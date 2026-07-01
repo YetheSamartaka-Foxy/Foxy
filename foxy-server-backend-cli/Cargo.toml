@@ -1,0 +1,31 @@
+[package]
+name = "foxy-server-backend-cli"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.96"
+# Application crate under the Foxy Community Source License (see ../LICENSE),
+# not an open-source library; never published to a public registry.
+publish = false
+license-file = "../LICENSE"
+
+[[bin]]
+name = "foxy-server-backend-cli"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.6.1", features = ["derive"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+md-5 = "0.11.0"
+hex = "0.4.3"
+rayon = "1.12.0"
+anyhow = "1.0.103"
+log = "0.4.33"
+env_logger = "0.11.11"
+indicatif = "0.18.5"
+glob = "0.3.3"
+sha1 = "0.11.0"
+blake3 = "1.8.5"
+
+[dev-dependencies]
+tempfile = "3.27.0"

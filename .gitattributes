@@ -1,0 +1,17 @@
+*.sh text eol=lf
+*.desktop text eol=lf
+*.service text eol=lf
+*.rs text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+
+*.png -text
+*.ico -text
+*.o -text
+*.exe -text
+*.dll -text
+*.zip -text
+*.db -text

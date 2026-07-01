@@ -1,0 +1,4 @@
+[alias]
+# Build a release-optimized pre-release of the app: version label and logs keep
+# the source commit (e.g. v1.0.0-pre (a1b2c3d)) instead of a bare version.
+prerelease = "build --release --features prerelease -p Foxy"

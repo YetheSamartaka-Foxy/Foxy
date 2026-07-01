@@ -1,0 +1,11 @@
+pub mod about;
+pub mod app_update;
+pub mod changelog;
+pub(crate) mod galley_cache;
+pub mod help;
+pub mod main;
+pub mod repository;
+pub mod repository_settings;
+pub mod settings;
+pub mod swifty_migration;
+pub mod update;

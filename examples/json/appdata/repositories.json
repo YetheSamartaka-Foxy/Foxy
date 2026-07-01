@@ -1,0 +1,1118 @@
+[
+  {
+    "profiles": [
+      {
+        "name": "Example Profile 1",
+        "csla": false,
+        "ef": false,
+        "gm": true,
+        "rf": false,
+        "spe": false,
+        "vn": false,
+        "ws": false,
+        "skip_intro": false,
+        "no_splash": false,
+        "world_empty": false,
+        "load_mission_to_memory": false,
+        "enable_ht": false,
+        "huge_pages": false,
+        "no_logs": false,
+        "include_steam_addons": false,
+        "additional_params": "",
+        "addons": [
+          [
+            "@example_profile_addon_001",
+            false
+          ]
+        ],
+        "optional_addons": [],
+        "external_addons": [],
+        "optional_addon_favorites": [],
+        "optional_addon_client_side": [],
+        "external_addon_favorites": [],
+        "external_addon_client_side": []
+      }
+    ],
+    "selected_profile": null,
+    "name": "Example Repository 1",
+    "address": "http://example.com/repositories/example-repository-1",
+    "path": "C:\\\\Example\\\\Foxy\\\\Repository1",
+    "auto_recheck_on_launch": null,
+    "auto_quick_scan_on_launch": null,
+    "auto_backup_on_update": null,
+    "apply_repo_json_client_parameters": null,
+    "apply_repo_json_dlc_content": null,
+    "warn_editor_external_addons": null,
+    "enable_editor_mission_list": null,
+    "enable_server_list": null,
+    "csla": false,
+    "ef": false,
+    "gm": true,
+    "rf": false,
+    "spe": false,
+    "vn": false,
+    "ws": false,
+    "skip_intro": false,
+    "no_splash": false,
+    "world_empty": false,
+    "load_mission_to_memory": false,
+    "enable_ht": false,
+    "huge_pages": false,
+    "no_logs": false,
+    "include_steam_addons": false,
+    "additional_params": "",
+    "addons": [
+      [
+        "@example_addon_001",
+        true
+      ],
+      [
+        "@example_addon_002",
+        true
+      ],
+      [
+        "@example_addon_003",
+        true
+      ],
+      [
+        "@example_addon_004",
+        true
+      ],
+      [
+        "@example_addon_005",
+        true
+      ],
+      [
+        "@example_addon_006",
+        true
+      ],
+      [
+        "@example_addon_007",
+        true
+      ],
+      [
+        "@example_addon_008",
+        true
+      ],
+      [
+        "@example_addon_009",
+        true
+      ],
+      [
+        "@example_addon_010",
+        true
+      ],
+      [
+        "@example_addon_011",
+        true
+      ],
+      [
+        "@example_addon_012",
+        true
+      ],
+      [
+        "@example_addon_013",
+        true
+      ],
+      [
+        "@example_addon_014",
+        true
+      ],
+      [
+        "@example_addon_015",
+        true
+      ],
+      [
+        "@example_addon_016",
+        true
+      ],
+      [
+        "@example_addon_017",
+        true
+      ],
+      [
+        "@example_addon_018",
+        true
+      ],
+      [
+        "@example_addon_019",
+        true
+      ],
+      [
+        "@example_addon_020",
+        true
+      ],
+      [
+        "@example_addon_021",
+        true
+      ],
+      [
+        "@example_addon_022",
+        true
+      ],
+      [
+        "@example_addon_023",
+        true
+      ],
+      [
+        "@example_addon_024",
+        true
+      ],
+      [
+        "@example_addon_025",
+        true
+      ],
+      [
+        "@example_addon_026",
+        true
+      ],
+      [
+        "@example_addon_027",
+        true
+      ],
+      [
+        "@example_addon_028",
+        true
+      ],
+      [
+        "@example_addon_029",
+        true
+      ],
+      [
+        "@example_addon_030",
+        true
+      ],
+      [
+        "@example_addon_031",
+        true
+      ],
+      [
+        "@example_addon_032",
+        true
+      ],
+      [
+        "@example_addon_033",
+        true
+      ],
+      [
+        "@example_addon_034",
+        true
+      ],
+      [
+        "@example_addon_035",
+        true
+      ],
+      [
+        "@example_addon_036",
+        true
+      ],
+      [
+        "@example_addon_037",
+        true
+      ],
+      [
+        "@example_addon_038",
+        true
+      ],
+      [
+        "@example_addon_039",
+        true
+      ],
+      [
+        "@example_addon_040",
+        true
+      ],
+      [
+        "@example_addon_041",
+        true
+      ],
+      [
+        "@example_addon_042",
+        true
+      ],
+      [
+        "@example_addon_043",
+        true
+      ],
+      [
+        "@example_addon_044",
+        true
+      ],
+      [
+        "@example_addon_045",
+        true
+      ],
+      [
+        "@example_addon_046",
+        true
+      ],
+      [
+        "@example_addon_047",
+        true
+      ],
+      [
+        "@example_addon_048",
+        true
+      ],
+      [
+        "@example_addon_049",
+        true
+      ],
+      [
+        "@example_addon_050",
+        true
+      ],
+      [
+        "@example_addon_051",
+        true
+      ],
+      [
+        "@example_addon_052",
+        true
+      ],
+      [
+        "@example_addon_053",
+        true
+      ],
+      [
+        "@example_addon_054",
+        true
+      ],
+      [
+        "@example_addon_055",
+        true
+      ],
+      [
+        "@example_addon_056",
+        true
+      ],
+      [
+        "@example_addon_057",
+        true
+      ],
+      [
+        "@example_addon_058",
+        true
+      ],
+      [
+        "@example_addon_059",
+        true
+      ],
+      [
+        "@example_addon_060",
+        true
+      ],
+      [
+        "@example_addon_061",
+        true
+      ],
+      [
+        "@example_addon_062",
+        true
+      ],
+      [
+        "@example_addon_063",
+        true
+      ],
+      [
+        "@example_addon_064",
+        true
+      ],
+      [
+        "@example_addon_065",
+        true
+      ],
+      [
+        "@example_addon_066",
+        true
+      ],
+      [
+        "@example_addon_067",
+        true
+      ],
+      [
+        "@example_addon_068",
+        true
+      ],
+      [
+        "@example_addon_069",
+        true
+      ],
+      [
+        "@example_addon_070",
+        true
+      ],
+      [
+        "@example_addon_071",
+        true
+      ],
+      [
+        "@example_addon_072",
+        true
+      ],
+      [
+        "@example_addon_073",
+        true
+      ],
+      [
+        "@example_addon_074",
+        true
+      ],
+      [
+        "@example_addon_075",
+        true
+      ],
+      [
+        "@example_addon_076",
+        true
+      ],
+      [
+        "@example_addon_077",
+        true
+      ],
+      [
+        "@example_addon_078",
+        true
+      ],
+      [
+        "@example_addon_079",
+        true
+      ],
+      [
+        "@example_addon_080",
+        true
+      ],
+      [
+        "@example_addon_081",
+        true
+      ],
+      [
+        "@example_addon_082",
+        true
+      ],
+      [
+        "@example_addon_083",
+        true
+      ],
+      [
+        "@example_addon_084",
+        true
+      ],
+      [
+        "@example_addon_085",
+        true
+      ],
+      [
+        "@example_addon_086",
+        true
+      ],
+      [
+        "@example_addon_087",
+        true
+      ],
+      [
+        "@example_addon_088",
+        true
+      ],
+      [
+        "@example_addon_089",
+        true
+      ],
+      [
+        "@example_addon_090",
+        true
+      ],
+      [
+        "@example_addon_091",
+        true
+      ],
+      [
+        "@example_addon_092",
+        true
+      ],
+      [
+        "@example_addon_093",
+        true
+      ],
+      [
+        "@example_addon_094",
+        true
+      ],
+      [
+        "@example_addon_095",
+        true
+      ],
+      [
+        "@example_addon_096",
+        true
+      ]
+    ],
+    "optional_addons": [],
+    "external_addons": [],
+    "servers": [
+      {
+        "name": "Example Server 1",
+        "address": "example.server.local",
+        "port": "2302",
+        "password": "example-password",
+        "battle_eye": false
+      },
+      {
+        "name": "Example Server 2",
+        "address": "example.server.local",
+        "port": "2402",
+        "password": "example-password",
+        "battle_eye": false
+      },
+      {
+        "name": "Example Server 3",
+        "address": "example.server.local",
+        "port": "2902",
+        "password": "example-password",
+        "battle_eye": false
+      },
+      {
+        "name": "Example Server 4",
+        "address": "example.server.local",
+        "port": "2906",
+        "password": "example-password",
+        "battle_eye": false
+      }
+    ],
+    "icon_image_path": "icon.png",
+    "icon_image_checksum": "0000000000000000000000000000000000000001",
+    "repo_image_path": "repo.png",
+    "repo_image_checksum": "00000000000000000000000000000000000003E9",
+    "app_update_url": "",
+    "repository_space_id": "space-example-repository-1",
+    "repository_space_entry_address": "http://example.com/repositories/example-repository-1",
+    "optional_addon_favorites": [],
+        "optional_addon_client_side": [],
+    "external_addon_favorites": [],
+        "external_addon_client_side": []
+  },
+  {
+    "profiles": [],
+    "selected_profile": null,
+    "name": "Example Repository 2",
+    "address": "http://example.com/repositories/example-repository-2",
+    "path": "",
+    "auto_recheck_on_launch": null,
+    "auto_quick_scan_on_launch": null,
+    "auto_backup_on_update": null,
+    "csla": false,
+    "ef": false,
+    "gm": false,
+    "rf": false,
+    "spe": false,
+    "vn": false,
+    "ws": false,
+    "skip_intro": false,
+    "no_splash": false,
+    "world_empty": false,
+    "load_mission_to_memory": false,
+    "enable_ht": false,
+    "huge_pages": false,
+    "no_logs": false,
+    "include_steam_addons": false,
+    "additional_params": "",
+    "addons": [],
+    "optional_addons": [],
+    "external_addons": [],
+    "servers": [
+      {
+        "name": "Example Server 1",
+        "address": "example.server.local",
+        "port": "2502",
+        "password": "example-password",
+        "battle_eye": false
+      }
+    ],
+    "icon_image_path": "icon.png",
+    "icon_image_checksum": "0000000000000000000000000000000000000002",
+    "repo_image_path": "repo.png",
+    "repo_image_checksum": "00000000000000000000000000000000000003EA",
+    "app_update_url": "",
+    "repository_space_id": null,
+    "repository_space_entry_address": null,
+    "optional_addon_favorites": [],
+        "optional_addon_client_side": [],
+    "external_addon_favorites": [],
+        "external_addon_client_side": []
+  },
+  {
+    "profiles": [
+      {
+        "name": "Example Profile 1",
+        "csla": false,
+        "ef": false,
+        "gm": false,
+        "rf": false,
+        "spe": false,
+        "vn": false,
+        "ws": false,
+        "skip_intro": false,
+        "no_splash": false,
+        "world_empty": false,
+        "load_mission_to_memory": false,
+        "enable_ht": false,
+        "huge_pages": false,
+        "no_logs": false,
+        "include_steam_addons": false,
+        "additional_params": "",
+        "addons": [],
+        "optional_addons": [
+          [
+            "@example_profile_optional_addon_001",
+            true
+          ],
+          [
+            "@example_profile_optional_addon_002",
+            true
+          ],
+          [
+            "@example_profile_optional_addon_003",
+            true
+          ],
+          [
+            "@example_profile_optional_addon_004",
+            true
+          ],
+          [
+            "@example_profile_optional_addon_005",
+            true
+          ],
+          [
+            "@example_profile_optional_addon_006",
+            true
+          ],
+          [
+            "@example_profile_optional_addon_007",
+            true
+          ],
+          [
+            "@example_profile_optional_addon_008",
+            true
+          ],
+          [
+            "@example_profile_optional_addon_009",
+            true
+          ],
+          [
+            "@example_profile_optional_addon_010",
+            true
+          ],
+          [
+            "@example_profile_optional_addon_011",
+            true
+          ]
+        ],
+        "external_addons": [],
+        "optional_addon_favorites": [],
+        "optional_addon_client_side": [],
+        "external_addon_favorites": [],
+        "external_addon_client_side": []
+      }
+    ],
+    "selected_profile": "Example Profile 1",
+    "name": "Example Repository 3",
+    "address": "http://example.com/repositories/example-repository-3",
+    "path": "",
+    "auto_recheck_on_launch": null,
+    "auto_quick_scan_on_launch": null,
+    "auto_backup_on_update": null,
+    "csla": false,
+    "ef": false,
+    "gm": false,
+    "rf": false,
+    "spe": false,
+    "vn": false,
+    "ws": false,
+    "skip_intro": false,
+    "no_splash": false,
+    "world_empty": false,
+    "load_mission_to_memory": false,
+    "enable_ht": false,
+    "huge_pages": false,
+    "no_logs": false,
+    "include_steam_addons": false,
+    "additional_params": "",
+    "addons": [],
+    "optional_addons": [
+      [
+        "@example_optional_addon_001",
+        true
+      ],
+      [
+        "@example_optional_addon_002",
+        true
+      ],
+      [
+        "@example_optional_addon_003",
+        true
+      ],
+      [
+        "@example_optional_addon_004",
+        true
+      ],
+      [
+        "@example_optional_addon_005",
+        true
+      ],
+      [
+        "@example_optional_addon_006",
+        true
+      ],
+      [
+        "@example_optional_addon_007",
+        true
+      ],
+      [
+        "@example_optional_addon_008",
+        true
+      ],
+      [
+        "@example_optional_addon_009",
+        true
+      ],
+      [
+        "@example_optional_addon_010",
+        true
+      ],
+      [
+        "@example_optional_addon_011",
+        true
+      ]
+    ],
+    "external_addons": [],
+    "servers": [
+      {
+        "name": "Example Server 1",
+        "address": "example.server.local",
+        "port": "2502",
+        "password": "example-password",
+        "battle_eye": false
+      }
+    ],
+    "icon_image_path": "icon.png",
+    "icon_image_checksum": "0000000000000000000000000000000000000003",
+    "repo_image_path": "repo.png",
+    "repo_image_checksum": "00000000000000000000000000000000000003EB",
+    "app_update_url": "",
+    "repository_space_id": null,
+    "repository_space_entry_address": null,
+    "optional_addon_favorites": [],
+        "optional_addon_client_side": [],
+    "external_addon_favorites": [],
+        "external_addon_client_side": []
+  },
+  {
+    "profiles": [],
+    "selected_profile": null,
+    "name": "Example Repository 4",
+    "address": "",
+    "path": "",
+    "auto_recheck_on_launch": null,
+    "auto_quick_scan_on_launch": null,
+    "auto_backup_on_update": null,
+    "csla": false,
+    "ef": false,
+    "gm": false,
+    "rf": false,
+    "spe": false,
+    "vn": false,
+    "ws": false,
+    "skip_intro": false,
+    "no_splash": false,
+    "world_empty": false,
+    "load_mission_to_memory": false,
+    "enable_ht": false,
+    "huge_pages": false,
+    "no_logs": false,
+    "include_steam_addons": false,
+    "additional_params": "",
+    "addons": [],
+    "optional_addons": [],
+    "external_addons": [],
+    "servers": [],
+    "icon_image_path": "",
+    "icon_image_checksum": "",
+    "repo_image_path": "",
+    "repo_image_checksum": "",
+    "app_update_url": "",
+    "repository_space_id": null,
+    "repository_space_entry_address": null,
+    "optional_addon_favorites": [],
+        "optional_addon_client_side": [],
+    "external_addon_favorites": [],
+        "external_addon_client_side": []
+  },
+  {
+    "profiles": [],
+    "selected_profile": null,
+    "name": "Example Repository 5",
+    "address": "http://example.com/repositories/example-repository-5",
+    "path": "C:\\\\Example\\\\Foxy\\\\Repository5",
+    "auto_recheck_on_launch": null,
+    "auto_quick_scan_on_launch": null,
+    "auto_backup_on_update": null,
+    "csla": false,
+    "ef": false,
+    "gm": false,
+    "rf": false,
+    "spe": false,
+    "vn": false,
+    "ws": false,
+    "skip_intro": false,
+    "no_splash": false,
+    "world_empty": false,
+    "load_mission_to_memory": false,
+    "enable_ht": false,
+    "huge_pages": false,
+    "no_logs": false,
+    "include_steam_addons": false,
+    "additional_params": "",
+    "addons": [
+      [
+        "@example_addon_001",
+        true
+      ],
+      [
+        "@example_addon_002",
+        true
+      ]
+    ],
+    "optional_addons": [],
+    "external_addons": [],
+    "servers": [
+      {
+        "name": "Example Server 1",
+        "address": "example.server.local",
+        "port": "2302",
+        "password": "example-password",
+        "battle_eye": false
+      }
+    ],
+    "icon_image_path": "icon.png",
+    "icon_image_checksum": "0000000000000000000000000000000000000005",
+    "repo_image_path": "repo.png",
+    "repo_image_checksum": "00000000000000000000000000000000000003ED",
+    "app_update_url": "",
+    "repository_space_id": null,
+    "repository_space_entry_address": null,
+    "optional_addon_favorites": [],
+        "optional_addon_client_side": [],
+    "external_addon_favorites": [],
+        "external_addon_client_side": []
+  },
+  {
+    "profiles": [],
+    "selected_profile": null,
+    "name": "Example Repository 6",
+    "address": "http://example.com/repositories/example-repository-6",
+    "path": "C:\\\\Example\\\\Foxy\\\\Repository6",
+    "auto_recheck_on_launch": null,
+    "auto_quick_scan_on_launch": null,
+    "auto_backup_on_update": null,
+    "csla": false,
+    "ef": false,
+    "gm": false,
+    "rf": false,
+    "spe": false,
+    "vn": false,
+    "ws": false,
+    "skip_intro": false,
+    "no_splash": false,
+    "world_empty": false,
+    "load_mission_to_memory": false,
+    "enable_ht": false,
+    "huge_pages": false,
+    "no_logs": false,
+    "include_steam_addons": false,
+    "additional_params": "",
+    "addons": [],
+    "optional_addons": [
+      [
+        "@example_optional_addon_001",
+        true
+      ],
+      [
+        "@example_optional_addon_002",
+        true
+      ],
+      [
+        "@example_optional_addon_003",
+        true
+      ],
+      [
+        "@example_optional_addon_004",
+        true
+      ],
+      [
+        "@example_optional_addon_005",
+        true
+      ],
+      [
+        "@example_optional_addon_006",
+        true
+      ],
+      [
+        "@example_optional_addon_007",
+        true
+      ],
+      [
+        "@example_optional_addon_008",
+        true
+      ],
+      [
+        "@example_optional_addon_009",
+        true
+      ],
+      [
+        "@example_optional_addon_010",
+        true
+      ],
+      [
+        "@example_optional_addon_011",
+        true
+      ]
+    ],
+    "external_addons": [],
+    "servers": [
+      {
+        "name": "Example Server 1",
+        "address": "example.server.local",
+        "port": "2502",
+        "password": "example-password",
+        "battle_eye": false
+      }
+    ],
+    "icon_image_path": "icon.png",
+    "icon_image_checksum": "0000000000000000000000000000000000000006",
+    "repo_image_path": "repo.png",
+    "repo_image_checksum": "00000000000000000000000000000000000003EE",
+    "app_update_url": "",
+    "repository_space_id": null,
+    "repository_space_entry_address": null,
+    "optional_addon_favorites": [],
+        "optional_addon_client_side": [],
+    "external_addon_favorites": [],
+        "external_addon_client_side": []
+  },
+  {
+    "profiles": [],
+    "selected_profile": null,
+    "name": "Example Repository 7",
+    "address": "http://example.com/repositories/example-repository-7",
+    "path": "C:\\\\Example\\\\Foxy\\\\Repository7",
+    "auto_recheck_on_launch": null,
+    "auto_quick_scan_on_launch": null,
+    "auto_backup_on_update": null,
+    "csla": false,
+    "ef": false,
+    "gm": false,
+    "rf": false,
+    "spe": false,
+    "vn": false,
+    "ws": false,
+    "skip_intro": false,
+    "no_splash": false,
+    "world_empty": false,
+    "load_mission_to_memory": false,
+    "enable_ht": false,
+    "huge_pages": false,
+    "no_logs": false,
+    "include_steam_addons": false,
+    "additional_params": "",
+    "addons": [
+      [
+        "@example_addon_001",
+        true
+      ],
+      [
+        "@example_addon_002",
+        true
+      ],
+      [
+        "@example_addon_003",
+        true
+      ],
+      [
+        "@example_addon_004",
+        true
+      ],
+      [
+        "@example_addon_005",
+        true
+      ],
+      [
+        "@example_addon_006",
+        true
+      ],
+      [
+        "@example_addon_007",
+        true
+      ],
+      [
+        "@example_addon_008",
+        true
+      ],
+      [
+        "@example_addon_009",
+        true
+      ],
+      [
+        "@example_addon_010",
+        true
+      ],
+      [
+        "@example_addon_011",
+        true
+      ],
+      [
+        "@example_addon_012",
+        true
+      ],
+      [
+        "@example_addon_013",
+        true
+      ],
+      [
+        "@example_addon_014",
+        true
+      ],
+      [
+        "@example_addon_015",
+        true
+      ],
+      [
+        "@example_addon_016",
+        true
+      ],
+      [
+        "@example_addon_017",
+        true
+      ],
+      [
+        "@example_addon_018",
+        true
+      ],
+      [
+        "@example_addon_019",
+        true
+      ],
+      [
+        "@example_addon_020",
+        true
+      ],
+      [
+        "@example_addon_021",
+        true
+      ]
+    ],
+    "optional_addons": [],
+    "external_addons": [],
+    "servers": [
+      {
+        "name": "Example Server 1",
+        "address": "example.server.local",
+        "port": "2312",
+        "password": "example-password",
+        "battle_eye": false
+      }
+    ],
+    "icon_image_path": "icon.png",
+    "icon_image_checksum": "0000000000000000000000000000000000000007",
+    "repo_image_path": "repo.png",
+    "repo_image_checksum": "00000000000000000000000000000000000003EF",
+    "app_update_url": "",
+    "repository_space_id": null,
+    "repository_space_entry_address": null,
+    "optional_addon_favorites": [],
+        "optional_addon_client_side": [],
+    "external_addon_favorites": [],
+        "external_addon_client_side": []
+  },
+  {
+    "profiles": [],
+    "selected_profile": null,
+    "name": "Example Repository 8",
+    "address": "",
+    "path": "",
+    "auto_recheck_on_launch": null,
+    "auto_quick_scan_on_launch": null,
+    "auto_backup_on_update": null,
+    "csla": false,
+    "ef": false,
+    "gm": false,
+    "rf": false,
+    "spe": false,
+    "vn": false,
+    "ws": false,
+    "skip_intro": false,
+    "no_splash": false,
+    "world_empty": false,
+    "load_mission_to_memory": false,
+    "enable_ht": false,
+    "huge_pages": false,
+    "no_logs": false,
+    "include_steam_addons": false,
+    "additional_params": "",
+    "addons": [],
+    "optional_addons": [],
+    "external_addons": [],
+    "servers": [],
+    "icon_image_path": "",
+    "icon_image_checksum": "",
+    "repo_image_path": "",
+    "repo_image_checksum": "",
+    "app_update_url": "",
+    "repository_space_id": null,
+    "repository_space_entry_address": null,
+    "optional_addon_favorites": [],
+        "optional_addon_client_side": [],
+    "external_addon_favorites": [],
+        "external_addon_client_side": []
+  },
+  {
+    "profiles": [],
+    "selected_profile": null,
+    "name": "Example Repository 9",
+    "address": "",
+    "path": "",
+    "auto_recheck_on_launch": null,
+    "auto_quick_scan_on_launch": null,
+    "auto_backup_on_update": null,
+    "csla": false,
+    "ef": false,
+    "gm": false,
+    "rf": false,
+    "spe": false,
+    "vn": false,
+    "ws": false,
+    "skip_intro": false,
+    "no_splash": false,
+    "world_empty": false,
+    "load_mission_to_memory": false,
+    "enable_ht": false,
+    "huge_pages": false,
+    "no_logs": false,
+    "include_steam_addons": false,
+    "additional_params": "",
+    "addons": [],
+    "optional_addons": [],
+    "external_addons": [],
+    "servers": [],
+    "icon_image_path": "",
+    "icon_image_checksum": "",
+    "repo_image_path": "",
+    "repo_image_checksum": "",
+    "app_update_url": "",
+    "repository_space_id": null,
+    "repository_space_entry_address": null,
+    "optional_addon_favorites": [],
+        "optional_addon_client_side": [],
+    "external_addon_favorites": [],
+        "external_addon_client_side": []
+  }
+]

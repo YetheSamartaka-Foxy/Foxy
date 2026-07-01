@@ -1,0 +1,61 @@
+{
+  "repoName": "Example Main Repository",
+  "checksum": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "foxyMode": "FoxyModeV1",
+  "requiredMods": [
+    {
+      "modName": "@cba_a3",
+      "checkSum": "11111111111111111111111111111111",
+      "enabled": true
+    },
+    {
+      "modName": "@ace3",
+      "checkSum": "22222222222222222222222222222222",
+      "enabled": true
+    }
+  ],
+  "optionalMods": [
+    {
+      "modName": "@example_optional",
+      "checkSum": "33333333333333333333333333333333",
+      "enabled": false,
+      "clientSide": true
+    }
+  ],
+  "iconImagePath": "icon.png",
+  "iconImageChecksum": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+  "repoImagePath": "repo.png",
+  "repoImageChecksum": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+  "appUpdateUrl": "http://myserver.com/foxy/",
+  "clientParameters": "-skipIntro -noSplash -world=empty",
+  "dlcContent": {
+    "csla": false,
+    "ef": false,
+    "gm": true,
+    "rf": false,
+    "spe": true,
+    "vn": false,
+    "ws": false
+  },
+  "repoBasicAuthentication": {
+    "username": "",
+    "password": ""
+  },
+  "version": "1.0.0",
+  "servers": [
+    {
+      "name": "Example Main Server",
+      "address": "arma3.example.com",
+      "port": "2302",
+      "password": "",
+      "battleEye": true
+    },
+    {
+      "name": "Example Training Server",
+      "address": "arma3-training.example.com",
+      "port": "2402",
+      "password": "",
+      "battleEye": false
+    }
+  ]
+}

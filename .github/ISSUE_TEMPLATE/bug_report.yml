@@ -1,0 +1,81 @@
+name: Bug report
+description: Report a problem with Foxy so it can be reproduced and fixed
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Please fill out the fields below so we can reproduce and fix it quickly.
+
+        This template is for bugs only. For licensing, commercial permission, community
+        continuation, or maintainer return, use the dedicated templates in the chooser instead.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: A clear description of the bug, and what you expected to happen instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Go to ...
+        2. Click on ...
+        3. See error ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Foxy version
+      description: Shown on the About screen or as the release tag you installed.
+      placeholder: e.g. 1.0.0
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - macOS
+        - Linux
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: os-version
+    attributes:
+      label: OS version
+      placeholder: e.g. Windows 11 24H2, macOS 15.1, Ubuntu 24.04
+    validations:
+      required: false
+  - type: input
+    id: install-source
+    attributes:
+      label: How did you obtain this build
+      placeholder: e.g. official release, built from source (commit hash)
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste logs or attach an exported log zip. This will be rendered as code, so no backticks needed.
+      render: shell
+    validations:
+      required: false
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations
+      options:
+        - label: I searched existing issues and this is not a duplicate.
+          required: true
+        - label: This report is about a bug, not a licensing, commercial, or continuation request.
+          required: true
+        - label: I have removed any private or sensitive information from the logs and screenshots above.
+          required: true

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Foxy GUI Driver"
+  short_description: "Drive and inspect Foxy's egui UI"
+  default_prompt: "Use $foxy-gui-driver to add or use Foxy's agentic GUI driver for an interactive UI debugging task."

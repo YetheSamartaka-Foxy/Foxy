@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Foxy
+Comment=Arma 3 mod updater
+Exec="@PREFIX_ESCAPED@/Foxy"
+Icon=@PREFIX_ESCAPED@/foxy.png
+Terminal=false
+Categories=Game;Utility;
+Keywords=arma;mods;updater;foxy;
+StartupNotify=true
+StartupWMClass=Foxy

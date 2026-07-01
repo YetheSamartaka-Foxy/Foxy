@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Contributing guide and CLA
+    url: https://github.com/YetheSamartaka-Foxy/Foxy/blob/master/CONTRIBUTING.md
+    about: Read this before opening a pull request. Contributions are accepted under CLA.md.
+  - name: Licensing and redistribution
+    url: https://github.com/YetheSamartaka-Foxy/Foxy/blob/master/LICENSING.md
+    about: How the Foxy Community Source License 1.0.0 works, including commercial use and community continuation.

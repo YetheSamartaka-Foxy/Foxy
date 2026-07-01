@@ -1,0 +1,35 @@
+{
+  "name": "Example Repository Space",
+  "image": "image.png",
+  "imageChecksum": "5d41402abc4b2a76b9719d911017c592",
+  "icon": "icon.png",
+  "iconChecksum": "7d793037a0760186574b0282f2f435e7",
+  "appUpdateUrl": "http://myserver.com/foxy/",
+  "entries": [
+    {
+      "Name": "Modern",
+      "Address": "https://example.com/repos/modern",
+      "Requiered": true
+    },
+    {
+      "Name": "Vietnam",
+      "Address": "https://example.com/repos/vietnam",
+      "Requiered": true
+    },
+    {
+      "Name": "WW2",
+      "Address": "https://example.com/repos/ww2",
+      "Requiered": false
+    },
+    {
+      "Name": "WW1",
+      "Address": "https://example.com/repos/ww1",
+      "Requiered": false
+    },
+    {
+      "Name": "Sci-Fi",
+      "Address": "https://example.com/repos/sci-fi",
+      "Requiered": false
+    }
+  ]
+}

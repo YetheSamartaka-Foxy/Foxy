@@ -1,0 +1,248 @@
+# Foxy Community Source License 1.0.0
+
+Copyright (c) 2026 Yethe Samartaka
+
+This license applies to Foxy and to first-party source code, object code, documentation, build scripts, assets, and other project materials that reference this license or are distributed with this license.
+
+This license is a source-available license. It is not an open-source license as that term is commonly used. It allows reading, noncommercial use, private modification, contribution-oriented forks, and community continuation after defined project inactivity. It does not allow commercial use or independent public distributions while the project is actively maintained.
+
+## 1. License parameters
+
+Project name: Foxy
+
+Licensor: Yethe Samartaka
+
+Official Repository: the GitHub repository that contains this license file, or a public successor GitHub repository designated through Official Issues.
+
+Official Issues: the GitHub Issues tracker of the Official Repository or, after a Community Continuation Event, the GitHub Issues tracker of the recognized Community Continuation Repository.
+
+Official Communication Channel: Official Issues. Email, private messages, chat, social media, or other channels are not official for license notices, continuation requests, maintainer-return requests, or commercial permission requests unless an Official Issue explicitly designates that channel for that specific matter.
+
+Inactivity Threshold: 24 consecutive months without a Meaningful Update.
+
+Maintainer Response Period: 90 days after a valid Community Continuation Request is opened.
+
+Continuation License: this Foxy Community Source License 1.0.0. A Community Continuation Event does not convert the Software to Apache-2.0, MIT, or any other license.
+
+## 2. Definitions
+
+**Software** means the first-party Foxy materials covered by this license. Software does not include third-party components, dependencies, tools, fonts, data sets, or libraries, which remain governed by their own licenses.
+
+**You** means the individual or legal entity exercising permissions under this license.
+
+**Project Steward** means Yethe Samartaka, a maintainer publicly appointed through Official Issues, or a Community Continuation Maintainer recognized under this license after a Community Continuation Event.
+
+**Official Maintainer** means a Project Steward or another person or organization publicly authorized through Official Issues to merge changes, publish releases, manage the Official Repository, or make official license communications for the Software.
+
+**Noncommercial Purpose** means use that is primarily personal, private, educational, academic, research, evaluation, or charitable, and that is not primarily intended for or directed toward commercial advantage or monetary compensation. The following are examples of Noncommercial Purposes:
+
+1. an individual running, studying, or modifying the Software for personal, hobby, or learning use;
+2. evaluating or testing the Software privately to decide whether to request Commercial Use;
+3. academic teaching, coursework, scholarship, or noncommercial research; or
+4. use by a registered nonprofit, charity, or public-interest organization for its own internal, noncommercial activities.
+
+**Commercial Use** means use that is primarily intended for or directed toward commercial advantage or monetary compensation. The following are examples of Commercial Use:
+
+1. selling, licensing, hosting, sublicensing, or distributing the Software or a modified version, whether alone or as part of a product or service;
+2. using the Software to provide a paid product, paid service, paid support offering, hosted service, or marketplace offering;
+3. deploying the Software in the operations of a for-profit organization, or for the benefit of an employer or client, beyond genuine personal evaluation; or
+4. using the Software to generate advertising, subscription, or other revenue.
+
+Personal use by an individual does not become Commercial Use merely because that individual is employed, provided the use is genuinely personal and is not for the operations or benefit of an employer, client, or business. Where a use is genuinely mixed and its primary purpose is not commercial, it is treated as a Noncommercial Purpose. If You are unsure whether a use is permitted, You may open a `[Commercial Permission Request]` in Official Issues before relying on it.
+
+**Contribution Request** means a pull request, issue, patch, or other submission made through GitHub to propose changes to the Official Repository.
+
+**Contribution Fork** means a public GitHub fork, branch, or copy of the Software made only to prepare, discuss, test, or submit a Contribution Request to the Official Repository.
+
+**Independent Distribution** means any public distribution, release, installer, package, binary, hosted service, update channel, marketplace listing, rebranded version, separately maintained public branch, or public successor project that is not made primarily for a Contribution Request or allowed as a Community Continuation after a Community Continuation Event.
+
+**Meaningful Update** means a public update by an Official Maintainer that materially maintains the Software. A Meaningful Update includes at least one of the following:
+
+1. a tagged release or pre-release containing material functional, compatibility, security, dependency, performance, or maintenance work;
+2. a material first-party source-code change in the Official Repository;
+3. a material dependency, security, compatibility, or platform-support update;
+4. an accepted external Contribution Request that materially improves, fixes, secures, or maintains the Software;
+5. a published fix that keeps the Software usable with current supported operating systems, services, APIs, dependencies, or project data formats;
+6. the public appointment of a successor Project Steward with practical authority to merge changes and publish releases; or
+7. the public transfer of the Official Repository to a successor repository with practical authority to continue maintenance.
+
+The following do not qualify by themselves as a Meaningful Update: formatting-only changes, comment-only changes, typo-only changes, version-number-only changes, license-only changes, repository metadata changes, issue-label changes, cosmetic documentation edits, automated bot churn without a reviewed maintenance purpose, lockfile churn without a real maintenance purpose, or activity whose main purpose is avoiding Project Inactivity rather than maintaining the Software.
+
+**Community Continuation Request** means a public GitHub issue titled `[Community Continuation Request]` that states that the Software appears inactive and asks the Official Maintainer to do at least one of the following:
+
+1. publish or identify a Meaningful Update;
+2. appoint a successor Project Steward;
+3. state that the Software is no longer actively maintained;
+4. authorize community continuation under this license; or
+5. explain why the Inactivity Threshold has not been met.
+
+A Community Continuation Request must be opened in Official Issues if that is reasonably possible. If the Official Repository is unavailable, archived, deleted, made private, or has issues disabled for 30 consecutive days, the request may be opened as a public GitHub issue in the most visible public fork that is reasonably connected to the Software. That fallback issue becomes the public record for the request unless an Official Maintainer restores Official Issues and links the restored issue from the fallback issue.
+
+**Valid Maintainer Response** means a public response in GitHub Issues completed within the Maintainer Response Period that does at least one of the following:
+
+1. publishes a Meaningful Update;
+2. identifies a Meaningful Update completed during the previous 24 months;
+3. appoints a successor Project Steward with practical authority to merge changes and publish releases;
+4. states that the Software is no longer actively maintained and that community continuation under this license is allowed; or
+5. opens a public maintainer search and appoints a successor Project Steward within the same Maintainer Response Period.
+
+A statement of intent, a vague roadmap, an announcement that work may happen later, or a promise to review contributions later is not a Valid Maintainer Response unless one of the actions above is completed within the Maintainer Response Period.
+
+**Project Inactivity** occurs when all of the following are true:
+
+1. there has been no Meaningful Update for 24 consecutive months;
+2. a valid Community Continuation Request has been opened; and
+3. no Valid Maintainer Response has been completed within 90 days after that request was opened.
+
+Project Inactivity also occurs immediately if an Official Maintainer states through Official Issues that the Software is no longer actively maintained and community continuation under this license is allowed.
+
+**Community Continuation Event** means the moment Project Inactivity occurs.
+
+**Community Continuation Repository** means a public GitHub repository that continues the Software after a Community Continuation Event under this license and that keeps Official Issues enabled for license, maintenance, succession, and return communications.
+
+**Community Continuation Maintainer** means a person or organization that publicly accepts responsibility for maintaining a Community Continuation Repository under this license.
+
+**Maintainer Return Request** means a public GitHub issue titled `[Maintainer Return Request]` opened by a previous Project Steward or another prior Community Continuation Maintainer asking the current Community Continuation Maintainer to consider returning, sharing, or transferring stewardship.
+
+## 3. Permissions before a Community Continuation Event
+
+Subject to this license, You may do the following before a Community Continuation Event:
+
+1. read, inspect, study, and reference the Software;
+2. run the Software for Noncommercial Purposes;
+3. make private copies and private modifications for Noncommercial Purposes;
+4. create and publish a Contribution Fork only for preparing, testing, discussing, or submitting a Contribution Request;
+5. submit Contribution Requests to the Official Repository; and
+6. share patches, diffs, reproduction cases, logs, test cases, and technical discussion through GitHub for the purpose of improving the Software.
+
+A Contribution Fork may remain public while it is reasonably connected to a Contribution Request. A Contribution Fork must not publish installers, binaries, package feeds, release artifacts, marketplace listings, branded distributions, hosted services, or a separately maintained public product unless separately permitted by an Official Maintainer through Official Issues.
+
+## 4. Permissions after a Community Continuation Event
+
+After a Community Continuation Event, this license remains in effect. The Software does not convert to Apache-2.0, MIT, or any other license.
+
+Subject to this license, You may create, maintain, modify, and publicly distribute a Community Continuation Repository for Noncommercial Purposes if all of the following conditions are met:
+
+1. the Community Continuation Repository keeps this license as the governing license for the Software and all modifications based on the Software;
+2. the Community Continuation Repository keeps Official Issues enabled for continuation, maintainer-return, succession, and commercial-permission communications;
+3. the Community Continuation Repository includes a public record linking to the Community Continuation Request and explaining why the Community Continuation Event occurred;
+4. the Community Continuation Maintainer accepts the maintainer succession and return obligations in this license;
+5. the Community Continuation Repository preserves copyright, license, attribution, and third-party notices;
+6. any public source distribution includes this license;
+7. any public binary distribution includes this license and all required third-party notices; and
+8. all public distributions remain Noncommercial unless a separate commercial license is granted by the Project Steward with authority to grant it.
+
+After a Community Continuation Event, multiple public continuation forks may exist under this license. However, a fork may not claim to be the official, primary, or recognized continuation unless it follows this license, keeps Official Issues enabled, preserves the public continuation record, and participates in the maintainer succession and return process.
+
+## 5. Maintainer succession and return
+
+The purpose of maintainer succession is continuity. A Community Continuation Maintainer accepts that stewardship may later be returned, shared, or transferred if that is best for the Software and the community.
+
+A previous Project Steward may return by opening a Maintainer Return Request in the current Community Continuation Repository. The current Community Continuation Maintainer must respond in good faith within 90 days through GitHub Issues.
+
+A valid response to a Maintainer Return Request may do one or more of the following:
+
+1. return stewardship to the previous Project Steward;
+2. create a shared-maintenance arrangement;
+3. appoint the previous Project Steward as a maintainer with practical authority;
+4. agree on a staged handback plan with concrete dates and responsibilities;
+5. decline the request with a clear public explanation based on project continuity, legal risk, security risk, abuse, lack of trust, or another reasonable project-protection reason; or
+6. propose another successor Project Steward who accepts the role through GitHub Issues.
+
+A Community Continuation Maintainer who does not respond to a Maintainer Return Request within 90 days loses the right to describe that repository as the official, primary, or recognized continuation. The code rights already granted under this license continue, but the nonresponsive maintainer must not use the Foxy name, logos, or project identity except for accurate descriptive references.
+
+The same succession and return process applies repeatedly across multiple maintainers. Each successor Project Steward and each Community Continuation Maintainer takes the Software subject to this license and must expect later succession, handback, shared maintenance, or another Community Continuation Event if the project again becomes inactive.
+
+A returning Project Steward cannot revoke permissions that already became available under this license after a Community Continuation Event. A return or handback restores project stewardship only by public agreement under this section. It does not convert the Software to another license and does not remove existing rights under this Foxy Community Source License 1.0.0.
+
+## 6. Restrictions
+
+You must not do any of the following unless separately permitted by an Official Maintainer through Official Issues or by a separate written commercial license:
+
+1. use the Software for Commercial Use;
+2. sell, rent, lease, sublicense, host, or provide the Software or a modified version as part of a commercial product or service;
+3. distribute an Independent Distribution before a Community Continuation Event;
+4. publish installers, binaries, package feeds, marketplace listings, update channels, or branded releases before a Community Continuation Event;
+5. remove or obscure copyright, license, attribution, or third-party notices;
+6. use the Foxy name, logos, or project identity to imply official status, endorsement, or continuity except as allowed by this license;
+7. bypass technical restrictions, license checks, or access controls in a way that violates this license;
+8. use the Software in a way that violates applicable law; or
+9. before a Community Continuation Event, use the source code of the Software, or a substantial portion of it, as the basis for a separate, independently distributed product or service.
+
+Nothing in this section restricts software that You create independently without copying or adapting the source code of the Software, restricts any use expressly permitted elsewhere in this license, or restricts any use that applicable law does not permit a copyright license to restrict. These restrictions are limited to the rights the Licensor holds in the Software and are not intended to restrain lawful competition beyond the scope of those rights.
+
+## 7. Commercial permission
+
+Commercial Use is not granted by this license.
+
+A request for Commercial Use must begin as a public GitHub issue titled `[Commercial Permission Request]` in Official Issues. The Project Steward may decline, ignore, discuss publicly, or designate another channel for private terms in that issue. No commercial permission exists unless the Project Steward with authority to grant it provides explicit written permission.
+
+No Project Steward is required to provide private contact information. Official Issues are sufficient for official project communication under this license.
+
+## 8. Contributions
+
+This license does not itself require the Project Steward to accept any Contribution Request.
+
+By submitting a Contribution Request, You agree that the project may require a separate contributor license agreement, developer certificate of origin, sign-off, or other contribution terms before accepting the contribution.
+
+If a contribution is accepted into the Software, the contribution is distributed under this license unless the Project Steward states different terms through Official Issues or a written contribution agreement.
+
+## 9. Third-party components
+
+Third-party components are not relicensed by this license. They remain under their own licenses.
+
+If You distribute the Software, a modified version, or a Community Continuation Repository, You must preserve and provide all notices, license texts, source-offer information, attribution, and other obligations required by third-party component licenses.
+
+## 10. Names, marks, and project identity
+
+This license does not grant trademark rights.
+
+Before a Community Continuation Event, You may use the Foxy name only to identify the Software, identify a Contribution Fork, or submit a Contribution Request.
+
+After a Community Continuation Event, a Community Continuation Repository that follows this license may use the phrase `Foxy Community Continuation` and may describe itself as a community continuation. It must not claim endorsement by Yethe Samartaka or by a previous Project Steward unless that endorsement is stated through Official Issues.
+
+If stewardship is returned, shared, or transferred under this license, the public GitHub issue recording that decision controls which repository may describe itself as official or recognized.
+
+## 11. Patent license
+
+To the extent the Licensor can grant patent rights, the Licensor grants You a worldwide, royalty-free, non-exclusive patent license to make, use, and distribute the Software only for activities permitted by this license.
+
+No patent rights are granted for Commercial Use unless a separate commercial license expressly grants them.
+
+If You initiate patent litigation alleging that the Software, a Contribution Request, or a Community Continuation Repository infringes a patent, any patent rights granted to You under this license terminate to the extent permitted by law.
+
+## 12. Termination
+
+If You violate this license, Your permissions under this license terminate automatically.
+
+Your permissions are reinstated if You cure the violation within 30 days after becoming aware of it, unless the same or substantially similar violation has previously occurred.
+
+Termination does not affect the rights of other recipients who remain in compliance with this license.
+
+## 13. Disclaimer of warranty
+
+The Software is provided as is, without warranty of any kind. To the maximum extent permitted by law, the Licensor, Project Stewards, maintainers, and contributors disclaim all warranties, including warranties of merchantability, fitness for a particular purpose, title, and non-infringement.
+
+## 14. Limitation of liability
+
+To the maximum extent permitted by law, the Licensor, Project Stewards, maintainers, and contributors will not be liable for any damages arising from or related to the Software or this license, including direct, indirect, incidental, special, consequential, punitive, or exemplary damages, or damages for lost profits, lost revenue, lost data, business interruption, or security incidents.
+
+## 15. Governing law and disputes
+
+This license is governed by and construed in accordance with the laws of the Czech Republic, without regard to its conflict-of-law rules, and consistent with Regulation (EC) No 593/2008 (Rome I) on the law applicable to contractual obligations.
+
+Subject to mandatory rules of jurisdiction, the courts of the Czech Republic have jurisdiction over any dispute arising out of or relating to this license or the Software. The Licensor may also bring proceedings to enforce or protect its rights in the Software before the courts of any jurisdiction where an alleged infringement occurs or where a person responsible for it is located.
+
+This choice of law and forum does not deprive a consumer or other person of the protection of mandatory provisions of law that would apply in the absence of this choice and that cannot be derogated from by agreement, including under European Union law and the law of that person's country of habitual residence.
+
+Where any provision of this license, including the disclaimer of warranty in Section 13 and the limitation of liability in Section 14, is restricted or not permitted by the governing law, that provision applies to the maximum extent permitted by the governing law, and the remaining provisions continue in effect.
+
+## 16. Interpretation
+
+If any provision of this license is unenforceable, the remaining provisions remain effective.
+
+A permission not expressly granted by this license is reserved.
+
+Headings are for convenience only.
+
+This license is the complete statement of permissions granted for the Software unless a separate written license is granted by a Project Steward with authority to grant it.

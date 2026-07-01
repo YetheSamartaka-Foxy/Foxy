@@ -1,0 +1,87 @@
+[workspace]
+members = [".", "foxy-server-backend-cli"]
+
+[package]
+name = "Foxy"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.96"
+build = "build.rs"
+# Application crate under the Foxy Community Source License (see LICENSE), not
+# an open-source library; never published to a public registry.
+publish = false
+license-file = "LICENSE"
+
+[profile.dev]
+# Line-tables-only debuginfo: keeps usable backtraces while cutting the
+# debuginfo codegen + link cost that dominates incremental rebuilds.
+debug = "line-tables-only"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+opt-level = "z"
+panic = "abort"
+
+
+[features]
+default = ["flate2/default"]
+zlib-ng = ["flate2/zlib-ng"]
+# Marks a release build as a pre-release: release-optimized, but the version
+# label and logs still carry the source commit. Build with `cargo prerelease`.
+prerelease = []
+
+[dependencies]
+flexi_logger = { version = "0.31.9", features = ["async", "colors"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+toon-format = { version = "0.5.0", default-features = false }
+scraper = "0.27.0"
+egui = "0.35.0"
+eframe = { version = "0.35.0", features = ["glow", "inspection"] }
+rfd = "0.17.2"
+tokio = { version = "1.52.3", features = ["time", "rt", "rt-multi-thread", "macros", "sync", "io-util", "fs"] }
+flate2 = { version = "1.1.9" , default-features = false}
+log = "0.4.33"
+futures = "0.3.32"
+reqwest = { version = "0.13.4", features = ["json", "blocking", "stream", "gzip", "brotli", "deflate"] }
+image = "0.25.10"
+dirs = "6.0.0"
+sha1 = "0.11.0"
+sha2 = "0.10.9"
+hex = "0.4.3"
+tokio-util = "0.7.18"
+anyhow = "1.0.103"
+chrono = "0.4.45"
+ansi_term = "0.12.1"
+rand = "0.10.1"
+md-5 = "0.11.0"
+blake3 = "1.8.5"
+once_cell = "1.21.4"
+notify = "8.2.0"
+clap = { version = "4.6.1", features = ["derive"] }
+sys-locale = "0.3.2"
+icu_collator = { version = "2.2.1", features = ["compiled_data"] }
+icu_locale_core = "2.2.0"
+# Enable Wayland data-control clipboard support while keeping X11 support on Linux.
+arboard = { version = "3.6.1", default-features = false, features = ["image-data", "wayland-data-control"] }
+semver = "1.0.28"
+# Turso: pure-Rust, async-native, SQLite-compatible engine - Foxy's persistence
+# engine (plan.md). `sync` (remote/replication) intentionally off - this is
+# local-file only (`Builder::new_local`). default-features off drops `fts`
+# (tantivy full-text search - unused) and `mimalloc` (which installs a
+# process-wide #[global_allocator] and pulls a C `cc` build; we keep Foxy's
+# default allocator). Phase-0 finding, plan.md §2.
+turso = { version = "0.6.1", default-features = false }
+fs4 = "1.1.0"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+sysinfo = "0.39.5"
+jmespath = "0.5.0"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3.9", features = ["consoleapi", "handleapi", "libloaderapi", "memoryapi", "processthreadsapi", "psapi", "securitybaseapi", "shellapi", "sysinfoapi", "winbase", "wincon", "winnls", "winnt", "winuser"] }
+wmi = "0.18.4"

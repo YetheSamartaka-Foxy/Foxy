@@ -1,0 +1,163 @@
+{
+  "debug_mode": false,
+  "show_debug_windows": false,
+  "show_activity_log": false,
+  "show_memory_diagnostics_icon": false,
+  "close_after_launch": true,
+  "hide_to_tray_after_launch": false,
+  "auto_recheck_on_launch": true,
+  "auto_quick_scan_on_launch": true,
+  "auto_backup_on_update": false,
+  "apply_repo_json_client_parameters": true,
+  "apply_repo_json_dlc_content": true,
+  "warn_editor_external_addons": true,
+  "enable_editor_mission_list": true,
+  "enable_server_list": true,
+  "check_server_addons_before_join": true,
+  "check_ts3_running_before_join": true,
+  "check_steam_running_before_launch": true,
+  "backup_keep_latest_per_addon": 5,
+  "backup_max_age_days": null,
+  "current_tab": "Application",
+  "arma3_directory": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Arma 3",
+  "arma3_profiles_directory": "",
+  "steam_directory": "C:\\Program Files (x86)\\Steam",
+  "teamspeak3_directory": "C:\\Program Files\\TeamSpeak 3 Client",
+  "temp_directory": "",
+  "backup_directory": "",
+  "download_speed_limit_mbps": null,
+  "hash_io_profile": "Auto",
+  "ui_renderer": "Auto",
+  "locale": "system",
+  "locale_preference_migrated": true,
+  "additional_folders": [],
+  "additional_folder_aliases": {},
+  "cleanup_folders": [],
+  "font_sizes": {
+    "main_view": {
+      "window_control_icons": 20,
+      "activity_log_toggle_icon": 14
+    },
+    "settings_view": {
+      "page_title": 24,
+      "close_icon": 20
+    },
+    "repository_view": {
+      "add_repository_button": 25,
+      "toolbar_icons": 20,
+      "status_banner": 22,
+      "launch_join_buttons": 25
+    },
+    "update_view": {
+      "page_title": 24,
+      "close_icon": 20,
+      "section_title": 26,
+      "total_size": 18,
+      "summary_heading": 22,
+      "summary_body_fallback": 16,
+      "mod_name": 18,
+      "mod_status": 15,
+      "mod_progress": 13,
+      "file_details": 14,
+      "pause_button": 16
+    },
+    "repository_settings_view": {
+      "page_title": 24,
+      "close_icon": 20,
+      "refresh_icon": 20,
+      "addon_path": 14
+    }
+  },
+  "ui_scale_percent": 100,
+  "palette_colors": {
+    "primary_accent": {
+      "r": 200,
+      "g": 100,
+      "b": 15
+    },
+    "widget_bg": {
+      "r": 60,
+      "g": 60,
+      "b": 60
+    },
+    "main_bg": {
+      "r": 45,
+      "g": 45,
+      "b": 45
+    },
+    "card_bg": {
+      "r": 35,
+      "g": 35,
+      "b": 35
+    },
+    "server_offline_bg": {
+      "r": 30,
+      "g": 30,
+      "b": 30
+    },
+    "text_normal": {
+      "r": 255,
+      "g": 255,
+      "b": 255
+    },
+    "text_gray": {
+      "r": 160,
+      "g": 160,
+      "b": 160
+    },
+    "text_dim": {
+      "r": 150,
+      "g": 150,
+      "b": 150
+    },
+    "text_error": {
+      "r": 122,
+      "g": 31,
+      "b": 39
+    },
+    "error": {
+      "r": 255,
+      "g": 80,
+      "b": 80
+    },
+    "warn": {
+      "r": 255,
+      "g": 180,
+      "b": 50
+    },
+    "debug": {
+      "r": 90,
+      "g": 150,
+      "b": 255
+    },
+    "success": {
+      "r": 0,
+      "g": 170,
+      "b": 0
+    },
+    "success_muted": {
+      "r": 0,
+      "g": 120,
+      "b": 0
+    },
+    "action_info": {
+      "r": 50,
+      "g": 50,
+      "b": 200
+    },
+    "action_destructive": {
+      "r": 200,
+      "g": 50,
+      "b": 50
+    }
+  },
+  "update_summary_notices": [],
+  "app_update_mode": "GitHub",
+  "app_update_url": "",
+  "app_update_github_repo": "YetheSamartaka-Foxy/Foxy",
+  "app_update_mode_user_override": false,
+  "app_update_url_user_override": false,
+  "app_update_auto_check": true,
+  "app_update_check_interval_minutes": 60,
+  "swifty_migration_offered": false
+}

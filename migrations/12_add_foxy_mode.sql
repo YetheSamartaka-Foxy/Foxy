@@ -1,0 +1,1 @@
+ALTER TABLE repositories ADD COLUMN foxy_mode TEXT NOT NULL DEFAULT '';

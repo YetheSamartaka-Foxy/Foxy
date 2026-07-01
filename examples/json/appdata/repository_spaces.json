@@ -1,0 +1,83 @@
+[
+  {
+    "id": "space-example-main",
+    "name": "Example Repository Space",
+    "local_name_override": null,
+    "collapsed": false,
+    "source_address": "https://repo.example.com/mods/repository_space.json",
+    "source_base_url": "https://repo.example.com/mods",
+    "shared_path": "D:\\Foxy\\RepositorySpace",
+    "icon_image_path": "repository_space_icon.png",
+    "icon_image_checksum": "317898dbb872d111e280c96620c8174b",
+    "repo_image_path": "repository_space_image.png",
+    "repo_image_checksum": "73d3a5073862926f9b77c43456fe1e4d",
+    "app_update_url": "https://updates.example.com/foxy/",
+    "entries": [
+      {
+        "name": "Example Main",
+        "address": "https://repo.example.com/mods/example_main",
+        "required": true
+      },
+      {
+        "name": "Example WW2",
+        "address": "https://repo.example.com/mods/example_ww2",
+        "required": false
+      },
+      {
+        "name": "Example CW",
+        "address": "https://repo.example.com/mods/example_coldwar",
+        "required": false
+      },
+      {
+        "name": "Example Sci-Fi",
+        "address": "https://repo.example.com/mods/example_scifi",
+        "required": false
+      },
+      {
+        "name": "Example 40K",
+        "address": "https://repo.example.com/mods/example_40k",
+        "required": false
+      },
+      {
+        "name": "Example Immersive",
+        "address": "https://repo.example.com/mods/example_immersive",
+        "required": false
+      },
+      {
+        "name": "Example Maps",
+        "address": "https://repo.example.com/mods/example_maps",
+        "required": false
+      },
+      {
+        "name": "Example Unsung",
+        "address": "https://repo.example.com/mods/example_unsung",
+        "required": false
+      },
+      {
+        "name": "Example cDLC Compat",
+        "address": "https://repo.example.com/mods/example_cdlc_compat",
+        "required": false
+      },
+      {
+        "name": "Example Test",
+        "address": "https://repo.example.com/mods/example_test",
+        "required": false
+      },
+      {
+        "name": "Example WW2 Test",
+        "address": "https://repo.example.com/mods/example_test_ww2",
+        "required": false
+      },
+      {
+        "name": "Example Sci-Fi Test",
+        "address": "https://repo.example.com/mods/example_test_scifi",
+        "required": false
+      },
+      {
+        "name": "Example JointOps",
+        "address": "https://repo.example.com/mods/example_jointops",
+        "required": false
+      }
+    ]
+  }
+]

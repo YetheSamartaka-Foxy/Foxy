@@ -1,0 +1,34 @@
+THIRD-PARTY LICENSES FOR FOXY
+=============================
+
+Foxy itself is licensed under the Foxy Community Source License 1.0.0 (see
+LICENSE). This file lists the third-party components distributed with Foxy and
+the licenses they are provided under. Third-party components remain governed by
+their own licenses and are not relicensed by the Foxy Community Source License.
+
+This file is generated from the dependency lockfile with cargo-about. Regenerate
+it before each release with:
+
+    cargo about generate about.hbs -o THIRD-PARTY-LICENSES.txt
+
+License summary (count of crates per license):
+
+{{#each overview}}
+  {{count}}x  {{{name}}} ({{id}})
+{{/each}}
+
+{{#each licenses}}
+================================================================================
+{{{name}}} ({{id}})
+================================================================================
+
+Used by:
+{{#each used_by}}
+  - {{{crate.name}}} {{crate.version}}
+{{/each}}
+
+--------------------------------------------------------------------------------
+
+{{{text}}}
+
+{{/each}}
