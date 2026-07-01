@@ -36,7 +36,7 @@ pub fn parse_changelog_str(content: &str) -> Result<Vec<ChangelogVersion>> {
     let mut current_section: Option<ChangelogSection> = None;
 
     for line in content.lines() {
-        let trimmed = line.trim();
+        let trimmed = line.trim().trim_start_matches('\u{feff}').trim();
 
         // Version header: `# 0.6.0` or `# [0.6.0] - 2026-03-28`
         if let Some(rest) = trimmed.strip_prefix("# ") {
@@ -143,7 +143,19 @@ pub fn find_version<'a>(
     versions: &'a [ChangelogVersion],
     target: &str,
 ) -> Option<&'a ChangelogVersion> {
-    versions.iter().find(|v| v.version == target)
+    let target_key = version_key(target);
+    versions
+        .iter()
+        .find(|v| version_key(&v.version) == target_key)
+}
+
+fn version_key(version: &str) -> String {
+    let version = version.trim().trim_start_matches('\u{feff}').trim();
+    version
+        .strip_prefix('v')
+        .or_else(|| version.strip_prefix('V'))
+        .unwrap_or(version)
+        .to_string()
 }
 
 #[cfg(test)]
@@ -182,6 +194,26 @@ mod tests {
         let versions = parse_changelog_str(input).unwrap();
         assert_eq!(versions[0].version, "0.5.1");
         assert_eq!(versions[0].date, Some("2026-03-28".to_string()));
+    }
+
+    #[test]
+    fn test_parse_first_heading_with_utf8_bom() {
+        let input = "\u{feff}# 1.0.0\n## Added\n- Release notes\n";
+
+        let versions = parse_changelog_str(input).unwrap();
+
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].version, "1.0.0");
+        assert!(find_version(&versions, "1.0.0").is_some());
+    }
+
+    #[test]
+    fn test_find_version_accepts_v_prefix() {
+        let input = "# v1.0.0\n## Added\n- Release notes\n";
+
+        let versions = parse_changelog_str(input).unwrap();
+
+        assert!(find_version(&versions, "1.0.0").is_some());
     }
 
     #[test]
