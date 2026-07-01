@@ -590,7 +590,9 @@ impl Foxy {
                 #[cfg(not(target_os = "windows"))]
                 {
                     warn!("Scheduled PC shutdown is not supported on this platform; skipping");
-                    self.toast(self.t("Scheduled shutdown is not supported on this platform."));
+                    self.show_error_toast(
+                        self.t("Scheduled shutdown is not supported on this platform."),
+                    );
                 }
             }
         }
