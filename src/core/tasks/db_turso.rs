@@ -23,7 +23,7 @@ use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::FutureExt;
 use log::{debug, info, warn};
@@ -238,7 +238,7 @@ pub(crate) async fn connect_tuned(db: &Database) -> turso::Result<Connection> {
     Ok(conn)
 }
 
-// --- Startup bloat inspection + auto-compaction (analysis4 P0) ----------------
+// --- Startup bloat inspection + opt-in compaction (analysis4 P0) --------------
 //
 // MVCC-era churn left `database.db` ~97% free pages (e.g. 349 648 pages / 338 750
 // free = 1.37 GB on disk for ~44 MB of live rows). Under WAL the file no longer
@@ -301,8 +301,10 @@ async fn read_db_bloat_stats(conn: &Connection) -> Option<DbBloatStats> {
     })
 }
 
-/// `off` disables auto-compaction; `force` compacts regardless of bloat (for
-/// testing); anything else (incl. unset) = `auto` (compact only when bloated).
+/// `force` compacts regardless of bloat. Any other value, including unset,
+/// disables startup compaction. The bloat stats are still logged so compaction
+/// can be run deliberately, but normal UI startup must not spend minutes behind
+/// database maintenance while repository syncs sit at "Preparing".
 fn compact_mode() -> String {
     std::env::var("FOXY_DB_COMPACT")
         .ok()
@@ -325,6 +327,90 @@ fn remove_db_artifacts(path: &std::path::Path) {
     let _ = fs::remove_file(with_suffix(path, "-shm"));
 }
 
+/// Move WAL/SHM sidecars alongside their main database file destination.
+async fn move_db_sidecars(from: &Path, to: &Path) -> std::io::Result<()> {
+    for suffix in ["-wal", "-shm"] {
+        let from_s = with_suffix(from, suffix);
+        if from_s.exists() {
+            let to_s = with_suffix(to, suffix);
+            let _ = fs::remove_file(&to_s);
+            rename_with_retry(&from_s, &to_s).await?;
+        }
+    }
+    Ok(())
+}
+
+fn rebuild_backup_path(path: &Path) -> PathBuf {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    for attempt in 0..100 {
+        let suffix = if attempt == 0 {
+            format!(".rebuild-backup-{seconds}")
+        } else {
+            format!(".rebuild-backup-{seconds}-{attempt}")
+        };
+        let candidate = with_suffix(path, &suffix);
+        if !candidate.exists()
+            && !with_suffix(&candidate, "-wal").exists()
+            && !with_suffix(&candidate, "-shm").exists()
+        {
+            return candidate;
+        }
+    }
+    with_suffix(path, ".rebuild-backup")
+}
+
+/// Preserve a failed database before creating a clean replacement.
+async fn move_db_artifacts_to_rebuild_backup(path: &Path) -> std::io::Result<PathBuf> {
+    let backup = rebuild_backup_path(path);
+    if path.exists() {
+        rename_with_retry(path, &backup).await?;
+    }
+    move_db_sidecars(path, &backup).await?;
+    Ok(backup)
+}
+
+async fn build_or_rebuild_after_failure(path: &Path, path_str: &str) -> turso::Result<Database> {
+    match build_and_bootstrap(path_str).await {
+        Ok(db) => Ok(db),
+        Err(first_err) => {
+            warn!(
+                "STARTUP: Turso database initialization failed ({}); attempting clean rebuild",
+                first_err
+            );
+            match move_db_artifacts_to_rebuild_backup(path).await {
+                Ok(backup) => info!(
+                    "STARTUP: moved failed database artifacts to {} before rebuild",
+                    sanitize_log_path(&backup)
+                ),
+                Err(move_err) => {
+                    warn!(
+                        "STARTUP: could not move failed database aside ({}); removing database artifacts before rebuild",
+                        move_err
+                    );
+                    remove_db_artifacts(path);
+                }
+            }
+            match build_and_bootstrap(path_str).await {
+                Ok(db) => {
+                    crate::core::tasks::db_schema_version::mark_wiped();
+                    info!("STARTUP: rebuilt Turso database after initialization failure");
+                    Ok(db)
+                }
+                Err(second_err) => {
+                    log::error!(
+                        "Failed to initialize Turso database after clean rebuild: {}",
+                        second_err
+                    );
+                    Err(second_err)
+                }
+            }
+        }
+    }
+}
+
 /// Tables copied during a manual compaction, FK-parent-first (FK enforcement is
 /// disabled on the destination during the copy, so order is not strictly
 /// required, but parent-first keeps it intuitive). Mirrors the bootstrap schema.
@@ -343,8 +429,8 @@ const COMPACT_COPY_TABLES: &[&str] = &[
 ];
 
 /// Inspect the open database for free-page bloat. Always logs the file/page/free
-/// stats; returns true when compaction should run (`FOXY_DB_COMPACT=force`, or
-/// bloated past the threshold and not disabled with `off`).
+/// stats; returns true only when compaction was explicitly requested with
+/// `FOXY_DB_COMPACT=force`.
 async fn should_compact_database(db: &Database) -> bool {
     let conn = match connect_tuned(db).await {
         Ok(c) => c,
@@ -365,10 +451,15 @@ async fn should_compact_database(db: &Database) -> bool {
         );
     }
     let mode = compact_mode();
-    if mode == "off" {
-        return false;
+    if mode == "force" {
+        return true;
     }
-    mode == "force" || stats.map(|s| s.is_bloated()).unwrap_or(false)
+    if stats.is_some_and(|s| s.is_bloated()) {
+        info!(
+            "STARTUP: database is bloated but startup compaction is disabled; set FOXY_DB_COMPACT=force to rebuild it"
+        );
+    }
+    false
 }
 
 /// Copy every row of `table` from `src` into `dst` in chunked multi-row inserts.
@@ -520,20 +611,6 @@ async fn rename_with_retry(from: &std::path::Path, to: &std::path::Path) -> std:
 /// handle has been dropped.
 async fn swap_compacted_file(path: &Path, tmp: &Path) -> bool {
     let bak = with_suffix(path, ".bak");
-    // Move any existing sidecar alongside its main file (best-effort): WAL frames
-    // may hold committed rows, so we relocate the whole db (main + -wal + -shm)
-    // rather than dropping sidecars.
-    async fn move_sidecars(from: &Path, to: &Path) {
-        for suffix in ["-wal", "-shm"] {
-            let from_s = with_suffix(from, suffix);
-            if from_s.exists() {
-                let to_s = with_suffix(to, suffix);
-                let _ = fs::remove_file(&to_s);
-                let _ = rename_with_retry(&from_s, &to_s).await;
-            }
-        }
-    }
-
     // Clear any stale backup (main + sidecars).
     remove_db_artifacts(&bak);
 
@@ -546,7 +623,7 @@ async fn swap_compacted_file(path: &Path, tmp: &Path) -> bool {
         remove_db_artifacts(tmp);
         return false;
     }
-    move_sidecars(path, &bak).await;
+    let _ = move_db_sidecars(path, &bak).await;
 
     // Install the compacted copy (main + its WAL/SHM) at the live path.
     if let Err(e) = rename_with_retry(tmp, path).await {
@@ -555,11 +632,11 @@ async fn swap_compacted_file(path: &Path, tmp: &Path) -> bool {
             e
         );
         let _ = rename_with_retry(&bak, path).await;
-        move_sidecars(&bak, path).await;
+        let _ = move_db_sidecars(&bak, path).await;
         remove_db_artifacts(tmp);
         return false;
     }
-    move_sidecars(tmp, path).await;
+    let _ = move_db_sidecars(tmp, path).await;
     info!(
         "STARTUP: compacted database installed; previous file kept as {}",
         sanitize_log_path(&bak)
@@ -578,7 +655,9 @@ pub(crate) async fn init_turso_database() -> Arc<Database> {
         let path_str = path.to_string_lossy().to_string();
         info!("Ensuring Turso database {}", sanitize_log_path(&path));
 
-        let mut db = build_and_bootstrap(&path_str).await.unwrap_or_else(|e| {
+        let mut db = build_or_rebuild_after_failure(&path, &path_str)
+            .await
+            .unwrap_or_else(|e| {
             log::error!("Failed to initialize Turso database: {}", e);
             panic!("Failed to initialize Turso database: {}", e);
         });
@@ -590,7 +669,7 @@ pub(crate) async fn init_turso_database() -> Arc<Database> {
             let compact_start = Instant::now();
             drop(db);
             let installed = compact_database_file(&path).await;
-            db = build_and_bootstrap(&path_str).await.unwrap_or_else(|e| {
+            db = build_or_rebuild_after_failure(&path, &path_str).await.unwrap_or_else(|e| {
                 log::error!("Failed to reopen Turso database after compaction: {}", e);
                 panic!("Failed to reopen Turso database after compaction: {}", e);
             });
@@ -758,6 +837,24 @@ mod tests {
         let path = dir.path().join("database.db");
         let db = build_and_bootstrap(path.to_str().unwrap()).await.unwrap();
         (dir, db)
+    }
+
+    #[tokio::test]
+    async fn rebuild_backup_moves_database_and_sidecars() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("database.db");
+        fs::write(&path, b"db").unwrap();
+        fs::write(with_suffix(&path, "-wal"), b"wal").unwrap();
+        fs::write(with_suffix(&path, "-shm"), b"shm").unwrap();
+
+        let backup = move_db_artifacts_to_rebuild_backup(&path).await.unwrap();
+
+        assert!(!path.exists());
+        assert!(!with_suffix(&path, "-wal").exists());
+        assert!(!with_suffix(&path, "-shm").exists());
+        assert_eq!(fs::read(&backup).unwrap(), b"db");
+        assert_eq!(fs::read(with_suffix(&backup, "-wal")).unwrap(), b"wal");
+        assert_eq!(fs::read(with_suffix(&backup, "-shm")).unwrap(), b"shm");
     }
 
     /// Benchmark (run explicitly: `cargo test --release bench_fresh_insert_vs_upsert

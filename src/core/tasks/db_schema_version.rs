@@ -246,6 +246,11 @@ pub fn mark_wiped() {
     });
 }
 
+/// Whether the persisted schema metadata is already current for this binary.
+pub fn is_current() -> bool {
+    read_meta().is_some_and(|meta| meta.schema_version >= DB_SCHEMA_VERSION)
+}
+
 /// Record that the user dismissed the wipe prompt for `target` and chose to keep
 /// the existing database. Preserves the stored (older) version so the schema is
 /// still considered out of date, but suppresses the prompt until the next bump.

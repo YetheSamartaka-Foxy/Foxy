@@ -490,6 +490,10 @@ impl Foxy {
         let Some(prompt) = self.pending_db_schema_wipe else {
             return;
         };
+        if crate::core::tasks::db_schema_version::is_current() {
+            self.pending_db_schema_wipe = None;
+            return;
+        }
 
         // A wipe must not race an in-flight sync (it drops the tables the sync
         // is writing). Mirror the settings wipe dialog's guard.
