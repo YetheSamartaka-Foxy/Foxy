@@ -1,13 +1,7 @@
 name: Linux Check
 
 on:
-  pull_request:
-  push:
-    branches:
-      - main
-      - master
-  schedule:
-    - cron: "22 3 * * 1"
+  workflow_dispatch:
 
 permissions:
   contents: read

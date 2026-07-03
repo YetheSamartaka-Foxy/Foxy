@@ -1,0 +1,67 @@
+name: Feature request
+description: Suggest an improvement or new capability for Foxy
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting an improvement. Please describe the user need and the outcome you want, not only a proposed implementation.
+
+        This template is for product features and workflow improvements. For bugs, licensing, commercial permission, community continuation, or maintainer return, use the dedicated templates in the chooser instead.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What are you trying to do, and what makes it difficult today?
+      placeholder: I want to ...
+    validations:
+      required: true
+  - type: textarea
+    id: proposed-solution
+    attributes:
+      label: Proposed solution
+      description: Describe the behavior, UI, CLI command, or workflow you would like Foxy to add or change.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Describe any workaround, different design, or existing tool you have considered.
+    validations:
+      required: false
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which part of Foxy would this affect most?
+      options:
+        - Mod sync or updates
+        - Repository setup or management
+        - Arma 3 launch integration
+        - Steam Workshop integration
+        - TeamSpeak 3 integration
+        - UI or accessibility
+        - CLI
+        - Packaging or installation
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add screenshots, links, examples, or constraints that would help evaluate the request.
+    validations:
+      required: false
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations
+      options:
+        - label: I searched existing issues and this is not a duplicate.
+          required: true
+        - label: This request is about a feature or improvement, not a bug or licensing request.
+          required: true

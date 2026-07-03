@@ -301,6 +301,32 @@ numbers straight from the logs.
 | Date | Version | Machine | Op | Work | T_actual | R_actual | Light (src) | sol | Bottleneck | Action |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | _2026-06-13_ | _1.0.0_ | _example_ | download | 8.2 GiB | 612 s | 14.3 MiB/s | 15.0 MiB/s (limiter) | 0.95 | limiter | none - at light |
+| 2026-07-03 | 1.0.0 | 9950X3D desktop | quick_scan clean | 96 addons | 0.210 s | 456.1 addons/s | 2,462 addons/s (B5 self) | 0.185 | no cache hits, DB load | persistent cache empty; track cache-key fix |
+| 2026-07-03 | 1.0.0 | 9950X3D desktop | quick_scan clean | 96 addons | 0.071 s | 1,356.0 addons/s | 2,462 addons/s (B5 self) | 0.551 | addon hash + DB load | cache_hits_persistent=0 |
+| 2026-07-03 | 1.0.0 | 9950X3D desktop | quick_scan clean | 96 addons | 0.074 s | 1,305.9 addons/s | 2,462 addons/s (B5 self) | 0.530 | addon hash + DB load | cache_hits_persistent=0 |
+| 2026-07-03 | 1.0.0 | 9950X3D desktop | quick_scan clean | 96 addons | 0.069 s | 1,399.2 addons/s | 2,462 addons/s (B5 self) | 0.568 | addon hash + DB load | best in this log, still under B5 |
+| 2026-07-03 | 1.0.0 | 9950X3D desktop | quick_scan clean | 96 addons | 0.072 s | 1,324.2 addons/s | 2,462 addons/s (B5 self) | 0.538 | addon hash + DB load | cache_hits_persistent=0 |
+| 2026-07-03 | 1.0.0 | 9950X3D desktop | quick_scan clean | 96 addons | 0.071 s | 1,353.6 addons/s | 2,462 addons/s (B5 self) | 0.550 | addon hash + DB load | cache_hits_persistent=0 |
+| 2026-07-03 | 1.0.0 | 9950X3D desktop | hash benchmark Conservative | 737.6 MiB | 0.362 s | 2,037.9 MiB/s | 6,003.6 MiB/s (same-run best) | 0.339 | profile limits | Balanced wins on this run |
+| 2026-07-03 | 1.0.0 | 9950X3D desktop | hash benchmark Balanced | 737.6 MiB | 0.123 s | 6,003.6 MiB/s | 6,003.6 MiB/s (same-run best) | 1.000 | at same-run light | selected profile |
+| 2026-07-03 | 1.0.0 | 9950X3D desktop | hash benchmark Aggressive | 737.6 MiB | 0.126 s | 5,859.4 MiB/s | 6,003.6 MiB/s (same-run best) | 0.976 | near same-run light | no action |
+| 2026-07-03 | 1.0.0 | 9950X3D desktop | hash selected remaining | 20.60 GiB | 6.571 s | 3,209.5 MiB/s | 6,003.6 MiB/s (benchmark best) | 0.535 | file mix, stragglers | 1086 files, max file 2.410 s |
+| 2026-07-03 | 1.0.0 | 9950X3D desktop | repository DB purge | 440,492 rows | 144.54 s | 3,047 rows/s | self_baseline | na | SQLite delete | zero-row part delete took 78.59 s; subfile delete took 59.59 s |
+| 2026-07-03 | 1.0.0 | 9950X3D desktop | deferred part insert | 433,016 rows | 107.30 s | 4,035 rows/s | self_baseline | na | SQLite insert with live indexes | 1,692 batches of 256; biggest sync cost |
+| 2026-07-03 | 1.0.0 | 9950X3D desktop | remote refresh rebuild | 3,738 files | 125.73 s | 29.7 files/s | self_baseline | na | DB persistence | 110.84 s DB write time; tree_hash_bootstrap 118.29 s |
+| 2026-07-03 | 1.0.0 | 9950X3D desktop | no-change remote skip | repo.json + foxy_addons | 0.27 s | 1 clean verdict | self_baseline | na | RTT + quick verify | repeat clean skip after rebuild |
+| 2026-07-03 | 1.0.0 | 9950X3D desktop | quick_scan clean | 96 addons | 0.072 s | 1,324.4 addons/s | 2,462 addons/s (B5 self) | 0.538 | addon hash + DB load | TFR Main startup quick scan |
+| 2026-07-03 | 1.0.0 | 9950X3D desktop | quick_scan updates | 41 addons | 0.167 s | 245.6 addons/s | self_baseline | na | missing-file diff | TFR_40K before download: 41 addons updated, 1,515 files missing |
+| 2026-07-03 | 1.0.0 | 9950X3D desktop | quick_scan updates | 41 addons | 0.158 s | 260.2 addons/s | self_baseline | na | missing-file diff | repeated update check before download |
+| 2026-07-03 | 1.0.0 | 9950X3D desktop | quick_scan updates | 41 addons | 0.154 s | 265.5 addons/s | self_baseline | na | missing-file diff | repeated update check before download |
+| 2026-07-03 | 1.0.0 | 9950X3D desktop | quick_scan updates | 41 addons | 0.153 s | 268.8 addons/s | self_baseline | na | missing-file diff | repeated update check before download |
+| 2026-07-03 | 1.0.0 | 9950X3D desktop | download | 22.56 GiB | 222.671 s | 103.73 MiB/s | 112.92 MiB/s (peak_1s) | 0.919 | network path | 1,515 full downloads, 1,515 files, no retries |
+| 2026-07-03 | 1.0.0 | 9950X3D desktop | download pipeline | 22.56 GiB | 247.54 s | 93.31 MiB/s | self_baseline | na | post-download tail | download 240.68 s, hash_finalize 17.75 s, DB writes 14.84 s |
+| 2026-07-03 | 1.0.0 | 9950X3D desktop | hash finalize tail | 22.56 GiB | 15.15 s | 1,524.6 MiB/s | self_baseline | na | rollup or persistence tail | all 1,515 files incrementally hashed during download |
+| 2026-07-03 | 1.0.0 | 9950X3D desktop | download DB checkpoint | 3,583 rows | 1.79 s | 2,002 rows/s | self_baseline | na | SQLite progress persistence | 36 batches, avg_batch=49.6ms |
+| 2026-07-03 | 1.0.0 | 9950X3D desktop | quick_scan clean | 41 addons | 0.040 s | 1,019.4 addons/s | 2,462 addons/s (B5 self) | 0.414 | addon hash + DB load | TFR_40K clean after download |
+| 2026-07-03 | 1.0.0 | 9950X3D desktop | quick_scan clean | 41 addons | 0.042 s | 972.4 addons/s | 2,462 addons/s (B5 self) | 0.395 | addon hash + DB load | TFR_40K remote skip verification |
+| 2026-07-03 | 1.0.0 | 9950X3D desktop | no-change remote skip | repo.json + foxy_addons | 0.21 s | 1 clean verdict | self_baseline | na | RTT + quick verify | TFR_40K clean skip after download |
 | | | | | | | | | | | |
 
 Workflow rules:
