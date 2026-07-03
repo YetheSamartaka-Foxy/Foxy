@@ -139,6 +139,10 @@ async fn apply_schema(conn: &Connection, schema: &str) -> turso::Result<()> {
 /// connection, then re-applies the bootstrap schema - so the in-process handle
 /// stays valid across the wipe (used by the schema-version wipe prompt).
 pub(crate) async fn wipe_and_rebuild_live(db: &Database) -> turso::Result<()> {
+    // Full live wipe is a destructive bulk operation. Hold the same exclusive
+    // barrier as repository purge so this cannot race another seam read/write on
+    // the shared Turso handle and surface as "database is locked".
+    let _exclusive = crate::core::tasks::init_database::acquire_db_exclusive().await;
     // FK enforcement is on per tuned connection; drop in dependency order so the
     // CASCADE chains don't fight the explicit DROPs.
     let conn = connect_tuned(db).await?;
@@ -855,6 +859,28 @@ mod tests {
         assert_eq!(fs::read(&backup).unwrap(), b"db");
         assert_eq!(fs::read(with_suffix(&backup, "-wal")).unwrap(), b"wal");
         assert_eq!(fs::read(with_suffix(&backup, "-shm")).unwrap(), b"shm");
+    }
+
+    #[tokio::test]
+    async fn live_wipe_waits_for_shared_db_access() {
+        let db = build_test_database().await;
+        let shared = crate::core::tasks::init_database::acquire_db_shared().await;
+        let wipe_db = db.clone();
+
+        let wipe = tokio::spawn(async move { wipe_and_rebuild_live(&wipe_db).await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert!(
+            !wipe.is_finished(),
+            "live wipe should wait for active shared DB access"
+        );
+
+        drop(shared);
+        tokio::time::timeout(Duration::from_secs(10), wipe)
+            .await
+            .expect("live wipe should finish after shared access is released")
+            .expect("live wipe task should not panic")
+            .expect("live wipe should succeed");
     }
 
     /// Benchmark (run explicitly: `cargo test --release bench_fresh_insert_vs_upsert
