@@ -19,13 +19,15 @@ pub enum RepositoryListSection {
 pub enum RepositoryListRow {
     SectionLabel(RepositoryListSection),
     SpaceHeader(usize),
-    Repository(usize),
+    FolderHeader(usize),
+    Repository { repo_idx: usize, indented: bool },
 }
 
 #[derive(Debug, Default)]
 pub struct RepositoryListCache {
     pub repositories_version: u64,
     pub spaces_version: u64,
+    pub visual_folders_version: u64,
     pub repo_states_version: u64,
     pub repository_spaces_collapsed: bool,
     pub repositories_collapsed: bool,

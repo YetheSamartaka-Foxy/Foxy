@@ -85,6 +85,25 @@ impl Foxy {
             central_frame.show(ui, |ui| {
                 if let Some(space_id) = self.selected_repository_space_id.clone() {
                     self.render_repository_space_detail(ui, &space_id);
+                } else if let Some(folder_id) = self.selected_repository_visual_folder_id.clone() {
+                    let folder = self
+                        .repository_visual_folders
+                        .iter()
+                        .find(|folder| folder.id == folder_id)
+                        .cloned();
+                    ui.vertical_centered_justified(|ui| {
+                        if let Some(folder) = folder {
+                            ui.heading(folder.name);
+                            ui.label(self.t_fmt(
+                                "Repositories in folder: {count}",
+                                &[("count", folder.repository_keys.len().to_string())],
+                            ));
+                        } else {
+                            self.selected_repository_visual_folder_id = None;
+                            ui.heading(tr("Selected repository"));
+                            ui.label(tr("No repository selected"));
+                        }
+                    });
                 } else if let Some(selected_idx) = self.repository_view_state.selected_repository {
                     let color_primary_accent = self.color_primary_accent();
                     let (
@@ -725,6 +744,8 @@ impl Foxy {
 
         self.render_repository_context_confirmation(ui.ctx());
         self.render_repository_space_delete_confirmation(ui.ctx());
+        self.render_repository_visual_folder_edit_modal(ui.ctx());
+        self.render_repository_visual_folder_delete_confirmation(ui.ctx());
         self.render_repository_space_bulk_action_modal(ui.ctx());
         self.render_delete_mission_modal(ui.ctx());
         self.render_remove_mission_dependencies_modal(ui.ctx());

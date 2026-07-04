@@ -33,6 +33,14 @@ impl Foxy {
         }
     }
 
+    pub(in crate::ui::app) fn bump_repository_visual_folders_version(&mut self) {
+        self.repository_visual_folders_version =
+            self.repository_visual_folders_version.wrapping_add(1);
+        if self.repository_visual_folders_version == 0 {
+            self.repository_visual_folders_version = 1;
+        }
+    }
+
     pub fn load_repositories(&mut self) {
         let path = Self::get_repositories_path();
         match std::fs::read_to_string(&path) {
@@ -121,7 +129,7 @@ impl Foxy {
     /// `pending_update_cache`). The same remote URL installed in different
     /// folders is tracked independently, so an empty new-folder install no
     /// longer inherits a sibling's "complete" status.
-    pub(in crate::ui::app) fn repo_instance_key(repository_url: &str, local_path: &str) -> String {
+    pub(crate) fn repo_instance_key(repository_url: &str, local_path: &str) -> String {
         format!(
             "{}\u{1f}{}",
             Self::normalize_repo_url(repository_url),

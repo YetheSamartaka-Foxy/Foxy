@@ -644,6 +644,15 @@ impl Foxy {
         }
 
         let removed = self.repository_view_state.repositories.remove(repo_idx);
+        let removed_visual_folder_key = Self::repo_instance_key(&removed.address, &removed.path);
+        let mut visual_folders_changed = false;
+        for folder in &mut self.repository_visual_folders {
+            let before = folder.repository_keys.len();
+            folder
+                .repository_keys
+                .retain(|key| key != &removed_visual_folder_key);
+            visual_folders_changed |= folder.repository_keys.len() != before;
+        }
         let normalized_url = Self::normalize_repo_url(&removed.address);
         let should_purge_database = !self
             .repository_view_state
@@ -731,6 +740,9 @@ impl Foxy {
 
         self.pending_repository_context_confirmation = None;
         self.save_repositories();
+        if visual_folders_changed {
+            self.save_repository_visual_folders();
+        }
         info!("Deleted repository {}", removed.name);
         if should_purge_database {
             if delete_local_files {
@@ -894,9 +906,11 @@ impl Foxy {
         }
         self.repository_space_sync_queue
             .retain(|(queued_space_id, _, _)| queued_space_id != space_id);
+        self.prune_repository_visual_folders(false);
 
         self.pending_repository_space_delete_id = None;
         self.save_repository_spaces();
+        self.save_repository_visual_folders();
         self.save_repositories();
         info!("Deleted repository space {}", removed.name);
         let removed_message = self.t_fmt(

@@ -73,6 +73,52 @@ impl Foxy {
         self.queue_selected_repository_space_sync(space_id, mode, &targets)
     }
 
+    pub fn collect_repository_visual_folder_sync_targets(&self, folder_id: &str) -> Vec<usize> {
+        let Some(folder) = self
+            .repository_visual_folders
+            .iter()
+            .find(|folder| folder.id == folder_id)
+        else {
+            return Vec::new();
+        };
+        let folder_keys: HashSet<&str> =
+            folder.repository_keys.iter().map(String::as_str).collect();
+        self.repository_view_state
+            .repositories
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, repo)| {
+                let key = Self::repo_instance_key(&repo.address, &repo.path);
+                folder_keys.contains(key.as_str()).then_some(idx)
+            })
+            .collect()
+    }
+
+    pub fn queue_repository_visual_folder_sync(
+        &mut self,
+        folder_id: &str,
+        mode: SyncMode,
+    ) -> usize {
+        let targets = self.collect_repository_visual_folder_sync_targets(folder_id);
+        self.repository_visual_folder_sync_queue.clear();
+        for repo_idx in targets {
+            let Some(repo) = self.repository_view_state.repositories.get(repo_idx) else {
+                continue;
+            };
+            if repo.address.trim().is_empty() || repo.path.trim().is_empty() {
+                continue;
+            }
+            self.repository_visual_folder_sync_queue
+                .push_back((repo_idx, mode));
+        }
+
+        let queued = self.repository_visual_folder_sync_queue.len();
+        if queued > 0 {
+            self.process_repository_visual_folder_sync_queue();
+        }
+        queued
+    }
+
     pub fn queue_selected_repository_space_sync(
         &mut self,
         space_id: &str,
@@ -342,6 +388,35 @@ impl Foxy {
                 self.refresh_repository_space_bulk_current_repo();
                 info!(
                     "Started queued repository-space sync: {} mode={:?}",
+                    repo_name, mode
+                );
+                break;
+            }
+        }
+    }
+
+    pub(in crate::ui::app) fn process_repository_visual_folder_sync_queue(&mut self) {
+        if self.repository_sync_active() || self.is_direct_download_running() {
+            return;
+        }
+
+        while let Some((repo_idx, mode)) = self.repository_visual_folder_sync_queue.pop_front() {
+            let Some(repo) = self.repository_view_state.repositories.get(repo_idx) else {
+                continue;
+            };
+            if repo.address.trim().is_empty() || repo.path.trim().is_empty() {
+                warn!(
+                    "Skipping queued visual-folder sync for {} due to incomplete configuration",
+                    repo.name
+                );
+                continue;
+            }
+
+            let repo_name = repo.name.clone();
+            self.start_core_sync(repo_idx, mode);
+            if self.syncing_repository == Some(repo_idx) {
+                info!(
+                    "Started queued visual-folder sync: {} mode={:?}",
                     repo_name, mode
                 );
                 break;

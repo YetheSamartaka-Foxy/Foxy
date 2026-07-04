@@ -68,11 +68,24 @@ pub(super) enum LaunchDispatchResult {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum RepositoryListSectionContextAction {
     ToggleCollapsed,
+    CreateFolder,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum RepositorySpaceRowContextAction {
     ToggleCollapsed,
+    CreateFolder,
+    Delete,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RepositoryVisualFolderRowContextAction {
+    ToggleCollapsed,
+    Rename,
+    ChangeColor,
+    QuickLocalCheck,
+    RemoteRecheck,
+    Update,
     Delete,
 }
 

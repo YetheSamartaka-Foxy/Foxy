@@ -198,9 +198,13 @@ impl Foxy {
             repository_list_data_version: 1,
             drag_source_repo_index: None,
             drag_drop_target_index: None,
+            drag_drop_target_visual_folder_id: None,
             repository_spaces_version: 1,
             repository_spaces: Vec::new(),
+            repository_visual_folders_version: 1,
+            repository_visual_folders: Vec::new(),
             selected_repository_space_id: None,
+            selected_repository_visual_folder_id: None,
             repository_space_detail_filter: String::new(),
             repository_space_detail_filter_space_id: None,
             show_add_repository_modal: false,
@@ -362,6 +366,7 @@ impl Foxy {
             sync_started_at: None,
             startup_recheck_queue: VecDeque::new(),
             repository_space_sync_queue: VecDeque::new(),
+            repository_visual_folder_sync_queue: VecDeque::new(),
             addon_hash_recalc_queue: VecDeque::new(),
             scheduler_active_run: None,
             scheduler_pending_post_action: None,
@@ -411,6 +416,8 @@ impl Foxy {
             repo_foxy_modes: HashMap::new(),
             pending_repository_context_confirmation: None,
             pending_repository_space_delete_id: None,
+            pending_repository_visual_folder_edit: None,
+            pending_repository_visual_folder_delete: None,
             startup_frame_rendered: false,
             startup_tasks_started: false,
             close_requested_at: None,
@@ -530,6 +537,7 @@ impl Foxy {
         app.load_repositories();
         app.load_repository_spaces();
         app.reconcile_repository_space_paths();
+        app.load_repository_visual_folders();
         api::log_startup_system_diagnostics(&app.startup_storage_paths());
         info!(
             "Startup state loaded: repositories={} repository_spaces={} debug_mode={}",

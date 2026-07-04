@@ -261,6 +261,7 @@ impl Foxy {
         self.maybe_dispatch_persistence_requests(false);
         self.process_startup_rechecks();
         self.process_repository_space_sync_queue();
+        self.process_repository_visual_folder_sync_queue();
         self.process_scheduled_jobs(&ctx);
         self.process_addon_hash_recalc_queue();
         self.maybe_sample_memory_diagnostics();
