@@ -3560,6 +3560,9 @@ impl Foxy {
             "external_addons_filter": self.external_addons_filter,
             "external_addons_origin_filter": self.external_addons_origin_filter,
             "external_addons_group_by_origin": self.external_addons_group_by_origin,
+            "addons_search_files": self.addons_search_files,
+            "optional_addons_search_files": self.optional_addons_search_files,
+            "external_addons_search_files": self.external_addons_search_files,
             "addon_state_filter": self.addon_state_filter,
             "addon_favorites_only_filter": self.addon_favorites_only_filter,
             "addon_client_side_only_filter": self.addon_client_side_only_filter,
@@ -3600,6 +3603,21 @@ impl Foxy {
                 self.external_addons_group_by_origin = parsed;
                 json!(parsed)
             }
+            "addons-search-files" | "addons-include-files" => {
+                let parsed = bool_filter(value, "addons-search-files")?;
+                self.addons_search_files = parsed;
+                json!(parsed)
+            }
+            "optional-addons-search-files" | "optional-addons-include-files" => {
+                let parsed = bool_filter(value, "optional-addons-search-files")?;
+                self.optional_addons_search_files = parsed;
+                json!(parsed)
+            }
+            "external-addons-search-files" | "external-addons-include-files" => {
+                let parsed = bool_filter(value, "external-addons-search-files")?;
+                self.external_addons_search_files = parsed;
+                json!(parsed)
+            }
             "show-folders" | "editor-mission-show-folders" => {
                 let parsed = bool_filter(value, "show-folders")?;
                 self.editor_mission_show_folders = parsed;
@@ -3621,7 +3639,7 @@ impl Foxy {
             }
             other => {
                 return Err(format!(
-                    "Unsupported filter '{other}' (string: addons-filter, optional-addons-filter, external-addons-filter, external-addons-origin-filter, addon-state-filter, mission-search, mission-terrain-filter, space-detail-filter; boolean: favorites-only, client-side-only, group-by-origin, show-folders)"
+                    "Unsupported filter '{other}' (string: addons-filter, optional-addons-filter, external-addons-filter, external-addons-origin-filter, addon-state-filter, mission-search, mission-terrain-filter, space-detail-filter; boolean: favorites-only, client-side-only, group-by-origin, addons-search-files, optional-addons-search-files, external-addons-search-files, show-folders)"
                 ));
             }
         };

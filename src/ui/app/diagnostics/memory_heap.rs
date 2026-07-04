@@ -5,8 +5,8 @@ use std::path::Path;
 use crate::core::api::{self, FileDiffSummary, ModDiffSummary, ProgressEvent, SyncMode};
 use crate::core::utils::addon_backup;
 use crate::ui::app::{
-    AddonInventoryPathCacheEntry, ExternalAddonRowCache, Foxy, RepositoryAddonListCache,
-    RepositoryExternalAddonsListCache, RepositoryListRow,
+    AddonFolderStructure, AddonInventoryPathCacheEntry, ExternalAddonRowCache, Foxy,
+    RepositoryAddonListCache, RepositoryExternalAddonsListCache, RepositoryListRow,
 };
 use crate::ui::types::*;
 
@@ -479,6 +479,15 @@ impl Foxy {
                 .filter_map(|path| path.as_ref())
                 .map(Self::heap_bytes_of_string)
                 .sum::<usize>()
+            + cache.file_entries_by_source.capacity() * size_of::<Option<AddonFolderStructure>>()
+            + cache
+                .file_entries_by_source
+                .iter()
+                .filter_map(|structure| structure.as_ref())
+                .map(Self::heap_bytes_of_addon_folder_structure)
+                .sum::<usize>()
+            + cache.expanded_source_indices.capacity() * size_of::<usize>()
+            + cache.file_search_matches_by_source.capacity() * size_of::<bool>()
             + cache.filtered_indices.capacity() * size_of::<usize>()
             + Self::heap_bytes_of_option_string(&cache.selected_profile)
             + Self::heap_bytes_of_string(&cache.repo_path_normalized)
@@ -519,6 +528,15 @@ impl Foxy {
                 .iter()
                 .map(Self::heap_bytes_of_string)
                 .sum::<usize>()
+            + cache.file_entries_by_row.capacity() * size_of::<Option<AddonFolderStructure>>()
+            + cache
+                .file_entries_by_row
+                .iter()
+                .filter_map(|structure| structure.as_ref())
+                .map(Self::heap_bytes_of_addon_folder_structure)
+                .sum::<usize>()
+            + cache.expanded_row_indices.capacity() * size_of::<usize>()
+            + cache.file_search_matches_by_row.capacity() * size_of::<bool>()
             + cache.enabled_by_row.capacity() * size_of::<bool>()
             + cache.favorite_by_row.capacity() * size_of::<bool>()
             + cache.client_side_by_row.capacity() * size_of::<bool>()
@@ -553,5 +571,19 @@ impl Foxy {
             .sum::<usize>();
 
         total
+    }
+
+    fn heap_bytes_of_addon_folder_structure(structure: &AddonFolderStructure) -> usize {
+        Self::heap_bytes_of_string(&structure.path_key)
+            + structure.files.capacity() * size_of::<crate::ui::app::AddonFolderEntry>()
+            + structure
+                .files
+                .iter()
+                .map(|file| {
+                    Self::heap_bytes_of_string(&file.display_path)
+                        + Self::heap_bytes_of_string(&file.name_lower)
+                        + Self::heap_bytes_of_string(&file.path_lower)
+                })
+                .sum::<usize>()
     }
 }

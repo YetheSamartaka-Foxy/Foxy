@@ -2,6 +2,7 @@ use super::AddonContextAction;
 use crate::ui::app::{AddonDestructiveConfirmAction, Foxy, RepositoryAddonListKind};
 use crate::ui::context_menu::{ContextMenuItem, attach_context_menu};
 use crate::ui::i18n::{fmt_bytes, tr, tr_fmt};
+use crate::ui::search_filter::MultiEntryFilter;
 use crate::ui::views::galley_cache;
 use eframe::egui::{
     self, Align, Align2, AsIdSalt, Button, Color32, CornerRadius, FontId, Layout, RichText,
@@ -18,6 +19,17 @@ const MAX_ADDON_PATH_OVERLAY_WIDTH: f32 = 440.0;
 /// Rows whose name/path galleys are shaped per frame by the background prewarm.
 const ADDON_GALLEY_PREWARM_ROWS_PER_FRAME: usize = 128;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RepositoryAddonVisibleRow {
+    Addon {
+        source_index: usize,
+    },
+    File {
+        source_index: usize,
+        file_index: usize,
+    },
+}
+
 struct AddonRowTooltips {
     add_favorite: String,
     remove_favorite: String,
@@ -32,6 +44,8 @@ struct AddonContextMenuLabels {
     restore_backup: String,
     recheck_integrity: String,
     standalone_download: String,
+    expand_structure: String,
+    collapse_structure: String,
     force_redownload: String,
     delete: String,
 }
@@ -94,6 +108,128 @@ fn addon_path_overlay_width(
 }
 
 impl Foxy {
+    fn repository_addon_visible_rows(
+        &self,
+        kind: RepositoryAddonListKind,
+        include_file_search: bool,
+        filter: &str,
+    ) -> Vec<RepositoryAddonVisibleRow> {
+        let cache = self.repository_addon_list_cache_cached(kind);
+        let multi_filter = MultiEntryFilter::parse(filter);
+        let search_files = include_file_search && !multi_filter.is_empty();
+        let mut rows = Vec::with_capacity(cache.filtered_indices.len());
+
+        for &source_index in &cache.filtered_indices {
+            rows.push(RepositoryAddonVisibleRow::Addon { source_index });
+            let auto_expanded = search_files
+                && cache
+                    .file_search_matches_by_source
+                    .get(source_index)
+                    .copied()
+                    .unwrap_or(false);
+            let manually_expanded = cache.expanded_source_indices.contains(&source_index);
+            if !auto_expanded && !manually_expanded {
+                continue;
+            }
+
+            let Some(structure) = cache
+                .file_entries_by_source
+                .get(source_index)
+                .and_then(|structure| structure.as_ref())
+            else {
+                continue;
+            };
+
+            rows.extend(
+                structure
+                    .files
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(file_index, file)| {
+                        if auto_expanded
+                            && !multi_filter.matches_any_normalized(&[
+                                file.name_lower.as_str(),
+                                file.path_lower.as_str(),
+                            ])
+                        {
+                            return None;
+                        }
+                        Some(RepositoryAddonVisibleRow::File {
+                            source_index,
+                            file_index,
+                        })
+                    }),
+            );
+        }
+
+        rows
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_repository_addon_file_row(
+        &self,
+        ui: &mut Ui,
+        kind: RepositoryAddonListKind,
+        source_index: usize,
+        file_index: usize,
+        horizontal_padding: f32,
+        path_font_id: &egui::FontId,
+        collapse_label: &str,
+        addon_context_action: &mut Option<(String, Option<String>, AddonContextAction)>,
+    ) {
+        let row_size = Vec2::new(ui.available_width(), ADDON_ROW_HEIGHT);
+        // Sense clicks so the expanded file rows carry their own right-click menu:
+        // when scrolling deep inside a long expanded structure the addon header is
+        // off-screen, so a per-file "Collapse addon structure" entry lets the user
+        // collapse without scrolling back up to the header.
+        let (row_rect, response) = ui.allocate_exact_size(row_size, egui::Sense::click());
+        if response.hovered() {
+            ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+        }
+
+        let mut context_action: Option<AddonContextAction> = None;
+        attach_context_menu(
+            &response,
+            &[ContextMenuItem::new(
+                AddonContextAction::ToggleStructure,
+                collapse_label.to_string(),
+            )],
+            &mut context_action,
+        );
+        if context_action.is_some()
+            && let Some(name) = self
+                .repository_addon_list_cache_cached(kind)
+                .source_names
+                .get(source_index)
+                .cloned()
+        {
+            *addon_context_action = Some((name, None, AddonContextAction::ToggleStructure));
+        }
+
+        let Some(file_path) = self
+            .repository_addon_list_cache_cached(kind)
+            .file_entries_by_source
+            .get(source_index)
+            .and_then(|structure| structure.as_ref())
+            .and_then(|structure| structure.files.get(file_index))
+            .map(|file| file.display_path.as_str())
+        else {
+            return;
+        };
+
+        let text_rect = egui::Rect::from_min_max(
+            egui::pos2(row_rect.left() + horizontal_padding + 28.0, row_rect.top()),
+            egui::pos2(row_rect.right() - horizontal_padding, row_rect.bottom()),
+        );
+        ui.painter().text(
+            text_rect.left_center(),
+            Align2::LEFT_CENTER,
+            format!("|- {file_path}"),
+            path_font_id.clone(),
+            self.color_text_dim(),
+        );
+    }
+
     /// Shape a chunk of off-screen addon name/path galleys per frame so they are
     /// cached before the user scrolls to them, instead of being shaped on first
     /// reveal (the dominant per-frame cost while scrolling). Mirrors the external
@@ -194,6 +330,10 @@ impl Foxy {
         context_menu_labels: &AddonContextMenuLabels,
         tooltips: &AddonRowTooltips,
     ) {
+        let structure_expanded = self
+            .repository_addon_list_cache_cached(kind)
+            .expanded_source_indices
+            .contains(&source_index);
         let available_width = ui.available_width();
         let row_size = Vec2::new(available_width, ADDON_ROW_HEIGHT);
         let (row_rect, _) = ui.allocate_exact_size(row_size, egui::Sense::hover());
@@ -476,6 +616,16 @@ impl Foxy {
                 )
                 .separator_before(),
                 ContextMenuItem::new(
+                    AddonContextAction::ToggleStructure,
+                    if structure_expanded {
+                        context_menu_labels.collapse_structure.clone()
+                    } else {
+                        context_menu_labels.expand_structure.clone()
+                    },
+                )
+                .disabled_if(addon_directory_path.is_none())
+                .separator_before(),
+                ContextMenuItem::new(
                     AddonContextAction::ForceRedownload,
                     context_menu_labels.force_redownload.clone(),
                 )
@@ -502,6 +652,7 @@ impl Foxy {
         repo_index: usize,
         kind: RepositoryAddonListKind,
         filter: &mut String,
+        search_files: &mut bool,
         addon_state_filter: &mut String,
     ) {
         self.ensure_repository_addon_list_cache_cached(repo_index, kind);
@@ -550,6 +701,8 @@ impl Foxy {
             restore_backup: tr("Restore addon backup"),
             recheck_integrity: tr("Recheck addon integrity"),
             standalone_download: tr("Standalone download"),
+            expand_structure: tr("Expand addon structure"),
+            collapse_structure: tr("Collapse addon structure"),
             force_redownload: tr("Force redownload addon"),
             delete: tr("Delete addon"),
         };
@@ -635,6 +788,10 @@ impl Foxy {
                             + 16.0 * 2.0
                             + item_spacing * 4.0;
                 }
+                controls_width +=
+                    super::filter_controls_checkbox_width(ui, &tr("Search addon files"))
+                        + 16.0
+                        + item_spacing * 2.0;
 
                 let filter_width =
                     super::responsive_filter_field_width(ui.available_width(), controls_width);
@@ -643,6 +800,15 @@ impl Foxy {
                     ui_state_changed = true;
                 }
                 if filter_edit.hovered() {
+                    ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                }
+                ui.add_space(16.0);
+
+                let search_files_checkbox = ui.checkbox(search_files, tr("Search addon files"));
+                if search_files_checkbox.changed() {
+                    ui_state_changed = true;
+                }
+                if search_files_checkbox.hovered() {
                     ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                 }
                 ui.add_space(16.0);
@@ -724,6 +890,7 @@ impl Foxy {
                 self.addon_favorites_only_filter && kind == RepositoryAddonListKind::OptionalAddons,
                 self.addon_client_side_only_filter
                     && kind == RepositoryAddonListKind::OptionalAddons,
+                *search_files,
             );
 
             let addon_count = self
@@ -831,68 +998,81 @@ impl Foxy {
                 &path_font_id,
                 path_overlay_width,
             );
+            let visible_rows = self.repository_addon_visible_rows(kind, *search_files, filter);
             ScrollArea::vertical()
                 .id_salt(("repository_addons_list_cached", repo_index, list_kind_salt))
-                .show_rows(ui, row_height, filtered_len, |ui, row_range| {
-                    for filtered_index in row_range {
-                        let source_index = self
-                            .repository_addon_list_cache_cached(kind)
-                            .filtered_indices[filtered_index];
-                        let (
-                            name,
-                            enabled,
-                            favorite,
-                            client_side,
-                            forced_client_side,
-                            addon_directory_path,
-                            remote_size_bytes,
-                        ) = {
-                            let cache = self.repository_addon_list_cache_cached(kind);
-                            (
-                                cache.source_names[source_index].clone(),
-                                cache.enabled_by_source[source_index],
-                                cache.favorite_by_source[source_index],
-                                cache.client_side_by_source[source_index],
-                                cache.forced_client_side_by_source[source_index],
-                                cache.preferred_paths[source_index].clone(),
-                                cache
-                                    .remote_size_bytes_by_source
-                                    .get(source_index)
-                                    .copied()
-                                    .unwrap_or(0),
-                            )
-                        };
-                        // Salt every widget in the row by the stable source index
-                        // so the icon buttons/checkbox keep the same id when the
-                        // visible range shifts. Auto (counter-based) ids shift with
-                        // the range and make egui re-run extra layout passes
-                        // ("changed id between passes"), multiplying the per-frame
-                        // cost while scrolling.
-                        ui.push_id(source_index, |ui| {
-                            self.render_repository_addon_row_fast(
-                                ui,
-                                repo_index,
-                                kind,
+                .show_rows(ui, row_height, visible_rows.len(), |ui, row_range| {
+                    for row_index in row_range {
+                        match visible_rows[row_index] {
+                            RepositoryAddonVisibleRow::Addon { source_index } => {
+                                let (
+                                    name,
+                                    enabled,
+                                    favorite,
+                                    client_side,
+                                    forced_client_side,
+                                    addon_directory_path,
+                                    remote_size_bytes,
+                                ) = {
+                                    let cache = self.repository_addon_list_cache_cached(kind);
+                                    (
+                                        cache.source_names[source_index].clone(),
+                                        cache.enabled_by_source[source_index],
+                                        cache.favorite_by_source[source_index],
+                                        cache.client_side_by_source[source_index],
+                                        cache.forced_client_side_by_source[source_index],
+                                        cache.preferred_paths[source_index].clone(),
+                                        cache
+                                            .remote_size_bytes_by_source
+                                            .get(source_index)
+                                            .copied()
+                                            .unwrap_or(0),
+                                    )
+                                };
+                                ui.push_id(source_index, |ui| {
+                                    self.render_repository_addon_row_fast(
+                                        ui,
+                                        repo_index,
+                                        kind,
+                                        source_index,
+                                        list_kind_salt,
+                                        &name,
+                                        enabled,
+                                        favorite,
+                                        client_side,
+                                        forced_client_side,
+                                        addon_directory_path,
+                                        remote_size_bytes,
+                                        backup_configured,
+                                        horizontal_padding,
+                                        path_overlay_width,
+                                        &name_font_id,
+                                        &path_font_id,
+                                        &mut repo_data_changed,
+                                        &mut addon_context_action,
+                                        &context_menu_labels,
+                                        &row_tooltips,
+                                    );
+                                });
+                            }
+                            RepositoryAddonVisibleRow::File {
                                 source_index,
-                                list_kind_salt,
-                                &name,
-                                enabled,
-                                favorite,
-                                client_side,
-                                forced_client_side,
-                                addon_directory_path,
-                                remote_size_bytes,
-                                backup_configured,
-                                horizontal_padding,
-                                path_overlay_width,
-                                &name_font_id,
-                                &path_font_id,
-                                &mut repo_data_changed,
-                                &mut addon_context_action,
-                                &context_menu_labels,
-                                &row_tooltips,
-                            );
-                        });
+                                file_index,
+                            } => {
+                                ui.push_id(("file", source_index, file_index), |ui| {
+                                    self.render_repository_addon_file_row(
+                                        ui,
+                                        kind,
+                                        source_index,
+                                        file_index,
+                                        horizontal_padding,
+                                        &path_font_id,
+                                        &context_menu_labels.collapse_structure,
+                                        &mut addon_context_action,
+                                    );
+                                });
+                            }
+                        }
                     }
                 });
         });
@@ -944,6 +1124,20 @@ impl Foxy {
                 AddonContextAction::StandaloneDownload => {
                     if !self.standalone_download_addon(repo_index, &addon_name) {
                         warn!("Standalone download failed for addon {}", addon_name);
+                    }
+                }
+                AddonContextAction::ToggleStructure => {
+                    let source_index = self
+                        .repository_addon_list_cache_cached(kind)
+                        .source_names
+                        .iter()
+                        .position(|name| name == &addon_name);
+                    if let Some(source_index) = source_index {
+                        self.ensure_repository_addon_file_structure_cached(kind, source_index);
+                        let cache = self.repository_addon_list_cache_mut_cached(kind);
+                        if !cache.expanded_source_indices.insert(source_index) {
+                            cache.expanded_source_indices.remove(&source_index);
+                        }
                     }
                 }
                 AddonContextAction::ForceRedownload => {

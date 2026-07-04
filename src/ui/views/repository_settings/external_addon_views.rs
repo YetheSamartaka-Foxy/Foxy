@@ -4,6 +4,7 @@ use crate::ui::app::{
 };
 use crate::ui::context_menu::{ContextMenuItem, attach_context_menu};
 use crate::ui::i18n::{fmt_bytes, tr, tr_fmt};
+use crate::ui::search_filter::MultiEntryFilter;
 use crate::ui::views::galley_cache;
 use eframe::egui::{
     self, Align, Align2, AsIdSalt, Button, Color32, CornerRadius, FontId, Layout, RichText,
@@ -34,6 +35,22 @@ enum ExternalAddonGroupedRow {
         row_slot: usize,
         entry_index: usize,
     },
+    File {
+        row_slot: usize,
+        entry_index: usize,
+        file_index: usize,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ExternalAddonVisibleRow {
+    Addon {
+        entry_index: usize,
+    },
+    File {
+        entry_index: usize,
+        file_index: usize,
+    },
 }
 
 #[derive(Clone)]
@@ -55,13 +72,106 @@ struct ExternalAddonRowTooltips {
     forced_client_side: String,
 }
 
+struct ExternalAddonContextMenuLabels {
+    open_directory: String,
+    expand_structure: String,
+    collapse_structure: String,
+    delete: String,
+}
+
 struct ExternalAddonIconCellStyle {
     fill: Color32,
     stroke: Color32,
     text_color: Color32,
 }
 
-fn grouped_external_addon_row_count(cache: &RepositoryExternalAddonsListCache) -> usize {
+fn external_addon_visible_file_count(
+    cache: &RepositoryExternalAddonsListCache,
+    entry_index: usize,
+    search_files: bool,
+    multi_filter: &MultiEntryFilter,
+) -> usize {
+    let auto_expanded = search_files
+        && cache
+            .file_search_matches_by_row
+            .get(entry_index)
+            .copied()
+            .unwrap_or(false);
+    let manually_expanded = cache.expanded_row_indices.contains(&entry_index);
+    if !auto_expanded && !manually_expanded {
+        return 0;
+    }
+
+    let Some(structure) = cache
+        .file_entries_by_row
+        .get(entry_index)
+        .and_then(|structure| structure.as_ref())
+    else {
+        return 0;
+    };
+
+    if auto_expanded {
+        structure
+            .files
+            .iter()
+            .filter(|file| {
+                multi_filter
+                    .matches_any_normalized(&[file.name_lower.as_str(), file.path_lower.as_str()])
+            })
+            .count()
+    } else {
+        structure.files.len()
+    }
+}
+
+fn external_addon_visible_file_indices(
+    cache: &RepositoryExternalAddonsListCache,
+    entry_index: usize,
+    search_files: bool,
+    multi_filter: &MultiEntryFilter,
+) -> Vec<usize> {
+    let auto_expanded = search_files
+        && cache
+            .file_search_matches_by_row
+            .get(entry_index)
+            .copied()
+            .unwrap_or(false);
+    let manually_expanded = cache.expanded_row_indices.contains(&entry_index);
+    if !auto_expanded && !manually_expanded {
+        return Vec::new();
+    }
+
+    let Some(structure) = cache
+        .file_entries_by_row
+        .get(entry_index)
+        .and_then(|structure| structure.as_ref())
+    else {
+        return Vec::new();
+    };
+
+    structure
+        .files
+        .iter()
+        .enumerate()
+        .filter_map(|(file_index, file)| {
+            if auto_expanded
+                && !multi_filter
+                    .matches_any_normalized(&[file.name_lower.as_str(), file.path_lower.as_str()])
+            {
+                return None;
+            }
+            Some(file_index)
+        })
+        .collect()
+}
+
+fn grouped_external_addon_row_count(
+    cache: &RepositoryExternalAddonsListCache,
+    search_files: bool,
+    filter: &str,
+) -> usize {
+    let multi_filter = MultiEntryFilter::parse(filter);
+    let search_files = search_files && !multi_filter.is_empty();
     cache
         .grouped_filtered_indices
         .iter()
@@ -69,7 +179,17 @@ fn grouped_external_addon_row_count(cache: &RepositoryExternalAddonsListCache) -
             1 + if cache.collapsed_origins.contains(origin) {
                 0
             } else {
-                entry_indices.len()
+                entry_indices
+                    .iter()
+                    .map(|entry_index| {
+                        1 + external_addon_visible_file_count(
+                            cache,
+                            *entry_index,
+                            search_files,
+                            &multi_filter,
+                        )
+                    })
+                    .sum::<usize>()
             }
         })
         .sum()
@@ -78,13 +198,31 @@ fn grouped_external_addon_row_count(cache: &RepositoryExternalAddonsListCache) -
 fn visible_grouped_external_addon_rows(
     cache: &RepositoryExternalAddonsListCache,
     row_range: Range<usize>,
+    search_files: bool,
+    filter: &str,
 ) -> Vec<ExternalAddonGroupedRow> {
     let mut rows = Vec::with_capacity(row_range.len());
     let mut row_cursor = 0;
+    let multi_filter = MultiEntryFilter::parse(filter);
+    let search_files = search_files && !multi_filter.is_empty();
 
     for (origin, entry_indices) in &cache.grouped_filtered_indices {
         let collapsed = cache.collapsed_origins.contains(origin);
-        let group_len = 1 + if collapsed { 0 } else { entry_indices.len() };
+        let group_len = 1 + if collapsed {
+            0
+        } else {
+            entry_indices
+                .iter()
+                .map(|entry_index| {
+                    1 + external_addon_visible_file_count(
+                        cache,
+                        *entry_index,
+                        search_files,
+                        &multi_filter,
+                    )
+                })
+                .sum::<usize>()
+        };
         let group_start = row_cursor;
         let group_end = group_start + group_len;
         row_cursor = group_end;
@@ -108,22 +246,56 @@ fn visible_grouped_external_addon_rows(
             continue;
         }
 
-        let entries_start_row = group_start + 1;
-        let visible_start = row_range.start.max(entries_start_row);
-        let visible_end = row_range.end.min(group_end);
-        if visible_start >= visible_end {
-            continue;
-        }
-
-        let entry_start = visible_start - entries_start_row;
-        let entry_end = visible_end - entries_start_row;
-        rows.extend(
-            entry_indices[entry_start..entry_end]
-                .iter()
-                .enumerate()
-                .map(|(offset, entry_index)| ExternalAddonGroupedRow::Addon {
-                    row_slot: visible_start + offset - row_range.start,
+        let mut entry_row = group_start + 1;
+        for entry_index in entry_indices {
+            if row_range.contains(&entry_row) {
+                rows.push(ExternalAddonGroupedRow::Addon {
+                    row_slot: entry_row - row_range.start,
                     entry_index: *entry_index,
+                });
+            }
+            entry_row += 1;
+
+            for file_index in external_addon_visible_file_indices(
+                cache,
+                *entry_index,
+                search_files,
+                &multi_filter,
+            ) {
+                if row_range.contains(&entry_row) {
+                    rows.push(ExternalAddonGroupedRow::File {
+                        row_slot: entry_row - row_range.start,
+                        entry_index: *entry_index,
+                        file_index,
+                    });
+                }
+                entry_row += 1;
+            }
+        }
+    }
+
+    rows
+}
+
+fn visible_external_addon_rows(
+    cache: &RepositoryExternalAddonsListCache,
+    search_files: bool,
+    filter: &str,
+) -> Vec<ExternalAddonVisibleRow> {
+    let multi_filter = MultiEntryFilter::parse(filter);
+    let search_files = search_files && !multi_filter.is_empty();
+    let mut rows = Vec::with_capacity(cache.filtered_indices.len());
+
+    for entry_index in &cache.filtered_indices {
+        rows.push(ExternalAddonVisibleRow::Addon {
+            entry_index: *entry_index,
+        });
+        rows.extend(
+            external_addon_visible_file_indices(cache, *entry_index, search_files, &multi_filter)
+                .into_iter()
+                .map(|file_index| ExternalAddonVisibleRow::File {
+                    entry_index: *entry_index,
+                    file_index,
                 }),
         );
     }
@@ -443,6 +615,80 @@ impl Foxy {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn render_repository_external_addon_file_row(
+        &self,
+        ui: &mut Ui,
+        entry_index: usize,
+        file_index: usize,
+        horizontal_padding: f32,
+        row_height: f32,
+        path_font_id: &egui::FontId,
+        collapse_label: &str,
+        external_addon_context_action: &mut Option<(String, String, ExternalAddonContextAction)>,
+    ) {
+        let row_rect =
+            egui::Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), row_height));
+        ui.advance_cursor_after_rect(row_rect);
+
+        // Sense clicks so the expanded file rows carry their own right-click menu:
+        // when scrolling deep inside a long expanded structure the addon header is
+        // off-screen, so a per-file "Collapse addon structure" entry lets the user
+        // collapse without scrolling back up to the header.
+        let response = ui.interact(
+            row_rect,
+            ui.make_persistent_id(("external_addon_file_row", entry_index, file_index)),
+            egui::Sense::click(),
+        );
+        if response.hovered() {
+            ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+        }
+        let mut context_action: Option<ExternalAddonContextAction> = None;
+        attach_context_menu(
+            &response,
+            &[ContextMenuItem::new(
+                ExternalAddonContextAction::ToggleStructure,
+                collapse_label.to_string(),
+            )],
+            &mut context_action,
+        );
+        if context_action.is_some()
+            && let Some(row) = self
+                .repository_external_addons_list_cache
+                .rows
+                .get(entry_index)
+        {
+            *external_addon_context_action = Some((
+                row.addon_name.clone(),
+                row.path.clone(),
+                ExternalAddonContextAction::ToggleStructure,
+            ));
+        }
+
+        let Some(file_path) = self
+            .repository_external_addons_list_cache
+            .file_entries_by_row
+            .get(entry_index)
+            .and_then(|structure| structure.as_ref())
+            .and_then(|structure| structure.files.get(file_index))
+            .map(|file| file.display_path.as_str())
+        else {
+            return;
+        };
+
+        let text_rect = egui::Rect::from_min_max(
+            egui::pos2(row_rect.left() + horizontal_padding + 28.0, row_rect.top()),
+            egui::pos2(row_rect.right() - horizontal_padding, row_rect.bottom()),
+        );
+        ui.painter().text(
+            text_rect.left_center(),
+            Align2::LEFT_CENTER,
+            format!("|- {file_path}"),
+            path_font_id.clone(),
+            self.color_text_dim(),
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn render_repository_external_addon_row_cached(
         &mut self,
         ui: &mut Ui,
@@ -455,7 +701,7 @@ impl Foxy {
         row_style: &ExternalAddonRowStyle,
         repo_data_changed: &mut bool,
         external_addon_context_action: &mut Option<(String, String, ExternalAddonContextAction)>,
-        context_items: &[ContextMenuItem<ExternalAddonContextAction>],
+        context_menu_labels: &ExternalAddonContextMenuLabels,
         tooltips: &ExternalAddonRowTooltips,
     ) {
         let (is_enabled, favorite, client_side, forced_client_side) = {
@@ -785,7 +1031,35 @@ impl Foxy {
             *repo_data_changed = true;
         }
         let mut context_action: Option<ExternalAddonContextAction> = None;
-        attach_context_menu(&context_response, context_items, &mut context_action);
+        let structure_expanded = self
+            .repository_external_addons_list_cache
+            .expanded_row_indices
+            .contains(&entry_index);
+        attach_context_menu(
+            &context_response,
+            &[
+                ContextMenuItem::new(
+                    ExternalAddonContextAction::OpenDirectory,
+                    context_menu_labels.open_directory.clone(),
+                ),
+                ContextMenuItem::new(
+                    ExternalAddonContextAction::ToggleStructure,
+                    if structure_expanded {
+                        context_menu_labels.collapse_structure.clone()
+                    } else {
+                        context_menu_labels.expand_structure.clone()
+                    },
+                )
+                .separator_before(),
+                ContextMenuItem::new(
+                    ExternalAddonContextAction::Delete,
+                    context_menu_labels.delete.clone(),
+                )
+                .separator_before()
+                .danger(),
+            ],
+            &mut context_action,
+        );
         if let Some(action) = context_action {
             let cache = &self.repository_external_addons_list_cache;
             let row = &cache.rows[entry_index];
@@ -794,6 +1068,7 @@ impl Foxy {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn render_repository_external_addons_list_cached(
         &mut self,
         ui: &mut Ui,
@@ -801,6 +1076,7 @@ impl Foxy {
         filter: &mut String,
         origin_filter: &mut String,
         group_by_origin: &mut bool,
+        search_files: &mut bool,
         addon_state_filter: &mut String,
     ) {
         if repo_index >= self.repository_view_state.repositories.len() {
@@ -823,18 +1099,12 @@ impl Foxy {
             *origin_filter = "All".to_string();
         }
 
-        // Built once per frame and shared by every row: the labels are constant,
-        // so rebuilding this array per row only churned allocations and `tr`
-        // lookups in the scroll hot path.
-        let context_items = [
-            ContextMenuItem::new(
-                ExternalAddonContextAction::OpenDirectory,
-                tr("Open addon directory"),
-            ),
-            ContextMenuItem::new(ExternalAddonContextAction::Delete, tr("Delete addon"))
-                .separator_before()
-                .danger(),
-        ];
+        let context_menu_labels = ExternalAddonContextMenuLabels {
+            open_directory: tr("Open addon directory"),
+            expand_structure: tr("Expand addon structure"),
+            collapse_structure: tr("Collapse addon structure"),
+            delete: tr("Delete addon"),
+        };
         let row_tooltips = ExternalAddonRowTooltips {
             add_favorite: tr("Add to favorites"),
             remove_favorite: tr("Remove from favorites"),
@@ -945,18 +1215,19 @@ impl Foxy {
                 ) + super::filter_controls_text_width(ui, &tr("Origin:"))
                     + super::filter_controls_combo_width(ui, &origin_selected)
                     + super::filter_controls_checkbox_width(ui, &tr("Group by origin"))
+                    + super::filter_controls_checkbox_width(ui, &tr("Search addon files"))
                     + super::filter_controls_checkbox_width(ui, &tr("Favorites only"))
                     + super::filter_controls_checkbox_width(ui, &tr("Client-side only"))
                     + super::filter_controls_text_width(ui, &tr("State:"))
                     + super::filter_controls_combo_width(ui, &state_selected)
-                    // The explicit add_space() gaps (six 16 px group gaps and the
+                    // The explicit add_space() gaps (seven 16 px group gaps and the
                     // two 6 px label→combo gaps) plus the item spacing egui inserts
-                    // between each of the ~16 items in this region. Counting them
+                    // between each of the ~18 items in this region. Counting them
                     // in full keeps the filter from being sized too wide, which
                     // would otherwise shove the trailing controls off the edge.
-                    + group_gap * 6.0
+                    + group_gap * 7.0
                     + 12.0
-                    + item_spacing * 16.0;
+                    + item_spacing * 18.0;
 
                 let filter_width =
                     super::responsive_filter_field_width(ui.available_width(), controls_width);
@@ -1026,6 +1297,15 @@ impl Foxy {
                     ui_state_changed = true;
                 }
                 if group_by_origin_checkbox.hovered() {
+                    ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                }
+                ui.add_space(16.0);
+
+                let search_files_checkbox = ui.checkbox(search_files, tr("Search addon files"));
+                if search_files_checkbox.changed() {
+                    ui_state_changed = true;
+                }
+                if search_files_checkbox.hovered() {
                     ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                 }
                 ui.add_space(16.0);
@@ -1103,6 +1383,7 @@ impl Foxy {
                 addon_state_filter,
                 self.addon_favorites_only_filter,
                 self.addon_client_side_only_filter,
+                *search_files,
             );
 
             let external_count = self.repository_external_addons_list_cache.rows.len();
@@ -1193,7 +1474,7 @@ impl Foxy {
             if *group_by_origin {
                 let grouped_row_count = {
                     let cache = &self.repository_external_addons_list_cache;
-                    grouped_external_addon_row_count(cache)
+                    grouped_external_addon_row_count(cache, *search_files, filter)
                 };
 
                 ScrollArea::vertical()
@@ -1205,7 +1486,12 @@ impl Foxy {
                         |ui, row_range| {
                             let visible_rows = {
                                 let cache = &self.repository_external_addons_list_cache;
-                                visible_grouped_external_addon_rows(cache, row_range)
+                                visible_grouped_external_addon_rows(
+                                    cache,
+                                    row_range,
+                                    *search_files,
+                                    filter,
+                                )
                             };
 
                             for visible_row in visible_rows {
@@ -1275,8 +1561,26 @@ impl Foxy {
                                                 &row_style,
                                                 &mut repo_data_changed,
                                                 &mut external_addon_context_action,
-                                                &context_items,
+                                                &context_menu_labels,
                                                 &row_tooltips,
+                                            );
+                                        });
+                                    }
+                                    ExternalAddonGroupedRow::File {
+                                        row_slot: _,
+                                        entry_index,
+                                        file_index,
+                                    } => {
+                                        ui.push_id(("file", entry_index, file_index), |ui| {
+                                            self.render_repository_external_addon_file_row(
+                                                ui,
+                                                entry_index,
+                                                file_index,
+                                                horizontal_padding,
+                                                row_height,
+                                                &row_style.path_font_id,
+                                                &context_menu_labels.collapse_structure,
+                                                &mut external_addon_context_action,
                                             );
                                         });
                                     }
@@ -1285,32 +1589,53 @@ impl Foxy {
                         },
                     );
             } else {
+                let visible_rows = {
+                    let cache = &self.repository_external_addons_list_cache;
+                    visible_external_addon_rows(cache, *search_files, filter)
+                };
                 ScrollArea::vertical()
                     .id_salt(("repository_external_addons_list_cached", repo_index))
-                    .show_rows(ui, row_height, filtered_len, |ui, row_range| {
+                    .show_rows(ui, row_height, visible_rows.len(), |ui, row_range| {
                         let row_start = row_range.start;
-                        for filtered_index in row_range {
-                            let row_slot = filtered_index - row_start;
-                            let entry_index = self
-                                .repository_external_addons_list_cache
-                                .filtered_indices[filtered_index];
-                            // Stable per-addon id scope, see the grouped branch above.
-                            ui.push_id(entry_index, |ui| {
-                                self.render_repository_external_addon_row_cached(
-                                    ui,
+                        for visible_index in row_range {
+                            let row_slot = visible_index - row_start;
+                            match visible_rows[visible_index] {
+                                ExternalAddonVisibleRow::Addon { entry_index } => {
+                                    ui.push_id(entry_index, |ui| {
+                                        self.render_repository_external_addon_row_cached(
+                                            ui,
+                                            entry_index,
+                                            row_slot,
+                                            *group_by_origin,
+                                            horizontal_padding,
+                                            row_height,
+                                            text_area_width,
+                                            &row_style,
+                                            &mut repo_data_changed,
+                                            &mut external_addon_context_action,
+                                            &context_menu_labels,
+                                            &row_tooltips,
+                                        );
+                                    });
+                                }
+                                ExternalAddonVisibleRow::File {
                                     entry_index,
-                                    row_slot,
-                                    *group_by_origin,
-                                    horizontal_padding,
-                                    row_height,
-                                    text_area_width,
-                                    &row_style,
-                                    &mut repo_data_changed,
-                                    &mut external_addon_context_action,
-                                    &context_items,
-                                    &row_tooltips,
-                                );
-                            });
+                                    file_index,
+                                } => {
+                                    ui.push_id(("file", entry_index, file_index), |ui| {
+                                        self.render_repository_external_addon_file_row(
+                                            ui,
+                                            entry_index,
+                                            file_index,
+                                            horizontal_padding,
+                                            row_height,
+                                            &row_style.path_font_id,
+                                            &context_menu_labels.collapse_structure,
+                                            &mut external_addon_context_action,
+                                        );
+                                    });
+                                }
+                            }
                         }
                     });
             }
@@ -1328,6 +1653,20 @@ impl Foxy {
                     if !self.open_addon_directory(&addon_name, &addon_directory_path) {
                         warn!("Failed to open addon directory for {}", addon_name);
                         self.show_error_toast(self.t("Failed to open addon directory."));
+                    }
+                }
+                ExternalAddonContextAction::ToggleStructure => {
+                    let row_index = self
+                        .repository_external_addons_list_cache
+                        .rows
+                        .iter()
+                        .position(|row| row.path == addon_directory_path);
+                    if let Some(row_index) = row_index {
+                        self.ensure_repository_external_addon_file_structure_cached(row_index);
+                        let cache = &mut self.repository_external_addons_list_cache;
+                        if !cache.expanded_row_indices.insert(row_index) {
+                            cache.expanded_row_indices.remove(&row_index);
+                        }
                     }
                 }
                 ExternalAddonContextAction::Delete => {
@@ -1358,9 +1697,9 @@ mod tests {
         };
         cache.collapsed_origins.insert("B".to_string());
 
-        assert_eq!(grouped_external_addon_row_count(&cache), 6);
+        assert_eq!(grouped_external_addon_row_count(&cache, false, ""), 6);
         assert_eq!(
-            visible_grouped_external_addon_rows(&cache, 1..5),
+            visible_grouped_external_addon_rows(&cache, 1..5, false, ""),
             vec![
                 ExternalAddonGroupedRow::Addon {
                     row_slot: 0,

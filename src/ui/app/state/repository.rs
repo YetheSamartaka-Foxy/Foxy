@@ -309,11 +309,15 @@ pub struct RepositoryAddonListCache {
     pub remote_size_bytes_by_source: Vec<u64>,
     pub sorted_indices: Vec<usize>,
     pub preferred_paths: Vec<Option<String>>,
+    pub file_entries_by_source: Vec<Option<AddonFolderStructure>>,
+    pub expanded_source_indices: HashSet<usize>,
+    pub file_search_matches_by_source: Vec<bool>,
     pub filtered_indices: Vec<usize>,
     pub filter_lower: String,
     pub state_filter: String,
     pub favorites_only_filter: bool,
     pub client_side_only_filter: bool,
+    pub include_file_search_filter: bool,
     pub filters_dirty: bool,
     pub galleys: AddonRowGalleyCache,
     /// Cursor into `filtered_indices` for the incremental galley prewarm, so the
@@ -322,6 +326,20 @@ pub struct RepositoryAddonListCache {
     /// width change. See `prewarm_repository_addon_galleys`.
     pub galley_prewarm_cursor: usize,
     pub galley_prewarm_path_width: Option<f32>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AddonFolderEntry {
+    pub display_path: String,
+    pub name_lower: String,
+    pub path_lower: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AddonFolderStructure {
+    pub path_key: String,
+    pub files: Vec<AddonFolderEntry>,
+    pub truncated: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -349,6 +367,9 @@ pub struct RepositoryExternalAddonsListCache {
     pub rows: Vec<ExternalAddonRowCache>,
     pub origin_options: Vec<String>,
     pub collapsed_origins: HashSet<String>,
+    pub file_entries_by_row: Vec<Option<AddonFolderStructure>>,
+    pub expanded_row_indices: HashSet<usize>,
+    pub file_search_matches_by_row: Vec<bool>,
     pub enabled_by_row: Vec<bool>,
     pub favorite_by_row: Vec<bool>,
     pub client_side_by_row: Vec<bool>,
@@ -364,6 +385,7 @@ pub struct RepositoryExternalAddonsListCache {
     pub state_filter: String,
     pub favorites_only_filter: bool,
     pub client_side_only_filter: bool,
+    pub include_file_search_filter: bool,
     pub filters_dirty: bool,
     pub galleys: AddonRowGalleyCache,
     pub galley_prewarm_cursor: usize,

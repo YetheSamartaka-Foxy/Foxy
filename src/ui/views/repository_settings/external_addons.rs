@@ -570,6 +570,7 @@ impl Foxy {
                         self.show_error_toast(self.t("Failed to open addon directory."));
                     }
                 }
+                ExternalAddonContextAction::ToggleStructure => {}
                 ExternalAddonContextAction::Delete => {
                     self.pending_addon_destructive_confirmation =
                         Some(AddonDestructiveConfirmAction::Delete {
