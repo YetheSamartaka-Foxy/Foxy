@@ -5,6 +5,7 @@ mod config_identity;
 mod config_profiles;
 mod config_sync;
 mod configuration;
+mod export_structure;
 mod external_addon_views;
 mod external_addons;
 mod profiles;
@@ -208,6 +209,7 @@ impl Foxy {
                 });
             });
             ui.separator();
+            let mut repository_structure_export_clicked = false;
             {
                 self.ensure_repository_addon_list_cache_cached(
                     repo_index,
@@ -276,8 +278,19 @@ impl Foxy {
                     ui.label(RichText::new(summary_prefix_text).color(color_text_dim));
                     ui.label(RichText::new(external_addons_text).color(color_text_dim))
                         .on_hover_text(external_addons_help);
+                    ui.add_space(12.0);
+                    let export_structure = ui.button(tr("Export Repository Structure"));
+                    if export_structure.hovered() {
+                        ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                    }
+                    if export_structure.clicked() {
+                        repository_structure_export_clicked = true;
+                    }
                 });
                 ui.separator();
+            }
+            if repository_structure_export_clicked {
+                self.export_repository_structure_to_file(repo_index);
             }
 
             // The header (profile selector, status, tab bar) and the per-tab
