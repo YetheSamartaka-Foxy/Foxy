@@ -477,14 +477,6 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
     // keeping pages in cache instead of thrashing on random access.
     part_updates.sort_by_key(|p| p.id);
     let mut parts_persisted = 0;
-    // The metadata rebuild deferred this repository's brand-new part rows (fresh,
-    // empty-`subfiles` load): they live only in the in-memory tree and were never
-    // written to `subfiles`. Persist them here with the local hash state computed in
-    // Phase 1, exactly like the full `calculate_hashes` pipeline does. Without this,
-    // the targeted tree-hash init leaves the repository with files whose checksums
-    // are populated but with zero part rows, so delta patch planning has no part
-    // data to work with until the next metadata rebuild re-defers the rows.
-    //
     // Scope this to the post-rebuild bootstrap (`!freshly_downloaded_files`): the
     // bootstrap hashes the whole set of just-deferred files in one pass, so the tree
     // covers the entire deferred buffer that the flush drains. Per-batch incremental
@@ -617,15 +609,9 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
             }
 
             if !has_parts {
-                // Partless file (part rows deferred or file hashed whole):
-                // the whole-file hash computed in Phase 1 IS the tree hash.
-                // Dropping it here left every checksum unpersisted and made
-                // each quick scan re-hash the entire repository from disk.
                 if let Some(checksum) = whole_file_checksums_by_file_idx.get(file_idx) {
                     file.local_checksum = checksum.clone();
                 } else if !old_checksum.is_empty() && old_checksum == file.remote_checksum {
-                    // No fresh hash (missing or size-mismatched file): keep the
-                    // previously verified clean state instead of wiping it.
                     file.local_checksum = old_checksum.clone();
                 } else {
                     file.local_checksum = String::new();

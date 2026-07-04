@@ -15,6 +15,7 @@ Keep this file as the compact root router. Put detailed conventions in `conventi
 - Do not reformat unrelated code, rename unrelated items, or change dependencies unless the task requires it.
 - Do not log secrets, tokens, or user file paths.
 - Never use em dashes (—) or en dashes (–) in any text (code, comments, docs, UI strings, commit messages, changelog). Use a plain hyphen `-` instead.
+- Keep comments sparse and durable. Do not add narrative bug-history, benchmark anecdote, decorative separator, or "what this obvious line does" comments in ordinary code; put operational context in logs, tests, commit messages, or conventions docs when it needs to be retained.
 - Do not edit runtime `database.db`, logs, caches, backups, temp patch artifacts, or user config files unless explicitly requested.
 - Use `rg`/`rg --files` for discovery, inspect the nearest `mod.rs`, and confirm behavior in code before changing it.
 - Check for nested `AGENTS.md` files before editing a subtree; more-specific instructions apply to files under that directory.

@@ -730,8 +730,6 @@ async fn eligible_joined_full_tree_ready() {
 
     seed_repository_addon(&fdb, 1, 1).await;
     seed_addon_file(&fdb, 1, 1).await;
-    // Manifests always emit at least one part per file; the preflight treats a
-    // repo with files but zero part rows as missing remote metadata.
     seed_subfile(&fdb, 1, 1, "PART_LOCAL", "PART_REMOTE").await;
 
     // Full tree with all checksums → should be eligible
@@ -798,12 +796,6 @@ async fn startup_eligibility_requires_part_metadata() {
 
     let repo_url = "https://example.invalid/partless/";
 
-    // Remote metadata present and the local content baseline missing (normally
-    // a NeedsBootstrap content refresh), but the repo has zero part rows.
-    // Manifests always emit at least one part per file and file remote
-    // checksums are rollups of part checksums, so without part metadata a
-    // bootstrap hash could never match remote: the repo must go through a
-    // remote metadata refresh first.
     seed_repository(
         &fdb,
         1,
@@ -849,7 +841,6 @@ async fn startup_eligibility_requires_part_metadata() {
         StartupQuickScanEligibility::Ineligible
     );
 
-    // Re-materialized part metadata makes the repo scannable again.
     seed_subfile(&fdb, 1, 1, "PART_LOCAL", "PART_REMOTE").await;
     assert_eq!(
         launch_quick_scan_repo_startup_eligibility(context, repo_url).await,

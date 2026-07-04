@@ -954,9 +954,6 @@ fn resolve_launch_mod_paths(repo: &Repository, arma3_directory: &str) -> Vec<Str
     }
 
     for addon in &enabled_addons {
-        // Resolve the addon folder tolerant of case differences between the
-        // manifest name and the on-disk folder (e.g. manifest
-        // `@Crows_Electronic_Warfare` vs downloaded `@crows_electronic_warfare`).
         if let Some(addon_path) =
             resolve_child_dir_case_insensitive(std::path::Path::new(repo_path), addon)
         {

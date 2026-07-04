@@ -688,8 +688,6 @@ impl Foxy {
             return false;
         }
 
-        // Resolve tolerant of case differences so a folder downloaded with a
-        // different case is the one targeted, not left as a duplicate.
         let fallback_path = crate::core::utils::fs_safety::resolve_child_dir_case_insensitive(
             Path::new(repo_path),
             addon_name,

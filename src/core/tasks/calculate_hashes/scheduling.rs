@@ -528,9 +528,6 @@ async fn calculate_whole_file_checksum(
     expected_len: u64,
     semaphore: Arc<Semaphore>,
 ) -> (Option<String>, super::part_hashes::PartHashMetrics) {
-    // Match the part-hash reader capacity: with 2+ files hashed concurrently on
-    // one HDD spindle, each read pays a seek, so larger requests amortize it
-    // (1MB reads measured ~96 MB/s aggregate vs ~129 MB/s with 4MB requests).
     const WHOLE_FILE_HASH_BUF_SIZE: usize = 4 * 1024 * 1024;
 
     let started = Instant::now();

@@ -290,17 +290,8 @@ pub(super) async fn calculate_part_hashes(
             }
         };
 
-        // Large read-ahead buffer: parts are sorted by offset, so hashing walks
-        // the file near-sequentially, but individual parts are tiny (PBO entries
-        // average tens of KB). Issuing them as raw 64KB reads lets a concurrent
-        // file on the same spindle interleave between every request; on an HDD
-        // that degrades throughput by ~10x (observed 9 MB/s vs ~100 MB/s
-        // sequential). Buffering turns the walk into multi-MB physical reads so
-        // seeks between concurrently hashed files are amortized.
         const HASH_READER_CAPACITY: usize = 4 * 1024 * 1024;
         let mut reader = std::io::BufReader::with_capacity(HASH_READER_CAPACITY, file);
-        // Logical stream position; `None` after a failed seek/read leaves it
-        // unknown and forces the next part to seek absolutely.
         let mut reader_pos: Option<u64> = Some(0);
 
         // Fixed-size buffer reused across all parts - caps memory regardless of part size
@@ -350,9 +341,6 @@ pub(super) async fn calculate_part_hashes(
                 }
             };
 
-            // Seek relative whenever the current position is known: within-buffer
-            // moves keep the read-ahead data alive, while `seek(Start)` would
-            // discard the whole buffer on every part.
             let seek_result = match reader_pos {
                 Some(pos) if pos == chosen_span.start => Ok(()),
                 Some(pos) => match i64::try_from(chosen_span.start as i128 - pos as i128) {

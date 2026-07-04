@@ -205,9 +205,6 @@ fn cmd_addon_force_redownload(
         ));
     }
 
-    // Resolve tolerant of case differences so a folder downloaded with a
-    // different case (e.g. `@crows_electronic_warfare` vs manifest
-    // `@Crows_Electronic_Warfare`) is the one removed, not left as a duplicate.
     let target = resolve_child_dir_case_insensitive(Path::new(repo.path.trim()), addon_name)
         .unwrap_or_else(|| Path::new(repo.path.trim()).join(addon_name));
     if !is_safe_addon_path(repo.path.trim(), &target) {

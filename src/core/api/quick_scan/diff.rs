@@ -27,10 +27,6 @@ use std::sync::{Mutex as StdMutex, OnceLock};
 
 static ZERO_HIT_CACHE_WARNING_REPOS: OnceLock<StdMutex<StdHashSet<String>>> = OnceLock::new();
 
-/// One async lock per repository so concurrent quick scans of the same repo
-/// (startup worker + manual recheck's quick verify, for example) coalesce
-/// instead of both bootstrapping and hashing the full file set in parallel -
-/// on an HDD that doubles a multi-minute pass and thrashes the disk.
 static QUICK_SCAN_REPO_LOCKS: OnceLock<StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
     OnceLock::new();
 
@@ -140,9 +136,6 @@ pub(crate) async fn quick_local_change_diff(
     .await
 }
 
-/// Body of [`quick_local_change_diff`]; callers must hold the per-repo
-/// in-flight lock. The tree-verify retry recurses here directly since the
-/// outer entry point already holds the (non-reentrant) lock.
 #[allow(clippy::too_many_arguments)]
 async fn quick_local_change_diff_locked(
     context: Arc<FoxyContext>,
@@ -163,11 +156,6 @@ async fn quick_local_change_diff_locked(
     let mut tree_part_stats_load_elapsed = Duration::default();
     let mut tree_verify_elapsed = Duration::default();
 
-    // Files whose tree hashes were computed by a bootstrap pass within this
-    // scan invocation. A hash computed seconds ago cannot be stale, so the
-    // targeted tree-hash verify (which force-rehashes every flagged file)
-    // must skip them - otherwise a bootstrap whose result differs from remote
-    // re-reads the entire repository a second time in the same scan.
     let mut bootstrap_hashed_all_files = false;
     let mut bootstrap_hashed_file_ids: HashSet<u64> = HashSet::new();
 
@@ -748,10 +736,6 @@ async fn quick_local_change_diff_locked(
     );
 
     // ── Phase 6: Optional Tree Verify ───────────────────────────────────
-    // The verify exists to catch stale local tree hashes. Files hashed by this
-    // scan's own bootstrap pass cannot be stale, so re-verifying them would
-    // only repeat the same disk read and produce the same result; their diff
-    // entries already reflect fresh hashes.
     let verify_targets: HashSet<u64> = if bootstrap_hashed_all_files {
         HashSet::new()
     } else {
