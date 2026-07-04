@@ -317,6 +317,7 @@ impl Foxy {
             pending_quick_scan_prevalidated_urls: HashSet::new(),
             pending_quick_scan_force_fresh_addon_hash_urls: HashSet::new(),
             quick_scan_pending: HashSet::new(),
+            active_quick_scan_instance_keys: HashSet::new(),
             repo_db_reset_pending_recheck: HashSet::new(),
             pending_repository_db_wipes: HashSet::new(),
             pending_repository_force_redownloads: HashSet::new(),

@@ -18,9 +18,7 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 
 use crate::core::models::context::FoxyContext;
-use crate::core::models::download_target_file::{
-    fetch_all_download_targets_with_mod, fetch_all_download_targets_with_mod_and_name,
-};
+use crate::core::models::download_target_file::fetch_all_download_targets_with_mod;
 use crate::core::models::model_tree::Tree;
 use crate::core::models::modification::FoxyMod;
 use crate::core::models::modification_file::FoxyModFile;

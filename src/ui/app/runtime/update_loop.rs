@@ -136,11 +136,13 @@ impl Foxy {
 
         let repository_status_visible = self.current_view == FoxyView::RepositoryList
             && (self.syncing_repository.is_some() || !self.pending_repository_db_wipes.is_empty());
+        let quick_scan_status_visible = self.current_view == FoxyView::RepositoryList
+            && !self.active_quick_scan_instance_keys.is_empty();
         let addon_backup_status_visible = self.current_view == FoxyView::RepositorySettings
             && self.addon_backup_status.as_ref().is_some_and(|status| {
                 self.selected_repository_for_settings == Some(status.repo_index)
             });
-        if repository_status_visible || addon_backup_status_visible {
+        if repository_status_visible || quick_scan_status_visible || addon_backup_status_visible {
             Self::merge_repaint_interval(&mut interval, STATUS_REPAINT_INTERVAL);
         }
 

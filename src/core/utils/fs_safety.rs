@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Write `data` to `path` atomically via a sibling temp file + fsync + rename.
 ///
@@ -68,6 +68,49 @@ pub fn is_safe_child_path(child: &str) -> bool {
     }
 
     true
+}
+
+/// Resolve a child directory of `base` named `name`, tolerating a difference in
+/// letter case between the requested name and the real on-disk folder.
+///
+/// Arma addon folders are routinely distributed with a different case than a
+/// repository manifest lists them (e.g. manifest `@Crows_Electronic_Warfare`
+/// versus a folder downloaded as `@crows_electronic_warfare`). Windows/NTFS
+/// resolve either spelling transparently, but a case-sensitive filesystem (most
+/// Linux setups, or a per-directory case-sensitive folder on Windows) does not,
+/// so a plain `base.join(name)` silently misses the folder there and the addon
+/// looks "not found".
+///
+/// Fast path: when `base/name` already exists as a directory it is returned
+/// unchanged, preserving the exact configured spelling whenever the on-disk case
+/// matches (the common case) and avoiding a directory read. Otherwise `base` is
+/// scanned once and the first entry whose name matches `name` ignoring ASCII
+/// case is returned with its real on-disk spelling. Returns `None` when no
+/// matching directory exists. Case folding is ASCII-only, matching the addon
+/// name comparisons used elsewhere in the app.
+pub fn resolve_child_dir_case_insensitive(base: &Path, name: &str) -> Option<PathBuf> {
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+
+    let direct = base.join(name);
+    if direct.is_dir() {
+        return Some(direct);
+    }
+
+    // Case-insensitive fallback: find the real folder name as it exists on disk.
+    let entries = fs::read_dir(base).ok()?;
+    for entry in entries.flatten() {
+        let entry_name = entry.file_name();
+        let Some(entry_name) = entry_name.to_str() else {
+            continue;
+        };
+        if entry_name.eq_ignore_ascii_case(name) && entry.path().is_dir() {
+            return Some(entry.path());
+        }
+    }
+    None
 }
 
 /// Sanitize an installer filename extracted from a URL.
@@ -273,5 +316,81 @@ mod tests {
     #[test]
     fn test_sanitize_installer_filename_just_whitespace() {
         assert_eq!(sanitize_installer_filename("   "), None);
+    }
+
+    // ── resolve_child_dir_case_insensitive ──────────────────────────────
+
+    #[test]
+    fn resolve_child_dir_exact_case_returns_direct_path() {
+        let dir = std::env::temp_dir().join("foxy_test_addon_exact");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("@Crows_Electronic_Warfare")).unwrap();
+
+        let resolved =
+            resolve_child_dir_case_insensitive(&dir, "@Crows_Electronic_Warfare").unwrap();
+        assert_eq!(resolved, dir.join("@Crows_Electronic_Warfare"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_child_dir_mismatched_case_resolves_to_real_dir() {
+        // Folder on disk is lowercase; the manifest asks for mixed case.
+        let dir = std::env::temp_dir().join("foxy_test_addon_case");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("@crows_electronic_warfare")).unwrap();
+
+        let resolved =
+            resolve_child_dir_case_insensitive(&dir, "@Crows_Electronic_Warfare").unwrap();
+        // The resolved path must point at the real on-disk directory regardless
+        // of which spelling the platform returns: Windows preserves the
+        // requested case through its case-insensitive filesystem, while a
+        // case-sensitive filesystem returns the actual on-disk spelling.
+        assert!(resolved.is_dir());
+        assert_eq!(
+            resolved.canonicalize().unwrap(),
+            dir.join("@crows_electronic_warfare")
+                .canonicalize()
+                .unwrap()
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_child_dir_missing_returns_none() {
+        let dir = std::env::temp_dir().join("foxy_test_addon_missing");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        assert!(resolve_child_dir_case_insensitive(&dir, "@not_here").is_none());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_child_dir_ignores_files_with_matching_name() {
+        // A file (not a directory) with the requested name must not match.
+        let dir = std::env::temp_dir().join("foxy_test_addon_file");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("@addon"), b"x").unwrap();
+
+        assert!(resolve_child_dir_case_insensitive(&dir, "@ADDON").is_none());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_child_dir_empty_name_returns_none() {
+        let dir = std::env::temp_dir();
+        assert!(resolve_child_dir_case_insensitive(&dir, "   ").is_none());
+    }
+
+    #[test]
+    fn resolve_child_dir_missing_base_returns_none() {
+        let base = std::env::temp_dir().join("foxy_test_addon_no_base_dir");
+        let _ = fs::remove_dir_all(&base);
+        assert!(resolve_child_dir_case_insensitive(&base, "@addon").is_none());
     }
 }

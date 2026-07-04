@@ -7,6 +7,7 @@ use super::local_path_preflight::{
     summarize_local_path_availability, suspect_local_path_mismatch,
 };
 use super::pending_updates::{
+    apply_download_target_estimates_to_pending_updates,
     apply_patch_plan_estimates_to_pending_updates, persist_pending_updates,
     refresh_patch_plan_metadata_for_pending_updates,
 };
@@ -602,16 +603,26 @@ async fn run_quick_scan_worker_repo(
             Some(&pending_mod_names),
         )
         .await;
-        if refreshed_files > 0
-            && let Some(adjusted_mods) = apply_patch_plan_estimates_to_pending_updates(
+        if refreshed_files > 0 {
+            if let Some(adjusted_mods) = apply_download_target_estimates_to_pending_updates(
+                context.clone(),
+                &normalized_repo_url,
+                Some(&pending_mod_names),
+            )
+            .await
+            {
+                mods = adjusted_mods;
+                has_updates = mods.iter().any(|m| m.needs_update);
+            } else if let Some(adjusted_mods) = apply_patch_plan_estimates_to_pending_updates(
                 context.clone(),
                 &normalized_repo_url,
                 &mods,
             )
             .await
-        {
-            mods = adjusted_mods;
-            has_updates = mods.iter().any(|m| m.needs_update);
+            {
+                mods = adjusted_mods;
+                has_updates = mods.iter().any(|m| m.needs_update);
+            }
         }
         info!(
             "Quick scan pending update: repo={} mods_with_updates={} cached={}",

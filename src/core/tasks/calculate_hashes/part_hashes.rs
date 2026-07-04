@@ -278,7 +278,7 @@ pub(super) async fn calculate_part_hashes(
     let blocking_started = Instant::now();
     let blocking_progress = progress.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let mut file = match std::fs::File::open(&file_path_owned) {
+        let file = match std::fs::File::open(&file_path_owned) {
             Ok(f) => f,
             Err(e) => {
                 warn!("Failed to open file {}: {}", file_path_owned, e);
@@ -289,6 +289,19 @@ pub(super) async fn calculate_part_hashes(
                 return indexed_parts;
             }
         };
+
+        // Large read-ahead buffer: parts are sorted by offset, so hashing walks
+        // the file near-sequentially, but individual parts are tiny (PBO entries
+        // average tens of KB). Issuing them as raw 64KB reads lets a concurrent
+        // file on the same spindle interleave between every request; on an HDD
+        // that degrades throughput by ~10x (observed 9 MB/s vs ~100 MB/s
+        // sequential). Buffering turns the walk into multi-MB physical reads so
+        // seeks between concurrently hashed files are amortized.
+        const HASH_READER_CAPACITY: usize = 4 * 1024 * 1024;
+        let mut reader = std::io::BufReader::with_capacity(HASH_READER_CAPACITY, file);
+        // Logical stream position; `None` after a failed seek/read leaves it
+        // unknown and forces the next part to seek absolutely.
+        let mut reader_pos: Option<u64> = Some(0);
 
         // Fixed-size buffer reused across all parts - caps memory regardless of part size
         const HASH_BUF_SIZE: usize = 64 * 1024;
@@ -337,7 +350,22 @@ pub(super) async fn calculate_part_hashes(
                 }
             };
 
-            if let Err(e) = file.seek(std::io::SeekFrom::Start(chosen_span.start)) {
+            // Seek relative whenever the current position is known: within-buffer
+            // moves keep the read-ahead data alive, while `seek(Start)` would
+            // discard the whole buffer on every part.
+            let seek_result = match reader_pos {
+                Some(pos) if pos == chosen_span.start => Ok(()),
+                Some(pos) => match i64::try_from(chosen_span.start as i128 - pos as i128) {
+                    Ok(delta) => reader.seek_relative(delta),
+                    Err(_) => reader
+                        .seek(std::io::SeekFrom::Start(chosen_span.start))
+                        .map(|_| ()),
+                },
+                None => reader
+                    .seek(std::io::SeekFrom::Start(chosen_span.start))
+                    .map(|_| ()),
+            };
+            if let Err(e) = seek_result {
                 if consecutive_read_failures == 0 {
                     warn!("Seek failed for {}: {}", file_path_owned, e);
                 }
@@ -345,11 +373,13 @@ pub(super) async fn calculate_part_hashes(
                 part.local_length = 0;
                 part.local_start = 0;
                 consecutive_read_failures += 1;
+                reader_pos = None;
                 if let Some(progress) = &blocking_progress {
                     progress.mark_parts_done(1);
                 }
                 continue;
             }
+            reader_pos = Some(chosen_span.start);
 
             let mut hasher = FlexHasher::from_checksum(&part.remote_checksum);
             let mut remaining = total_len;
@@ -357,15 +387,19 @@ pub(super) async fn calculate_part_hashes(
 
             while remaining > 0 {
                 let chunk = remaining.min(HASH_BUF_SIZE);
-                if let Err(e) = file.read_exact(&mut buf[..chunk]) {
+                if let Err(e) = reader.read_exact(&mut buf[..chunk]) {
                     if consecutive_read_failures == 0 {
                         warn!("Read failed for {}: {}", file_path_owned, e);
                     }
                     read_ok = false;
+                    reader_pos = None;
                     break;
                 }
                 hasher.update(&buf[..chunk]);
                 remaining -= chunk;
+            }
+            if read_ok {
+                reader_pos = Some(chosen_span.start.saturating_add(chosen_span.length));
             }
 
             let local_checksum = hasher.finalize_hex();

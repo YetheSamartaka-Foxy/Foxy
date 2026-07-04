@@ -48,8 +48,8 @@ pub(crate) enum StartupQuickScanEligibility {
 }
 
 /// Combined preflight that determines both remote readiness and bootstrap plan
-/// in 3 SQL queries (mod stats, file stats, part stats) using subqueries,
-/// instead of the ~15+ round-trips the two separate functions required.
+/// in 3 SQL queries (mod stats, file stats, part stats), instead of the ~15+
+/// round-trips the two separate functions required.
 pub(super) async fn quick_scan_preflight_combined(
     context: Arc<FoxyContext>,
     repo_url: &str,
@@ -226,7 +226,9 @@ async fn quick_scan_preflight_combined_inner(
         });
     }
 
-    // Query 2: file stats via subquery
+    // Query 2: file stats via repository membership. Avoid DISTINCT/IN here:
+    // Turso 0.6.1 can panic while building the temporary DISTINCT btree for
+    // large repository file sets.
     let file_stats_started = Instant::now();
     let file_row = match db
         .query_one(
@@ -235,12 +237,14 @@ async fn quick_scan_preflight_combined_inner(
                 SUM(CASE WHEN remote_checksum = '' THEN 1 ELSE 0 END) AS missing_remote,
                 SUM(CASE WHEN local_checksum = '' THEN 1 ELSE 0 END) AS missing_local,
                 SUM(CASE WHEN local_content_hash = '' THEN 1 ELSE 0 END) AS missing_content
-            FROM files
-            WHERE id IN (
-                SELECT DISTINCT af.file_id
-                FROM repository_addons ra
-                JOIN addon_files af ON af.addon_id = ra.addon_id
-                WHERE ra.repository_id = ?
+            FROM files f
+            WHERE EXISTS (
+                SELECT 1
+                FROM addon_files af
+                JOIN repository_addons ra
+                    ON ra.addon_id = af.addon_id
+                   AND ra.repository_id = ?
+                WHERE af.file_id = f.id
             )"#,
             params![repository.id as i64],
         )
@@ -318,7 +322,8 @@ async fn quick_scan_preflight_combined_inner(
         });
     }
 
-    // Query 3: part stats via subquery
+    // Query 3: part stats via repository membership, matching the file query
+    // shape so we do not build a temporary DISTINCT file-id set.
     let part_stats_started = Instant::now();
     let (part_count, missing_part_remote, missing_part_local) = match db
         .query_one(
@@ -337,11 +342,13 @@ async fn quick_scan_preflight_combined_inner(
                 END) AS missing_local
             FROM subfiles sf
             JOIN files f ON f.id = sf.file_id
-            WHERE sf.file_id IN (
-                SELECT DISTINCT af.file_id
-                FROM repository_addons ra
-                JOIN addon_files af ON af.addon_id = ra.addon_id
-                WHERE ra.repository_id = ?
+            WHERE EXISTS (
+                SELECT 1
+                FROM addon_files af
+                JOIN repository_addons ra
+                    ON ra.addon_id = af.addon_id
+                   AND ra.repository_id = ?
+                WHERE af.file_id = sf.file_id
             )"#,
             params![repository.id as i64],
         )
@@ -364,10 +371,27 @@ async fn quick_scan_preflight_combined_inner(
     };
     let part_stats_elapsed = part_stats_started.elapsed();
 
-    // Remote readiness: all remote checksums must be non-empty
+    // Remote readiness: all remote checksums must be non-empty AND part
+    // metadata must be available. Manifest generators emit at least one part
+    // per file, and a file's remote checksum is a rollup of its part
+    // checksums - hashing without part metadata produces file hashes that can
+    // never match remote (observed as a 100% tree-checksum mismatch that
+    // re-hashes the whole repository on every scan). A repo with files but
+    // zero part rows (and no deferred part inserts pending in memory) lost
+    // its part metadata, e.g. the app closed before the first hash pass
+    // flushed the deferred rows; require a remote metadata refresh to
+    // re-materialize parts instead of bootstrapping incomparable hashes.
+    let parts_metadata_available = part_count > 0 || context.deferred_part_count() > 0;
+    if !parts_metadata_available {
+        info!(
+            "Quick scan preflight for repo {}: part metadata is missing (files={} parts=0, no deferred rows); remote metadata refresh required before local hashing",
+            repo_url, file_count
+        );
+    }
     let remote_ready = missing_mod_remote == 0
         && missing_file_remote == 0
-        && (part_count == 0 || missing_part_remote == 0);
+        && missing_part_remote == 0
+        && parts_metadata_available;
 
     // Bootstrap plan determination (same logic as determine_quick_scan_bootstrap_plan).
     // `repo_missing_tree` / `repo_missing_content` were computed above for the
@@ -471,7 +495,11 @@ fn tree_has_missing_effective_part_checksums(tree: &Tree) -> bool {
             return true;
         };
         if file_node.parts.is_empty() {
-            return true;
+            // Partless file (part rows are deferred until the first hash pass
+            // persists them): the file-level checksum, validated by the caller,
+            // is the authoritative tree hash. Treating the missing part rows as
+            // missing hashes re-hashed the whole repository on every scan.
+            continue;
         }
         if file_node.parts.iter().any(|part_idx| {
             tree.parts
@@ -521,12 +549,15 @@ pub(crate) fn collect_files_with_missing_local_tree_hashes(tree: &Tree) -> HashS
 
     for (file_idx, file) in tree.files.iter().enumerate() {
         let file_missing = file.local_checksum.trim().is_empty();
+        // A file without part rows is judged by its file-level checksum alone
+        // (`file_missing`): part rows are deferred until the first hash pass
+        // persists them, so their absence must not flag the file for re-hashing.
         let part_missing = tree
             .file_nodes
             .get(file_idx)
             .map(|file_node| {
-                file_node.parts.is_empty()
-                    || file_node.parts.iter().any(|part_idx| {
+                !file_node.parts.is_empty()
+                    && file_node.parts.iter().any(|part_idx| {
                         tree.parts
                             .get(*part_idx)
                             .map(|part| {
@@ -538,7 +569,7 @@ pub(crate) fn collect_files_with_missing_local_tree_hashes(tree: &Tree) -> HashS
                             .unwrap_or(true)
                     })
             })
-            .unwrap_or(true);
+            .unwrap_or(false);
 
         if file_missing || part_missing {
             file_ids.insert(file.id);
@@ -1150,12 +1181,23 @@ mod tests {
     }
 
     #[test]
-    fn collect_missing_tree_hashes_includes_file_with_no_parts() {
+    fn collect_missing_tree_hashes_skips_partless_file_with_checksum() {
+        // Part rows are deferred until the first hash pass persists them; a
+        // partless file with a populated file-level checksum is hash-complete.
+        // Flagging it would re-hash the entire repository on every quick scan.
         let tree = node_tree("R", vec![("M", vec![(10, "F", vec![])])]);
+        assert!(collect_files_with_missing_local_tree_hashes(&tree).is_empty());
+        assert!(!tree_local_checksums_missing(&tree));
+    }
+
+    #[test]
+    fn collect_missing_tree_hashes_includes_partless_file_without_checksum() {
+        let tree = node_tree("R", vec![("M", vec![(10, "", vec![])])]);
         assert_eq!(
             collect_files_with_missing_local_tree_hashes(&tree),
             HashSet::from([10])
         );
+        assert!(tree_local_checksums_missing(&tree));
     }
 
     #[test]

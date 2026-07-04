@@ -896,6 +896,7 @@ impl Foxy {
                         let repo_name = repo.name.clone();
                         let address = repo.address.clone();
                         let path = repo.path.clone();
+                        self.clear_quick_scan_instance_active(&address, &path);
                         if finished_successfully {
                             if last_mode == Some(SyncMode::Download) {
                                 self.set_repo_state_for_address(&address, &path, RepoState::Synced);

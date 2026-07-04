@@ -211,6 +211,7 @@ pub struct Foxy {
     pub pending_quick_scan_prevalidated_urls: HashSet<String>,
     pub pending_quick_scan_force_fresh_addon_hash_urls: HashSet<String>,
     pub quick_scan_pending: HashSet<String>,
+    pub active_quick_scan_instance_keys: HashSet<String>,
     pub repo_db_reset_pending_recheck: HashSet<String>,
     pending_repository_db_wipes: HashSet<String>,
     pending_repository_force_redownloads: HashSet<String>,

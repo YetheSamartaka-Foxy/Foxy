@@ -1,4 +1,5 @@
 use super::super::quick_scan::{
+    apply_download_target_estimates_to_pending_updates,
     apply_patch_plan_estimates_to_pending_updates, collect_files_with_missing_local_tree_hashes,
     collect_repo_download_targets, collect_unexpected_files_for_repo_mods,
     delete_unexpected_local_files, format_local_path_mismatch_message, log_addon_path_disk_state,
@@ -177,6 +178,10 @@ fn should_refresh_delta_plan_after_quick_verify(
     delta_plan_estimate_refreshed: bool,
 ) -> bool {
     !builds_download_plan && has_pending_updates && !delta_plan_estimate_refreshed
+}
+
+fn quick_verify_already_eligible(cached_pending_scope: Option<&HashSet<String>>) -> bool {
+    cached_pending_scope.is_some_and(|scope| !scope.is_empty())
 }
 
 fn should_defer_remote_metadata_part_inserts(mode: SyncMode, force_redownload: bool) -> bool {
@@ -935,7 +940,7 @@ async fn run_repository_pipeline(
             Some(&mod_enabled_overrides),
             Some(&progress_tx),
             true,
-            false,
+            quick_verify_already_eligible(cached_pending_scope.as_ref()),
             false,
             None,
         )
@@ -2275,18 +2280,28 @@ async fn run_repository_pipeline(
             }
         }
 
-        if !force_redownload
-            && !download_file_ids.is_empty()
-            && let Some(adjusted_mods) = apply_patch_plan_estimates_to_pending_updates(
+        if !force_redownload && !download_file_ids.is_empty() {
+            if let Some(adjusted_mods) = apply_download_target_estimates_to_pending_updates(
+                context.clone(),
+                &normalized_repo_url,
+                Some(&pending_mod_names),
+            )
+            .await
+            {
+                mods = adjusted_mods;
+                emit_progress!(ProgressEvent::Diff { mods: mods.clone() });
+                persist_pending_updates(context.clone(), &normalized_repo_url, &mods).await;
+            } else if let Some(adjusted_mods) = apply_patch_plan_estimates_to_pending_updates(
                 context.clone(),
                 &normalized_repo_url,
                 &mods,
             )
             .await
-        {
-            mods = adjusted_mods;
-            emit_progress!(ProgressEvent::Diff { mods: mods.clone() });
-            persist_pending_updates(context.clone(), &normalized_repo_url, &mods).await;
+            {
+                mods = adjusted_mods;
+                emit_progress!(ProgressEvent::Diff { mods: mods.clone() });
+                persist_pending_updates(context.clone(), &normalized_repo_url, &mods).await;
+            }
         }
 
         if prepare_download_plan && !download_file_ids.is_empty() {
@@ -3481,6 +3496,22 @@ mod tests {
         assert!(!should_refresh_delta_plan_after_quick_verify(
             false, true, true
         ));
+    }
+
+    #[test]
+    fn cached_pending_scope_prevalidates_quick_verify() {
+        let mut scope = HashSet::new();
+        scope.insert("@ace3".to_string());
+
+        assert!(quick_verify_already_eligible(Some(&scope)));
+    }
+
+    #[test]
+    fn missing_or_empty_pending_scope_keeps_quick_verify_preflight() {
+        let empty_scope = HashSet::new();
+
+        assert!(!quick_verify_already_eligible(None));
+        assert!(!quick_verify_already_eligible(Some(&empty_scope)));
     }
 
     #[test]

@@ -447,13 +447,14 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
             }
 
             if !has_parts {
-                if !old_checksum.is_empty() && old_checksum == file.remote_checksum {
+                if let Some(checksum) = whole_file_checksums_by_file_idx.get(&file_node.file_idx) {
+                    file.local_checksum = checksum.clone();
+                } else if !old_checksum.is_empty() && old_checksum == file.remote_checksum {
+                    // No fresh hash (missing or size-mismatched file): keep the
+                    // previously verified clean state instead of wiping it.
                     file.local_checksum = old_checksum.clone();
                 } else {
-                    file.local_checksum = whole_file_checksums_by_file_idx
-                        .get(&file_node.file_idx)
-                        .cloned()
-                        .unwrap_or_default();
+                    file.local_checksum = String::new();
                 }
             } else if all_match {
                 file.local_checksum = file.remote_checksum.clone();

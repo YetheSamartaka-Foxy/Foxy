@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use log::{info, warn};
 
+use crate::core::utils::fs_safety::resolve_child_dir_case_insensitive;
 use crate::ui::app::{
     AddonInventoryEntry, AddonInventoryViewCache, Foxy, RepositoryAddonListCache,
     RepositoryExternalAddonsListCache, RepositorySettingsAddonPreloadResult,
@@ -953,19 +954,22 @@ fn resolve_launch_mod_paths(repo: &Repository, arma3_directory: &str) -> Vec<Str
     }
 
     for addon in &enabled_addons {
-        let addon_path = std::path::Path::new(repo_path).join(addon);
-        if addon_path.exists() {
+        // Resolve the addon folder tolerant of case differences between the
+        // manifest name and the on-disk folder (e.g. manifest
+        // `@Crows_Electronic_Warfare` vs downloaded `@crows_electronic_warfare`).
+        if let Some(addon_path) =
+            resolve_child_dir_case_insensitive(std::path::Path::new(repo_path), addon)
+        {
             resolved_addons.push(addon_path.to_string_lossy().to_string());
+        } else if let Some(arma3_addon_path) =
+            resolve_child_dir_case_insensitive(std::path::Path::new(arma3_directory), addon)
+        {
+            resolved_addons.push(arma3_addon_path.to_string_lossy().to_string());
         } else {
-            let arma3_addon_path = std::path::Path::new(arma3_directory).join(addon);
-            if arma3_addon_path.exists() {
-                resolved_addons.push(arma3_addon_path.to_string_lossy().to_string());
-            } else {
-                log::error!(
-                    "Addon not found in repository or Arma 3 directory: {}",
-                    addon
-                );
-            }
+            log::error!(
+                "Addon not found in repository or Arma 3 directory: {}",
+                addon
+            );
         }
     }
 
@@ -991,8 +995,7 @@ fn resolve_external_launch_addon_path(addon: &str, path: &str) -> Option<std::pa
     }
 
     let base_path = std::path::Path::new(trimmed_path);
-    let nested_path = base_path.join(addon.trim());
-    if nested_path.is_dir() {
+    if let Some(nested_path) = resolve_child_dir_case_insensitive(base_path, addon) {
         return Some(nested_path);
     }
 

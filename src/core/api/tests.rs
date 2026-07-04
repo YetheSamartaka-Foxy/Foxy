@@ -126,6 +126,23 @@ async fn seed_addon_file(fdb: &FoxyDb, addon_id: i64, file_id: i64) {
     .expect("seed addon/file link");
 }
 
+async fn seed_subfile(
+    fdb: &FoxyDb,
+    id: i64,
+    file_id: i64,
+    local_checksum: &str,
+    remote_checksum: &str,
+) {
+    fdb.execute(
+        "INSERT INTO subfiles \
+         (id, file_id, path, local_length, local_start, remote_length, remote_start, local_checksum, remote_checksum, data_order) \
+         VALUES (?, ?, '', 0, 0, 1024, 0, ?, ?, 0)",
+        params![id, file_id, local_checksum, remote_checksum],
+    )
+    .await
+    .expect("seed subfile");
+}
+
 /// Read `(local_checksum, remote_checksum, local_content_hash)` for a row by id.
 async fn checksums(fdb: &FoxyDb, table: &str, id: i64) -> (String, String, String) {
     let row = fdb
@@ -713,6 +730,9 @@ async fn eligible_joined_full_tree_ready() {
 
     seed_repository_addon(&fdb, 1, 1).await;
     seed_addon_file(&fdb, 1, 1).await;
+    // Manifests always emit at least one part per file; the preflight treats a
+    // repo with files but zero part rows as missing remote metadata.
+    seed_subfile(&fdb, 1, 1, "PART_LOCAL", "PART_REMOTE").await;
 
     // Full tree with all checksums → should be eligible
     assert!(launch_quick_scan_repo_eligible_joined(&fdb, 1, repo_url).await);
@@ -768,5 +788,71 @@ async fn eligible_joined_full_tree_ready() {
     assert_eq!(
         content_hash_baseline_ready_joined(&fdb, 1, "test").await,
         Some(false)
+    );
+}
+
+#[tokio::test]
+async fn startup_eligibility_requires_part_metadata() {
+    let db = create_test_db().await;
+    let fdb = FoxyDb::from_turso(db.clone());
+
+    let repo_url = "https://example.invalid/partless/";
+
+    // Remote metadata present and the local content baseline missing (normally
+    // a NeedsBootstrap content refresh), but the repo has zero part rows.
+    // Manifests always emit at least one part per file and file remote
+    // checksums are rollups of part checksums, so without part metadata a
+    // bootstrap hash could never match remote: the repo must go through a
+    // remote metadata refresh first.
+    seed_repository(
+        &fdb,
+        1,
+        "Partless",
+        repo_url,
+        "",
+        "REPO_LOCAL",
+        "REPO_REMOTE",
+        "REPO_CONTENT",
+    )
+    .await;
+    seed_addon(
+        &fdb,
+        1,
+        "@partless",
+        "",
+        "",
+        "MOD_LOCAL",
+        "MOD_REMOTE",
+        "",
+        false,
+    )
+    .await;
+    seed_file(
+        &fdb,
+        1,
+        "data.pbo",
+        "",
+        "",
+        "FILE_LOCAL",
+        "FILE_REMOTE",
+        "FILE_CONTENT",
+        1024,
+        0,
+    )
+    .await;
+    seed_repository_addon(&fdb, 1, 1).await;
+    seed_addon_file(&fdb, 1, 1).await;
+
+    let context = Arc::new(FoxyContext::new(db.clone(), reqwest::Client::new()));
+    assert_eq!(
+        launch_quick_scan_repo_startup_eligibility(context.clone(), repo_url).await,
+        StartupQuickScanEligibility::Ineligible
+    );
+
+    // Re-materialized part metadata makes the repo scannable again.
+    seed_subfile(&fdb, 1, 1, "PART_LOCAL", "PART_REMOTE").await;
+    assert_eq!(
+        launch_quick_scan_repo_startup_eligibility(context, repo_url).await,
+        StartupQuickScanEligibility::NeedsBootstrap
     );
 }

@@ -193,6 +193,15 @@ impl Foxy {
         repo_index: usize,
     ) -> Option<String> {
         if self.syncing_repository != Some(repo_index) {
+            let repo = self.repository_view_state.repositories.get(repo_index)?;
+            let key = Self::repo_instance_key(&repo.address, &repo.path);
+            if self.active_quick_scan_instance_keys.contains(&key) {
+                return Some(format!(
+                    "{}\n{}",
+                    self.t("Quick local check in progress"),
+                    self.t("Quick local verify")
+                ));
+            }
             return None;
         }
 

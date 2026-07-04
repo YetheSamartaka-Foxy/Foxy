@@ -2,6 +2,7 @@ use super::{AppState, CommandError, CommandSuccess, effective_repository, find_r
 use crate::cli::args::{CliArgs, LaunchArgs};
 use crate::cli::exit_codes;
 use crate::core::steam::{SteamEnsureResult, ensure_steam_running};
+use crate::core::utils::fs_safety::resolve_child_dir_case_insensitive;
 use crate::ui::types::{
     Repository, RepositoryServer, SettingsViewState, push_arma3_profile_launch_args,
     selected_creator_dlc_codes, split_additional_launch_params,
@@ -205,22 +206,26 @@ fn build_launch_spec_with_profiles(
         }
 
         for addon in &enabled_addons {
-            let addon_path = Path::new(repo_path).join(addon);
-            if addon_path.exists() {
+            // Resolve the addon folder tolerant of case differences between the
+            // manifest name and the on-disk folder (e.g. manifest
+            // `@Crows_Electronic_Warfare` vs downloaded `@crows_electronic_warfare`).
+            if let Some(addon_path) =
+                resolve_child_dir_case_insensitive(Path::new(repo_path), addon)
+            {
                 resolved_addons.push(addon_path.to_string_lossy().to_string());
-            } else {
-                let arma3_addon_path = Path::new(arma3_directory).join(addon);
-                if arma3_addon_path.exists() {
-                    resolved_addons.push(arma3_addon_path.to_string_lossy().to_string());
-                }
+            } else if let Some(arma3_addon_path) =
+                resolve_child_dir_case_insensitive(Path::new(arma3_directory), addon)
+            {
+                resolved_addons.push(arma3_addon_path.to_string_lossy().to_string());
             }
         }
 
         for (addon, enabled, path) in &repo.external_addons {
             if *enabled {
                 let trimmed_path = path.trim();
-                let external_path = Path::new(trimmed_path).join(addon);
-                if external_path.exists() {
+                if let Some(external_path) =
+                    resolve_child_dir_case_insensitive(Path::new(trimmed_path), addon)
+                {
                     resolved_addons.push(external_path.to_string_lossy().to_string());
                 } else {
                     resolved_addons.push(trimmed_path.to_string());
