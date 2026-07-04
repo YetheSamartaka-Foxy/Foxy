@@ -627,9 +627,20 @@ impl Foxy {
 
         let mut args = Vec::new();
 
+        // Re-detect profiles at launch time so -name decisions reflect the
+        // current on-disk state, not a cached list.
+        let custom_profiles_dir = self.settings_view_state.arma3_profiles_directory.trim();
+        let custom_profiles_dir = if custom_profiles_dir.is_empty() {
+            None
+        } else {
+            Some(std::path::Path::new(custom_profiles_dir))
+        };
+        let detected_profiles =
+            crate::core::arma3_profiles::detect_all_profiles(custom_profiles_dir);
         crate::ui::types::push_arma3_profile_launch_args(
             &self.settings_view_state,
             repo,
+            &detected_profiles,
             &mut args,
         );
 

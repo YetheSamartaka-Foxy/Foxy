@@ -122,6 +122,22 @@ fn build_launch_spec(
     repo: &Repository,
     server: Option<&RepositoryServer>,
 ) -> Result<LaunchSpec, CommandError> {
+    let custom_profiles_dir = settings.arma3_profiles_directory.trim();
+    let custom_profiles_dir = if custom_profiles_dir.is_empty() {
+        None
+    } else {
+        Some(Path::new(custom_profiles_dir))
+    };
+    let detected_profiles = crate::core::arma3_profiles::detect_all_profiles(custom_profiles_dir);
+    build_launch_spec_with_profiles(settings, repo, server, &detected_profiles)
+}
+
+fn build_launch_spec_with_profiles(
+    settings: &SettingsViewState,
+    repo: &Repository,
+    server: Option<&RepositoryServer>,
+    detected_profiles: &[crate::core::arma3_profiles::Arma3Profile],
+) -> Result<LaunchSpec, CommandError> {
     let arma3_directory = settings.arma3_directory.trim();
     #[cfg(target_os = "windows")]
     if arma3_directory.is_empty() {
@@ -134,7 +150,7 @@ fn build_launch_spec(
     let cwd = launch_working_directory(arma3_directory)?;
     let mut args = Vec::new();
 
-    push_arma3_profile_launch_args(settings, repo, &mut args);
+    push_arma3_profile_launch_args(settings, repo, detected_profiles, &mut args);
 
     if repo.skip_intro {
         args.push("-skipIntro".to_string());
@@ -269,8 +285,9 @@ fn launch_working_directory(arma3_directory: &str) -> Result<PathBuf, CommandErr
 #[cfg(test)]
 mod tests {
     use super::super::effective_repository;
-    use super::build_launch_spec;
+    use super::{build_launch_spec, build_launch_spec_with_profiles};
     use crate::ui::types::{Repository, RepositoryProfile, SettingsViewState};
+    use std::path::PathBuf;
 
     #[test]
     fn build_launch_spec_puts_creator_dlc_into_mod_argument() {
@@ -304,9 +321,15 @@ mod tests {
             additional_params: r#""-profiles=C:\Arma 3 Profiles" -window"#.to_string(),
             ..Repository::default()
         };
+        let detected_profiles = vec![crate::core::arma3_profiles::Arma3Profile {
+            name: "Jane Doe".to_string(),
+            path: PathBuf::from("D:\\Arma Profiles\\Users\\Jane%20Doe"),
+            is_default: false,
+        }];
 
         let launch_spec =
-            build_launch_spec(&settings, &repo, None).expect("launch spec should build");
+            build_launch_spec_with_profiles(&settings, &repo, None, &detected_profiles)
+                .expect("launch spec should build");
 
         assert!(launch_spec.args.iter().any(|arg| arg == "-skipIntro"));
         assert!(launch_spec.args.iter().any(|arg| arg == "-noLogs"));

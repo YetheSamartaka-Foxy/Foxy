@@ -106,6 +106,9 @@ pub struct Foxy {
     pub detected_arma3_profiles: Vec<crate::core::arma3_profiles::Arma3Profile>,
     /// The auto-detected "currently active" Arma 3 profile name.
     pub detected_active_arma3_profile: Option<String>,
+    /// Pending rename/clone/delete action from the Arma 3 profile manager
+    /// in the application settings, awaiting confirmation in a modal.
+    pub pending_arma3_profile_action: Option<crate::ui::views::settings::Arma3ProfileAction>,
     /// Cached editor missions for the currently viewed repository.
     pub cached_missions: Option<CachedMissionList>,
     pub previous_debug_mode: bool,

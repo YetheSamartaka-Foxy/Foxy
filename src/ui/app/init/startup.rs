@@ -261,6 +261,7 @@ impl Foxy {
             repository_selection: None,
             detected_arma3_profiles: Vec::new(),
             detected_active_arma3_profile: None,
+            pending_arma3_profile_action: None,
             cached_missions: None,
             selected_repository_for_settings: None,
             current_repository_settings_tab: RepositorySettingsTab::Configuration,

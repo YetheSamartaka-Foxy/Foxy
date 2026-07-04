@@ -3,6 +3,7 @@ use super::repository_space::RepositorySpace;
 use super::settings::SettingsViewState;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 pub fn selected_creator_dlc_codes(repo: &Repository) -> Vec<&'static str> {
     let mut codes = Vec::new();
@@ -344,21 +345,85 @@ pub fn normalize_settings_launch_behavior(settings: &mut SettingsViewState) {
     }
 }
 
+/// Push `-profiles`/`-name` launch arguments.
+///
+/// Arma 3 treats `-name=<profile>` as "load the named profile from the
+/// named-profiles root, creating a fresh one (default settings, default
+/// keybinds) when it does not exist there". Passing `-name` for the default
+/// profile in `Documents\Arma 3`, or forwarding that vanilla directory as
+/// `-profiles`, therefore silently clones the player into a brand-new empty
+/// profile. Both are filtered out here; `-name` is only passed when the
+/// selected profile actually exists where Arma 3 will look for it.
 pub fn push_arma3_profile_launch_args(
     settings: &SettingsViewState,
     repo: &Repository,
+    detected_profiles: &[crate::core::arma3_profiles::Arma3Profile],
     args: &mut Vec<String>,
 ) {
     let profiles_directory = settings.arma3_profiles_directory.trim();
+    let mut custom_profiles_dir: Option<&Path> = None;
     if !profiles_directory.is_empty() {
-        args.push(format!("-profiles={}", profiles_directory));
+        let profiles_path = Path::new(profiles_directory);
+        if crate::core::arma3_profiles::is_vanilla_profiles_location(profiles_path) {
+            log::warn!(
+                "Ignoring configured Arma 3 profiles directory because it is the vanilla profile location; passing it as -profiles would relocate profiles into a Users subfolder and reset settings and keybinds"
+            );
+        } else {
+            args.push(format!("-profiles={}", profiles_directory));
+            custom_profiles_dir = Some(profiles_path);
+        }
     }
 
-    if let Some(arma3_profile) = repo.arma3_profile.as_deref() {
-        let arma3_profile = arma3_profile.trim();
-        if !arma3_profile.is_empty() {
+    let Some(arma3_profile) = repo
+        .arma3_profile
+        .as_deref()
+        .map(str::trim)
+        .filter(|profile| !profile.is_empty())
+    else {
+        return;
+    };
+
+    if let Some(custom_dir) = custom_profiles_dir {
+        // With -profiles active, -name resolves against <dir>\Users\<name>.
+        let exists_in_custom_dir = detected_profiles.iter().any(|profile| {
+            profile.name.eq_ignore_ascii_case(arma3_profile)
+                && crate::core::arma3_profiles::path_is_under(&profile.path, custom_dir)
+        });
+        if exists_in_custom_dir {
             args.push(format!("-name={}", arma3_profile));
+        } else {
+            log::warn!(
+                "Skipping -name for Arma 3 profile '{}': it does not exist under the configured profiles directory, so Arma 3 would create a new empty profile",
+                arma3_profile
+            );
         }
+        return;
+    }
+
+    let matches_named = detected_profiles
+        .iter()
+        .any(|profile| !profile.is_default && profile.name.eq_ignore_ascii_case(arma3_profile));
+    let matches_default = detected_profiles
+        .iter()
+        .any(|profile| profile.is_default && profile.name.eq_ignore_ascii_case(arma3_profile));
+
+    if matches_default {
+        // The default profile is what Arma 3 loads without -name. Passing
+        // -name here would make the game create an empty duplicate under
+        // "Arma 3 - Other Profiles". When a duplicate named profile also
+        // exists (a leftover of that exact accident), still prefer the
+        // default profile because it holds the user's real settings.
+        log::info!(
+            "Selected Arma 3 profile '{}' is the default profile; omitting -name so the game loads it directly",
+            arma3_profile
+        );
+    } else if matches_named {
+        args.push(format!("-name={}", arma3_profile));
+    } else {
+        log::warn!(
+            "Skipping -name for Arma 3 profile '{}': no such profile was detected on disk, so Arma 3 would create a new empty profile",
+            arma3_profile
+        );
     }
 }
 

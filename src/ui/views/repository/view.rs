@@ -273,11 +273,20 @@ impl Foxy {
                                                 profile_changed = true;
                                             }
                                             for p in &self.detected_arma3_profiles {
-                                                let profile_response = ui.selectable_label(
-                                                    repo.arma3_profile.as_deref()
-                                                        == Some(&p.name),
-                                                    &p.name,
-                                                );
+                                                let profile_label = if p.is_default {
+                                                    format!("{} ({})", p.name, tr("default"))
+                                                } else {
+                                                    p.name.clone()
+                                                };
+                                                let profile_response = ui
+                                                    .selectable_label(
+                                                        repo.arma3_profile.as_deref()
+                                                            == Some(&p.name),
+                                                        profile_label,
+                                                    )
+                                                    .on_hover_text(
+                                                        p.path.display().to_string(),
+                                                    );
                                                 if profile_response.hovered() {
                                                     ui.ctx().output_mut(
                                                         Foxy::set_pointing_cursor_output,

@@ -43,6 +43,7 @@ impl Foxy {
 
         self.render_application_settings_wipe_db_confirmation(ui);
         self.render_application_settings_reset_confirmation(ui);
+        self.render_arma3_profile_action_modal(ui);
 
         if path_change_flags.settings {
             self.save_settings();
