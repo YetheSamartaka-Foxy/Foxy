@@ -413,6 +413,46 @@ impl Foxy {
         }
     }
 
+    /// Drop every frame-persistent galley cache.
+    ///
+    /// Cached `Arc<Galley>`s hold pixel UVs into egui's font atlas. When egui
+    /// recreates that atlas (glyphs repack into new positions), the stale UVs
+    /// sample the wrong glyphs and paint as garbled text. The per-cache
+    /// fingerprints track font sizes and colors but not atlas recreation, so we
+    /// drop the caches here to force a one-off re-shape against the current atlas.
+    pub(in crate::ui::app) fn reset_all_list_galley_caches(&mut self) {
+        self.mission_row_galleys = Default::default();
+        self.activity_log_galleys = Default::default();
+        self.repository_list_galleys = Default::default();
+        self.update_detail_file_galleys = Default::default();
+        self.bulk_action_entry_galleys = Default::default();
+        self.space_selector_entry_galleys = Default::default();
+        self.space_selector_candidate_galleys = Default::default();
+        self.space_detail_candidate_galleys = Default::default();
+        self.server_row_galleys = Default::default();
+        self.repository_addons_list_cache.galleys = Default::default();
+        self.repository_optional_addons_list_cache.galleys = Default::default();
+        self.repository_external_addons_list_cache.galleys = Default::default();
+    }
+
+    /// Drop the galley caches when egui's font atlas size changes.
+    ///
+    /// Reading the atlas size at the top of the frame (before any Foxy text is
+    /// laid out) catches every recreation or growth, whatever the cause. This is
+    /// the general safety net; see [`Self::reset_all_list_galley_caches`] for why
+    /// staleness corrupts the text.
+    pub(in crate::ui::app) fn invalidate_galley_caches_on_font_atlas_change(
+        &mut self,
+        ctx: &egui::Context,
+    ) {
+        let size = ctx.fonts(|fonts| fonts.font_image_size());
+        if size == self.last_font_image_size {
+            return;
+        }
+        self.last_font_image_size = size;
+        self.reset_all_list_galley_caches();
+    }
+
     pub(in crate::ui::app) fn apply_runtime_palette_visuals(&mut self, ctx: &egui::Context) {
         let palette_changed = self
             .last_applied_palette
@@ -425,6 +465,12 @@ impl Foxy {
         if !palette_changed {
             return;
         }
+
+        // A palette/theme change can recreate the font atlas while the list views
+        // are off-screen, leaving their persistent galley caches stale. Drop them
+        // here so the views re-shape on return, without depending on the atlas-size
+        // detector's frame timing.
+        self.reset_all_list_galley_caches();
 
         let cache = self.color_cache();
 

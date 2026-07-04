@@ -367,6 +367,10 @@ pub struct Foxy {
     pub default_repo_image_texture_bytes: usize,
     pub last_applied_palette: Option<palette::PaletteColors>,
     pub cached_color32: Option<CachedPaletteColor32>,
+    /// Size of egui's font atlas the last time the persistent galley caches were
+    /// checked. A change signals an atlas recreation/growth that invalidates any
+    /// `Arc<Galley>` held across frames, so we drop those caches the frame it moves.
+    pub last_font_image_size: [usize; 2],
     pub last_saved_window_state: Option<WindowState>,
     /// Used to log monitor/app resolutions at startup and whenever they change.
     pub last_logged_display_metrics: Option<DisplayMetricsSnapshot>,

@@ -184,6 +184,7 @@ impl Foxy {
 
         self.apply_runtime_palette_visuals(&ctx);
         self.apply_runtime_ui_scale(&ctx);
+        self.invalidate_galley_caches_on_font_atlas_change(&ctx);
         self.handle_global_accessibility_shortcuts(&ctx);
         self.log_display_metrics_if_changed(&ctx);
         self.update_fps_estimate(&ctx);

@@ -457,6 +457,7 @@ impl Foxy {
             default_repo_image_texture_bytes: 0,
             last_applied_palette: None,
             cached_color32: None,
+            last_font_image_size: [0, 0],
             last_saved_window_state: Self::load_window_state(),
             last_logged_display_metrics: None,
             tray_manager: None,
