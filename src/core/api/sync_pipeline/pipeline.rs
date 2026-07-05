@@ -2524,19 +2524,18 @@ async fn run_repository_pipeline(
     // background transaction overlapped with the download. The incremental hash worker
     // awaits this handle before its first tree load, so the rows are guaranteed present
     // by the time any reader needs them. No-op when nothing was deferred.
-    let deferred_part_insert_handle: Option<tokio::task::JoinHandle<()>> =
-        if force_redownload && context.should_defer_part_inserts() {
-            let flush_context = context.clone();
-            let handle = tokio::spawn(async move {
-                flush_deferred_part_inserts(flush_context).await;
-            });
-            // Close the defer window now that the buffer has been handed to the flush
-            // task; any later writes in this session use the normal inline path.
-            context.set_defer_part_inserts(false);
-            Some(handle)
-        } else {
-            None
-        };
+    let deferred_part_insert_handle: Option<tokio::task::JoinHandle<bool>> = if force_redownload
+        && context.should_defer_part_inserts()
+    {
+        let flush_context = context.clone();
+        let handle = tokio::spawn(async move { flush_deferred_part_inserts(flush_context).await });
+        // Close the defer window now that the buffer has been handed to the flush
+        // task; any later writes in this session use the normal inline path.
+        context.set_defer_part_inserts(false);
+        Some(handle)
+    } else {
+        None
+    };
     // The worker blocks on the deferred insert (~22s) before its first tree load, so
     // the channel must hold the completions that arrive during that window without
     // spilling them to the (post-download) final hash stage. 2048 comfortably covers
@@ -2564,10 +2563,16 @@ async fn run_repository_pipeline(
         // A++: ensure the deferred part insert has completed before the first tree
         // load (the only `subfiles` reader on the force path). Completions that arrive
         // during this wait buffer in the widened channel rather than spilling.
-        if let Some(handle) = deferred_part_insert_handle
-            && let Err(err) = handle.await
-        {
-            warn!("Deferred part insert task failed before incremental hashing: {err}");
+        if let Some(handle) = deferred_part_insert_handle {
+            match handle.await {
+                Ok(true) => {}
+                Ok(false) => {
+                    warn!("Deferred part insert task failed before incremental hashing");
+                }
+                Err(err) => {
+                    warn!("Deferred part insert task failed before incremental hashing: {err}");
+                }
+            }
         }
         let mut hashed_file_ids: HashSet<u64> = HashSet::new();
         let mut pending_file_ids: HashSet<u64> = HashSet::new();

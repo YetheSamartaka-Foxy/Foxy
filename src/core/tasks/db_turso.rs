@@ -1677,6 +1677,176 @@ mod tests {
         }
     }
 
+    /// Diagnostic: dump the repository/addon link graph of a database copy:
+    /// which repositories exist, how many `repository_addons` links each has,
+    /// and whether any links or addons dangle. Set FOXY_INSPECT_DB to the db
+    /// path (copy only). Run:
+    /// `cargo test -p Foxy inspect_repo_links -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn inspect_repo_links() {
+        let path = std::env::var("FOXY_INSPECT_DB").expect("set FOXY_INSPECT_DB");
+        let db = Builder::new_local(&path).build().await.expect("open db");
+        let conn = db.connect().expect("connect");
+
+        let mut rows = conn
+            .query(
+                "SELECT id, name, remote_url, local_path FROM repositories ORDER BY id",
+                (),
+            )
+            .await
+            .expect("repositories");
+        while let Ok(Some(row)) = rows.next().await {
+            eprintln!(
+                "repo id={:?} name={:?} url={:?} local={:?}",
+                row.get_value(0).ok(),
+                row.get_value(1).ok(),
+                row.get_value(2).ok(),
+                row.get_value(3).ok()
+            );
+        }
+
+        let mut rows = conn
+            .query(
+                "SELECT repository_id, COUNT(*) FROM repository_addons GROUP BY repository_id",
+                (),
+            )
+            .await
+            .expect("link counts");
+        while let Ok(Some(row)) = rows.next().await {
+            eprintln!(
+                "links repository_id={:?} count={:?}",
+                row.get_value(0).ok(),
+                row.get_value(1).ok()
+            );
+        }
+
+        for (label, sql) in [
+            (
+                "dangling links (addon gone)",
+                "SELECT COUNT(*) FROM repository_addons ra LEFT JOIN addons a ON a.id = ra.addon_id WHERE a.id IS NULL",
+            ),
+            (
+                "dangling links (repo gone)",
+                "SELECT COUNT(*) FROM repository_addons ra LEFT JOIN repositories r ON r.id = ra.repository_id WHERE r.id IS NULL",
+            ),
+            (
+                "unlinked addons",
+                "SELECT COUNT(*) FROM addons a LEFT JOIN repository_addons ra ON ra.addon_id = a.id WHERE ra.addon_id IS NULL",
+            ),
+            ("addons total", "SELECT COUNT(*) FROM addons"),
+            ("subfiles total", "SELECT COUNT(*) FROM subfiles"),
+            (
+                "subfiles with local checksum",
+                "SELECT COUNT(*) FROM subfiles WHERE local_checksum != ''",
+            ),
+            (
+                "files with local checksum",
+                "SELECT COUNT(*) FROM files WHERE local_checksum != ''",
+            ),
+            ("files total", "SELECT COUNT(*) FROM files"),
+        ] {
+            match conn.query(sql, ()).await {
+                Ok(mut rows) => {
+                    let v = rows
+                        .next()
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|r| r.get_value(0).ok());
+                    eprintln!("{label:<32} = {v:?}");
+                }
+                Err(e) => eprintln!("{label:<32} ERR {e}"),
+            }
+        }
+
+        let mut rows = conn
+            .query(
+                "SELECT a.local_path, COUNT(*) FROM addons a \
+                 LEFT JOIN repository_addons ra ON ra.addon_id = a.id \
+                 WHERE ra.addon_id IS NULL GROUP BY a.local_path LIMIT 20",
+                (),
+            )
+            .await
+            .expect("unlinked addon paths");
+        while let Ok(Some(row)) = rows.next().await {
+            eprintln!(
+                "unlinked addon local_path={:?} count={:?}",
+                row.get_value(0).ok(),
+                row.get_value(1).ok()
+            );
+        }
+
+        // Id churn: max id far above the row count means rows are being
+        // deleted and recreated across rechecks instead of upserted in place.
+        for t in ["addons", "files", "subfiles", "repositories"] {
+            let sql = format!("SELECT COUNT(*), MIN(id), MAX(id) FROM {t}");
+            match conn.query(&sql, ()).await {
+                Ok(mut rows) => {
+                    if let Ok(Some(row)) = rows.next().await {
+                        eprintln!(
+                            "ids {t:<14} count={:?} min={:?} max={:?}",
+                            row.get_value(0).ok(),
+                            row.get_value(1).ok(),
+                            row.get_value(2).ok()
+                        );
+                    }
+                }
+                Err(e) => eprintln!("ids {t:<14} ERR {e}"),
+            }
+        }
+
+        let mut rows = conn
+            .query(
+                "SELECT substr(local_path, 1, 3), COUNT(*), \
+                 SUM(CASE WHEN local_checksum = '' THEN 1 ELSE 0 END) \
+                 FROM addons GROUP BY substr(local_path, 1, 3)",
+                (),
+            )
+            .await
+            .expect("addon path roots");
+        while let Ok(Some(row)) = rows.next().await {
+            eprintln!(
+                "addon root={:?} count={:?} empty_local_checksum={:?}",
+                row.get_value(0).ok(),
+                row.get_value(1).ok(),
+                row.get_value(2).ok()
+            );
+        }
+
+        // Which repo owns which id range: reveals creation order and whether a
+        // repo's graph was recreated after the other repo's.
+        for (label, sql) in [
+            (
+                "addon id ranges",
+                "SELECT substr(local_path, 1, 3), MIN(id), MAX(id) FROM addons GROUP BY substr(local_path, 1, 3)",
+            ),
+            (
+                "file id ranges",
+                "SELECT substr(local_path, 1, 3), MIN(id), MAX(id) FROM files GROUP BY substr(local_path, 1, 3)",
+            ),
+            (
+                "subfile id ranges",
+                "SELECT substr(f.local_path, 1, 3), MIN(sf.id), MAX(sf.id), COUNT(*) FROM subfiles sf JOIN files f ON f.id = sf.file_id GROUP BY substr(f.local_path, 1, 3)",
+            ),
+        ] {
+            match conn.query(sql, ()).await {
+                Ok(mut rows) => {
+                    while let Ok(Some(row)) = rows.next().await {
+                        eprintln!(
+                            "{label}: root={:?} min={:?} max={:?} extra={:?}",
+                            row.get_value(0).ok(),
+                            row.get_value(1).ok(),
+                            row.get_value(2).ok(),
+                            row.get_value(3).ok()
+                        );
+                    }
+                }
+                Err(e) => eprintln!("{label} ERR {e}"),
+            }
+        }
+    }
+
     /// Probe: does Turso 0.6.1 support `VACUUM INTO 'file'` (compacted copy to a
     /// new file, which does NOT need the experimental in-place vacuum flag)? If
     /// yes, startup compaction is a one-liner + file swap. Bloats a fresh db, then

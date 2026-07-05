@@ -10,7 +10,10 @@ use super::scheduling::{
     missing_local_hash_pass_is_noop, recalculate_parts_for_jobs_with_profile,
 };
 use super::*;
-use crate::core::tasks::remote_file_parts::flush_deferred_part_inserts_with_local_state;
+use crate::core::tasks::remote_file_parts::{
+    flush_deferred_part_inserts, flush_deferred_part_inserts_with_local_state,
+    persist_part_local_state_by_file_path,
+};
 use crate::ui::types::HashIoProfilePreference;
 
 pub(crate) async fn calculate_hashes(
@@ -59,6 +62,74 @@ pub(crate) enum HashCalculationResult {
     Completed(Box<Tree>),
     Cancelled,
     Failed,
+}
+
+fn derived_clean_part_indices(data_tree: &Tree) -> HashSet<usize> {
+    let mut clean_indices = HashSet::new();
+    for file_node in &data_tree.file_nodes {
+        let Some(file) = data_tree.files.get(file_node.file_idx) else {
+            continue;
+        };
+        if file_node.parts.is_empty() {
+            continue;
+        }
+        let mut parts = Vec::with_capacity(file_node.parts.len());
+        let mut all_parts_match = true;
+        for &part_idx in &file_node.parts {
+            let Some(part) = data_tree.parts.get(part_idx) else {
+                all_parts_match = false;
+                break;
+            };
+            if part.local_checksum.is_empty()
+                || part.local_checksum != part.remote_checksum
+                || part.local_length != part.remote_length
+                || part.local_start != part.remote_start
+            {
+                all_parts_match = false;
+                break;
+            }
+            parts.push(part.clone());
+        }
+        if all_parts_match && local_file_matches_part_layout(&file.local_path, file.length, &parts)
+        {
+            clean_indices.extend(file_node.parts.iter().copied());
+        }
+    }
+    clean_indices
+}
+
+/// The background flush issues plain conflict-free `INSERT`s, so it is only safe
+/// when the buffered rows were staged during a fresh `subfiles` load. Gate on the
+/// buffer marker, not tree provenance, since a preloaded tree says nothing about
+/// whether the deferred rows are conflict-free.
+fn should_insert_part_metadata_in_background(context: &FoxyContext) -> bool {
+    context.deferred_part_count() > 0 && context.deferred_part_inserts_are_fresh_load()
+}
+
+async fn await_deferred_part_metadata_insert(
+    handle: &mut Option<tokio::task::JoinHandle<bool>>,
+    repository_url: &str,
+) -> bool {
+    let Some(handle) = handle.take() else {
+        return true;
+    };
+    match handle.await {
+        Ok(true) => true,
+        Ok(false) => {
+            error!(
+                "Deferred manifest part metadata insert failed for repo {}",
+                repository_url
+            );
+            false
+        }
+        Err(err) => {
+            error!(
+                "Deferred manifest part metadata insert task failed for repo {}: {}",
+                repository_url, err
+            );
+            false
+        }
+    }
 }
 
 pub(crate) async fn calculate_hashes_with_tree_and_profile(
@@ -137,6 +208,21 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
         );
         return HashCalculationResult::Completed(Box::new(data_tree));
     }
+    let mut deferred_part_metadata_insert_handle = if should_insert_part_metadata_in_background(
+        &context,
+    ) {
+        info!(
+            "Starting deferred manifest part metadata insert in background before hashing: rows={}",
+            context.deferred_part_count()
+        );
+        let flush_context = context.clone();
+        context.set_defer_part_inserts(false);
+        Some(tokio::spawn(async move {
+            flush_deferred_part_inserts(flush_context).await
+        }))
+    } else {
+        None
+    };
     let hash_jobs = build_file_hash_jobs(
         &data_tree,
         &all_file_indices,
@@ -204,6 +290,11 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
             "Hash calculation cancelled during part hashing for repo {}",
             repository_url
         );
+        await_deferred_part_metadata_insert(
+            &mut deferred_part_metadata_insert_handle,
+            repository_url,
+        )
+        .await;
         return HashCalculationResult::Cancelled;
     }
     info!(
@@ -296,6 +387,11 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
             "Hash calculation cancelled before applying part hashes for repo {}",
             repository_url
         );
+        await_deferred_part_metadata_insert(
+            &mut deferred_part_metadata_insert_handle,
+            repository_url,
+        )
+        .await;
         return HashCalculationResult::Cancelled;
     }
     let apply_parts_started = Instant::now();
@@ -324,16 +420,31 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
             "Hash calculation cancelled before persisting part hashes for repo {}",
             repository_url
         );
+        await_deferred_part_metadata_insert(
+            &mut deferred_part_metadata_insert_handle,
+            repository_url,
+        )
+        .await;
         return HashCalculationResult::Cancelled;
     }
-    let mut part_updates: Vec<_> = updated_part_indices
+    let derived_clean_indices = if deferred_part_metadata_insert_handle.is_some() {
+        derived_clean_part_indices(&data_tree)
+    } else {
+        HashSet::new()
+    };
+    let fallback_part_indices: HashSet<usize> = updated_part_indices
+        .difference(&derived_clean_indices)
+        .copied()
+        .collect();
+    let mut part_updates: Vec<_> = fallback_part_indices
         .iter()
         .filter_map(|&idx| data_tree.parts.get(idx).cloned())
         .collect();
     // Sort by PK so the UPDATE walks the subfiles B-tree sequentially,
     // keeping pages in cache instead of thrashing on random access.
     part_updates.sort_by_key(|p| p.id);
-    let part_count = part_updates.len();
+    let derived_clean_part_count = derived_clean_indices.len();
+    let part_count = derived_clean_part_count.saturating_add(part_updates.len());
     if let Some(tx) = progress_tx {
         let _ = tx.send(ProgressEvent::Stage {
             label: format!("Saving parts 0/{}", part_count),
@@ -342,7 +453,56 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
     }
     let persist_started = Instant::now();
     let mut parts_persisted = 0;
-    if context.deferred_part_count() > 0 {
+    if deferred_part_metadata_insert_handle.is_some() {
+        if derived_clean_part_count > 0 {
+            parts_persisted += derived_clean_part_count;
+            info!(
+                "Phase 2 derived clean part state: parts={} fallback_parts={} db_part_updates=skipped",
+                derived_clean_part_count,
+                part_updates.len()
+            );
+            info!(
+                "Phase 2 progress: {}/{} parts accepted as derived clean state",
+                parts_persisted, part_count
+            );
+            if let Some(tx) = progress_tx {
+                let pct = 0.50 + 0.20 * (parts_persisted as f32 / part_count.max(1) as f32);
+                let _ = tx.send(ProgressEvent::Stage {
+                    label: format!("Saving parts {}/{}", parts_persisted, part_count),
+                    percent: pct,
+                });
+            }
+        }
+        if !await_deferred_part_metadata_insert(
+            &mut deferred_part_metadata_insert_handle,
+            repository_url,
+        )
+        .await
+        {
+            return HashCalculationResult::Failed;
+        }
+        if !part_updates.is_empty()
+            && !persist_part_local_state_by_file_path(&db, &part_updates, |persisted_chunk| {
+                parts_persisted += persisted_chunk;
+                if parts_persisted % PERSIST_LOG_INTERVAL == 0 || parts_persisted == part_count {
+                    info!(
+                        "Phase 2 progress: {}/{} fallback parts persisted",
+                        parts_persisted, part_count
+                    );
+                }
+                if let Some(tx) = progress_tx {
+                    let pct = 0.50 + 0.20 * (parts_persisted as f32 / part_count.max(1) as f32);
+                    let _ = tx.send(ProgressEvent::Stage {
+                        label: format!("Saving parts {}/{}", parts_persisted, part_count),
+                        percent: pct,
+                    });
+                }
+            })
+            .await
+        {
+            return HashCalculationResult::Failed;
+        }
+    } else if context.deferred_part_count() > 0 {
         info!(
             "Persisting {} deferred manifest parts with local hash state in one coalesced sorted insert pass",
             data_tree.parts.len()
@@ -588,4 +748,131 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
         total_start.elapsed().as_secs_f64()
     );
     HashCalculationResult::Completed(Box::new(data_tree))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::models::context::DeferredPartInsert;
+    use crate::core::models::model_tree::{FileNode, Tree};
+
+    /// Fresh rows stay eligible for the background metadata insert after
+    /// `fresh_subfiles_load` is cleared: the buffer's own marker gates it.
+    #[tokio::test]
+    async fn background_part_metadata_insert_selected_for_fresh_buffered_rows() {
+        let handle = crate::core::tasks::db_turso::build_test_database().await;
+        let context = Arc::new(FoxyContext::new(handle, reqwest::Client::new()));
+
+        context.set_fresh_subfiles_load(true);
+        context.set_defer_part_inserts(true);
+        context.buffer_deferred_parts(vec![DeferredPartInsert {
+            file_id: 1,
+            path: "p0".to_owned(),
+            remote_length: 1,
+            remote_start: 0,
+            remote_checksum: "r0".to_owned(),
+            data_order: 0,
+        }]);
+        context.set_fresh_subfiles_load(false);
+
+        assert!(should_insert_part_metadata_in_background(&context));
+    }
+
+    #[tokio::test]
+    async fn background_part_metadata_insert_rejected_for_non_fresh_rows() {
+        let handle = crate::core::tasks::db_turso::build_test_database().await;
+        let context = Arc::new(FoxyContext::new(handle, reqwest::Client::new()));
+
+        context.set_defer_part_inserts(true);
+        context.buffer_deferred_parts(vec![DeferredPartInsert {
+            file_id: 1,
+            path: "p0".to_owned(),
+            remote_length: 1,
+            remote_start: 0,
+            remote_checksum: "r0".to_owned(),
+            data_order: 0,
+        }]);
+
+        assert!(!should_insert_part_metadata_in_background(&context));
+    }
+
+    #[test]
+    fn derived_clean_part_indices_accepts_clean_layout() {
+        let file_path = std::env::temp_dir().join(format!(
+            "foxy-derived-clean-{}-{}.bin",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&file_path, b"abcd").unwrap();
+
+        let mut tree = Tree::default();
+        tree.files.push(FoxyModFile {
+            id: 10,
+            local_path: file_path.to_string_lossy().to_string(),
+            length: 4,
+            ..Default::default()
+        });
+        tree.parts.push(FoxyModFilePart {
+            id: 1,
+            file_id: 10,
+            path: "part0".to_owned(),
+            remote_checksum: "A".to_owned(),
+            local_checksum: "A".to_owned(),
+            remote_length: 4,
+            local_length: 4,
+            remote_start: 0,
+            local_start: 0,
+            data_order: 0,
+        });
+        tree.file_nodes.push(FileNode {
+            file_idx: 0,
+            parts: vec![0],
+        });
+
+        assert_eq!(derived_clean_part_indices(&tree), HashSet::from([0]));
+        let _ = std::fs::remove_file(file_path);
+    }
+
+    #[test]
+    fn derived_clean_part_indices_rejects_dirty_part() {
+        let file_path = std::env::temp_dir().join(format!(
+            "foxy-derived-dirty-{}-{}.bin",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&file_path, b"abcd").unwrap();
+
+        let mut tree = Tree::default();
+        tree.files.push(FoxyModFile {
+            id: 10,
+            local_path: file_path.to_string_lossy().to_string(),
+            length: 4,
+            ..Default::default()
+        });
+        tree.parts.push(FoxyModFilePart {
+            id: 1,
+            file_id: 10,
+            path: "part0".to_owned(),
+            remote_checksum: "A".to_owned(),
+            local_checksum: "B".to_owned(),
+            remote_length: 4,
+            local_length: 4,
+            remote_start: 0,
+            local_start: 0,
+            data_order: 0,
+        });
+        tree.file_nodes.push(FileNode {
+            file_idx: 0,
+            parts: vec![0],
+        });
+
+        assert!(derived_clean_part_indices(&tree).is_empty());
+        let _ = std::fs::remove_file(file_path);
+    }
 }

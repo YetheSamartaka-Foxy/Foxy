@@ -210,7 +210,22 @@ impl FoxyDb {
         Ok(OwnedDbTxn {
             conn,
             _permit: permit,
-            _shared: Some(shared),
+            _barrier: OwnedDbBarrierGuard::Shared(shared),
+        })
+    }
+
+    /// Begin an owned transaction while holding the exclusive DB barrier. Use this
+    /// for schema-level bulk operations that must not overlap readers, while still
+    /// keeping normal foreign key enforcement on.
+    pub(crate) async fn begin_exclusive(&self) -> Result<OwnedDbTxn, DbErr> {
+        let exclusive = crate::core::tasks::init_database::acquire_db_exclusive().await;
+        let (permit, _gate_wait) = crate::core::tasks::init_database::acquire_db_write_gate().await;
+        let conn = connect_turso(&self.db).await?;
+        turso_execute(&conn, "BEGIN", Vec::new()).await?;
+        Ok(OwnedDbTxn {
+            conn,
+            _permit: permit,
+            _barrier: OwnedDbBarrierGuard::Exclusive(exclusive),
         })
     }
 
@@ -291,8 +306,8 @@ pub(crate) struct OwnedDbTxn {
     /// commit/rollback (which consume `self`) or on drop. `None` only if the gate
     /// semaphore was closed (never in practice).
     _permit: Option<tokio::sync::OwnedSemaphorePermit>,
-    /// Shared DB barrier guard (see [`DB_EXCLUSIVE`]); released with the txn.
-    _shared: Option<tokio::sync::OwnedRwLockReadGuard<()>>,
+    /// DB barrier guard (see [`DB_EXCLUSIVE`]); released with the txn.
+    _barrier: OwnedDbBarrierGuard,
 }
 
 impl OwnedDbTxn {
@@ -319,6 +334,11 @@ impl OwnedDbTxn {
             .await
             .map(|_| ())
     }
+}
+
+enum OwnedDbBarrierGuard {
+    Shared(tokio::sync::OwnedRwLockReadGuard<()>),
+    Exclusive(tokio::sync::OwnedRwLockWriteGuard<()>),
 }
 
 // --- Turso storage layer --------------------------------------------------------

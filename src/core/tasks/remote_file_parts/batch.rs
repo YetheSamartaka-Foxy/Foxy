@@ -9,9 +9,10 @@ use crate::core::models::modification_file_part::{
     FoxyModFilePart, SUBFILE_COLUMNS, part_display_path, part_storage_path,
 };
 use crate::core::models::recheck_level::RecheckLevel;
+use crate::core::tasks::db_turso::{SUBFILES_INDEX_CREATE_SQL, SUBFILES_INDEX_NAMES};
 use crate::core::tasks::delta_patch::{persist_patch_plan, plan_file_patch};
 use crate::core::tasks::init_database::{sqlite_labeled_write_scope, sqlite_perf_snapshot};
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -755,16 +756,20 @@ pub(crate) async fn remote_file_parts_batch(
 /// needs them. A plain conflict-free `INSERT` (the deferred load always targets a
 /// globally-empty `subfiles` table - same `fresh=true` SQL as the inline fast path).
 /// No-op when nothing was deferred.
-pub(crate) async fn flush_deferred_part_inserts(context: Arc<FoxyContext>) {
+pub(crate) async fn flush_deferred_part_inserts(context: Arc<FoxyContext>) -> bool {
     let rows = context.take_deferred_parts();
+    context.set_deferred_part_inserts_fresh_load(false);
     if rows.is_empty() {
-        return;
+        return true;
     }
     let total = rows.len();
     let db = context.db();
     let chunk_size = file_part_upsert_chunk_size();
     let started = Instant::now();
+    let sqlite_baseline = sqlite_perf_snapshot();
     let rows = Arc::new(rows);
+    let mut insert_batches = 0usize;
+    let mut insert_rows_affected = 0u64;
     if let Err(e) = db
         .transaction("deferred file parts insert", |txn| {
             let rows = rows.clone();
@@ -789,12 +794,106 @@ pub(crate) async fn flush_deferred_part_inserts(context: Arc<FoxyContext>) {
         .await
     {
         warn!("Failed to flush deferred file part inserts: {}", e);
+        return false;
     }
+    for chunk in rows.chunks(chunk_size) {
+        insert_batches += 1;
+        insert_rows_affected = insert_rows_affected.saturating_add(chunk.len() as u64);
+    }
+    let sqlite_delta = sqlite_perf_snapshot().delta_since(sqlite_baseline);
     info!(
         "Deferred file part insert flushed {} rows in {:.2?}",
         total,
         started.elapsed()
     );
+    info!(
+        "Deferred file part insert metrics: strategy=fresh_remote_metadata_live_indexes rows={} insert_batch_size={} insert_batches={} insert_rows_affected={} sqlite_retries={} sqlite_backoff_ms={} sqlite_write_time_ms={:.1} total={:.3}s",
+        total,
+        chunk_size,
+        insert_batches,
+        insert_rows_affected,
+        sqlite_delta.lock_retries,
+        sqlite_delta.lock_backoff_ms_total,
+        sqlite_delta.db_write_time_ms(),
+        started.elapsed().as_secs_f64()
+    );
+    true
+}
+
+pub(crate) async fn persist_part_local_state_by_file_path<F>(
+    db: &FoxyDb,
+    parts: &[FoxyModFilePart],
+    mut on_rows_persisted: F,
+) -> bool
+where
+    F: FnMut(usize),
+{
+    if parts.is_empty() {
+        return true;
+    }
+
+    let chunk_size = file_part_insert_with_local_chunk_size();
+    let started = Instant::now();
+    let sqlite_baseline = sqlite_perf_snapshot();
+    let _write_scope = sqlite_labeled_write_scope("persist part local state by file path");
+    let txn = match db.begin().await {
+        Ok(txn) => txn,
+        Err(err) => {
+            error!("Failed to begin part local-state upsert: {}", err);
+            return false;
+        }
+    };
+
+    let mut upsert_elapsed = Duration::ZERO;
+    let mut upsert_batch_max_elapsed = Duration::ZERO;
+    let mut upsert_batches = 0usize;
+    let mut upsert_rows_affected = 0u64;
+    for chunk in parts.chunks(chunk_size) {
+        let sql = file_part_insert_with_local_sql(chunk.len(), false);
+        let chunk_refs: Vec<&FoxyModFilePart> = chunk.iter().collect();
+        let upsert_started = Instant::now();
+        match txn
+            .execute(&sql, file_part_insert_with_local_ref_values(&chunk_refs))
+            .await
+        {
+            Ok(affected) => {
+                let elapsed = upsert_started.elapsed();
+                upsert_elapsed += elapsed;
+                upsert_batch_max_elapsed = upsert_batch_max_elapsed.max(elapsed);
+                upsert_batches += 1;
+                upsert_rows_affected = upsert_rows_affected.saturating_add(affected);
+                on_rows_persisted(chunk.len());
+            }
+            Err(err) => {
+                let _ = txn.rollback().await;
+                error!("Failed to persist part local state by file path: {}", err);
+                return false;
+            }
+        }
+    }
+
+    let commit_started = Instant::now();
+    if let Err(err) = txn.commit().await {
+        error!("Failed to commit part local-state upsert: {}", err);
+        return false;
+    }
+    let commit_elapsed = commit_started.elapsed();
+    let sqlite_delta = sqlite_perf_snapshot().delta_since(sqlite_baseline);
+    info!(
+        "Part local-state persistence metrics: strategy=upsert_by_file_path rows={} upsert_batch_size={} upsert_batches={} upsert_rows_affected={} sqlite_retries={} sqlite_backoff_ms={} sqlite_write_time_ms={:.1} upsert={:.3}s upsert_batch_max={:.3}s commit={:.3}s total={:.3}s",
+        parts.len(),
+        chunk_size,
+        upsert_batches,
+        upsert_rows_affected,
+        sqlite_delta.lock_retries,
+        sqlite_delta.lock_backoff_ms_total,
+        sqlite_delta.db_write_time_ms(),
+        upsert_elapsed.as_secs_f64(),
+        upsert_batch_max_elapsed.as_secs_f64(),
+        commit_elapsed.as_secs_f64(),
+        started.elapsed().as_secs_f64()
+    );
+    true
 }
 
 pub(crate) async fn flush_deferred_part_inserts_with_local_state<F>(
@@ -810,6 +909,7 @@ where
     }
     if parts.is_empty() {
         let _ = context.take_deferred_parts();
+        context.set_deferred_part_inserts_fresh_load(false);
         return false;
     }
 
@@ -824,7 +924,12 @@ where
 
     let sqlite_baseline = sqlite_perf_snapshot();
     let _write_scope = sqlite_labeled_write_scope("deferred file parts insert with local state");
-    let txn = match db.begin().await {
+    let fresh_requested = context.deferred_part_inserts_are_fresh_load();
+    let txn = match if fresh_requested {
+        db.begin_exclusive().await
+    } else {
+        db.begin().await
+    } {
         Ok(txn) => txn,
         Err(err) => {
             warn!(
@@ -835,12 +940,67 @@ where
         }
     };
 
+    let mut strategy = if fresh_requested {
+        "fresh_plain_insert_rebuild_indexes"
+    } else {
+        "coalesced_sorted_upsert_live_indexes"
+    };
+    let mut drop_indexes_elapsed = Duration::ZERO;
+    let mut rebuild_indexes_elapsed = Duration::ZERO;
+    let mut indexes_deferred = false;
+    if fresh_requested {
+        let row_count = match txn
+            .query_all("SELECT COUNT(*) AS c FROM subfiles", Vec::new())
+            .await
+            .and_then(|rows| {
+                rows.into_iter()
+                    .next()
+                    .ok_or_else(|| DbErr::Custom("COUNT(*) returned no rows".to_owned()))
+                    .and_then(|row| row.get_i64("c"))
+            }) {
+            Ok(row_count) => row_count,
+            Err(err) => {
+                let _ = txn.rollback().await;
+                error!(
+                    "Failed to verify empty subfiles table before deferred fresh insert: {}",
+                    err
+                );
+                return false;
+            }
+        };
+
+        if row_count == 0 {
+            let drop_started = Instant::now();
+            for name in SUBFILES_INDEX_NAMES {
+                if let Err(err) = txn
+                    .execute(&format!("DROP INDEX IF EXISTS {name}"), Vec::new())
+                    .await
+                {
+                    let _ = txn.rollback().await;
+                    error!(
+                        "Failed to drop subfiles indexes before deferred fresh insert: {}",
+                        err
+                    );
+                    return false;
+                }
+            }
+            drop_indexes_elapsed = drop_started.elapsed();
+            indexes_deferred = true;
+        } else {
+            strategy = "fresh_requested_but_subfiles_nonempty_upsert_live_indexes";
+            warn!(
+                "Fresh deferred subfiles insert requested but table is not empty (rows={}); keeping live indexes and using upsert",
+                row_count
+            );
+        }
+    }
+
     let mut insert_elapsed = Duration::ZERO;
     let mut insert_batch_max_elapsed = Duration::ZERO;
     let mut insert_batches = 0usize;
     let mut insert_rows_affected = 0u64;
     for chunk in ordered_parts.chunks(chunk_size) {
-        let sql = file_part_insert_with_local_sql(chunk.len(), true);
+        let sql = file_part_insert_with_local_sql(chunk.len(), indexes_deferred);
         let insert_started = Instant::now();
         match txn
             .execute(&sql, file_part_insert_with_local_ref_values(chunk))
@@ -865,9 +1025,24 @@ where
         }
     }
 
+    if indexes_deferred {
+        let rebuild_started = Instant::now();
+        for sql in SUBFILES_INDEX_CREATE_SQL {
+            if let Err(err) = txn.execute(sql, Vec::new()).await {
+                let _ = txn.rollback().await;
+                error!(
+                    "Failed to rebuild subfiles indexes after deferred fresh insert: {}",
+                    err
+                );
+                return false;
+            }
+        }
+        rebuild_indexes_elapsed = rebuild_started.elapsed();
+    }
+
     let commit_started = Instant::now();
     if let Err(err) = txn.commit().await {
-        warn!(
+        error!(
             "Failed to commit deferred file part inserts with local state: {}",
             err
         );
@@ -877,13 +1052,16 @@ where
     let sqlite_delta = sqlite_perf_snapshot().delta_since(sqlite_baseline);
     let _ = context.take_deferred_parts();
     context.set_defer_part_inserts(false);
+    context.set_fresh_subfiles_load(false);
+    context.set_deferred_part_inserts_fresh_load(false);
     info!(
         "Deferred file part insert with local state flushed {} rows in {:.2?}",
         total,
         started.elapsed()
     );
     info!(
-        "Deferred file part insert metrics: strategy=coalesced_sorted_fresh_plain_insert_live_indexes rows={} insert_batch_size={} insert_batches={} insert_rows_affected={} sqlite_retries={} sqlite_backoff_ms={} sqlite_write_time_ms={:.1} sort={:.3}s insert={:.3}s insert_batch_max={:.3}s commit={:.3}s total={:.3}s",
+        "Deferred file part insert metrics: strategy={} rows={} insert_batch_size={} insert_batches={} insert_rows_affected={} sqlite_retries={} sqlite_backoff_ms={} sqlite_write_time_ms={:.1} sort={:.3}s drop_indexes={:.3}s insert={:.3}s insert_batch_max={:.3}s rebuild_indexes={:.3}s commit={:.3}s total={:.3}s",
+        strategy,
         total,
         chunk_size,
         insert_batches,
@@ -892,8 +1070,10 @@ where
         sqlite_delta.lock_backoff_ms_total,
         sqlite_delta.db_write_time_ms(),
         sort_elapsed.as_secs_f64(),
+        drop_indexes_elapsed.as_secs_f64(),
         insert_elapsed.as_secs_f64(),
         insert_batch_max_elapsed.as_secs_f64(),
+        rebuild_indexes_elapsed.as_secs_f64(),
         commit_elapsed.as_secs_f64(),
         started.elapsed().as_secs_f64()
     );
@@ -978,6 +1158,100 @@ mod tests {
         assert!(!should_prepare_download_work(false, false));
         assert!(should_prepare_download_work(true, false));
         assert!(should_prepare_download_work(false, true));
+    }
+
+    #[tokio::test]
+    async fn deferred_local_state_fresh_flush_rebuilds_unique_index() {
+        let handle = crate::core::tasks::db_turso::build_test_database().await;
+        let db = FoxyDb::from_handle(handle.clone());
+        db.execute(
+            "INSERT INTO files (id, name, remote_path, local_path, length, data_order) \
+             VALUES (1, 'f', 'remote/f', 'local/f', 2, 0)",
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+
+        let context = Arc::new(FoxyContext::new(handle, reqwest::Client::new()));
+        context.set_fresh_subfiles_load(true);
+        context.set_defer_part_inserts(true);
+        context.buffer_deferred_parts(vec![DeferredPartInsert {
+            file_id: 1,
+            path: "p0".to_owned(),
+            remote_length: 1,
+            remote_start: 0,
+            remote_checksum: "r0".to_owned(),
+            data_order: 0,
+        }]);
+        context.set_fresh_subfiles_load(false);
+        assert!(context.deferred_part_inserts_are_fresh_load());
+
+        for name in SUBFILES_INDEX_NAMES {
+            db.execute(&format!("DROP INDEX IF EXISTS {name}"), Vec::new())
+                .await
+                .unwrap();
+        }
+
+        let parts = vec![
+            FoxyModFilePart {
+                file_id: 1,
+                path: "p0".to_owned(),
+                remote_length: 1,
+                local_length: 1,
+                remote_start: 0,
+                local_start: 0,
+                remote_checksum: "r0".to_owned(),
+                local_checksum: "r0".to_owned(),
+                data_order: 0,
+                ..FoxyModFilePart::default()
+            },
+            FoxyModFilePart {
+                file_id: 1,
+                path: "p1".to_owned(),
+                remote_length: 1,
+                local_length: 1,
+                remote_start: 1,
+                local_start: 1,
+                remote_checksum: "r1".to_owned(),
+                local_checksum: "r1".to_owned(),
+                data_order: 1,
+                ..FoxyModFilePart::default()
+            },
+        ];
+        let mut persisted = 0usize;
+
+        assert!(
+            flush_deferred_part_inserts_with_local_state(context.clone(), &parts, |rows| {
+                persisted += rows;
+            })
+            .await
+        );
+        assert_eq!(persisted, 2);
+        assert_eq!(context.deferred_part_count(), 0);
+        assert!(!context.should_defer_part_inserts());
+        assert!(!context.is_fresh_subfiles_load());
+        assert!(!context.deferred_part_inserts_are_fresh_load());
+
+        let row = db
+            .query_one("SELECT COUNT(*) AS c FROM subfiles", Vec::new())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.get_i64("c").unwrap(), 2);
+
+        let duplicate = db
+            .execute(
+                "INSERT INTO subfiles \
+                 (file_id, path, local_length, local_start, remote_length, remote_start, \
+                  local_checksum, remote_checksum, data_order) \
+                 VALUES (1, 'p0', 1, 0, 1, 0, 'r0', 'r0', 99)",
+                Vec::new(),
+            )
+            .await;
+        assert!(
+            duplicate.is_err(),
+            "rebuilt idx_subfiles_file_id_path must reject duplicate rows"
+        );
     }
 
     #[test]

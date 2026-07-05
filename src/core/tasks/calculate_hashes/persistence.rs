@@ -589,7 +589,6 @@ pub(super) fn calculate_compound_content_hash(ordered_hashes: &[(i64, String)]) 
 mod tests {
     use super::*;
 
-
     #[test]
     fn rollup_persists_use_tuned_write_knee() {
         for params_per_row in [4usize, 9, 12] {
@@ -627,7 +626,6 @@ mod tests {
         assert_eq!(sql.matches('?').count(), 4);
     }
 
-
     #[test]
     fn compound_content_hash_empty_returns_empty() {
         assert_eq!(calculate_compound_content_hash(&[]), String::new());
@@ -646,7 +644,6 @@ mod tests {
         let b = calculate_compound_content_hash(&[(1, "xyz".into())]);
         assert_ne!(a, b);
     }
-
 
     /// Seeds enough subfiles to span several chunked `UPDATE FROM VALUES`
     /// statements, then verifies every part's local columns are written and the

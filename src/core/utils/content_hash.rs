@@ -149,7 +149,6 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-
     #[test]
     fn blake3_hex_returns_32_uppercase_hex_chars() {
         let mut hasher = blake3::Hasher::new();
@@ -164,7 +163,6 @@ mod tests {
         let hex = blake3_hex(hasher);
         assert_eq!(hex, "AF1349B9F5F9A1A6A0404DEA36DCC949");
     }
-
 
     #[test]
     fn is_blake3_checksum_64_chars() {
@@ -188,7 +186,6 @@ mod tests {
         let hex40 = "D".repeat(40);
         assert!(!is_blake3_checksum(&hex40));
     }
-
 
     #[test]
     fn flex_hasher_md5_produces_32_hex() {
@@ -239,7 +236,6 @@ mod tests {
         assert_eq!(h.finalize_hex(), "5D41402ABC4B2A76B9719D911017C592");
     }
 
-
     #[test]
     fn normalize_path_backslashes_to_forward() {
         let result = normalize_path("foo\\bar\\baz");
@@ -282,7 +278,6 @@ mod tests {
     fn normalize_path_preserves_case_on_unix() {
         assert_eq!(normalize_path("FOO/BAR"), "FOO/BAR");
     }
-
 
     #[test]
     fn blake3_file_hash_reads_file_correctly() {
@@ -330,7 +325,6 @@ mod tests {
 
         assert_eq!(file_hash, expected);
     }
-
 
     #[test]
     fn addon_folder_hash_not_a_dir() {
@@ -411,7 +405,6 @@ mod tests {
         assert_eq!(hex1, hex2);
     }
 
-
     #[test]
     fn temp_artifact_path_mid_path_not_detected() {
         assert!(!is_foxy_temp_artifact_path("file.foxy.part.extra"));
@@ -429,7 +422,6 @@ mod tests {
         assert!(is_foxy_temp_artifact_path(".foxy.bak"));
     }
 
-
     #[test]
     fn normalize_path_multiple_trailing_slashes() {
         let result = normalize_path("path///");
@@ -442,7 +434,6 @@ mod tests {
         assert_eq!(result.matches('/').count(), 2);
         assert!(!result.contains('\\'));
     }
-
 
     #[test]
     fn flex_hasher_blake3_incremental_update() {

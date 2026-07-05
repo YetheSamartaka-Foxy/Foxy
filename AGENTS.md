@@ -15,7 +15,7 @@ Keep this file as the compact root router. Put detailed conventions in `conventi
 - Do not reformat unrelated code, rename unrelated items, or change dependencies unless the task requires it.
 - Do not log secrets, tokens, or user file paths.
 - Never use em dashes (—) or en dashes (–) in any text (code, comments, docs, UI strings, commit messages, changelog). Use a plain hyphen `-` instead.
-- Keep comments sparse and durable. Do not add narrative bug-history, benchmark anecdote, decorative separator, or "what this obvious line does" comments in ordinary code; put operational context in logs, tests, commit messages, or conventions docs when it needs to be retained.
+- Default to writing no comment. Add one only to explain a non-obvious *why* (a safety invariant, an ordering constraint, a subtle edge case) that the code cannot state itself, and keep it to one or two lines. Never add narrative bug-history, dated regression stories, benchmark anecdotes, decorative separators, restated-code, or "what this obvious line does" comments; put operational context in logs, tests, commit messages, or conventions docs instead. When editing existing code, do not leave behind comments that narrate the change you just made.
 - Do not edit runtime `database.db`, logs, caches, backups, temp patch artifacts, or user config files unless explicitly requested.
 - Use `rg`/`rg --files` for discovery, inspect the nearest `mod.rs`, and confirm behavior in code before changing it.
 - Check for nested `AGENTS.md` files before editing a subtree; more-specific instructions apply to files under that directory.
@@ -80,10 +80,12 @@ Keep this file as the compact root router. Put detailed conventions in `conventi
 ---
 
 ## Communication
+- Answer in the fewest words that fully address the request. Lead with the answer; skip preamble, restating the question, and closing summaries.
+- Default to a few sentences or a short bullet list. Reserve headings and multi-section write-ups for genuinely large or multi-part tasks the user asked to see laid out.
 - Keep progress updates sparse and high-signal. Prefer one short sentence only when starting a new phase, making edits, waiting on long commands, or hitting a blocker.
 - Avoid verbose running summaries, repeated status prints, and blow-by-blow narration of routine discovery or validation.
 - Do not paste large command outputs unless the user asks. Summarize only the result and any actionable failures.
-- Keep final handoffs compact by default: changed files, validation, and notable caveats only.
+- Keep final handoffs compact by default: changed files, validation, and notable caveats only. Do not re-explain code you just wrote unless asked.
 
 ---
 

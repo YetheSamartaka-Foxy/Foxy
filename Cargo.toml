@@ -17,6 +17,29 @@ license-file = "LICENSE"
 # debuginfo codegen + link cost that dominates incremental rebuilds.
 debug = "line-tables-only"
 
+# Turso runs every statement through interpreted VDBE + B-tree code in
+# turso_core; at opt-level 0 the clean-DB bootstrap insert of 433k subfile rows
+# measured ~15x slower than release (127s vs ~9s), so dev-build logs kept
+# looking like a DB regression that release builds do not have
+# (recheck_clean_db_regression_2026-07-05.md). Optimize the Turso stack in dev
+# so DB timings are representative; the workspace crate stays unoptimized for
+# fast iteration. Proc-macro crates (turso_macros, turso_sdk_kit_macros) are
+# compile-time only and intentionally left out.
+[profile.dev.package.turso]
+opt-level = 3
+[profile.dev.package.turso_core]
+opt-level = 3
+[profile.dev.package.turso_ext]
+opt-level = 3
+[profile.dev.package.turso_parser]
+opt-level = 3
+[profile.dev.package.turso_sdk_kit]
+opt-level = 3
+[profile.dev.package.turso_sync_sdk_kit]
+opt-level = 3
+[profile.dev.package.turso_sync_engine]
+opt-level = 3
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
