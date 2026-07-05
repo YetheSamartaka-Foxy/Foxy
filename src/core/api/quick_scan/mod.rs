@@ -14,7 +14,7 @@ mod worker;
 
 // Public API (re-exported by api/mod.rs)
 pub use worker::{
-    StartupRepositoryInstance, filter_repo_urls_with_db_entry, plan_startup_quick_scan_repos,
+    StartupRepositoryInstance, filter_repo_instances_with_db_entry, plan_startup_quick_scan_repos,
     recalculate_hashes_for_addon_by_name, spawn_quick_local_scan, spawn_quick_local_scan_instances,
 };
 

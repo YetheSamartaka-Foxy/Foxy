@@ -5,6 +5,7 @@ use crate::core::models::recheck_level::RecheckLevel;
 use crate::core::tasks::create_web_client::create_web_client;
 use crate::core::tasks::init_database::init_database;
 use log::debug;
+use tokio::sync::OnceCell;
 
 /// Create FoxyContext with shared data: available database connection and reqwest client
 pub(crate) async fn create_context() -> Arc<FoxyContext> {
@@ -13,6 +14,12 @@ pub(crate) async fn create_context() -> Arc<FoxyContext> {
     let client = create_web_client().await;
     debug!("Core context created");
     Arc::new(FoxyContext::new(database, client))
+}
+
+/// Process-wide base context for workers on the shared background runtime.
+pub(crate) async fn shared_background_context() -> Arc<FoxyContext> {
+    static CONTEXT: OnceCell<Arc<FoxyContext>> = OnceCell::const_new();
+    CONTEXT.get_or_init(create_context).await.clone()
 }
 
 pub(crate) async fn create_context_with_recheck_level(

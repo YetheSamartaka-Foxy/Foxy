@@ -1,6 +1,6 @@
 use super::super::fs_watcher::normalize_path_for_match;
 use super::super::*;
-use super::file_state::{AddonFolderState, probe_addon_folder_state};
+use super::file_state::{AddonFolderState, probe_addon_folder_state_with_fingerprint};
 use super::persistent_cache::{
     AddonRootFingerprint, PersistentAddonHashEntry, addon_root_fingerprint, now_unix_ms,
     persistent_addon_fingerprint_is_current, persistent_addon_fingerprint_matches,
@@ -11,6 +11,15 @@ use crate::core::utils::format::sanitize_log_path_str;
 use log::{debug, info};
 
 const MISSING_ADDON_PATH_SAMPLE_LIMIT: usize = 8;
+
+fn lock_shared(
+    shared: &Arc<Mutex<QuickScanSharedCache>>,
+) -> std::sync::MutexGuard<'_, QuickScanSharedCache> {
+    match shared.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
 
 #[derive(Clone)]
 struct AddonHashWork {
@@ -69,9 +78,10 @@ pub(super) async fn resolve_addon_hashes(
     let mut enabled_addons = 0usize;
     let mut missing_addon_path_samples = Vec::new();
     let mut unresolved_addon_hash_work: Vec<AddonHashWork> = Vec::new();
-    let mut unresolved_seen_path_keys: HashSet<String> = HashSet::new();
     let mut persistent_miss_debug_samples = 0usize;
 
+    let mut fingerprint_candidates: Vec<(String, String)> = Vec::new();
+    let mut fingerprint_candidate_seen: HashSet<String> = HashSet::new();
     for m in mods {
         let is_enabled = mod_enabled_overrides
             .and_then(|overrides| overrides.get(&m.name.to_lowercase()).copied())
@@ -85,171 +95,141 @@ pub(super) async fn resolve_addon_hashes(
         let path_key = normalize_path_for_match(&m.local_path);
         mod_path_key_by_id.insert(mod_id, path_key.clone());
 
-        if local_addon_state_cache.contains_key(&path_key) {
+        if local_addon_state_cache.contains_key(&path_key)
+            || fingerprint_candidate_seen.contains(&path_key)
+        {
             continue;
         }
 
         let started = Instant::now();
-        let mut state_from_cache: Option<AddonFolderState> = None;
         if !force_fresh_addon_hash && let Some(shared) = shared_cache {
-            let cached = match shared.lock() {
-                Ok(guard) => guard.addon_state_by_path.get(&path_key).cloned(),
-                Err(poisoned) => poisoned
-                    .into_inner()
-                    .addon_state_by_path
-                    .get(&path_key)
-                    .cloned(),
-            };
+            let cached = lock_shared(shared)
+                .addon_state_by_path
+                .get(&path_key)
+                .cloned();
             if let Some(state) = cached {
                 addon_hash_hits_shared_memory += 1;
-                state_from_cache = Some(state);
                 addon_hash_timings.push((path_key.clone(), started.elapsed(), "shared_memory"));
+                local_addon_state_cache.insert(path_key, state);
+                continue;
             }
         }
-        if let Some(state) = state_from_cache {
-            local_addon_state_cache.insert(path_key, state);
-            continue;
-        }
 
-        let fingerprint = addon_root_fingerprint(&m.local_path);
+        fingerprint_candidate_seen.insert(path_key.clone());
+        fingerprint_candidates.push((path_key, m.local_path.clone()));
+    }
+
+    let mut fingerprint_by_key: HashMap<String, (AddonRootFingerprint, Duration)> = HashMap::new();
+    if !fingerprint_candidates.is_empty() {
+        let fingerprint_concurrency = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .max(1)
+            .min(fingerprint_candidates.len());
+        let semaphore = Arc::new(Semaphore::new(fingerprint_concurrency));
+        let mut join_set: JoinSet<(String, AddonRootFingerprint, Duration)> = JoinSet::new();
+        for (path_key, local_path) in fingerprint_candidates.iter().cloned() {
+            let sem = semaphore.clone();
+            join_set.spawn(async move {
+                let _permit = sem.acquire_owned().await.ok();
+                let started = Instant::now();
+                let fingerprint =
+                    tokio::task::spawn_blocking(move || addon_root_fingerprint(&local_path))
+                        .await
+                        .unwrap_or_default();
+                (path_key, fingerprint, started.elapsed())
+            });
+        }
+        while let Some(joined) = join_set.join_next().await {
+            if let Ok((path_key, fingerprint, elapsed)) = joined {
+                fingerprint_by_key.insert(path_key, (fingerprint, elapsed));
+            }
+        }
+    }
+
+    for (path_key, local_path) in fingerprint_candidates {
+        let Some((fingerprint, walk_elapsed)) = fingerprint_by_key.remove(&path_key) else {
+            continue;
+        };
+
         if !fingerprint.exists || !fingerprint.is_dir {
             if missing_addon_path_samples.len() < MISSING_ADDON_PATH_SAMPLE_LIMIT {
-                missing_addon_path_samples.push(m.local_path.clone());
+                missing_addon_path_samples.push(local_path.clone());
             }
             let missing_state = AddonFolderState::default();
             local_addon_state_cache.insert(path_key.clone(), missing_state.clone());
             if let Some(shared) = shared_cache {
-                match shared.lock() {
-                    Ok(mut guard) => {
-                        guard
-                            .addon_state_by_path
-                            .insert(path_key.clone(), missing_state.clone());
-                    }
-                    Err(poisoned) => {
-                        let mut guard = poisoned.into_inner();
-                        guard
-                            .addon_state_by_path
-                            .insert(path_key.clone(), missing_state.clone());
-                    }
-                }
+                lock_shared(shared)
+                    .addon_state_by_path
+                    .insert(path_key.clone(), missing_state);
             }
-            addon_hash_timings.push((path_key, started.elapsed(), "missing_or_not_dir"));
+            addon_hash_timings.push((path_key, walk_elapsed, "missing_or_not_dir"));
             continue;
         }
 
-        let mut persistent_hit = false;
+        let mut persistent_state: Option<AddonFolderState> = None;
         if !force_fresh_addon_hash && let Some(shared) = shared_cache {
-            let cached = match shared.lock() {
-                Ok(mut guard) => {
-                    let existing_entry =
-                        guard.persistent_addon_hash_by_path.get(&path_key).cloned();
-                    if let Some(entry) = existing_entry.as_ref()
-                        && !persistent_addon_fingerprint_matches(entry, &fingerprint)
-                        && persistent_miss_debug_samples < 8
-                    {
-                        persistent_miss_debug_samples += 1;
-                        let reasons =
-                            persistent_addon_fingerprint_mismatch_reasons(entry, &fingerprint);
-                        debug!(
-                            "Persistent addon hash cache miss: path={} reasons={}",
-                            sanitize_log_path_str(&path_key),
-                            reasons.join(",")
-                        );
-                    }
-                    let cached_entry = existing_entry
-                        .filter(|entry| persistent_addon_fingerprint_matches(entry, &fingerprint));
-                    if let Some(entry) = cached_entry {
-                        let state = AddonFolderState {
-                            exists: true,
-                            content_hash: entry.content_hash.clone(),
-                        };
-                        if !persistent_addon_fingerprint_is_current(
-                            &entry.fingerprint,
-                            &fingerprint,
-                        ) {
-                            guard.persistent_addon_hash_by_path.insert(
-                                path_key.clone(),
-                                PersistentAddonHashEntry {
-                                    fingerprint: fingerprint.clone(),
-                                    content_hash: entry.content_hash.clone(),
-                                    updated_unix_ms: now_unix_ms(),
-                                },
-                            );
-                            guard.persistent_dirty = true;
-                        }
-                        guard
-                            .addon_state_by_path
-                            .insert(path_key.clone(), state.clone());
-                        Some(state)
-                    } else {
-                        None
-                    }
+            let mut guard = lock_shared(shared);
+            let existing_entry = guard.persistent_addon_hash_by_path.get(&path_key).cloned();
+            if let Some(entry) = existing_entry.as_ref()
+                && !persistent_addon_fingerprint_matches(entry, &fingerprint)
+                && persistent_miss_debug_samples < 8
+            {
+                persistent_miss_debug_samples += 1;
+                let reasons = persistent_addon_fingerprint_mismatch_reasons(entry, &fingerprint);
+                debug!(
+                    "Persistent addon hash cache miss: path={} reasons={}",
+                    sanitize_log_path_str(&path_key),
+                    reasons.join(",")
+                );
+            }
+            let cached_entry = existing_entry
+                .filter(|entry| persistent_addon_fingerprint_matches(entry, &fingerprint));
+            if let Some(entry) = cached_entry {
+                let state = AddonFolderState {
+                    exists: true,
+                    content_hash: entry.content_hash.clone(),
+                };
+                let fingerprint_current =
+                    persistent_addon_fingerprint_is_current(&entry.fingerprint, &fingerprint);
+                guard.persistent_addon_hash_by_path.insert(
+                    path_key.clone(),
+                    PersistentAddonHashEntry {
+                        fingerprint: if fingerprint_current {
+                            entry.fingerprint.clone()
+                        } else {
+                            fingerprint.clone()
+                        },
+                        content_hash: entry.content_hash.clone(),
+                        updated_unix_ms: if fingerprint_current {
+                            entry.updated_unix_ms
+                        } else {
+                            now_unix_ms()
+                        },
+                        last_seen_unix_ms: now_unix_ms(),
+                    },
+                );
+                if !fingerprint_current {
+                    guard.persistent_dirty = true;
                 }
-                Err(poisoned) => {
-                    let mut guard = poisoned.into_inner();
-                    let existing_entry =
-                        guard.persistent_addon_hash_by_path.get(&path_key).cloned();
-                    if let Some(entry) = existing_entry.as_ref()
-                        && !persistent_addon_fingerprint_matches(entry, &fingerprint)
-                        && persistent_miss_debug_samples < 8
-                    {
-                        persistent_miss_debug_samples += 1;
-                        let reasons =
-                            persistent_addon_fingerprint_mismatch_reasons(entry, &fingerprint);
-                        debug!(
-                            "Persistent addon hash cache miss: path={} reasons={}",
-                            sanitize_log_path_str(&path_key),
-                            reasons.join(",")
-                        );
-                    }
-                    let cached_entry = existing_entry
-                        .filter(|entry| persistent_addon_fingerprint_matches(entry, &fingerprint));
-                    if let Some(entry) = cached_entry {
-                        let state = AddonFolderState {
-                            exists: true,
-                            content_hash: entry.content_hash.clone(),
-                        };
-                        if !persistent_addon_fingerprint_is_current(
-                            &entry.fingerprint,
-                            &fingerprint,
-                        ) {
-                            guard.persistent_addon_hash_by_path.insert(
-                                path_key.clone(),
-                                PersistentAddonHashEntry {
-                                    fingerprint: fingerprint.clone(),
-                                    content_hash: entry.content_hash.clone(),
-                                    updated_unix_ms: now_unix_ms(),
-                                },
-                            );
-                            guard.persistent_dirty = true;
-                        }
-                        guard
-                            .addon_state_by_path
-                            .insert(path_key.clone(), state.clone());
-                        Some(state)
-                    } else {
-                        None
-                    }
-                }
-            };
-            if let Some(state) = cached {
-                addon_hash_hits_persistent += 1;
-                persistent_hit = true;
-                local_addon_state_cache.insert(path_key.clone(), state);
-                addon_hash_timings.push((path_key.clone(), started.elapsed(), "persistent_cache"));
+                guard
+                    .addon_state_by_path
+                    .insert(path_key.clone(), state.clone());
+                persistent_state = Some(state);
             }
         }
-        if persistent_hit {
+        if let Some(state) = persistent_state {
+            addon_hash_hits_persistent += 1;
+            local_addon_state_cache.insert(path_key.clone(), state);
+            addon_hash_timings.push((path_key, walk_elapsed, "persistent_cache"));
             continue;
         }
 
-        if unresolved_seen_path_keys.insert(path_key.clone()) {
-            unresolved_addon_hash_work.push(AddonHashWork {
-                path_key,
-                local_path: m.local_path.clone(),
-                fingerprint,
-            });
-        }
+        unresolved_addon_hash_work.push(AddonHashWork {
+            path_key,
+            local_path,
+            fingerprint,
+        });
     }
 
     let addon_hash_concurrency = std::thread::available_parallelism()
@@ -269,7 +249,8 @@ pub(super) async fn resolve_addon_hashes(
                 let started = Instant::now();
                 let state = match tokio::task::spawn_blocking({
                     let local_path = work.local_path.clone();
-                    move || probe_addon_folder_state(&local_path)
+                    let fingerprint = work.fingerprint.clone();
+                    move || probe_addon_folder_state_with_fingerprint(&local_path, &fingerprint)
                 })
                 .await
                 {
@@ -298,60 +279,31 @@ pub(super) async fn resolve_addon_hashes(
                 addon_hash_timings.push((work.path_key.clone(), elapsed, "computed"));
                 local_addon_state_cache.insert(work.path_key.clone(), state.clone());
                 if let Some(shared) = shared_cache {
-                    match shared.lock() {
-                        Ok(mut guard) => {
-                            guard
-                                .addon_state_by_path
-                                .insert(work.path_key.clone(), state.clone());
-                            let updated_entry = PersistentAddonHashEntry {
-                                fingerprint: work.fingerprint.clone(),
-                                content_hash: state.content_hash.clone(),
-                                updated_unix_ms: now_unix_ms(),
-                            };
-                            let changed = guard
-                                .persistent_addon_hash_by_path
-                                .get(&work.path_key)
-                                .map(|existing| {
-                                    !persistent_addon_fingerprint_is_current(
-                                        &existing.fingerprint,
-                                        &updated_entry.fingerprint,
-                                    ) || existing.content_hash != updated_entry.content_hash
-                                })
-                                .unwrap_or(true);
-                            if changed {
-                                guard
-                                    .persistent_addon_hash_by_path
-                                    .insert(work.path_key.clone(), updated_entry);
-                                guard.persistent_dirty = true;
-                            }
-                        }
-                        Err(poisoned) => {
-                            let mut guard = poisoned.into_inner();
-                            guard
-                                .addon_state_by_path
-                                .insert(work.path_key.clone(), state.clone());
-                            let updated_entry = PersistentAddonHashEntry {
-                                fingerprint: work.fingerprint.clone(),
-                                content_hash: state.content_hash.clone(),
-                                updated_unix_ms: now_unix_ms(),
-                            };
-                            let changed = guard
-                                .persistent_addon_hash_by_path
-                                .get(&work.path_key)
-                                .map(|existing| {
-                                    !persistent_addon_fingerprint_is_current(
-                                        &existing.fingerprint,
-                                        &updated_entry.fingerprint,
-                                    ) || existing.content_hash != updated_entry.content_hash
-                                })
-                                .unwrap_or(true);
-                            if changed {
-                                guard
-                                    .persistent_addon_hash_by_path
-                                    .insert(work.path_key.clone(), updated_entry);
-                                guard.persistent_dirty = true;
-                            }
-                        }
+                    let mut guard = lock_shared(shared);
+                    guard
+                        .addon_state_by_path
+                        .insert(work.path_key.clone(), state.clone());
+                    let updated_entry = PersistentAddonHashEntry {
+                        fingerprint: work.fingerprint.clone(),
+                        content_hash: state.content_hash.clone(),
+                        updated_unix_ms: now_unix_ms(),
+                        last_seen_unix_ms: now_unix_ms(),
+                    };
+                    let changed = guard
+                        .persistent_addon_hash_by_path
+                        .get(&work.path_key)
+                        .map(|existing| {
+                            !persistent_addon_fingerprint_is_current(
+                                &existing.fingerprint,
+                                &updated_entry.fingerprint,
+                            ) || existing.content_hash != updated_entry.content_hash
+                        })
+                        .unwrap_or(true);
+                    if changed {
+                        guard
+                            .persistent_addon_hash_by_path
+                            .insert(work.path_key.clone(), updated_entry);
+                        guard.persistent_dirty = true;
                     }
                 }
             }
@@ -484,6 +436,7 @@ mod tests {
                 fingerprint,
                 content_hash: "STALE_CACHE_HASH".to_string(),
                 updated_unix_ms: now_unix_ms(),
+                last_seen_unix_ms: 0,
             },
         );
         let shared = Arc::new(Mutex::new(shared));

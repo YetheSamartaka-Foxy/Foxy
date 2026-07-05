@@ -4,7 +4,7 @@ use std::time::Duration;
 use eframe::egui::{self, Visuals};
 use log::info;
 
-use crate::core::api::{self, QuickScanResult};
+use crate::core::api::{self, QuickScanProgressEvent, QuickScanResult};
 use crate::ui::app::{
     AddonBackupTaskResult, AddonDeleteResult, AddonHashRecalcResult, AddonInventoryViewCache,
     CachedUpdateLoadResult, Foxy, ImageLoadResult, JoinPreflightQueryResult, ListGalleyCache,
@@ -157,11 +157,14 @@ impl Foxy {
         let (cached_update_load_result_tx, cached_update_load_result_rx) =
             std::sync::mpsc::channel::<CachedUpdateLoadResult>();
         let (quick_scan_tx, quick_scan_rx) = std::sync::mpsc::channel::<QuickScanResult>();
+        let (quick_scan_progress_tx, quick_scan_progress_rx) =
+            std::sync::mpsc::channel::<QuickScanProgressEvent>();
         let (fs_watch_tx, fs_watch_rx) = std::sync::mpsc::channel::<api::FsChangeEvent>();
         let fs_watch_suppressed_until_ms =
             std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let (repository_db_wipe_tx, repository_db_wipe_rx) =
             std::sync::mpsc::channel::<RepositoryDbWipeResult>();
+        let (database_wipe_tx, database_wipe_rx) = std::sync::mpsc::channel::<Result<(), String>>();
         let (addon_backup_task_tx, addon_backup_task_rx) =
             std::sync::mpsc::channel::<AddonBackupTaskResult>();
         let (repository_settings_addon_preload_tx, repository_settings_addon_preload_rx) =
@@ -308,6 +311,8 @@ impl Foxy {
             pending_cached_update_loads: HashSet::new(),
             quick_scan_rx,
             quick_scan_tx,
+            quick_scan_progress_rx,
+            quick_scan_progress_tx,
             quick_scan_worker: None,
             startup_quick_scan_filter_rx: None,
             startup_quick_scan_filter_worker: None,
@@ -321,12 +326,15 @@ impl Foxy {
             pending_quick_scan_force_fresh_addon_hash_urls: HashSet::new(),
             quick_scan_pending: HashSet::new(),
             active_quick_scan_instance_keys: HashSet::new(),
+            quick_scan_progress_by_instance: HashMap::new(),
             repo_db_reset_pending_recheck: HashSet::new(),
             pending_repository_db_wipes: HashSet::new(),
             pending_repository_force_redownloads: HashSet::new(),
             pending_repository_db_wipe_started_at: HashMap::new(),
             repository_db_wipe_rx,
             repository_db_wipe_tx,
+            database_wipe_rx,
+            database_wipe_tx,
             addon_backup_task_rx,
             addon_backup_task_tx,
             addon_backup_worker: None,

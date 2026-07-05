@@ -6,7 +6,7 @@ use crate::core::models::modification_file_part::{self, FoxyModFilePart};
 use crate::core::models::repository::{
     self, FoxyRepository, normalize_repository_local_path_identity,
 };
-use crate::core::tasks::init_database::SQLITE_MAX_VARIABLES;
+use crate::core::tasks::init_database::read_chunk_ids;
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -113,7 +113,7 @@ impl Tree {
         file_id_filter: Option<&HashSet<u64>>,
         include_all_repo_mods: bool,
     ) -> Result<Self> {
-        let chunk_size = SQLITE_MAX_VARIABLES.saturating_sub(10).max(1);
+        let chunk_size = read_chunk_ids();
         let target_local_path = context.target_local_path.clone();
         // Own the borrowed inputs so the read-transaction closure's future is not
         // tied to the caller's lifetimes (the seam's `for<'a>` bound rejects that).

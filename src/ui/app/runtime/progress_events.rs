@@ -161,6 +161,27 @@ impl Foxy {
         }
     }
 
+    /// Drain completed global database wipe results.
+    pub(in crate::ui::app) fn poll_database_wipe_result(&mut self) {
+        loop {
+            match self.database_wipe_rx.try_recv() {
+                Ok(Ok(())) => {
+                    self.show_success_toast(self.t("Database wiped successfully"));
+                    self.needs_repaint = true;
+                }
+                Ok(Err(err)) => {
+                    self.show_error_toast(self.t("Failed to wipe database") + &format!(": {err}"));
+                    self.needs_repaint = true;
+                }
+                Err(StdTryRecvError::Empty) => break,
+                Err(StdTryRecvError::Disconnected) => {
+                    warn!("Database wipe result channel disconnected");
+                    break;
+                }
+            }
+        }
+    }
+
     pub(in crate::ui::app) fn poll_addon_delete_results(&mut self) {
         loop {
             match self.addon_delete_result_rx.try_recv() {
@@ -1104,7 +1125,7 @@ impl Foxy {
         }
     }
 
-    fn stage_label_uses_hash_counter(label: &str) -> bool {
+    pub(in crate::ui::app) fn stage_label_uses_hash_counter(label: &str) -> bool {
         // Only actual hashing stages should keep the hash counter visible.
         // Persistence stages ("Saving parts X/Y", "Updating files X/Y", etc.)
         // carry their own progress in the label and should clear the counter.

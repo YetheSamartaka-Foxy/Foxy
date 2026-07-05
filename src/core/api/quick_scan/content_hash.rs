@@ -2,8 +2,10 @@ use super::super::fs_watcher::normalize_path_for_match;
 use super::super::logging::CONTENT_HASH_PERSIST_LOG_INTERVAL;
 use super::super::*;
 use crate::core::db::{DbValue, FoxyDb};
+use crate::core::tasks::init_database::bulk_write_rows_for;
 use crate::core::utils::format::sanitize_log_path_str;
 
+// Do not include creation time: it changes on copies/restores while content does not.
 pub(super) fn calculate_fast_file_content_hash(path: &str) -> Result<String, std::io::Error> {
     const SAMPLE_CHUNK_BYTES: usize = 16 * 1024;
     const SAMPLE_SLOTS: u64 = 8;
@@ -16,16 +18,10 @@ pub(super) fn calculate_fast_file_content_hash(path: &str) -> Result<String, std
         .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|duration| duration.as_nanos())
         .unwrap_or(0);
-    let created_ns = metadata
-        .created()
-        .ok()
-        .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
     let mut hasher = blake3::Hasher::new();
+    hasher.update(b"FOXY_FILE_CONTENT_HASH_V2");
     hasher.update(&file_len.to_le_bytes());
     hasher.update(&modified_ns.to_le_bytes());
-    hasher.update(&created_ns.to_le_bytes());
 
     if file_len == 0 {
         return Ok(crate::core::utils::content_hash::blake3_hex(hasher));
@@ -89,14 +85,8 @@ fn calculate_compound_content_hash(ordered_hashes: &[(i64, String)]) -> String {
     crate::core::utils::content_hash::blake3_hex(hasher)
 }
 
-fn sqlite_upsert_batch_size(columns_per_row: usize) -> usize {
-    (SQLITE_MAX_VARIABLES / columns_per_row)
-        .saturating_sub(1)
-        .max(1)
-}
-
 async fn persist_file_content_hashes(db: &FoxyDb, repo_url: &str, file_updates: &[FoxyModFile]) {
-    let batch_size = sqlite_upsert_batch_size(9);
+    let batch_size = bulk_write_rows_for(9);
     for (chunk_index, chunk) in file_updates
         .chunks(CONTENT_HASH_PERSIST_LOG_INTERVAL)
         .enumerate()
@@ -110,7 +100,7 @@ async fn persist_file_content_hashes(db: &FoxyDb, repo_url: &str, file_updates: 
                         let placeholders =
                             vec!["(?, ?, ?, ?, ?, ?, ?, ?, ?)"; batch.len()].join(", ");
                         let sql = format!(
-                            "INSERT INTO files (id, name, remote_path, local_path, local_checksum, remote_checksum, local_content_hash, length, data_order) VALUES {placeholders} ON CONFLICT(id) DO UPDATE SET local_content_hash = excluded.local_content_hash"
+                            "INSERT INTO files (id, name, remote_path, local_path, local_checksum, remote_checksum, local_content_hash, length, data_order) VALUES {placeholders} ON CONFLICT(id) DO UPDATE SET local_content_hash = excluded.local_content_hash WHERE files.local_content_hash IS NOT excluded.local_content_hash"
                         );
                         let mut values: Vec<DbValue> = Vec::with_capacity(batch.len() * 9);
                         for f in batch {
@@ -147,7 +137,7 @@ pub(super) async fn persist_mod_content_hashes(
     repo_url: &str,
     mod_updates: &[FoxyMod],
 ) {
-    let batch_size = sqlite_upsert_batch_size(10);
+    let batch_size = bulk_write_rows_for(12);
     for (chunk_index, chunk) in mod_updates
         .chunks(CONTENT_HASH_PERSIST_LOG_INTERVAL)
         .enumerate()
@@ -161,7 +151,7 @@ pub(super) async fn persist_mod_content_hashes(
                         let placeholders =
                             vec!["(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"; batch.len()].join(", ");
                         let sql = format!(
-                            "INSERT INTO addons (id, name, display_name, remote_path, local_path, client_side, enabled, local_checksum, remote_checksum, local_content_hash, required, data_order) VALUES {placeholders} ON CONFLICT(id) DO UPDATE SET local_checksum = excluded.local_checksum, local_content_hash = excluded.local_content_hash"
+                            "INSERT INTO addons (id, name, display_name, remote_path, local_path, client_side, enabled, local_checksum, remote_checksum, local_content_hash, required, data_order) VALUES {placeholders} ON CONFLICT(id) DO UPDATE SET local_checksum = excluded.local_checksum, local_content_hash = excluded.local_content_hash WHERE addons.local_checksum IS NOT excluded.local_checksum OR addons.local_content_hash IS NOT excluded.local_content_hash"
                         );
                         let mut values: Vec<DbValue> = Vec::with_capacity(batch.len() * 12);
                         for m in batch {
@@ -197,7 +187,7 @@ pub(super) async fn persist_mod_content_hashes(
 }
 
 async fn persist_repo_content_hashes(db: &FoxyDb, repo_url: &str, repo_updates: &[FoxyRepository]) {
-    let batch_size = sqlite_upsert_batch_size(8);
+    let batch_size = bulk_write_rows_for(9);
     for (chunk_index, chunk) in repo_updates
         .chunks(CONTENT_HASH_PERSIST_LOG_INTERVAL)
         .enumerate()
@@ -211,7 +201,7 @@ async fn persist_repo_content_hashes(db: &FoxyDb, repo_url: &str, repo_updates: 
                         let placeholders =
                             vec!["(?, ?, ?, ?, ?, ?, ?, ?, ?)"; batch.len()].join(", ");
                         let sql = format!(
-                            "INSERT INTO repositories (id, name, remote_url, local_path, image, local_checksum, remote_checksum, local_content_hash, foxy_mode) VALUES {placeholders} ON CONFLICT(id) DO UPDATE SET local_content_hash = excluded.local_content_hash"
+                            "INSERT INTO repositories (id, name, remote_url, local_path, image, local_checksum, remote_checksum, local_content_hash, foxy_mode) VALUES {placeholders} ON CONFLICT(id) DO UPDATE SET local_content_hash = excluded.local_content_hash WHERE repositories.local_content_hash IS NOT excluded.local_content_hash"
                         );
                         let mut values: Vec<DbValue> = Vec::with_capacity(batch.len() * 9);
                         for r in batch {
@@ -328,7 +318,30 @@ async fn refresh_content_hashes_for_tree_started(
         .saturating_mul(9)
         .div_ceil(10)
         .max(1);
-    let file_concurrency = (cpu_budget.saturating_mul(6)).clamp(16, 256);
+    let probe_path = tree
+        .files
+        .iter()
+        .map(|file| file.local_path.trim())
+        .find(|path| !path.is_empty())
+        .or_else(|| {
+            tree.repositories
+                .iter()
+                .map(|repo| repo.local_path.trim())
+                .find(|path| !path.is_empty())
+        })
+        .unwrap_or_default();
+    let storage_class =
+        crate::core::tasks::calculate_hashes::detect_storage_class_for_path(probe_path);
+    let storage_is_rotational = matches!(
+        storage_class,
+        crate::core::tasks::calculate_hashes::HashStorageClass::Hdd
+            | crate::core::tasks::calculate_hashes::HashStorageClass::Removable
+    );
+    let file_concurrency = if storage_is_rotational {
+        4
+    } else {
+        (cpu_budget.saturating_mul(6)).clamp(16, 256)
+    };
     let semaphore = Arc::new(Semaphore::new(file_concurrency));
     let mut join_set: JoinSet<(u64, String)> = JoinSet::new();
 
@@ -373,7 +386,7 @@ async fn refresh_content_hashes_for_tree_started(
     let file_hash_elapsed = file_hash_started.elapsed();
 
     let mut files_with_content_hash = 0usize;
-    let mut file_updates: Vec<FoxyModFile> = Vec::with_capacity(tree.files.len());
+    let mut file_updates: Vec<FoxyModFile> = Vec::new();
     for file in &tree.files {
         let mut updated = file.clone();
         if file_ids_with_tree_mismatch.contains(&file.id) {
@@ -389,7 +402,9 @@ async fn refresh_content_hashes_for_tree_started(
             }
             updated.local_content_hash = hash;
         }
-        file_updates.push(updated);
+        if updated.local_content_hash != file.local_content_hash {
+            file_updates.push(updated);
+        }
     }
     let file_persist_started = Instant::now();
     persist_file_content_hashes(&db, repo_url, &file_updates).await;
@@ -397,10 +412,78 @@ async fn refresh_content_hashes_for_tree_started(
 
     let addon_hash_started = Instant::now();
     let mut addon_content_hash_by_idx: HashMap<usize, String> = HashMap::new();
-    let mut addon_hash_by_path: HashMap<String, String> = HashMap::new();
     let mut addons_with_content_hash = 0usize;
     let mut addon_hash_failures = 0usize;
     let mut addons_with_missing_expected_files = 0usize;
+
+    let mut addon_paths_to_hash: HashMap<String, String> = HashMap::new();
+    for addon_node in &tree.mod_nodes {
+        let Some(addon) = tree.mods.get(addon_node.mod_idx) else {
+            continue;
+        };
+        if addon_indices_with_tree_mismatch.contains(&addon_node.mod_idx) {
+            continue;
+        }
+        let addon_path = addon.local_path.trim().to_string();
+        if addon_path.is_empty() {
+            continue;
+        }
+        addon_paths_to_hash
+            .entry(normalize_path_for_match(&addon_path))
+            .or_insert(addon_path);
+    }
+    let addon_concurrency = if storage_is_rotational {
+        2
+    } else {
+        cpu_budget.clamp(2, 16)
+    };
+    let addon_semaphore = Arc::new(Semaphore::new(addon_concurrency));
+    let mut addon_join_set: JoinSet<(String, Option<String>)> = JoinSet::new();
+    for (path_key, addon_path) in addon_paths_to_hash {
+        let sem = addon_semaphore.clone();
+        addon_join_set.spawn(async move {
+            let _permit = sem.acquire_owned().await.ok();
+            let addon_path_for_task = addon_path.clone();
+            let hash = match tokio::task::spawn_blocking(move || {
+                calculate_fast_addon_folder_content_hash(&addon_path_for_task)
+            })
+            .await
+            {
+                Ok(Ok(h)) => Some(h),
+                Ok(Err(err)) => {
+                    debug!(
+                        "Content hash calculation failed for {}: {}",
+                        addon_path, err
+                    );
+                    None
+                }
+                Err(err) => {
+                    warn!(
+                        "Content hash task panicked for {}: {}",
+                        sanitize_log_path_str(&addon_path),
+                        err
+                    );
+                    None
+                }
+            };
+            (path_key, hash)
+        });
+    }
+    let mut addon_hash_by_path: HashMap<String, String> = HashMap::new();
+    while let Some(result) = addon_join_set.join_next().await {
+        match result {
+            Ok((path_key, hash)) => {
+                if hash.is_none() {
+                    addon_hash_failures += 1;
+                }
+                addon_hash_by_path.insert(path_key, hash.unwrap_or_default());
+            }
+            Err(_) => {
+                addon_hash_failures += 1;
+            }
+        }
+    }
+
     for addon_node in &tree.mod_nodes {
         let Some(addon) = tree.mods.get(addon_node.mod_idx) else {
             continue;
@@ -416,38 +499,10 @@ async fn refresh_content_hashes_for_tree_started(
         }
 
         let path_key = normalize_path_for_match(&addon_path);
-        let addon_content_hash = if let Some(existing) = addon_hash_by_path.get(&path_key).cloned()
-        {
-            existing
-        } else {
-            let addon_path_for_task = addon_path.clone();
-            let hash = match tokio::task::spawn_blocking(move || {
-                calculate_fast_addon_folder_content_hash(&addon_path_for_task)
-            })
-            .await
-            {
-                Ok(Ok(h)) => h,
-                Ok(Err(err)) => {
-                    debug!(
-                        "Content hash calculation failed for {}: {}",
-                        addon_path, err
-                    );
-                    addon_hash_failures += 1;
-                    String::new()
-                }
-                Err(err) => {
-                    warn!(
-                        "Content hash task panicked for {}: {}",
-                        sanitize_log_path_str(&addon_path),
-                        err
-                    );
-                    addon_hash_failures += 1;
-                    String::new()
-                }
-            };
-            addon_hash_by_path.insert(path_key, hash.clone());
-            hash
-        };
+        let addon_content_hash = addon_hash_by_path
+            .get(&path_key)
+            .cloned()
+            .unwrap_or_default();
 
         // A folder content hash computed over a folder that is *missing* manifest
         // files still matches a baseline recorded from the same incomplete state,
@@ -491,12 +546,15 @@ async fn refresh_content_hashes_for_tree_started(
         );
     }
 
-    let mut mod_updates: Vec<FoxyMod> = Vec::with_capacity(tree.mods.len());
+    let mut mod_updates: Vec<FoxyMod> = Vec::new();
     for (addon_idx, addon) in tree.mods.iter().enumerate() {
         let hash = addon_content_hash_by_idx
             .get(&addon_idx)
             .cloned()
             .unwrap_or_default();
+        if hash == addon.local_content_hash {
+            continue;
+        }
         let mut updated = addon.clone();
         updated.local_content_hash = hash;
         mod_updates.push(updated);
@@ -534,6 +592,9 @@ async fn refresh_content_hashes_for_tree_started(
             };
             if !repo_content_hash.is_empty() {
                 repos_with_content_hash += 1;
+            }
+            if repo_content_hash == repo.local_content_hash {
+                continue;
             }
             let mut updated = repo.clone();
             updated.local_content_hash = repo_content_hash;

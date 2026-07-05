@@ -84,7 +84,7 @@ pub(super) async fn compute_file_diffs(
     shared_cache: Option<&Arc<Mutex<QuickScanSharedCache>>>,
 ) -> Option<DiffComputeResult> {
     let db = context.db();
-    let chunk_size = SQLITE_MAX_VARIABLES.saturating_sub(10).max(1);
+    let chunk_size = read_chunk_ids();
 
     // Determine which mods need file metadata
     let mut mods_requiring_file_metadata: HashSet<i64> = HashSet::new();

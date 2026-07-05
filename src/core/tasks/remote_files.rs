@@ -5,7 +5,7 @@ use crate::core::models::modification_file::{FILE_COLUMNS, FoxyModFile};
 use crate::core::models::recheck_level::RecheckLevel;
 use crate::core::models::repository::FoxyRepository;
 use crate::core::tasks::init_database::{
-    DB_WRITE_PERMITS, SQLITE_MAX_VARIABLES, sqlite_perf_snapshot,
+    DB_WRITE_PERMITS, SQLITE_MAX_VARIABLES, read_chunk_ids, sqlite_perf_snapshot,
 };
 use crate::core::tasks::remote_file_parts::{
     FilePartData, FilePartsPayload, remote_file_parts_batch,
@@ -151,7 +151,7 @@ async fn load_file_remote_graph_states(
 
     let mut ids: Vec<i64> = file_ids.iter().copied().collect();
     ids.sort_unstable();
-    let chunk_size = SQLITE_MAX_VARIABLES.saturating_sub(10).max(1);
+    let chunk_size = read_chunk_ids();
     let mut idx = 0usize;
     while idx < ids.len() {
         let end = (idx + chunk_size).min(ids.len());
@@ -201,7 +201,7 @@ async fn load_file_remote_graph_states(
 /// bind limit). Returns every matching [`FoxyModFile`]; callers filter by identity.
 async fn load_files_by_remote_paths(db: &FoxyDb, remote_paths: &[String]) -> Vec<FoxyModFile> {
     let mut out = Vec::new();
-    let chunk_size = SQLITE_MAX_VARIABLES.saturating_sub(10).max(1);
+    let chunk_size = read_chunk_ids();
     let mut idx = 0usize;
     while idx < remote_paths.len() {
         let end = (idx + chunk_size).min(remote_paths.len());
@@ -250,7 +250,7 @@ async fn reconcile_addon_file_links(
     // to survive heavy DB lock contention during first-run metadata rebuilds.
     if !desired_file_ids.is_empty() {
         let link_ids: Vec<i64> = desired_file_ids.iter().copied().collect();
-        let insert_chunk_size = (SQLITE_MAX_VARIABLES / 2).saturating_sub(1).max(1);
+        let insert_chunk_size = crate::core::tasks::init_database::bulk_write_rows_for(2);
         for chunk in link_ids.chunks(insert_chunk_size) {
             let placeholders = vec!["(?, ?)"; chunk.len()].join(", ");
             let sql = format!(
@@ -501,8 +501,7 @@ pub(crate) async fn remote_files_transaction(
             );
         }
 
-        // 8 bound columns per row; chunk to stay under the SQLite bind limit.
-        let file_chunk_size = (SQLITE_MAX_VARIABLES / 8).max(1);
+        let file_chunk_size = crate::core::tasks::init_database::bulk_write_rows_for(8);
         let mut chunk_idx = 0;
         while chunk_idx < file_keys_with_json.len() {
             let chunk_end = usize::min(chunk_idx + file_chunk_size, file_keys_with_json.len());
@@ -1005,9 +1004,11 @@ mod tests {
     // ── reconcile chunking ─────────────────────────────────────────────
 
     #[test]
-    fn reconcile_addon_file_insert_chunk_size_is_498() {
-        // 2 bound columns per row for addon_files (addon_id, file_id)
-        let chunk_size = (SQLITE_MAX_VARIABLES / 2).saturating_sub(1).max(1);
-        assert_eq!(chunk_size, 498);
+    fn reconcile_addon_file_insert_uses_tuned_write_chunk() {
+        let chunk_size = crate::core::tasks::init_database::bulk_write_rows_for(2);
+        assert_eq!(
+            chunk_size,
+            crate::core::tasks::init_database::bulk_write_chunk_rows()
+        );
     }
 }

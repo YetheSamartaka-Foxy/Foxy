@@ -54,7 +54,7 @@ pub(super) struct HashSchedulerLimits {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum HashStorageClass {
+pub(crate) enum HashStorageClass {
     Hdd,
     Ssd,
     Removable,
@@ -330,6 +330,14 @@ fn detect_hash_storage_class(jobs: &[FileHashJob]) -> HashStorageClass {
     else {
         return HashStorageClass::Unknown;
     };
+    detect_storage_class_for_path(path)
+}
+
+pub(crate) fn detect_storage_class_for_path(path: &str) -> HashStorageClass {
+    let path = path.trim();
+    if path.is_empty() {
+        return HashStorageClass::Unknown;
+    }
     let path = Path::new(path);
     let disks = Disks::new_with_refreshed_list();
     disks

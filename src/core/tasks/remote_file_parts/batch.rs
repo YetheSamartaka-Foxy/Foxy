@@ -40,15 +40,7 @@ struct DownloadTargetRow {
 
 fn file_part_upsert_chunk_size() -> usize {
     // Turso writes are fastest in small multi-row statements (see
-    // `bulk_write_chunk_rows`). Cap by the bind-variable ceiling for safety, but
-    // the tuned ~256-row default is far below it.
-    crate::core::tasks::init_database::bulk_write_chunk_rows()
-        .min(
-            (crate::core::tasks::init_database::sqlite_variable_limit()
-                / FILE_PART_UPSERT_PARAMS_PER_ROW)
-                .saturating_sub(1),
-        )
-        .max(1)
+    crate::core::tasks::init_database::bulk_write_rows_for(FILE_PART_UPSERT_PARAMS_PER_ROW)
 }
 
 /// Build the bulk subfile upsert SQL for `rows` rows. The local_* columns use
@@ -89,13 +81,9 @@ fn file_part_upsert_values(chunk: &[PartUpsertRow]) -> Vec<DbValue> {
 }
 
 fn file_part_insert_with_local_chunk_size() -> usize {
-    crate::core::tasks::init_database::bulk_write_chunk_rows()
-        .min(
-            (crate::core::tasks::init_database::sqlite_variable_limit()
-                / FILE_PART_INSERT_WITH_LOCAL_PARAMS_PER_ROW)
-                .saturating_sub(1),
-        )
-        .max(1)
+    crate::core::tasks::init_database::bulk_write_rows_for(
+        FILE_PART_INSERT_WITH_LOCAL_PARAMS_PER_ROW,
+    )
 }
 
 fn file_part_insert_with_local_sql(rows: usize, fresh: bool) -> String {
@@ -139,10 +127,9 @@ fn file_part_insert_with_local_ref_values(chunk: &[&FoxyModFilePart]) -> Vec<DbV
 }
 
 fn download_file_target_upsert_chunk_size() -> usize {
-    (crate::core::tasks::init_database::sqlite_variable_limit()
-        / DOWNLOAD_FILE_TARGET_UPSERT_PARAMS_PER_ROW)
-        .saturating_sub(1)
-        .max(1)
+    crate::core::tasks::init_database::bulk_write_rows_for(
+        DOWNLOAD_FILE_TARGET_UPSERT_PARAMS_PER_ROW,
+    )
 }
 
 fn download_file_target_upsert_sql(rows: usize) -> String {
@@ -178,9 +165,7 @@ async fn load_parts_by_file_ids(
     file_ids: &[i64],
 ) -> Result<HashMap<(i64, String), FoxyModFilePart>, DbErr> {
     let mut map = HashMap::new();
-    let chunk_size = crate::core::tasks::init_database::SQLITE_MAX_VARIABLES
-        .saturating_sub(4)
-        .max(1);
+    let chunk_size = crate::core::tasks::init_database::read_chunk_ids();
     for ids in file_ids.chunks(chunk_size) {
         let placeholders = vec!["?"; ids.len()].join(", ");
         let sql =
@@ -996,8 +981,15 @@ mod tests {
     }
 
     #[test]
-    fn download_target_raw_sql_uses_bulk_variable_limit() {
-        assert_eq!(download_file_target_upsert_chunk_size(), 8_190);
+    fn download_target_upsert_uses_tuned_small_chunk() {
+        assert_eq!(
+            download_file_target_upsert_chunk_size(),
+            crate::core::tasks::init_database::bulk_write_chunk_rows()
+        );
+        assert!(
+            download_file_target_upsert_chunk_size() * DOWNLOAD_FILE_TARGET_UPSERT_PARAMS_PER_ROW
+                < 32_766
+        );
     }
 
     #[test]

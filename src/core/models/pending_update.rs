@@ -34,7 +34,8 @@ async fn upsert_payload(
     local_path: &str,
     payload: &str,
 ) -> Result<(), DbErr> {
-    db.execute(
+    db.execute_retry(
+        "upsert pending update",
         "INSERT INTO pending_updates (repository_url, local_path, diff_json, updated_at) \
          VALUES (?, ?, ?, ?) \
          ON CONFLICT (repository_url, local_path) DO UPDATE SET \
@@ -46,7 +47,8 @@ async fn upsert_payload(
 }
 
 async fn delete_payload(db: &FoxyDb, repository_url: &str, local_path: &str) -> Result<(), DbErr> {
-    db.execute(
+    db.execute_retry(
+        "delete pending update",
         "DELETE FROM pending_updates WHERE repository_url = ? AND local_path = ?",
         params![repository_url, local_path],
     )

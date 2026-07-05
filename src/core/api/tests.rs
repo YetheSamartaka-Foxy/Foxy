@@ -764,7 +764,7 @@ async fn eligible_joined_full_tree_ready() {
         Some(false)
     );
 
-    // Restore addon remote_checksum, clear file local_content_hash → still ineligible
+    // Startup eligibility now trusts complete repo/addon rollups.
     fdb.execute(
         "UPDATE addons SET remote_checksum = 'MOD_REMOTE' WHERE id = 1",
         params![],
@@ -780,12 +780,25 @@ async fn eligible_joined_full_tree_ready() {
 
     assert!(!launch_quick_scan_repo_eligible_joined(&fdb, 1, repo_url).await);
     assert_eq!(
-        launch_quick_scan_repo_startup_eligibility(context, repo_url).await,
-        StartupQuickScanEligibility::NeedsBootstrap
+        launch_quick_scan_repo_startup_eligibility(context.clone(), repo_url).await,
+        StartupQuickScanEligibility::Prevalidated
     );
     assert_eq!(
         content_hash_baseline_ready_joined(&fdb, 1, "test").await,
         Some(false)
+    );
+
+    // Clearing the addon-level rollup breaks the fast path.
+    fdb.execute(
+        "UPDATE addons SET local_content_hash = '' WHERE id = 1",
+        params![],
+    )
+    .await
+    .expect("clear addon content hash");
+
+    assert_eq!(
+        launch_quick_scan_repo_startup_eligibility(context, repo_url).await,
+        StartupQuickScanEligibility::NeedsBootstrap
     );
 }
 

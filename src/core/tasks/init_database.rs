@@ -21,6 +21,7 @@ use tokio::sync::Semaphore;
 use crate::core::utils::app_paths;
 use crate::core::utils::format::sanitize_log_path;
 
+/// Legacy SQLite-era bind budget for SQL shapes that do not use tuned chunk helpers.
 pub(crate) const SQLITE_MAX_VARIABLES: usize = 999;
 /// Raw SQL bulk operations (not a query builder) can use a higher bind-variable
 /// ceiling. Turso accepts far more (≥250k, plan.md §11); the historical SQLite
@@ -236,15 +237,10 @@ pub(crate) fn sqlite_perf_snapshot() -> SqlitePerfSnapshot {
 
 /// Whether a DB error message is a transient lock/conflict that should be
 /// retried by the hand-rolled retry loops (bulk part-hash persist, etc.).
-/// Matches SQLite's `"database is locked"` and Turso's transient busy/conflict
-/// variants (`db_turso::db_is_retryable`'s strings).
+/// Delegates to the single classifier in `db_turso` so the retryable set
+/// cannot drift between the seam, the bulk loops, and the typed fallback.
 pub(crate) fn sqlite_is_locked_error(message: &str) -> bool {
-    let m = message.to_ascii_lowercase();
-    m.contains("database is locked")
-        || m.contains("conflict")
-        || m.contains("busy")
-        || m.contains("no transaction is active")
-        || m.contains("locked")
+    crate::core::tasks::db_turso::db_error_message_is_retryable(message)
 }
 
 pub(crate) fn sqlite_lock_backoff(attempt: usize) -> Duration {
@@ -402,6 +398,11 @@ pub(crate) fn sqlite_variable_limit() -> usize {
         .unwrap_or(SQLITE_BULK_VARIABLE_LIMIT)
 }
 
+/// Chunk size for read-side IN-list queries.
+pub(crate) fn read_chunk_ids() -> usize {
+    sqlite_variable_limit().saturating_sub(10).max(1)
+}
+
 /// Rows per multi-row bulk write statement (`INSERT … VALUES` /
 /// `UPDATE … FROM (VALUES …)`).
 ///
@@ -420,13 +421,30 @@ pub(crate) fn bulk_write_chunk_rows() -> usize {
         .clamp(16, SQLITE_BULK_VARIABLE_LIMIT)
 }
 
+/// Rows per multi-row bulk write statement for a row shape with `params_per_row` binds.
+pub(crate) fn bulk_write_rows_for(params_per_row: usize) -> usize {
+    bulk_write_chunk_rows()
+        .min(
+            (sqlite_variable_limit() / params_per_row.max(1))
+                .saturating_sub(1)
+                .max(1),
+        )
+        .max(1)
+}
+
 /// Process-wide database handle. Builds/bootstraps the Turso engine via
 /// [`crate::core::tasks::db_turso`] and runs the post-init addon-display-name
 /// backfill exactly once (plan.md §5.1).
 pub(crate) async fn init_database() -> crate::core::db::DbHandle {
     static BACKFILLED: OnceCell<()> = OnceCell::const_new();
+    static CONTENT_HASH_FORMAT_CHECKED: OnceCell<()> = OnceCell::const_new();
 
     let db = crate::core::tasks::db_turso::init_turso_database().await;
+    CONTENT_HASH_FORMAT_CHECKED
+        .get_or_init(|| async {
+            retire_stale_content_hash_baselines(&db).await;
+        })
+        .await;
     BACKFILLED
         .get_or_init(|| async {
             let backfill_db = crate::core::db::FoxyDb::from_turso(db.clone());
@@ -434,6 +452,52 @@ pub(crate) async fn init_database() -> crate::core::db::DbHandle {
         })
         .await;
     db
+}
+
+/// Blank stale content-hash baselines so scans lazily rebuild them in the current format.
+async fn retire_stale_content_hash_baselines(db: &crate::core::db::DbHandle) {
+    use crate::core::tasks::db_schema_version;
+
+    if !db_schema_version::content_hash_baselines_need_retire() {
+        return;
+    }
+
+    let foxy_db = crate::core::db::FoxyDb::from_turso(db.clone());
+    let started = Instant::now();
+    let mut total_rows = 0u64;
+    for (label, sql) in [
+        (
+            "retire file content-hash baselines",
+            "UPDATE files SET local_content_hash = '' WHERE local_content_hash != ''",
+        ),
+        (
+            "retire addon content-hash baselines",
+            "UPDATE addons SET local_content_hash = '' WHERE local_content_hash != ''",
+        ),
+        (
+            "retire repository content-hash baselines",
+            "UPDATE repositories SET local_content_hash = '' WHERE local_content_hash != ''",
+        ),
+    ] {
+        match foxy_db.execute_retry(label, sql, vec![]).await {
+            Ok(rows) => total_rows += rows,
+            Err(err) => {
+                log::warn!(
+                    "Failed to {} for content-hash format upgrade (will retry next launch): {}",
+                    label,
+                    err
+                );
+                return;
+            }
+        }
+    }
+    db_schema_version::mark_content_hash_format_current();
+    info!(
+        "Retired {} stale content-hash baselines for format {} in {:.2?}; repos will re-baseline lazily via RefreshContentBaseline",
+        total_rows,
+        db_schema_version::CONTENT_HASH_FORMAT,
+        started.elapsed()
+    );
 }
 
 pub fn wipe_database_sync() {
@@ -460,15 +524,38 @@ pub fn check_and_wipe_database() {
 
     info!("Wipe marker found, deleting database files...");
 
-    let db_path = base_dir.join("database.db");
-    let wal_path = base_dir.join("database.db-wal");
-    let shm_path = base_dir.join("database.db-shm");
-
-    for path in [&db_path, &wal_path, &shm_path] {
+    let db_artifacts = [
+        "database.db",
+        "database.db-wal",
+        "database.db-shm",
+        "database.db.compacting",
+        "database.db.compacting-wal",
+        "database.db.compacting-shm",
+        "database.db.bak",
+        "database.db.bak-wal",
+        "database.db.bak-shm",
+    ];
+    for name in db_artifacts {
+        let path = base_dir.join(name);
         if path.exists() {
-            match fs::remove_file(path) {
-                Ok(_) => info!("Deleted: {}", sanitize_log_path(path)),
-                Err(e) => log::error!("Failed to delete {}: {}", sanitize_log_path(path), e),
+            match fs::remove_file(&path) {
+                Ok(_) => info!("Deleted: {}", sanitize_log_path(&path)),
+                Err(e) => log::error!("Failed to delete {}: {}", sanitize_log_path(&path), e),
+            }
+        }
+    }
+    if let Ok(entries) = fs::read_dir(&base_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name
+                .to_string_lossy()
+                .starts_with("database.db.rebuild-backup-")
+            {
+                let path = entry.path();
+                match fs::remove_file(&path) {
+                    Ok(_) => info!("Deleted: {}", sanitize_log_path(&path)),
+                    Err(e) => log::error!("Failed to delete {}: {}", sanitize_log_path(&path), e),
+                }
             }
         }
     }

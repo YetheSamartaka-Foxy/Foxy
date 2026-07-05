@@ -135,7 +135,10 @@ impl Foxy {
         }
 
         let repository_status_visible = self.current_view == FoxyView::RepositoryList
-            && (self.syncing_repository.is_some() || !self.pending_repository_db_wipes.is_empty());
+            && (self.syncing_repository.is_some()
+                || !self.pending_repository_db_wipes.is_empty()
+                // Keep the startup database maintenance banner's elapsed time live.
+                || crate::core::tasks::db_turso::db_startup_compaction_active());
         let quick_scan_status_visible = self.current_view == FoxyView::RepositoryList
             && !self.active_quick_scan_instance_keys.is_empty();
         let addon_backup_status_visible = self.current_view == FoxyView::RepositorySettings
@@ -237,8 +240,10 @@ impl Foxy {
         self.poll_restore_pending_updates();
         self.poll_startup_quick_scan_filter_results();
         self.poll_fs_watch_results();
+        self.poll_quick_scan_progress();
         self.poll_quick_scan_results();
         self.poll_repository_db_wipe_results();
+        self.poll_database_wipe_result();
         self.poll_addon_delete_results();
         self.poll_addon_backup_results();
         self.poll_repository_settings_addon_preload_results();

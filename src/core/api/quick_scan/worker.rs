@@ -1,7 +1,7 @@
 use super::super::logging::request_background_repaint;
 use super::super::sync_pipeline::summary::{PipelineSummary, StageEntry};
 use super::super::*;
-use super::diff::quick_local_change_diff;
+use super::diff::quick_local_change_diff_with_preflight;
 use super::local_path_preflight::{
     format_local_path_mismatch_message, log_local_path_availability,
     summarize_local_path_availability, suspect_local_path_mismatch,
@@ -14,7 +14,7 @@ use super::pending_updates::{
 use super::persistent_cache::{load_persistent_addon_hash_cache, save_persistent_addon_hash_cache};
 use super::readiness::{
     StartupQuickScanEligibility, launch_quick_scan_repo_startup_eligibility,
-    repo_has_cached_pending_update,
+    launch_quick_scan_repo_startup_eligibility_with_preflight, repo_has_cached_pending_update,
 };
 use super::shared_cache::QuickScanSharedCache;
 use crate::core::db::{DbValue, params};
@@ -57,6 +57,8 @@ pub struct StartupQuickScanPlan {
     pub eligible_repositories: Vec<StartupRepositoryInstance>,
     pub prevalidated_repositories: Vec<StartupRepositoryInstance>,
     pub remote_changed_repositories: Vec<StartupRepositoryInstance>,
+    /// True when eligibility planning ran to completion.
+    pub completed: bool,
 }
 
 pub async fn recalculate_hashes_for_addon_by_name(
@@ -139,69 +141,76 @@ pub async fn recalculate_hashes_for_addon_by_name(
     Ok(true)
 }
 
-/// Returns the subset of `repo_urls` that have a row in the `repositories` table,
-/// meaning they have been checked/synced at least once before. Skips repos that
-/// have never been initialized so auto-recheck does not trigger a fresh first
-/// check on launch.
-pub fn filter_repo_urls_with_db_entry(repo_urls: Vec<String>) -> HashSet<String> {
-    if repo_urls.is_empty() {
+/// Returns repository instances that already have a database row.
+pub fn filter_repo_instances_with_db_entry(
+    repositories: Vec<StartupRepositoryInstance>,
+) -> HashSet<StartupRepositoryInstance> {
+    if repositories.is_empty() {
         return HashSet::new();
     }
 
-    let mut seen = HashSet::new();
-    let mut normalized_unique: Vec<String> = Vec::new();
-    for repo_url in repo_urls {
-        if repo_url.trim().is_empty() {
+    let mut candidates: Vec<(StartupRepositoryInstance, (String, String))> = Vec::new();
+    let mut urls_seen = HashSet::new();
+    let mut normalized_urls: Vec<String> = Vec::new();
+    for repository in repositories {
+        if repository.repo_url.trim().is_empty() {
             continue;
         }
-        let normalized = if repo_url.ends_with('/') {
-            repo_url
+        let normalized_url = if repository.repo_url.ends_with('/') {
+            repository.repo_url.clone()
         } else {
-            format!("{}/", repo_url)
+            format!("{}/", repository.repo_url)
         };
-        if seen.insert(normalized.clone()) {
-            normalized_unique.push(normalized);
+        let identity = (
+            normalized_url.clone(),
+            normalize_instance_path(&repository.local_path),
+        );
+        if urls_seen.insert(normalized_url.clone()) {
+            normalized_urls.push(normalized_url);
         }
+        candidates.push((repository, identity));
     }
-    if normalized_unique.is_empty() {
+    if normalized_urls.is_empty() {
         return HashSet::new();
     }
 
-    let rt = match Builder::new_current_thread().enable_all().build() {
-        Ok(rt) => rt,
-        Err(err) => {
-            warn!(
-                "Failed to build runtime for startup recheck DB-entry filter: {}",
-                err
-            );
-            return HashSet::new();
-        }
+    let Some(rt) = background_runtime() else {
+        warn!("Shared background runtime unavailable for startup recheck DB-entry filter");
+        return HashSet::new();
     };
 
     rt.block_on(async move {
         ensure_logger();
-        let context = create_context().await;
-        if normalized_unique.is_empty() {
-            return HashSet::new();
-        }
-        let placeholders = vec!["?"; normalized_unique.len()].join(", ");
-        let sql =
-            format!("SELECT remote_url FROM repositories WHERE remote_url IN ({placeholders})");
-        let values: Vec<DbValue> = normalized_unique.into_iter().map(DbValue::from).collect();
-        let rows: Vec<String> = match context.db().query_all(&sql, values).await {
-            Ok(rows) => rows
-                .iter()
-                .filter_map(|row| row.get_string("remote_url").ok())
-                .collect(),
-            Err(err) => {
-                warn!(
-                    "Failed to query repositories for startup recheck DB-entry filter: {}",
-                    err
-                );
-                return HashSet::new();
-            }
-        };
-        rows.into_iter().collect()
+        let context = crate::core::tasks::create_context::shared_background_context().await;
+        let placeholders = vec!["?"; normalized_urls.len()].join(", ");
+        let sql = format!(
+            "SELECT remote_url, local_path FROM repositories WHERE remote_url IN ({placeholders})"
+        );
+        let values: Vec<DbValue> = normalized_urls.into_iter().map(DbValue::from).collect();
+        let known_instances: HashSet<(String, String)> =
+            match context.db().query_all(&sql, values).await {
+                Ok(rows) => rows
+                    .iter()
+                    .filter_map(|row| {
+                        Some((
+                            row.get_string("remote_url").ok()?,
+                            normalize_instance_path(&row.get_string("local_path").ok()?),
+                        ))
+                    })
+                    .collect(),
+                Err(err) => {
+                    warn!(
+                        "Failed to query repositories for startup recheck DB-entry filter: {}",
+                        err
+                    );
+                    return HashSet::new();
+                }
+            };
+        candidates
+            .into_iter()
+            .filter(|(_, identity)| known_instances.contains(identity))
+            .map(|(repository, _)| repository)
+            .collect()
     })
 }
 
@@ -219,15 +228,9 @@ pub fn plan_startup_quick_scan_repos(
         return StartupQuickScanPlan::default();
     }
 
-    let rt = match Builder::new_multi_thread().enable_all().build() {
-        Ok(rt) => rt,
-        Err(err) => {
-            warn!(
-                "Failed to build runtime for startup quick scan filtering: {}",
-                err
-            );
-            return StartupQuickScanPlan::default();
-        }
+    let Some(rt) = background_runtime() else {
+        warn!("Shared background runtime unavailable for startup quick scan filtering");
+        return StartupQuickScanPlan::default();
     };
 
     rt.block_on(async move {
@@ -235,69 +238,61 @@ pub fn plan_startup_quick_scan_repos(
         // DATABASE_URL is set once at startup in main.rs to avoid unsafe env::set_var
         // race conditions in multi-threaded context.
 
-        let context = create_context().await;
-        let remote_changed_set =
-            startup_remote_changed_repositories(context.clone(), &normalized_unique).await;
+        let context = crate::core::tasks::create_context::shared_background_context().await;
+
+        // Keep local eligibility independent from network latency.
+        let remote_probe = startup_remote_changed_repositories(context.clone(), &normalized_unique);
+        let local_eligibility = async {
+            let mut join_set: JoinSet<(StartupRepositoryInstance, StartupQuickScanEligibility)> =
+                JoinSet::new();
+            for repository in normalized_unique.iter().cloned() {
+                let context = Arc::new(
+                    (*context)
+                        .clone()
+                        .with_target_local_path(repository.local_path.clone()),
+                );
+                join_set.spawn(async move {
+                    let eligibility =
+                        launch_quick_scan_repo_startup_eligibility(context, &repository.repo_url)
+                            .await;
+                    (repository, eligibility)
+                });
+            }
+
+            let mut eligible_set = HashSet::new();
+            let mut prevalidated_set = HashSet::new();
+            while let Some(joined) = join_set.join_next().await {
+                if let Ok((repository, eligibility)) = joined {
+                    match eligibility {
+                        StartupQuickScanEligibility::Ineligible => {}
+                        StartupQuickScanEligibility::NeedsBootstrap => {
+                            eligible_set.insert(repository);
+                        }
+                        StartupQuickScanEligibility::Prevalidated => {
+                            prevalidated_set.insert(repository.clone());
+                            eligible_set.insert(repository);
+                        }
+                    }
+                }
+            }
+            (eligible_set, prevalidated_set)
+        };
+        let (remote_changed_set, (eligible_set, prevalidated_set)) =
+            tokio::join!(remote_probe, local_eligibility);
         if !remote_changed_set.is_empty() {
             info!(
                 "Startup remote checksum probe found {} changed repositories",
                 remote_changed_set.len()
             );
         }
-        let quick_scan_candidates = normalized_unique
-            .iter()
-            .filter(|repository| !remote_changed_set.contains(*repository))
-            .cloned()
-            .collect::<Vec<_>>();
-        if quick_scan_candidates.is_empty() {
-            return StartupQuickScanPlan {
-                eligible_repositories: Vec::new(),
-                prevalidated_repositories: Vec::new(),
-                remote_changed_repositories: normalized_unique
-                    .into_iter()
-                    .filter(|repository| remote_changed_set.contains(repository))
-                    .collect(),
-            };
-        }
-
-        // Tier 1: batch gate - single query loads all repos, rejects those with
-        // empty remote_checksum or local_content_hash in Rust.
-        let mut join_set: JoinSet<(StartupRepositoryInstance, StartupQuickScanEligibility)> =
-            JoinSet::new();
-        for repository in quick_scan_candidates.iter().cloned() {
-            let context = Arc::new(
-                (*context)
-                    .clone()
-                    .with_target_local_path(repository.local_path.clone()),
-            );
-            join_set.spawn(async move {
-                let eligibility =
-                    launch_quick_scan_repo_startup_eligibility(context, &repository.repo_url).await;
-                (repository, eligibility)
-            });
-        }
-
-        let mut eligible_set = HashSet::new();
-        let mut prevalidated_set = HashSet::new();
-        while let Some(joined) = join_set.join_next().await {
-            if let Ok((repository, eligibility)) = joined {
-                match eligibility {
-                    StartupQuickScanEligibility::Ineligible => {}
-                    StartupQuickScanEligibility::NeedsBootstrap => {
-                        eligible_set.insert(repository);
-                    }
-                    StartupQuickScanEligibility::Prevalidated => {
-                        prevalidated_set.insert(repository.clone());
-                        eligible_set.insert(repository);
-                    }
-                }
-            }
-        }
 
         // Preserve original insertion order
-        let eligible_repositories: Vec<StartupRepositoryInstance> = quick_scan_candidates
-            .into_iter()
-            .filter(|repository| eligible_set.contains(repository))
+        let eligible_repositories: Vec<StartupRepositoryInstance> = normalized_unique
+            .iter()
+            .filter(|repository| {
+                eligible_set.contains(*repository) && !remote_changed_set.contains(*repository)
+            })
+            .cloned()
             .collect();
         let prevalidated_repositories = eligible_repositories
             .iter()
@@ -312,6 +307,7 @@ pub fn plan_startup_quick_scan_repos(
             eligible_repositories,
             prevalidated_repositories,
             remote_changed_repositories,
+            completed: true,
         }
     })
 }
@@ -488,6 +484,7 @@ async fn run_quick_scan_worker_repo(
     target_local_path: String,
     already_eligible: bool,
     force_fresh_addon_hash: bool,
+    progress_result_tx: Option<StdSender<QuickScanProgressEvent>>,
 ) -> QuickScanWorkerRepoOutcome {
     let repo_started_at = Instant::now();
     // Scope every DB lookup, tree load, eligibility check and pending-update
@@ -535,30 +532,72 @@ async fn run_quick_scan_worker_repo(
             normalized_repo_url
         );
     }
-    let eligibility = if already_eligible {
-        StartupQuickScanEligibility::Prevalidated
+    let (eligibility, eligibility_preflight) = if already_eligible {
+        (StartupQuickScanEligibility::Prevalidated, None)
     } else {
-        launch_quick_scan_repo_startup_eligibility(context.clone(), &normalized_repo_url).await
+        launch_quick_scan_repo_startup_eligibility_with_preflight(
+            context.clone(),
+            &normalized_repo_url,
+        )
+        .await
     };
     let can_produce_result = !matches!(eligibility, StartupQuickScanEligibility::Ineligible);
+    // Reuse only positive startup preflights; negative ones are stricter than scan preflights.
+    let reusable_preflight = eligibility_preflight.filter(|preflight| preflight.remote_ready);
 
     let addon_states_before = match shared_cache.lock() {
         Ok(guard) => guard.addon_state_by_path.len(),
         Err(poisoned) => poisoned.into_inner().addon_state_by_path.len(),
     };
 
-    let mut mods = quick_local_change_diff(
+    let progress_sender = progress_result_tx.as_ref().map(|_| {
+        let (tx, _) = tokio::sync::broadcast::channel::<ProgressEvent>(1024);
+        tx
+    });
+    let progress_forwarder = progress_sender.as_ref().and_then(|sender| {
+        let progress_result_tx = progress_result_tx.clone()?;
+        let repo_url = normalized_repo_url.clone();
+        let local_path = target_local_path.clone();
+        let mut rx = sender.subscribe();
+        Some(tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        if progress_result_tx
+                            .send(QuickScanProgressEvent {
+                                repo_url: repo_url.clone(),
+                                local_path: local_path.clone(),
+                                event,
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                }
+            }
+        }))
+    });
+
+    let mut mods = quick_local_change_diff_with_preflight(
         context.clone(),
         &normalized_repo_url,
         None,
         None,
-        None,
+        progress_sender.as_ref(),
         true,
         already_eligible,
         force_fresh_addon_hash,
         Some(&shared_cache),
+        reusable_preflight,
     )
     .await;
+    drop(progress_sender);
+    if let Some(forwarder) = progress_forwarder {
+        let _ = forwarder.await;
+    }
 
     let addon_states_after = match shared_cache.lock() {
         Ok(guard) => guard.addon_state_by_path.len(),
@@ -680,6 +719,7 @@ pub fn spawn_quick_local_scan(
     prevalidated_repo_urls: HashSet<String>,
     force_fresh_addon_hash_repo_urls: HashSet<String>,
     result_tx: StdSender<QuickScanResult>,
+    progress_result_tx: Option<StdSender<QuickScanProgressEvent>>,
     repaint_ctx: Option<egui::Context>,
 ) -> std::thread::JoinHandle<()> {
     let repositories = repo_urls
@@ -708,6 +748,7 @@ pub fn spawn_quick_local_scan(
         prevalidated_repositories,
         force_fresh_addon_hash_repositories,
         result_tx,
+        progress_result_tx,
         repaint_ctx,
     )
 }
@@ -717,6 +758,7 @@ pub fn spawn_quick_local_scan_instances(
     prevalidated_repositories: HashSet<StartupRepositoryInstance>,
     force_fresh_addon_hash_repositories: HashSet<StartupRepositoryInstance>,
     result_tx: StdSender<QuickScanResult>,
+    progress_result_tx: Option<StdSender<QuickScanProgressEvent>>,
     repaint_ctx: Option<egui::Context>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
@@ -726,19 +768,16 @@ pub fn spawn_quick_local_scan_instances(
             prevalidated_repositories.len(),
             force_fresh_addon_hash_repositories.len()
         );
-        let rt = match Builder::new_multi_thread().enable_all().build() {
-            Ok(rt) => rt,
-            Err(err) => {
-                error!("Failed to build runtime for quick scan: {}", err);
-                return;
-            }
+        let Some(rt) = background_runtime() else {
+            error!("Shared background runtime unavailable for quick scan");
+            return;
         };
         rt.block_on(async move {
             ensure_logger();
             // DATABASE_URL is set once at startup in main.rs to avoid unsafe env::set_var
             // race conditions in multi-threaded context.
 
-            let context = create_context().await;
+            let context = crate::core::tasks::create_context::shared_background_context().await;
             let shared_cache: Arc<Mutex<QuickScanSharedCache>> =
                 Arc::new(Mutex::new(QuickScanSharedCache::default()));
             let persistent_addon_cache = load_persistent_addon_hash_cache();
@@ -811,6 +850,7 @@ pub fn spawn_quick_local_scan_instances(
                         target_local_path,
                         already_eligible,
                         force_fresh_addon_hash,
+                        progress_result_tx.clone(),
                     ));
                 }
             }

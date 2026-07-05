@@ -38,10 +38,7 @@ use crate::core::utils::format::sanitize_log_path;
 /// clean rebuild on the breaking Turso upgrade so no incremental replay is needed.
 const TURSO_BOOTSTRAP_SCHEMA: &str = include_str!("../../../sql/turso_schema.sql");
 
-/// Canonical `subfiles` table DDL, kept byte-identical to `sql/turso_schema.sql`.
-/// Used by the whole-wipe purge (after_turso_regression_analysis5.md P0-a) to
-/// `DROP TABLE subfiles` + recreate empty in O(1) page-dealloc instead of a
-/// 66k-row `DELETE`. If you edit the table shape, edit both places.
+/// Canonical `subfiles` table DDL, kept token-identical to `sql/turso_schema.sql`.
 pub(crate) const SUBFILES_CREATE_TABLE: &str = "CREATE TABLE IF NOT EXISTS subfiles (\
     id INTEGER PRIMARY KEY, \
     file_id INTEGER NOT NULL, \
@@ -261,6 +258,10 @@ pub(crate) async fn connect_tuned(db: &Database) -> turso::Result<Connection> {
 /// that the walk cost matters - a fresh/small db is never churned.
 const COMPACT_MIN_FREE_PAGES: i64 = 20_000;
 const COMPACT_MIN_FREE_RATIO: f64 = 0.5;
+/// Automatic startup compaction live-row ceiling.
+const COMPACT_AUTO_MAX_LIVE_MIB: f64 = 512.0;
+/// How long a post-compaction backup is kept.
+const DB_BACKUP_MAX_AGE: Duration = Duration::from_secs(14 * 24 * 60 * 60);
 
 #[derive(Debug, Clone, Copy)]
 struct DbBloatStats {
@@ -305,10 +306,7 @@ async fn read_db_bloat_stats(conn: &Connection) -> Option<DbBloatStats> {
     })
 }
 
-/// `force` compacts regardless of bloat. Any other value, including unset,
-/// disables startup compaction. The bloat stats are still logged so compaction
-/// can be run deliberately, but normal UI startup must not spend minutes behind
-/// database maintenance while repository syncs sit at "Preparing".
+/// Startup compaction mode from `FOXY_DB_COMPACT`.
 fn compact_mode() -> String {
     std::env::var("FOXY_DB_COMPACT")
         .ok()
@@ -329,6 +327,37 @@ fn remove_db_artifacts(path: &std::path::Path) {
     let _ = fs::remove_file(path);
     let _ = fs::remove_file(with_suffix(path, "-wal"));
     let _ = fs::remove_file(with_suffix(path, "-shm"));
+}
+
+/// Remove stale maintenance artifacts next to `database.db`.
+fn sweep_stale_db_artifacts(path: &Path) {
+    let compacting = with_suffix(path, ".compacting");
+    if compacting.exists()
+        || with_suffix(&compacting, "-wal").exists()
+        || with_suffix(&compacting, "-shm").exists()
+    {
+        info!(
+            "STARTUP: removing stale compaction artifacts {}",
+            sanitize_log_path(&compacting)
+        );
+        remove_db_artifacts(&compacting);
+    }
+
+    let bak = with_suffix(path, ".bak");
+    if let Ok(metadata) = fs::metadata(&bak) {
+        let expired = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age > DB_BACKUP_MAX_AGE);
+        if expired {
+            info!(
+                "STARTUP: removing expired database backup {}",
+                sanitize_log_path(&bak)
+            );
+            remove_db_artifacts(&bak);
+        }
+    }
 }
 
 /// Move WAL/SHM sidecars alongside their main database file destination.
@@ -432,9 +461,7 @@ const COMPACT_COPY_TABLES: &[&str] = &[
     "download_patch_op",
 ];
 
-/// Inspect the open database for free-page bloat. Always logs the file/page/free
-/// stats; returns true only when compaction was explicitly requested with
-/// `FOXY_DB_COMPACT=force`.
+/// Inspect the open database and decide whether startup should compact it.
 async fn should_compact_database(db: &Database) -> bool {
     let conn = match connect_tuned(db).await {
         Ok(c) => c,
@@ -458,9 +485,16 @@ async fn should_compact_database(db: &Database) -> bool {
     if mode == "force" {
         return true;
     }
-    if stats.is_some_and(|s| s.is_bloated()) {
+    if mode == "off" {
+        return false;
+    }
+    if let Some(s) = stats.filter(|s| s.is_bloated()) {
+        if s.live_mib() < COMPACT_AUTO_MAX_LIVE_MIB {
+            return true;
+        }
         info!(
-            "STARTUP: database is bloated but startup compaction is disabled; set FOXY_DB_COMPACT=force to rebuild it"
+            "STARTUP: database is bloated but its live size ({:.0}MiB) exceeds the automatic compaction bound; set FOXY_DB_COMPACT=force to rebuild it",
+            s.live_mib()
         );
     }
     false
@@ -648,6 +682,35 @@ async fn swap_compacted_file(path: &Path, tmp: &Path) -> bool {
     true
 }
 
+/// Set while startup compaction and reopen hold the database.
+static DB_STARTUP_COMPACTION_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static DB_STARTUP_COMPACTION_STARTED: std::sync::Mutex<Option<Instant>> =
+    std::sync::Mutex::new(None);
+
+/// True while startup compaction is holding the database.
+pub(crate) fn db_startup_compaction_active() -> bool {
+    DB_STARTUP_COMPACTION_ACTIVE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Elapsed time for the active startup compaction.
+pub(crate) fn db_startup_compaction_elapsed() -> Option<Duration> {
+    if !db_startup_compaction_active() {
+        return None;
+    }
+    DB_STARTUP_COMPACTION_STARTED
+        .lock()
+        .ok()
+        .and_then(|started| started.map(|at| at.elapsed()))
+}
+
+fn set_db_startup_compaction_active(active: bool) {
+    if active && let Ok(mut started) = DB_STARTUP_COMPACTION_STARTED.lock() {
+        *started = Some(Instant::now());
+    }
+    DB_STARTUP_COMPACTION_ACTIVE.store(active, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Process-wide Turso database handle, mirroring the `Arc<DatabaseConnection>`
 /// shape so it slots into `FoxyContext` at cutover.
 pub(crate) async fn init_turso_database() -> Arc<Database> {
@@ -658,6 +721,8 @@ pub(crate) async fn init_turso_database() -> Arc<Database> {
         let path = database_file_path();
         let path_str = path.to_string_lossy().to_string();
         info!("Ensuring Turso database {}", sanitize_log_path(&path));
+
+        sweep_stale_db_artifacts(&path);
 
         let mut db = build_or_rebuild_after_failure(&path, &path_str)
             .await
@@ -671,12 +736,14 @@ pub(crate) async fn init_turso_database() -> Arc<Database> {
         // drop `db` first, compact (panic-safe - never crashes startup), reopen.
         if should_compact_database(&db).await {
             let compact_start = Instant::now();
+            set_db_startup_compaction_active(true);
             drop(db);
             let installed = compact_database_file(&path).await;
             db = build_or_rebuild_after_failure(&path, &path_str).await.unwrap_or_else(|e| {
                 log::error!("Failed to reopen Turso database after compaction: {}", e);
                 panic!("Failed to reopen Turso database after compaction: {}", e);
             });
+            set_db_startup_compaction_active(false);
             if installed {
                 info!(
                     "STARTUP: database compaction complete in {:.2}s",
@@ -730,6 +797,15 @@ pub(crate) async fn build_test_database() -> Arc<Database> {
     Arc::new(db)
 }
 
+/// Shared classifier for transient DB errors used by every retry loop.
+pub(crate) fn db_error_message_is_retryable(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    m.contains("conflict")
+        || m.contains("busy")
+        || m.contains("locked")
+        || m.contains("no transaction is active")
+}
+
 /// Whether a Turso error should be retried by [`db_retry_transaction`].
 ///
 /// Default-mode busy/locked → `Busy`/`BusySnapshot`. MVCC write–write conflicts
@@ -739,10 +815,7 @@ pub(crate) async fn build_test_database() -> Arc<Database> {
 pub(crate) fn db_is_retryable(err: &Error) -> bool {
     match err {
         Error::Busy(_) | Error::BusySnapshot(_) => true,
-        Error::Error(msg) => {
-            let m = msg.to_ascii_lowercase();
-            m.contains("conflict") || m.contains("no transaction is active") || m.contains("locked")
-        }
+        Error::Error(msg) => db_error_message_is_retryable(msg),
         _ => false,
     }
 }
@@ -841,6 +914,72 @@ mod tests {
         let path = dir.path().join("database.db");
         let db = build_and_bootstrap(path.to_str().unwrap()).await.unwrap();
         (dir, db)
+    }
+
+    fn normalize_ddl(sql: &str) -> String {
+        sql.lines()
+            .map(|line| match line.find("--") {
+                Some(idx) => &line[..idx],
+                None => line,
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+            .replace('(', " ( ")
+            .replace(')', " ) ")
+            .replace(',', " , ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_lowercase()
+    }
+
+    #[test]
+    fn subfiles_ddl_matches_bootstrap_schema() {
+        let statements: Vec<String> = TURSO_BOOTSTRAP_SCHEMA
+            .lines()
+            .map(|line| match line.find("--") {
+                Some(idx) => &line[..idx],
+                None => line,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            .split(';')
+            .map(normalize_ddl)
+            .filter(|statement| !statement.is_empty())
+            .collect();
+
+        let schema_table = statements
+            .iter()
+            .find(|statement| statement.starts_with("create table if not exists subfiles"))
+            .expect("bootstrap schema declares the subfiles table");
+        assert_eq!(
+            *schema_table,
+            normalize_ddl(SUBFILES_CREATE_TABLE),
+            "SUBFILES_CREATE_TABLE drifted from sql/turso_schema.sql"
+        );
+
+        for index_sql in SUBFILES_INDEX_CREATE_SQL {
+            let normalized = normalize_ddl(index_sql);
+            assert!(
+                statements.contains(&normalized),
+                "subfiles index DDL drifted from sql/turso_schema.sql: {index_sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn retryable_classifier_matches_transient_errors_only() {
+        assert!(db_error_message_is_retryable("database is locked"));
+        assert!(db_error_message_is_retryable("Write-write conflict"));
+        assert!(db_error_message_is_retryable("Busy: database busy"));
+        assert!(db_error_message_is_retryable(
+            "cannot commit - no transaction is active"
+        ));
+        assert!(!db_error_message_is_retryable(
+            "UNIQUE constraint failed: repositories.remote_url"
+        ));
+        assert!(!db_error_message_is_retryable("no such table: files"));
+        assert!(!db_error_message_is_retryable("disk I/O error"));
     }
 
     #[tokio::test]

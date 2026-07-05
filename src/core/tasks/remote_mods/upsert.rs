@@ -7,7 +7,7 @@ use crate::core::models::context::FoxyContext;
 use crate::core::models::modification::{ADDON_COLUMNS, FoxyMod};
 use crate::core::models::recheck_level::RecheckLevel;
 use crate::core::models::repository::FoxyRepository;
-use crate::core::tasks::init_database::SQLITE_MAX_VARIABLES;
+use crate::core::tasks::init_database::{SQLITE_MAX_VARIABLES, read_chunk_ids};
 use crate::core::tasks::remote_files::{ModRecheckStats, remote_files_transaction};
 use log::{debug, warn};
 use serde_json::Value;
@@ -75,7 +75,7 @@ async fn load_mod_remote_graph_states(
 
     let mut ids: Vec<i64> = mod_ids.iter().copied().collect();
     ids.sort_unstable();
-    let chunk_size = SQLITE_MAX_VARIABLES.saturating_sub(10).max(1);
+    let chunk_size = read_chunk_ids();
     let mut idx = 0usize;
     while idx < ids.len() {
         let end = (idx + chunk_size).min(ids.len());
@@ -347,7 +347,7 @@ pub(super) async fn process_mods_upsert(
         let mut linked: HashSet<i64> = HashSet::new();
         let mut ids: Vec<i64> = resolved_mod_ids.iter().copied().collect();
         ids.sort_unstable();
-        let chunk_size = SQLITE_MAX_VARIABLES.saturating_sub(1).max(1);
+        let chunk_size = read_chunk_ids();
         for chunk in ids.chunks(chunk_size) {
             let placeholders = vec!["?"; chunk.len()].join(", ");
             let sql = format!(

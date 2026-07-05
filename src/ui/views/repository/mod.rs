@@ -24,6 +24,8 @@ pub(super) struct RepositoryCheckStatusBanner {
     pub(super) hint: String,
     pub(super) progress: Option<f32>,
     pub(super) elapsed_seconds: u64,
+    /// Whether the banner offers the Cancel button.
+    pub(super) cancellable: bool,
 }
 
 pub(super) struct RepositoryCheckCompletionBanner {

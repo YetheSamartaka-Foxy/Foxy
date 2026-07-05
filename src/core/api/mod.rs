@@ -30,7 +30,7 @@ use crate::core::models::repository::{FoxyRepository, load_repository_by_remote_
 use crate::core::tasks::calculate_hashes::{calculate_hashes, calculate_hashes_for_files};
 use crate::core::tasks::create_context::{create_context, create_context_with_recheck_level};
 use crate::core::tasks::download_files::DownloadModCompletion;
-use crate::core::tasks::init_database::SQLITE_MAX_VARIABLES;
+use crate::core::tasks::init_database::{SQLITE_MAX_VARIABLES, read_chunk_ids};
 use crate::core::utils::app_paths;
 
 use flexi_logger::writers::LogWriter;
@@ -38,12 +38,15 @@ use flexi_logger::{
     Cleanup, Criterion, DeferredNow, Duplicate, FileSpec, Logger, Naming, Record, WriteMode,
 };
 
+mod background_runtime;
 mod fs_watcher;
 mod logging;
 mod quick_scan;
 mod startup_diagnostics;
 mod sync_pipeline;
 mod types;
+
+pub(crate) use background_runtime::background_runtime;
 
 pub use fs_watcher::spawn_repo_fs_watcher;
 pub(crate) use logging::send_progress_event;
@@ -52,7 +55,7 @@ pub use logging::{
 };
 pub(crate) use logging::{ensure_logger, ensure_logger_with_terminal};
 pub use quick_scan::{
-    StartupRepositoryInstance, filter_repo_urls_with_db_entry, plan_startup_quick_scan_repos,
+    StartupRepositoryInstance, filter_repo_instances_with_db_entry, plan_startup_quick_scan_repos,
     recalculate_hashes_for_addon_by_name, spawn_quick_local_scan, spawn_quick_local_scan_instances,
 };
 pub use startup_diagnostics::{
@@ -61,8 +64,8 @@ pub use startup_diagnostics::{
 };
 pub use sync_pipeline::spawn_repository_sync;
 pub use types::{
-    FileDiffSummary, FsChangeEvent, LogEntry, ModDiffSummary, ProgressEvent, QuickScanResult,
-    RepositorySyncOptions, SyncMode,
+    FileDiffSummary, FsChangeEvent, LogEntry, ModDiffSummary, ProgressEvent,
+    QuickScanProgressEvent, QuickScanResult, RepositorySyncOptions, SyncMode,
 };
 
 #[cfg(test)]

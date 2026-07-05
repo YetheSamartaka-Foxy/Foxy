@@ -127,7 +127,9 @@ impl Foxy {
                     let repo_state = self.repo_state_for_address(&repo_address, &repo_path);
                     let status_banner = self
                         .active_repository_check_banner(selected_idx)
-                        .or_else(|| self.active_repository_db_wipe_banner(selected_idx));
+                        .or_else(|| self.active_quick_scan_banner(selected_idx))
+                        .or_else(|| self.active_repository_db_wipe_banner(selected_idx))
+                        .or_else(|| self.active_database_maintenance_banner());
                     let completed_check_banner = self
                         .completed_repository_db_wipe_banner(selected_idx)
                         .or_else(|| self.completed_repository_check_banner(selected_idx));
@@ -471,6 +473,7 @@ impl Foxy {
                         let detail = status_banner.detail;
                         let hint = status_banner.hint;
                         let progress = status_banner.progress;
+                        let cancellable = status_banner.cancellable;
                         let elapsed_label = status_banner_elapsed_label.unwrap_or_default();
 
                         Frame::NONE
@@ -488,20 +491,23 @@ impl Foxy {
                                             .strong(),
                                     );
                                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                        let cancel_btn = ui.add(
-                                            Button::new(
-                                                RichText::new(self.t("Cancel"))
-                                                    .size((detail_font_size - 1.0).max(13.0)),
-                                            )
-                                            .fill(self.color_action_destructive()),
-                                        );
-                                        if cancel_btn.hovered() {
-                                            ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                                        if cancellable {
+                                            let cancel_btn = ui.add(
+                                                Button::new(
+                                                    RichText::new(self.t("Cancel"))
+                                                        .size((detail_font_size - 1.0).max(13.0)),
+                                                )
+                                                .fill(self.color_action_destructive()),
+                                            );
+                                            if cancel_btn.hovered() {
+                                                ui.ctx()
+                                                    .output_mut(Foxy::set_pointing_cursor_output);
+                                            }
+                                            if cancel_btn.clicked() {
+                                                cancel_sync_requested = true;
+                                            }
+                                            ui.add_space(8.0);
                                         }
-                                        if cancel_btn.clicked() {
-                                            cancel_sync_requested = true;
-                                        }
-                                        ui.add_space(8.0);
                                         ui.label(
                                             RichText::new(elapsed_label.as_str())
                                             .size(hint_font_size)

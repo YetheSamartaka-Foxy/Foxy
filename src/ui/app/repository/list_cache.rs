@@ -5,7 +5,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use log::{debug, error, info, warn};
 use rand::{RngExt, distr::Alphanumeric, rng};
-use tokio::runtime::Runtime;
 
 use crate::core::api::ModDiffSummary;
 use crate::core::models::pending_update::{
@@ -95,22 +94,20 @@ impl Foxy {
             let normalized_url = Self::normalize_repo_url(&repo.address);
             let local_path = repo.path.clone();
             let repo_name = repo.name.clone();
-            std::thread::spawn(move || match Runtime::new() {
-                Ok(rt) => {
-                    if let Err(err) = rt.block_on(clear_pending_update_payload_for_path(
-                        &normalized_url,
-                        &local_path,
-                    )) {
-                        log::error!(
-                            "Failed to clear cached pending updates for {}: {}",
-                            repo_name,
-                            err
-                        );
-                    }
-                }
-                Err(err) => {
+            std::thread::spawn(move || {
+                let Some(rt) = crate::core::api::background_runtime() else {
                     log::error!(
-                        "Failed to initialize runtime for clearing pending updates: {}",
+                        "Shared background runtime unavailable for clearing pending updates"
+                    );
+                    return;
+                };
+                if let Err(err) = rt.block_on(clear_pending_update_payload_for_path(
+                    &normalized_url,
+                    &local_path,
+                )) {
+                    log::error!(
+                        "Failed to clear cached pending updates for {}: {}",
+                        repo_name,
                         err
                     );
                 }
@@ -403,17 +400,15 @@ impl Foxy {
             requests.len()
         );
         self.startup_pending_restore_worker = Some(std::thread::spawn(move || {
-            let runtime = match Runtime::new() {
-                Ok(rt) => rt,
-                Err(err) => {
-                    log::error!("Failed to initialize runtime for cached updates: {}", err);
-                    return;
-                }
+            let Some(runtime) = crate::core::api::background_runtime() else {
+                log::error!("Shared background runtime unavailable for cached updates");
+                return;
             };
 
             let mut restored = Vec::with_capacity(requests.len());
             for request in requests {
-                let is_foxy = runtime.block_on(is_repository_foxy(&request.repo_url));
+                let is_foxy =
+                    runtime.block_on(is_repository_foxy(&request.repo_url, &request.repo_path));
                 match runtime.block_on(load_pending_update_payload_for_path(
                     &request.repo_url,
                     &request.repo_path,
@@ -891,9 +886,10 @@ pub(crate) fn merge_download_mod_diffs_preserving_finished(
 /// repository's cached pending-update payload from the database and classify
 /// the result. Runs off the UI thread.
 fn load_cached_update_outcome(normalized_url: &str, local_path: &str) -> CachedUpdateLoadOutcome {
-    let rt = match Runtime::new() {
-        Ok(rt) => rt,
-        Err(err) => return CachedUpdateLoadOutcome::ReadError(err.to_string()),
+    let Some(rt) = crate::core::api::background_runtime() else {
+        return CachedUpdateLoadOutcome::ReadError(
+            "shared background runtime unavailable".to_string(),
+        );
     };
     let payload = match rt.block_on(load_pending_update_payload_for_path(
         normalized_url,

@@ -21,7 +21,9 @@ use super::i18n::I18n;
 use super::memory::ProcessVirtualMemoryMap;
 use super::palette;
 use super::tray::TrayManager;
-use crate::core::api::{self, ModDiffSummary, ProgressEvent, QuickScanResult, SyncMode};
+use crate::core::api::{
+    self, ModDiffSummary, ProgressEvent, QuickScanProgressEvent, QuickScanResult, SyncMode,
+};
 use crate::core::utils::addon_backup;
 use tokio::sync::broadcast::Receiver as BroadcastReceiver;
 use tokio::sync::watch;
@@ -34,6 +36,29 @@ pub use state::*;
 
 /// Last logged display metrics: (monitor resolution, app resolution, scale percent).
 pub type DisplayMetricsSnapshot = (Option<[i32; 2]>, Option<[i32; 2]>, i32);
+
+#[derive(Clone, Debug)]
+pub(crate) struct QuickScanProgressState {
+    pub(crate) started_at: Instant,
+    pub(crate) stage_label: Option<String>,
+    pub(crate) stage_percent: Option<f32>,
+    pub(crate) hash_counter: Option<(usize, usize)>,
+    pub(crate) hash_part_counter: Option<(usize, usize)>,
+    pub(crate) last_repaint: Option<Instant>,
+}
+
+impl QuickScanProgressState {
+    pub(crate) fn new(now: Instant) -> Self {
+        Self {
+            started_at: now,
+            stage_label: None,
+            stage_percent: None,
+            hash_counter: None,
+            hash_part_counter: None,
+            last_repaint: None,
+        }
+    }
+}
 
 pub struct Foxy {
     pub app_icon: Option<egui::TextureHandle>,
@@ -202,6 +227,8 @@ pub struct Foxy {
     pending_cached_update_loads: HashSet<String>,
     pub quick_scan_rx: StdReceiver<QuickScanResult>,
     pub quick_scan_tx: StdSender<QuickScanResult>,
+    pub quick_scan_progress_rx: StdReceiver<QuickScanProgressEvent>,
+    pub quick_scan_progress_tx: StdSender<QuickScanProgressEvent>,
     pub quick_scan_worker: Option<std::thread::JoinHandle<()>>,
     startup_quick_scan_filter_rx: Option<StdReceiver<StartupQuickScanFilterResult>>,
     startup_quick_scan_filter_worker: Option<std::thread::JoinHandle<()>>,
@@ -215,12 +242,16 @@ pub struct Foxy {
     pub pending_quick_scan_force_fresh_addon_hash_urls: HashSet<String>,
     pub quick_scan_pending: HashSet<String>,
     pub active_quick_scan_instance_keys: HashSet<String>,
+    pub quick_scan_progress_by_instance: HashMap<String, QuickScanProgressState>,
     pub repo_db_reset_pending_recheck: HashSet<String>,
     pending_repository_db_wipes: HashSet<String>,
     pending_repository_force_redownloads: HashSet<String>,
     pending_repository_db_wipe_started_at: HashMap<String, Instant>,
     repository_db_wipe_rx: StdReceiver<RepositoryDbWipeResult>,
     repository_db_wipe_tx: StdSender<RepositoryDbWipeResult>,
+    /// Completion channel for the global settings database wipe.
+    database_wipe_rx: StdReceiver<Result<(), String>>,
+    pub(crate) database_wipe_tx: StdSender<Result<(), String>>,
     addon_backup_task_rx: StdReceiver<AddonBackupTaskResult>,
     addon_backup_task_tx: StdSender<AddonBackupTaskResult>,
     pub addon_backup_worker: Option<std::thread::JoinHandle<()>>,

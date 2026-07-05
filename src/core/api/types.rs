@@ -41,6 +41,13 @@ pub struct QuickScanResult {
 }
 
 #[derive(Clone, Debug)]
+pub struct QuickScanProgressEvent {
+    pub repo_url: String,
+    pub local_path: String,
+    pub event: ProgressEvent,
+}
+
+#[derive(Clone, Debug)]
 pub struct FsChangeEvent {
     pub repo_urls: Vec<String>,
 }

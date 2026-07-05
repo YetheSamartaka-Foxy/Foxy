@@ -1,8 +1,6 @@
 use crate::core::db::{DbErr, DbRow, DbValue, params};
 use crate::core::models::context::FoxyContext;
-use crate::core::tasks::init_database::{
-    SQLITE_MAX_VARIABLES, SqlitePerfSnapshot, sqlite_perf_snapshot,
-};
+use crate::core::tasks::init_database::{SqlitePerfSnapshot, sqlite_perf_snapshot};
 use log::info;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -175,7 +173,7 @@ pub(crate) struct DownloadProgressPersistResult {
 }
 
 fn download_progress_update_batch_size() -> usize {
-    (SQLITE_MAX_VARIABLES / 3).saturating_sub(1).max(1)
+    crate::core::tasks::init_database::bulk_write_rows_for(3)
 }
 
 pub(crate) async fn fetch_all_download_targets_with_mod(
@@ -197,7 +195,7 @@ pub(crate) async fn fetch_all_download_targets_with_mod(
 
     let mut file_to_mod: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
     if !file_ids.is_empty() {
-        let chunk_size = SQLITE_MAX_VARIABLES.saturating_sub(10).max(1);
+        let chunk_size = crate::core::tasks::init_database::read_chunk_ids();
         for chunk in file_ids.chunks(chunk_size) {
             let placeholders = vec!["?"; chunk.len()].join(", ");
             let sql = format!(
@@ -278,10 +276,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn progress_update_batch_size_stays_under_sqlite_variable_limit() {
+    fn progress_update_batch_size_uses_tuned_write_chunk() {
         let batch_size = download_progress_update_batch_size();
 
         assert!(batch_size > 1);
-        assert!(batch_size * 3 < SQLITE_MAX_VARIABLES);
+        assert_eq!(
+            batch_size,
+            crate::core::tasks::init_database::bulk_write_chunk_rows()
+        );
+        // A full chunk stays under the bind-variable budget (3 binds per row).
+        assert!(batch_size * 3 < 32_766);
     }
 }

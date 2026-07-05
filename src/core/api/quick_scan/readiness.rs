@@ -35,6 +35,7 @@ pub(super) enum QuickScanBootstrapPlan {
     LoadTreeAndRepairMissingChecksums,
 }
 
+#[derive(Clone, Copy, Debug)]
 pub(super) struct QuickScanPreflightResult {
     pub remote_ready: bool,
     pub bootstrap_plan: QuickScanBootstrapPlan,
@@ -69,10 +70,7 @@ async fn quick_scan_preflight_combined_inner(
     let preflight_started = Instant::now();
     let db = context.db();
 
-    // When several repository rows share this URL (the same repo installed in
-    // different folders), pick the instance the caller targeted instead of an
-    // arbitrary `.one()` - otherwise an empty new-folder install would inherit a
-    // sibling's "complete" status.
+    // Prefer the caller's repository instance when one URL has multiple rows.
     let repository_query_started = Instant::now();
     let repository = {
         let rows: Vec<_> = match db
@@ -198,31 +196,35 @@ async fn quick_scan_preflight_combined_inner(
     let repo_missing_tree = repository.local_checksum.trim().is_empty();
     let repo_missing_content = repository.local_content_hash.trim().is_empty();
 
-    // Clean fastest path: a populated repository tree/content checksum plus
-    // populated addon tree/content checksums is enough to run the local folder
-    // fingerprint check. File and part checksums are inputs to those rollups, so
-    // scanning every file row on every clean QuickCheckOnly run is redundant and
-    // is the dominant Turso regression (~135 ms for the 40K repo).
+    // Populated repo/addon rollups are enough for the local folder fingerprint check.
     let addon_levels_complete = missing_mod_remote == 0
         && missing_mod_local == 0
         && missing_mod_content == 0
         && !repo_missing_tree
         && !repo_missing_content;
-    if allow_addon_fast_path && addon_levels_complete {
-        info!(
-            "Quick scan preflight timings: repo={} outcome=addon_fast_path bootstrap_plan=None repository_query={:.2?} mod_stats={:.2?} file_stats=skipped part_stats=skipped total={:.2?} addons={}",
-            repo_url,
-            repository_query_elapsed,
-            mod_stats_elapsed,
-            preflight_started.elapsed(),
-            mod_count
-        );
-        return Some(QuickScanPreflightResult {
-            remote_ready: true,
-            bootstrap_plan: QuickScanBootstrapPlan::None,
-        });
+    if addon_levels_complete {
+        // Startup callers need a cheap proof that part metadata exists.
+        let fast_path_allowed = allow_addon_fast_path
+            || context.deferred_part_count() > 0
+            || repository_parts_metadata_exists(&db, repository.id as i64, repo_url).await
+                == Some(true);
+        if fast_path_allowed {
+            info!(
+                "Quick scan preflight timings: repo={} outcome=addon_fast_path bootstrap_plan=None repository_query={:.2?} mod_stats={:.2?} file_stats=skipped part_stats=skipped total={:.2?} addons={}",
+                repo_url,
+                repository_query_elapsed,
+                mod_stats_elapsed,
+                preflight_started.elapsed(),
+                mod_count
+            );
+            return Some(QuickScanPreflightResult {
+                remote_ready: true,
+                bootstrap_plan: QuickScanBootstrapPlan::None,
+            });
+        }
     }
 
+    // Keep this repository-driven query shape; correlated EXISTS is much slower in Turso.
     let file_stats_started = Instant::now();
     let file_row = match db
         .query_one(
@@ -231,14 +233,12 @@ async fn quick_scan_preflight_combined_inner(
                 SUM(CASE WHEN remote_checksum = '' THEN 1 ELSE 0 END) AS missing_remote,
                 SUM(CASE WHEN local_checksum = '' THEN 1 ELSE 0 END) AS missing_local,
                 SUM(CASE WHEN local_content_hash = '' THEN 1 ELSE 0 END) AS missing_content
-            FROM files f
-            WHERE EXISTS (
-                SELECT 1
+            FROM files
+            WHERE id IN (
+                SELECT af.file_id
                 FROM addon_files af
-                JOIN repository_addons ra
-                    ON ra.addon_id = af.addon_id
-                   AND ra.repository_id = ?
-                WHERE af.file_id = f.id
+                JOIN repository_addons ra ON ra.addon_id = af.addon_id
+                WHERE ra.repository_id = ?
             )"#,
             params![repository.id as i64],
         )
@@ -281,16 +281,7 @@ async fn quick_scan_preflight_combined_inner(
         });
     }
 
-    // Clean fast-path: when every repository-, addon-, and file-level checksum is
-    // already populated, the part level is guaranteed complete too. File/addon/
-    // repo checksums are rolled UP from part checksums - `calculate_hashes`
-    // persists parts (Phase 2) before files (Phase 3) before addons (Phase 4)
-    // before repos (Phase 5) - so a populated higher-level checksum implies its
-    // parts were persisted first. In that state we can skip the part-stats
-    // aggregate, which otherwise scans every subfile row (tens of thousands) on
-    // each clean quick scan and dominates the Turso quick-check cost. The full
-    // part audit below still runs whenever any higher level is incomplete
-    // (bootstrap/repair), where part-level detail picks the bootstrap plan.
+    // Populated higher-level checksums imply part checksums were persisted first.
     let higher_levels_complete = missing_mod_remote == 0
         && missing_file_remote == 0
         && missing_mod_local == 0
@@ -334,13 +325,11 @@ async fn quick_scan_preflight_combined_inner(
                 END) AS missing_local
             FROM subfiles sf
             JOIN files f ON f.id = sf.file_id
-            WHERE EXISTS (
-                SELECT 1
+            WHERE sf.file_id IN (
+                SELECT af.file_id
                 FROM addon_files af
-                JOIN repository_addons ra
-                    ON ra.addon_id = af.addon_id
-                   AND ra.repository_id = ?
-                WHERE af.file_id = sf.file_id
+                JOIN repository_addons ra ON ra.addon_id = af.addon_id
+                WHERE ra.repository_id = ?
             )"#,
             params![repository.id as i64],
         )
@@ -375,9 +364,6 @@ async fn quick_scan_preflight_combined_inner(
         && missing_part_remote == 0
         && parts_metadata_available;
 
-    // Bootstrap plan determination (same logic as determine_quick_scan_bootstrap_plan).
-    // `repo_missing_tree` / `repo_missing_content` were computed above for the
-    // clean fast-path check.
     let tree_missing = repo_missing_tree
         || missing_mod_local > 0
         || missing_file_local > 0
@@ -388,7 +374,8 @@ async fn quick_scan_preflight_combined_inner(
         && missing_mod_content == mod_count
         && missing_file_content == file_count;
 
-    let bootstrap_plan = if content_missing_all {
+    // Blank content hashes with a complete tree only need baseline refresh.
+    let bootstrap_plan = if content_missing_all && tree_missing {
         QuickScanBootstrapPlan::InitializeTreeAndRefreshContent
     } else if tree_missing {
         QuickScanBootstrapPlan::LoadTreeAndRepairMissingChecksums
@@ -424,6 +411,37 @@ async fn quick_scan_preflight_combined_inner(
         remote_ready,
         bootstrap_plan,
     })
+}
+
+/// Indexed existence probe for repository part metadata.
+async fn repository_parts_metadata_exists(
+    db: &FoxyDb,
+    repository_id: i64,
+    repo_url: &str,
+) -> Option<bool> {
+    match db
+        .query_one(
+            r#"SELECT 1 FROM subfiles
+            WHERE file_id IN (
+                SELECT af.file_id
+                FROM addon_files af
+                JOIN repository_addons ra ON ra.addon_id = af.addon_id
+                WHERE ra.repository_id = ?
+            )
+            LIMIT 1"#,
+            params![repository_id],
+        )
+        .await
+    {
+        Ok(row) => Some(row.is_some()),
+        Err(err) => {
+            warn!(
+                "Failed to probe part metadata for preflight {}: {}",
+                repo_url, err
+            );
+            None
+        }
+    }
 }
 
 pub(crate) fn tree_local_checksums_missing(tree: &Tree) -> bool {
@@ -756,8 +774,21 @@ pub(crate) async fn launch_quick_scan_repo_startup_eligibility(
     context: Arc<FoxyContext>,
     repo_url: &str,
 ) -> StartupQuickScanEligibility {
+    launch_quick_scan_repo_startup_eligibility_with_preflight(context, repo_url)
+        .await
+        .0
+}
+
+/// Eligibility plus the preflight it was derived from.
+pub(super) async fn launch_quick_scan_repo_startup_eligibility_with_preflight(
+    context: Arc<FoxyContext>,
+    repo_url: &str,
+) -> (
+    StartupQuickScanEligibility,
+    Option<QuickScanPreflightResult>,
+) {
     let Some(preflight) = quick_scan_preflight_combined(context, repo_url).await else {
-        return StartupQuickScanEligibility::Ineligible;
+        return (StartupQuickScanEligibility::Ineligible, None);
     };
 
     if !preflight.remote_ready {
@@ -765,10 +796,10 @@ pub(crate) async fn launch_quick_scan_repo_startup_eligibility(
             "Startup quick scan skipped for {}: remote checksum metadata not ready",
             repo_url
         );
-        return StartupQuickScanEligibility::Ineligible;
+        return (StartupQuickScanEligibility::Ineligible, Some(preflight));
     }
 
-    match preflight.bootstrap_plan {
+    let eligibility = match preflight.bootstrap_plan {
         QuickScanBootstrapPlan::None => StartupQuickScanEligibility::Prevalidated,
         QuickScanBootstrapPlan::RefreshContentBaseline => {
             debug!(
@@ -791,7 +822,8 @@ pub(crate) async fn launch_quick_scan_repo_startup_eligibility(
             );
             StartupQuickScanEligibility::Ineligible
         }
-    }
+    };
+    (eligibility, Some(preflight))
 }
 
 /// Deep eligibility check using consolidated JOIN queries.

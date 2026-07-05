@@ -148,6 +148,93 @@ impl Foxy {
             hint: self.repository_check_cycle_message(mode, elapsed),
             progress,
             elapsed_seconds: elapsed.as_secs(),
+            cancellable: true,
+        })
+    }
+
+    pub(super) fn active_quick_scan_banner(
+        &self,
+        repo_index: usize,
+    ) -> Option<RepositoryCheckStatusBanner> {
+        let repo = self.repository_view_state.repositories.get(repo_index)?;
+        let key = Self::repo_instance_key(&repo.address, &repo.path);
+        if !self.active_quick_scan_instance_keys.contains(&key) {
+            return None;
+        }
+
+        let state = self.quick_scan_progress_by_instance.get(&key);
+        let detail = if let Some(state) = state {
+            if let Some((checked, total)) = state.hash_counter {
+                let (checked_text, total_text) = if let Some((checked_parts, total_parts)) =
+                    state.hash_part_counter
+                    && total_parts > 0
+                    && (checked_parts, total_parts) != (checked, total)
+                {
+                    (
+                        format!("{checked}/{total}, {checked_parts}"),
+                        total_parts.to_string(),
+                    )
+                } else {
+                    (checked.to_string(), total.to_string())
+                };
+                self.t_fmt(
+                    "Calculating file hashes ({checked}/{total})",
+                    &[("checked", checked_text), ("total", total_text)],
+                )
+            } else if let Some(stage) = &state.stage_label {
+                self.translate_repository_check_stage(stage)
+            } else {
+                self.t("Quick local check")
+            }
+        } else {
+            self.t("Quick local check")
+        };
+
+        let elapsed = state
+            .map(|state| state.started_at.elapsed())
+            .unwrap_or_default();
+        let progress = if let Some(state) = state {
+            if let Some((checked_parts, total_parts)) = state.hash_part_counter {
+                if total_parts > 0 {
+                    Some((checked_parts as f32 / total_parts as f32).clamp(0.0, 1.0))
+                } else {
+                    None
+                }
+            } else if let Some((checked, total)) = state.hash_counter {
+                if total > 0 {
+                    Some((checked as f32 / total as f32).clamp(0.0, 1.0))
+                } else {
+                    None
+                }
+            } else {
+                state.stage_percent.map(|percent| percent.clamp(0.0, 1.0))
+            }
+        } else {
+            None
+        };
+
+        Some(RepositoryCheckStatusBanner {
+            title: self.t("Quick local check in progress"),
+            detail,
+            hint: self.repository_check_cycle_message(SyncMode::QuickCheckOnly, elapsed),
+            progress,
+            elapsed_seconds: elapsed.as_secs(),
+            cancellable: false,
+        })
+    }
+
+    /// Shown while startup database maintenance still holds the database.
+    pub(super) fn active_database_maintenance_banner(&self) -> Option<RepositoryCheckStatusBanner> {
+        let elapsed = crate::core::tasks::db_turso::db_startup_compaction_elapsed()?;
+        Some(RepositoryCheckStatusBanner {
+            title: self.t("Optimizing database"),
+            detail: self.t(
+                "One-time database maintenance is running. Checks and updates continue automatically when it finishes.",
+            ),
+            hint: self.t("This may take a few minutes"),
+            progress: None,
+            elapsed_seconds: elapsed.as_secs(),
+            cancellable: false,
         })
     }
 
@@ -185,6 +272,7 @@ impl Foxy {
             },
             progress: None,
             elapsed_seconds: elapsed.as_secs(),
+            cancellable: true,
         })
     }
 
@@ -196,11 +284,12 @@ impl Foxy {
             let repo = self.repository_view_state.repositories.get(repo_index)?;
             let key = Self::repo_instance_key(&repo.address, &repo.path);
             if self.active_quick_scan_instance_keys.contains(&key) {
-                return Some(format!(
-                    "{}\n{}",
-                    self.t("Quick local check in progress"),
-                    self.t("Quick local verify")
-                ));
+                let banner = self.active_quick_scan_banner(repo_index)?;
+                return Some(if banner.detail == banner.title {
+                    banner.title
+                } else {
+                    format!("{}\n{}", banner.title, banner.detail)
+                });
             }
             return None;
         }

@@ -215,7 +215,7 @@ pub(crate) async fn refresh_patch_plan_metadata_for_pending_updates(
         return 0;
     }
 
-    let chunk_size = SQLITE_MAX_VARIABLES.saturating_sub(10).max(1);
+    let chunk_size = read_chunk_ids();
     let mut allowed_mod_ids = HashSet::new();
     for chunk in mod_ids.chunks(chunk_size) {
         let placeholders = vec!["?"; chunk.len()].join(", ");
@@ -431,7 +431,7 @@ pub(crate) async fn apply_patch_plan_estimates_to_pending_updates(
         return None;
     }
 
-    let chunk_size = SQLITE_MAX_VARIABLES.saturating_sub(10).max(1);
+    let chunk_size = read_chunk_ids();
     let mut mod_rows = Vec::new();
     for chunk in scoped_mod_ids.chunks(chunk_size) {
         let placeholders = vec!["?"; chunk.len()].join(", ");

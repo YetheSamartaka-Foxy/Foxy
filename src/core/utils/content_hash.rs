@@ -85,14 +85,15 @@ pub(crate) fn blake3_file_hash(path: &Path) -> std::io::Result<String> {
     Ok(blake3_hex(hasher))
 }
 
+// Do not include creation time: it changes on copies/restores while content does not.
 pub fn calculate_addon_folder_content_hash(path: &Path) -> Result<String, std::io::Error> {
     let metadata = std::fs::metadata(path)?;
     if !metadata.is_dir() {
         return Ok(String::new());
     }
 
-    let mut file_entries: Vec<(String, u64, u128, u128)> = Vec::new();
-    let mut dir_entries: Vec<(String, u128, u128)> = Vec::new();
+    let mut file_entries: Vec<(String, u64, u128)> = Vec::new();
+    let mut dir_entries: Vec<String> = Vec::new();
     let mut pending_dirs: Vec<PathBuf> = vec![path.to_path_buf()];
 
     while let Some(dir_path) = pending_dirs.pop() {
@@ -105,46 +106,39 @@ pub fn calculate_addon_folder_content_hash(path: &Path) -> Result<String, std::i
                 Ok(relative) => normalize_path(&relative.to_string_lossy()),
                 Err(_) => continue,
             };
-            let modified_ns = entry_meta
-                .modified()
-                .ok()
-                .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0);
-            let created_ns = entry_meta
-                .created()
-                .ok()
-                .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0);
 
             if file_type.is_dir() {
                 pending_dirs.push(entry_path);
-                dir_entries.push((relative_path, modified_ns, created_ns));
+                dir_entries.push(relative_path);
             } else if file_type.is_file() && !is_foxy_temp_artifact_path(&relative_path) {
-                file_entries.push((relative_path, entry_meta.len(), modified_ns, created_ns));
+                let modified_ns = entry_meta
+                    .modified()
+                    .ok()
+                    .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|duration| duration.as_nanos())
+                    .unwrap_or(0);
+                file_entries.push((relative_path, entry_meta.len(), modified_ns));
             }
         }
     }
 
-    dir_entries.sort_by(|a, b| a.0.cmp(&b.0));
+    dir_entries.sort();
     file_entries.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"FOXY_ADDON_FOLDER_HASH_V2");
+    hasher.update(b"FOXY_ADDON_FOLDER_HASH_V3");
     hasher.update(normalize_path(&path.to_string_lossy()).as_bytes());
 
     hasher.update(&(dir_entries.len() as u64).to_le_bytes());
-    for (relative_path, _modified_ns, _created_ns) in dir_entries {
+    for relative_path in dir_entries {
         hasher.update(relative_path.as_bytes());
     }
 
     hasher.update(&(file_entries.len() as u64).to_le_bytes());
-    for (relative_path, len, modified_ns, created_ns) in file_entries {
+    for (relative_path, len, modified_ns) in file_entries {
         hasher.update(relative_path.as_bytes());
         hasher.update(&len.to_le_bytes());
         hasher.update(&modified_ns.to_le_bytes());
-        hasher.update(&created_ns.to_le_bytes());
     }
 
     Ok(blake3_hex(hasher))
@@ -155,7 +149,6 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    // ── blake3_hex ──────────────────────────────────────────────────────
 
     #[test]
     fn blake3_hex_returns_32_uppercase_hex_chars() {
@@ -172,7 +165,6 @@ mod tests {
         assert_eq!(hex, "AF1349B9F5F9A1A6A0404DEA36DCC949");
     }
 
-    // ── is_blake3_checksum ──────────────────────────────────────────────
 
     #[test]
     fn is_blake3_checksum_64_chars() {
@@ -197,7 +189,6 @@ mod tests {
         assert!(!is_blake3_checksum(&hex40));
     }
 
-    // ── FlexHasher ──────────────────────────────────────────────────────
 
     #[test]
     fn flex_hasher_md5_produces_32_hex() {
@@ -248,7 +239,6 @@ mod tests {
         assert_eq!(h.finalize_hex(), "5D41402ABC4B2A76B9719D911017C592");
     }
 
-    // ── normalize_path ──────────────────────────────────────────────────
 
     #[test]
     fn normalize_path_backslashes_to_forward() {
@@ -293,7 +283,6 @@ mod tests {
         assert_eq!(normalize_path("FOO/BAR"), "FOO/BAR");
     }
 
-    // ── blake3_file_hash ────────────────────────────────────────────────
 
     #[test]
     fn blake3_file_hash_reads_file_correctly() {
@@ -342,7 +331,6 @@ mod tests {
         assert_eq!(file_hash, expected);
     }
 
-    // ── calculate_addon_folder_content_hash ─────────────────────────────
 
     #[test]
     fn addon_folder_hash_not_a_dir() {
@@ -423,7 +411,6 @@ mod tests {
         assert_eq!(hex1, hex2);
     }
 
-    // ── is_foxy_temp_artifact_path: additional ─────────────────────────
 
     #[test]
     fn temp_artifact_path_mid_path_not_detected() {
@@ -442,7 +429,6 @@ mod tests {
         assert!(is_foxy_temp_artifact_path(".foxy.bak"));
     }
 
-    // ── normalize_path: additional ─────────────────────────────────────
 
     #[test]
     fn normalize_path_multiple_trailing_slashes() {
@@ -457,7 +443,6 @@ mod tests {
         assert!(!result.contains('\\'));
     }
 
-    // ── FlexHasher: additional ─────────────────────────────────────────
 
     #[test]
     fn flex_hasher_blake3_incremental_update() {
