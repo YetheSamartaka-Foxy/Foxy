@@ -928,6 +928,8 @@ mod tests {
     use crate::core::api::{FileDiffSummary, ModDiffSummary};
 
     fn mod_summary(name: &str, needs_update: bool, files: usize) -> ModDiffSummary {
+        use crate::core::api::FileDiffKind;
+
         ModDiffSummary {
             name: name.to_string(),
             needs_update,
@@ -938,6 +940,7 @@ mod tests {
                     needs_update,
                     total_bytes: 100,
                     changed_parts: 1,
+                    change_kind: FileDiffKind::Modified,
                 })
                 .collect(),
         }

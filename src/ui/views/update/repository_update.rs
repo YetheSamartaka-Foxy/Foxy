@@ -307,9 +307,17 @@ impl Foxy {
                                         ui.set_width(card_width);
 
                                         ui.vertical(|ui| {
-                                                // Row: [name] ... [Details (X files) button (right)]
+                                                // Row: [name] ... [Diff (X files) button (right)]
                                                 let details_id =
                                                     Id::new(("update-details-toggle", mod_idx, &m.name));
+                                                let diff_file_indices: Vec<usize> = m
+                                                    .files
+                                                    .iter()
+                                                    .enumerate()
+                                                    .filter_map(|(idx, file)| {
+                                                        file.needs_update.then_some(idx)
+                                                    })
+                                                    .collect();
                                                 ui.horizontal(|ui| {
                                                     ui.add(
                                                         eframe::egui::Label::new(
@@ -320,7 +328,7 @@ impl Foxy {
                                                         .truncate(),
                                                     );
 
-                                                    if !m.files.is_empty() {
+                                                    if !diff_file_indices.is_empty() {
                                                         ui.with_layout(
                                                             Layout::right_to_left(Align::Center),
                                                             |ui| {
@@ -335,23 +343,26 @@ impl Foxy {
                                                                 let details_label =
                                                                     self.i18n.tr_plural(
                                                                         "Details ({count} files)",
-                                                                        m.files.len() as u64,
+                                                                        diff_file_indices.len() as u64,
                                                                     );
-                                                                if ui
-                                                                    .add(
-                                                                        eframe::egui::Button::new(
-                                                                            RichText::new(format!(
-                                                                                "{} {}",
-                                                                                arrow,
-                                                                                details_label
-                                                                            ))
-                                                                            .color(self.color_text_dim())
-                                                                            .size(mod_status_text_size),
-                                                                        )
-                                                                        .frame(false),
+                                                                let response = ui.add(
+                                                                    eframe::egui::Button::new(
+                                                                        RichText::new(format!(
+                                                                            "{} {}",
+                                                                            arrow,
+                                                                            details_label
+                                                                        ))
+                                                                        .color(self.color_text_dim())
+                                                                        .size(mod_status_text_size),
                                                                     )
-                                                                    .clicked()
-                                                                {
+                                                                    .frame(false),
+                                                                );
+                                                                if response.hovered() {
+                                                                    ui.ctx().output_mut(
+                                                                        Foxy::set_pointing_cursor_output,
+                                                                    );
+                                                                }
+                                                                if response.clicked() {
                                                                     ui.data_mut(|d| {
                                                                         d.insert_temp(details_id, !open)
                                                                     });
@@ -361,11 +372,11 @@ impl Foxy {
                                                     }
                                                 });
 
-                                                // Details panel (between name and progress bar)
+                                                // Diff panel (between name and progress bar)
                                                 let details_open: bool = ui.data(|d| {
                                                     d.get_temp(details_id).unwrap_or(false)
                                                 });
-                                                if details_open && !m.files.is_empty() {
+                                                if details_open && !diff_file_indices.is_empty() {
                                                     ui.add_space(2.0);
                                                     let file_font = egui::FontId::proportional(
                                                         file_details_text_size,
@@ -377,24 +388,19 @@ impl Foxy {
                                                         .max(16.0);
                                                     let details_max_height =
                                                         (file_row_height * 10.0) + 4.0;
-                                                    // Cache the shaped file lines so scrolling a long
-                                                    // file list (virtualized, 10 rows tall) does not
-                                                    // re-shape revealed rows. Keyed on the mod so the
-                                                    // selected mod's panel reuses its galleys; if two
-                                                    // panels are open at once they share one cache and
-                                                    // degrade gracefully to per-frame shaping.
-                                                    let file_text_color = self.color_text_normal();
-                                                    let file_generation = galley_cache::fingerprint((
-                                                        mod_idx,
-                                                        m.name.as_str(),
-                                                        m.files.len(),
-                                                    ));
+                                                    let added_color = self.color_success();
+                                                    let modified_color = self.color_warn();
+                                                    let deleted_color = self.color_error();
+                                                    let file_generation =
+                                                        update_file_diff_generation(mod_idx, m);
                                                     let file_fingerprint = galley_cache::fingerprint((
                                                         file_details_text_size.to_bits(),
-                                                        file_text_color.to_array(),
+                                                        added_color.to_array(),
+                                                        modified_color.to_array(),
+                                                        deleted_color.to_array(),
                                                     ));
                                                     file_galleys.ensure(
-                                                        m.files.len(),
+                                                        diff_file_indices.len(),
                                                         1,
                                                         file_generation,
                                                         file_fingerprint,
@@ -410,37 +416,33 @@ impl Foxy {
                                                         .show_rows(
                                                             ui,
                                                             file_row_height,
-                                                            m.files.len(),
+                                                            diff_file_indices.len(),
                                                             |ui, row_range| {
                                                                 for row_idx in row_range {
-                                                                    let file = &m.files[row_idx];
+                                                                    let file =
+                                                                        &m.files[diff_file_indices[row_idx]];
+                                                                    let file_text_color =
+                                                                        update_file_diff_kind_color(
+                                                                            file.change_kind,
+                                                                            added_color,
+                                                                            modified_color,
+                                                                            deleted_color,
+                                                                        );
+                                                                    let kind_marker =
+                                                                        update_file_diff_kind_marker(
+                                                                            file.change_kind,
+                                                                        );
+                                                                    let row_text =
+                                                                        update_file_diff_row_text(
+                                                                            file,
+                                                                            kind_marker,
+                                                                        );
                                                                     let galley = galley_cache::lazy_galley_colored(
                                                                         ui,
                                                                         file_galleys.slot(row_idx, 0),
                                                                         file_font.clone(),
                                                                         file_text_color,
-                                                                        || {
-                                                                            let parts_text =
-                                                                                if file.changed_parts > 0 {
-                                                                                    format!(
-                                                                                        ", {} part{}",
-                                                                                        file.changed_parts,
-                                                                                        if file.changed_parts == 1 {
-                                                                                            ""
-                                                                                        } else {
-                                                                                            "s"
-                                                                                        }
-                                                                                    )
-                                                                                } else {
-                                                                                    String::new()
-                                                                                };
-                                                                            format!(
-                                                                                "- {} ({}{})",
-                                                                                file.name,
-                                                                                fmt_bytes(file.total_bytes),
-                                                                                parts_text
-                                                                            )
-                                                                        },
+                                                                        || row_text,
                                                                     );
                                                                     ui.add(eframe::egui::Label::new(galley));
                                                                 }
@@ -1498,6 +1500,77 @@ fn update_view_scaled_text_size(font_size: f32, scale: f32) -> f32 {
     (font_size * scale).max(1.0)
 }
 
+fn update_file_diff_generation(mod_idx: usize, mod_summary: &ModDiffSummary) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    mod_idx.hash(&mut hasher);
+    mod_summary.name.hash(&mut hasher);
+    mod_summary.files.len().hash(&mut hasher);
+    for file in &mod_summary.files {
+        file.name.hash(&mut hasher);
+        file.needs_update.hash(&mut hasher);
+        file.total_bytes.hash(&mut hasher);
+        file.changed_parts.hash(&mut hasher);
+        update_file_diff_kind_code(file.change_kind).hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn update_file_diff_kind_code(kind: FileDiffKind) -> u8 {
+    match kind {
+        FileDiffKind::Added => 1,
+        FileDiffKind::Modified => 2,
+        FileDiffKind::Deleted => 3,
+    }
+}
+
+fn update_file_diff_kind_marker(kind: FileDiffKind) -> &'static str {
+    match kind {
+        FileDiffKind::Added => "+",
+        FileDiffKind::Modified => "~",
+        FileDiffKind::Deleted => "-",
+    }
+}
+
+fn update_file_diff_kind_color(
+    kind: FileDiffKind,
+    added_color: egui::Color32,
+    modified_color: egui::Color32,
+    deleted_color: egui::Color32,
+) -> egui::Color32 {
+    match kind {
+        FileDiffKind::Added => added_color,
+        FileDiffKind::Modified => modified_color,
+        FileDiffKind::Deleted => deleted_color,
+    }
+}
+
+fn update_file_diff_row_text(
+    file: &crate::core::api::FileDiffSummary,
+    kind_marker: &str,
+) -> String {
+    if file.change_kind == FileDiffKind::Deleted && file.total_bytes == 0 && file.changed_parts == 0
+    {
+        return format!("{} {}", kind_marker, file.name);
+    }
+
+    let parts_text = if file.changed_parts > 0 {
+        format!(
+            ", {} part{}",
+            file.changed_parts,
+            if file.changed_parts == 1 { "" } else { "s" }
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "{} {} ({}{})",
+        kind_marker,
+        file.name,
+        fmt_bytes(file.total_bytes),
+        parts_text
+    )
+}
+
 fn update_view_inset_rect(rect: egui::Rect, horizontal_padding: f32) -> egui::Rect {
     let padding = horizontal_padding.min(rect.width() * 0.5);
     rect.shrink2(Vec2::new(padding, 0.0))
@@ -1633,6 +1706,36 @@ mod tests {
         let text_size = update_view_scaled_text_size(18.0, 0.5);
 
         assert_eq!(text_size, 9.0);
+    }
+
+    #[test]
+    fn update_file_diff_row_text_includes_change_kind_size_and_parts() {
+        let file = crate::core::api::FileDiffSummary {
+            name: "addons/main.pbo".to_string(),
+            needs_update: true,
+            total_bytes: 2048,
+            changed_parts: 2,
+            change_kind: FileDiffKind::Modified,
+        };
+
+        let text = update_file_diff_row_text(&file, "~");
+
+        assert_eq!(text, "~ addons/main.pbo (2.0 KB, 2 parts)");
+    }
+
+    #[test]
+    fn update_file_diff_row_text_omits_empty_deleted_size() {
+        let file = crate::core::api::FileDiffSummary {
+            name: "addons/old.pbo".to_string(),
+            needs_update: true,
+            total_bytes: 0,
+            changed_parts: 0,
+            change_kind: FileDiffKind::Deleted,
+        };
+
+        let text = update_file_diff_row_text(&file, "-");
+
+        assert_eq!(text, "- addons/old.pbo");
     }
 
     #[test]

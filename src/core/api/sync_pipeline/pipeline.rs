@@ -17,6 +17,7 @@ use super::hashing::{
     render_hash_total_summary, run_incremental_hash_batch,
 };
 use super::summary::{PipelineSummary, StageEntry};
+use crate::core::api::FileDiffKind;
 use crate::core::db::{DbValue, FoxyDb, params};
 use crate::core::models::download_target_file::fetch_all_download_targets_with_mod_and_name;
 use crate::core::models::modification::ADDON_COLUMNS;
@@ -1314,6 +1315,11 @@ async fn run_repository_pipeline(
                                 needs_update: true,
                                 total_bytes: f.length,
                                 changed_parts,
+                                change_kind: if f.local_checksum.is_empty() {
+                                    FileDiffKind::Added
+                                } else {
+                                    FileDiffKind::Modified
+                                },
                             });
                         }
                     }

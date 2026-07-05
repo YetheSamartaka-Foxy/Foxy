@@ -14,6 +14,17 @@ pub struct FileDiffSummary {
     pub needs_update: bool,
     pub total_bytes: u64,
     pub changed_parts: usize,
+    #[serde(default)]
+    pub change_kind: FileDiffKind,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileDiffKind {
+    Added,
+    #[default]
+    Modified,
+    Deleted,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -132,4 +143,19 @@ pub struct RepositorySyncOptions {
     pub cancel_rx: watch::Receiver<bool>,
     pub hash_algorithm_preference: crate::ui::types::HashAlgorithmPreference,
     pub hash_io_profile: crate::ui::types::HashIoProfilePreference,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_diff_summary_defaults_missing_change_kind_to_modified() {
+        let summary: FileDiffSummary = serde_json::from_str(
+            r#"{"name":"addons/main.pbo","needs_update":true,"total_bytes":12,"changed_parts":1}"#,
+        )
+        .unwrap();
+
+        assert_eq!(summary.change_kind, FileDiffKind::Modified);
+    }
 }

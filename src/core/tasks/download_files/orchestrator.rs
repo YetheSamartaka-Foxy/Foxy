@@ -1,4 +1,6 @@
-use crate::core::api::{FileDiffSummary, ModDiffSummary, ProgressEvent, send_progress_event};
+use crate::core::api::{
+    FileDiffKind, FileDiffSummary, ModDiffSummary, ProgressEvent, send_progress_event,
+};
 use crate::core::models::context::FoxyContext;
 use crate::core::models::download_patch_file::load_download_patch_file;
 use crate::core::models::download_target_file::{
@@ -93,6 +95,7 @@ pub(crate) fn build_download_estimate_diffs(
             needs_update: true,
             total_bytes: estimate,
             changed_parts: 0,
+            change_kind: FileDiffKind::Modified,
         });
     }
 

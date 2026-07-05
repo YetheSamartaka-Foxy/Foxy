@@ -2,7 +2,7 @@ mod direct_download;
 mod manifest;
 mod repository_update;
 
-use crate::core::api::SyncMode;
+use crate::core::api::{FileDiffKind, ModDiffSummary, SyncMode};
 use crate::ui::app::Foxy;
 use crate::ui::i18n::{fmt_bytes, fmt_duration, fmt_duration_ms, fmt_speed_mbps, locale_compare};
 use crate::ui::types::FoxyView;
@@ -13,4 +13,5 @@ use eframe::egui::{
 };
 use log::{info, warn};
 use rfd::FileDialog;
+use std::hash::{Hash, Hasher};
 use std::time::Duration;

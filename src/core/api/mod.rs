@@ -64,7 +64,7 @@ pub use startup_diagnostics::{
 };
 pub use sync_pipeline::spawn_repository_sync;
 pub use types::{
-    FileDiffSummary, FsChangeEvent, LogEntry, ModDiffSummary, ProgressEvent,
+    FileDiffKind, FileDiffSummary, FsChangeEvent, LogEntry, ModDiffSummary, ProgressEvent,
     QuickScanProgressEvent, QuickScanResult, RepositorySyncOptions, SyncMode,
 };
 

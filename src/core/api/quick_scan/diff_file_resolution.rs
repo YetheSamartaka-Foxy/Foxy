@@ -8,6 +8,7 @@ use super::diff_addon_hash::AddonHashResult;
 use super::file_state::{LocalFileState, resolve_local_file_state};
 use super::shared_cache::QuickScanSharedCache;
 use super::unexpected_files::collect_unexpected_local_files_for_mod;
+use crate::core::api::FileDiffKind;
 use crate::core::db::DbValue;
 
 pub(super) struct DiffComputeResult {
@@ -267,6 +268,7 @@ pub(super) async fn compute_file_diffs(
                     needs_update: true,
                     total_bytes: f.length,
                     changed_parts: 0,
+                    change_kind: FileDiffKind::Added,
                 })
                 .collect();
             diffs.push(ModDiffSummary {
@@ -397,6 +399,11 @@ pub(super) async fn compute_file_diffs(
                         needs_update: true,
                         total_bytes: planned_patch_bytes,
                         changed_parts: part_stats.changed_parts,
+                        change_kind: if exists {
+                            FileDiffKind::Modified
+                        } else {
+                            FileDiffKind::Added
+                        },
                     });
                 }
             }
@@ -449,6 +456,7 @@ pub(super) async fn compute_file_diffs(
                     needs_update: true,
                     total_bytes: planned_patch_bytes,
                     changed_parts: part_stats.changed_parts,
+                    change_kind: FileDiffKind::Modified,
                 });
             }
         }

@@ -693,6 +693,7 @@ mod tests {
             needs_update: true,
             total_bytes,
             changed_parts: 1,
+            change_kind: FileDiffKind::Modified,
         }
     }
 
