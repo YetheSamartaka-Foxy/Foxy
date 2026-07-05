@@ -1667,6 +1667,172 @@ impl Foxy {
         }
     }
 
+    pub(super) fn render_repository_visual_folder_edit_modal(&mut self, ctx: &egui::Context) {
+        let Some(mut edit) = self.pending_repository_visual_folder_edit.clone() else {
+            return;
+        };
+
+        let title = if edit.folder_id.is_some() {
+            self.t("Edit folder")
+        } else {
+            self.t("Create folder")
+        };
+        let mut save = false;
+        let mut cancel = false;
+        egui::Window::new(title)
+            .frame(
+                egui::Frame::window(&ctx.global_style())
+                    .fill(self.color_card_bg())
+                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
+                    .corner_radius(CornerRadius::same(10)),
+            )
+            .title_bar(true)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+            .default_width(420.0)
+            .show(ctx, |ui| {
+                ui.label(self.t("Folder name"));
+                let name_response = ui.add(
+                    TextEdit::singleline(&mut edit.name_buffer)
+                        .id_salt("repository_visual_folder_name")
+                        .desired_width(ui.available_width()),
+                );
+                if name_response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    save = true;
+                }
+
+                ui.add_space(8.0);
+                ui.label(self.t("Folder color"));
+                let mut color = egui::Color32::from_rgb(
+                    edit.color_rgb[0],
+                    edit.color_rgb[1],
+                    edit.color_rgb[2],
+                );
+                let color_response = ui.color_edit_button_srgba(&mut color);
+                if color_response.hovered() {
+                    ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                }
+                edit.color_rgb = [color.r(), color.g(), color.b()];
+
+                if let Some(error) = edit.error.as_ref() {
+                    ui.add_space(8.0);
+                    ui.colored_label(self.color_text_error(), error);
+                }
+
+                ui.add_space(14.0);
+                ui.horizontal(|ui| {
+                    let cancel_btn = ui.button(self.t("Cancel"));
+                    if cancel_btn.hovered() {
+                        ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                    }
+                    if cancel_btn.clicked() {
+                        cancel = true;
+                    }
+
+                    let save_btn = ui.button(self.t("Save"));
+                    if save_btn.hovered() {
+                        ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                    }
+                    if save_btn.clicked() {
+                        save = true;
+                    }
+                });
+            });
+
+        if cancel {
+            self.pending_repository_visual_folder_edit = None;
+            return;
+        }
+
+        self.pending_repository_visual_folder_edit = Some(edit);
+        if save {
+            self.apply_repository_visual_folder_edit();
+        }
+    }
+
+    pub(super) fn render_repository_visual_folder_delete_confirmation(
+        &mut self,
+        ctx: &egui::Context,
+    ) {
+        let Some(mut pending) = self.pending_repository_visual_folder_delete.clone() else {
+            return;
+        };
+
+        let Some(folder) = self
+            .repository_visual_folders
+            .iter()
+            .find(|folder| folder.id == pending.folder_id)
+            .cloned()
+        else {
+            self.pending_repository_visual_folder_delete = None;
+            return;
+        };
+
+        let mut confirm = false;
+        let mut cancel = false;
+        egui::Window::new(self.t("Delete folder"))
+            .frame(
+                egui::Frame::window(&ctx.global_style())
+                    .fill(self.color_card_bg())
+                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
+                    .corner_radius(CornerRadius::same(10)),
+            )
+            .title_bar(true)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+            .default_width(520.0)
+            .show(ctx, |ui| {
+                ui.label(self.t_fmt("Delete folder {name}?", &[("name", folder.name.clone())]));
+                ui.label(self.t(
+                    "If repositories are not deleted, they will be moved back out of the folder.",
+                ));
+                ui.add_space(12.0);
+                let delete_repositories_checkbox = ui.checkbox(
+                    &mut pending.delete_repositories,
+                    self.t("Also delete repositories inside this folder"),
+                );
+                if delete_repositories_checkbox.hovered() {
+                    ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                }
+                if pending.delete_repositories {
+                    ui.label(
+                        self.t("Repository files on disk are not deleted by this folder action."),
+                    );
+                }
+
+                ui.add_space(18.0);
+                ui.horizontal(|ui| {
+                    let cancel_btn = ui.button(self.t("Cancel"));
+                    if cancel_btn.hovered() {
+                        ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                    }
+                    if cancel_btn.clicked() {
+                        cancel = true;
+                    }
+
+                    let delete_btn = ui.button(self.t("Delete folder"));
+                    if delete_btn.hovered() {
+                        ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                    }
+                    if delete_btn.clicked() {
+                        confirm = true;
+                    }
+                });
+            });
+
+        if cancel {
+            self.pending_repository_visual_folder_delete = None;
+            return;
+        }
+
+        self.pending_repository_visual_folder_delete = Some(pending.clone());
+        if confirm {
+            self.delete_repository_visual_folder(&pending.folder_id, pending.delete_repositories);
+        }
+    }
+
     pub(super) fn render_repository_context_confirmation(&mut self, ctx: &egui::Context) {
         let Some(confirm_action) = self.pending_repository_context_confirmation else {
             return;

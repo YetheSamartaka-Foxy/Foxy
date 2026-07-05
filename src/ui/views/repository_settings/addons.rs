@@ -420,6 +420,7 @@ impl Foxy {
                             warn!("Standalone download failed for addon {}", addon_name);
                         }
                     }
+                    AddonContextAction::ToggleStructure => {}
                     AddonContextAction::ForceRedownload => {
                         self.pending_addon_destructive_confirmation =
                             Some(AddonDestructiveConfirmAction::ForceRedownload {

@@ -4,7 +4,7 @@ use std::time::Duration;
 use eframe::egui::{self, Visuals};
 use log::info;
 
-use crate::core::api::{self, QuickScanResult};
+use crate::core::api::{self, QuickScanProgressEvent, QuickScanResult};
 use crate::ui::app::{
     AddonBackupTaskResult, AddonDeleteResult, AddonHashRecalcResult, AddonInventoryViewCache,
     CachedUpdateLoadResult, Foxy, ImageLoadResult, JoinPreflightQueryResult, ListGalleyCache,
@@ -157,11 +157,14 @@ impl Foxy {
         let (cached_update_load_result_tx, cached_update_load_result_rx) =
             std::sync::mpsc::channel::<CachedUpdateLoadResult>();
         let (quick_scan_tx, quick_scan_rx) = std::sync::mpsc::channel::<QuickScanResult>();
+        let (quick_scan_progress_tx, quick_scan_progress_rx) =
+            std::sync::mpsc::channel::<QuickScanProgressEvent>();
         let (fs_watch_tx, fs_watch_rx) = std::sync::mpsc::channel::<api::FsChangeEvent>();
         let fs_watch_suppressed_until_ms =
             std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let (repository_db_wipe_tx, repository_db_wipe_rx) =
             std::sync::mpsc::channel::<RepositoryDbWipeResult>();
+        let (database_wipe_tx, database_wipe_rx) = std::sync::mpsc::channel::<Result<(), String>>();
         let (addon_backup_task_tx, addon_backup_task_rx) =
             std::sync::mpsc::channel::<AddonBackupTaskResult>();
         let (repository_settings_addon_preload_tx, repository_settings_addon_preload_rx) =
@@ -198,9 +201,13 @@ impl Foxy {
             repository_list_data_version: 1,
             drag_source_repo_index: None,
             drag_drop_target_index: None,
+            drag_drop_target_visual_folder_id: None,
             repository_spaces_version: 1,
             repository_spaces: Vec::new(),
+            repository_visual_folders_version: 1,
+            repository_visual_folders: Vec::new(),
             selected_repository_space_id: None,
+            selected_repository_visual_folder_id: None,
             repository_space_detail_filter: String::new(),
             repository_space_detail_filter_space_id: None,
             show_add_repository_modal: false,
@@ -257,16 +264,20 @@ impl Foxy {
             repository_selection: None,
             detected_arma3_profiles: Vec::new(),
             detected_active_arma3_profile: None,
+            pending_arma3_profile_action: None,
             cached_missions: None,
             selected_repository_for_settings: None,
             current_repository_settings_tab: RepositorySettingsTab::Configuration,
             current_help_tab: HelpTab::Overview,
             current_about_tab: AboutTab::About,
             addons_filter: String::new(),
+            addons_search_files: false,
             optional_addons_filter: String::new(),
             external_addons_filter: String::new(),
             external_addons_origin_filter: "All".to_string(),
             external_addons_group_by_origin: false,
+            optional_addons_search_files: false,
+            external_addons_search_files: false,
             addon_state_filter: String::new(),
             addon_favorites_only_filter: false,
             addon_client_side_only_filter: false,
@@ -300,6 +311,8 @@ impl Foxy {
             pending_cached_update_loads: HashSet::new(),
             quick_scan_rx,
             quick_scan_tx,
+            quick_scan_progress_rx,
+            quick_scan_progress_tx,
             quick_scan_worker: None,
             startup_quick_scan_filter_rx: None,
             startup_quick_scan_filter_worker: None,
@@ -312,12 +325,16 @@ impl Foxy {
             pending_quick_scan_prevalidated_urls: HashSet::new(),
             pending_quick_scan_force_fresh_addon_hash_urls: HashSet::new(),
             quick_scan_pending: HashSet::new(),
+            active_quick_scan_instance_keys: HashSet::new(),
+            quick_scan_progress_by_instance: HashMap::new(),
             repo_db_reset_pending_recheck: HashSet::new(),
             pending_repository_db_wipes: HashSet::new(),
             pending_repository_force_redownloads: HashSet::new(),
             pending_repository_db_wipe_started_at: HashMap::new(),
             repository_db_wipe_rx,
             repository_db_wipe_tx,
+            database_wipe_rx,
+            database_wipe_tx,
             addon_backup_task_rx,
             addon_backup_task_tx,
             addon_backup_worker: None,
@@ -359,9 +376,11 @@ impl Foxy {
             backend_worker: None,
             startup_pending_restore_rx: None,
             startup_pending_restore_worker: None,
+            startup_repository_layout_logged: false,
             sync_started_at: None,
             startup_recheck_queue: VecDeque::new(),
             repository_space_sync_queue: VecDeque::new(),
+            repository_visual_folder_sync_queue: VecDeque::new(),
             addon_hash_recalc_queue: VecDeque::new(),
             scheduler_active_run: None,
             scheduler_pending_post_action: None,
@@ -411,6 +430,8 @@ impl Foxy {
             repo_foxy_modes: HashMap::new(),
             pending_repository_context_confirmation: None,
             pending_repository_space_delete_id: None,
+            pending_repository_visual_folder_edit: None,
+            pending_repository_visual_folder_delete: None,
             startup_frame_rendered: false,
             startup_tasks_started: false,
             close_requested_at: None,
@@ -445,6 +466,7 @@ impl Foxy {
             default_repo_image_texture_bytes: 0,
             last_applied_palette: None,
             cached_color32: None,
+            last_font_image_size: [0, 0],
             last_saved_window_state: Self::load_window_state(),
             last_logged_display_metrics: None,
             tray_manager: None,
@@ -530,6 +552,7 @@ impl Foxy {
         app.load_repositories();
         app.load_repository_spaces();
         app.reconcile_repository_space_paths();
+        app.load_repository_visual_folders();
         api::log_startup_system_diagnostics(&app.startup_storage_paths());
         info!(
             "Startup state loaded: repositories={} repository_spaces={} debug_mode={}",

@@ -46,6 +46,10 @@ pub(crate) struct FoxyContext {
     /// Buffer of part rows staged by the deferred-insert path; drained once by the
     /// background flush task (awaited before the incremental hasher loads its tree).
     pub(crate) deferred_part_inserts: Arc<Mutex<Vec<DeferredPartInsert>>>,
+    /// True when the staged deferred rows were collected while `fresh_subfiles_load`
+    /// was true. The metadata fan-out clears `fresh_subfiles_load` before the hash
+    /// bootstrap flushes local state, so the buffer needs its own durable marker.
+    pub(crate) deferred_part_inserts_fresh_load: Arc<AtomicBool>,
 }
 
 /// Constructor
@@ -64,6 +68,7 @@ impl FoxyContext {
             fresh_subfiles_load: Arc::new(AtomicBool::new(false)),
             defer_part_inserts: Arc::new(AtomicBool::new(false)),
             deferred_part_inserts: Arc::new(Mutex::new(Vec::new())),
+            deferred_part_inserts_fresh_load: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -83,6 +88,9 @@ impl FoxyContext {
     pub(crate) fn buffer_deferred_parts(&self, rows: Vec<DeferredPartInsert>) {
         if rows.is_empty() {
             return;
+        }
+        if self.is_fresh_subfiles_load() {
+            self.set_deferred_part_inserts_fresh_load(true);
         }
         if let Ok(mut buffer) = self.deferred_part_inserts.lock() {
             buffer.extend(rows);
@@ -122,6 +130,16 @@ impl FoxyContext {
     /// Mark (or clear) the index-deferred fresh-load mode for the current rebuild.
     pub(crate) fn set_fresh_subfiles_load(&self, value: bool) {
         self.fresh_subfiles_load.store(value, Ordering::Relaxed);
+    }
+
+    pub(crate) fn deferred_part_inserts_are_fresh_load(&self) -> bool {
+        self.deferred_part_inserts_fresh_load
+            .load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn set_deferred_part_inserts_fresh_load(&self, value: bool) {
+        self.deferred_part_inserts_fresh_load
+            .store(value, Ordering::Relaxed);
     }
 
     pub(crate) fn with_forced_mod_refreshes(

@@ -23,7 +23,7 @@ use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::FutureExt;
 use log::{debug, info, warn};
@@ -38,10 +38,7 @@ use crate::core::utils::format::sanitize_log_path;
 /// clean rebuild on the breaking Turso upgrade so no incremental replay is needed.
 const TURSO_BOOTSTRAP_SCHEMA: &str = include_str!("../../../sql/turso_schema.sql");
 
-/// Canonical `subfiles` table DDL, kept byte-identical to `sql/turso_schema.sql`.
-/// Used by the whole-wipe purge (after_turso_regression_analysis5.md P0-a) to
-/// `DROP TABLE subfiles` + recreate empty in O(1) page-dealloc instead of a
-/// 66k-row `DELETE`. If you edit the table shape, edit both places.
+/// Canonical `subfiles` table DDL, kept token-identical to `sql/turso_schema.sql`.
 pub(crate) const SUBFILES_CREATE_TABLE: &str = "CREATE TABLE IF NOT EXISTS subfiles (\
     id INTEGER PRIMARY KEY, \
     file_id INTEGER NOT NULL, \
@@ -139,6 +136,10 @@ async fn apply_schema(conn: &Connection, schema: &str) -> turso::Result<()> {
 /// connection, then re-applies the bootstrap schema - so the in-process handle
 /// stays valid across the wipe (used by the schema-version wipe prompt).
 pub(crate) async fn wipe_and_rebuild_live(db: &Database) -> turso::Result<()> {
+    // Full live wipe is a destructive bulk operation. Hold the same exclusive
+    // barrier as repository purge so this cannot race another seam read/write on
+    // the shared Turso handle and surface as "database is locked".
+    let _exclusive = crate::core::tasks::init_database::acquire_db_exclusive().await;
     // FK enforcement is on per tuned connection; drop in dependency order so the
     // CASCADE chains don't fight the explicit DROPs.
     let conn = connect_tuned(db).await?;
@@ -238,7 +239,7 @@ pub(crate) async fn connect_tuned(db: &Database) -> turso::Result<Connection> {
     Ok(conn)
 }
 
-// --- Startup bloat inspection + auto-compaction (analysis4 P0) ----------------
+// --- Startup bloat inspection + opt-in compaction (analysis4 P0) --------------
 //
 // MVCC-era churn left `database.db` ~97% free pages (e.g. 349 648 pages / 338 750
 // free = 1.37 GB on disk for ~44 MB of live rows). Under WAL the file no longer
@@ -257,6 +258,10 @@ pub(crate) async fn connect_tuned(db: &Database) -> turso::Result<Connection> {
 /// that the walk cost matters - a fresh/small db is never churned.
 const COMPACT_MIN_FREE_PAGES: i64 = 20_000;
 const COMPACT_MIN_FREE_RATIO: f64 = 0.5;
+/// Automatic startup compaction live-row ceiling.
+const COMPACT_AUTO_MAX_LIVE_MIB: f64 = 512.0;
+/// How long a post-compaction backup is kept.
+const DB_BACKUP_MAX_AGE: Duration = Duration::from_secs(14 * 24 * 60 * 60);
 
 #[derive(Debug, Clone, Copy)]
 struct DbBloatStats {
@@ -301,8 +306,7 @@ async fn read_db_bloat_stats(conn: &Connection) -> Option<DbBloatStats> {
     })
 }
 
-/// `off` disables auto-compaction; `force` compacts regardless of bloat (for
-/// testing); anything else (incl. unset) = `auto` (compact only when bloated).
+/// Startup compaction mode from `FOXY_DB_COMPACT`.
 fn compact_mode() -> String {
     std::env::var("FOXY_DB_COMPACT")
         .ok()
@@ -325,6 +329,121 @@ fn remove_db_artifacts(path: &std::path::Path) {
     let _ = fs::remove_file(with_suffix(path, "-shm"));
 }
 
+/// Remove stale maintenance artifacts next to `database.db`.
+fn sweep_stale_db_artifacts(path: &Path) {
+    let compacting = with_suffix(path, ".compacting");
+    if compacting.exists()
+        || with_suffix(&compacting, "-wal").exists()
+        || with_suffix(&compacting, "-shm").exists()
+    {
+        info!(
+            "STARTUP: removing stale compaction artifacts {}",
+            sanitize_log_path(&compacting)
+        );
+        remove_db_artifacts(&compacting);
+    }
+
+    let bak = with_suffix(path, ".bak");
+    if let Ok(metadata) = fs::metadata(&bak) {
+        let expired = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age > DB_BACKUP_MAX_AGE);
+        if expired {
+            info!(
+                "STARTUP: removing expired database backup {}",
+                sanitize_log_path(&bak)
+            );
+            remove_db_artifacts(&bak);
+        }
+    }
+}
+
+/// Move WAL/SHM sidecars alongside their main database file destination.
+async fn move_db_sidecars(from: &Path, to: &Path) -> std::io::Result<()> {
+    for suffix in ["-wal", "-shm"] {
+        let from_s = with_suffix(from, suffix);
+        if from_s.exists() {
+            let to_s = with_suffix(to, suffix);
+            let _ = fs::remove_file(&to_s);
+            rename_with_retry(&from_s, &to_s).await?;
+        }
+    }
+    Ok(())
+}
+
+fn rebuild_backup_path(path: &Path) -> PathBuf {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    for attempt in 0..100 {
+        let suffix = if attempt == 0 {
+            format!(".rebuild-backup-{seconds}")
+        } else {
+            format!(".rebuild-backup-{seconds}-{attempt}")
+        };
+        let candidate = with_suffix(path, &suffix);
+        if !candidate.exists()
+            && !with_suffix(&candidate, "-wal").exists()
+            && !with_suffix(&candidate, "-shm").exists()
+        {
+            return candidate;
+        }
+    }
+    with_suffix(path, ".rebuild-backup")
+}
+
+/// Preserve a failed database before creating a clean replacement.
+async fn move_db_artifacts_to_rebuild_backup(path: &Path) -> std::io::Result<PathBuf> {
+    let backup = rebuild_backup_path(path);
+    if path.exists() {
+        rename_with_retry(path, &backup).await?;
+    }
+    move_db_sidecars(path, &backup).await?;
+    Ok(backup)
+}
+
+async fn build_or_rebuild_after_failure(path: &Path, path_str: &str) -> turso::Result<Database> {
+    match build_and_bootstrap(path_str).await {
+        Ok(db) => Ok(db),
+        Err(first_err) => {
+            warn!(
+                "STARTUP: Turso database initialization failed ({}); attempting clean rebuild",
+                first_err
+            );
+            match move_db_artifacts_to_rebuild_backup(path).await {
+                Ok(backup) => info!(
+                    "STARTUP: moved failed database artifacts to {} before rebuild",
+                    sanitize_log_path(&backup)
+                ),
+                Err(move_err) => {
+                    warn!(
+                        "STARTUP: could not move failed database aside ({}); removing database artifacts before rebuild",
+                        move_err
+                    );
+                    remove_db_artifacts(path);
+                }
+            }
+            match build_and_bootstrap(path_str).await {
+                Ok(db) => {
+                    crate::core::tasks::db_schema_version::mark_wiped();
+                    info!("STARTUP: rebuilt Turso database after initialization failure");
+                    Ok(db)
+                }
+                Err(second_err) => {
+                    log::error!(
+                        "Failed to initialize Turso database after clean rebuild: {}",
+                        second_err
+                    );
+                    Err(second_err)
+                }
+            }
+        }
+    }
+}
+
 /// Tables copied during a manual compaction, FK-parent-first (FK enforcement is
 /// disabled on the destination during the copy, so order is not strictly
 /// required, but parent-first keeps it intuitive). Mirrors the bootstrap schema.
@@ -342,9 +461,7 @@ const COMPACT_COPY_TABLES: &[&str] = &[
     "download_patch_op",
 ];
 
-/// Inspect the open database for free-page bloat. Always logs the file/page/free
-/// stats; returns true when compaction should run (`FOXY_DB_COMPACT=force`, or
-/// bloated past the threshold and not disabled with `off`).
+/// Inspect the open database and decide whether startup should compact it.
 async fn should_compact_database(db: &Database) -> bool {
     let conn = match connect_tuned(db).await {
         Ok(c) => c,
@@ -365,10 +482,22 @@ async fn should_compact_database(db: &Database) -> bool {
         );
     }
     let mode = compact_mode();
+    if mode == "force" {
+        return true;
+    }
     if mode == "off" {
         return false;
     }
-    mode == "force" || stats.map(|s| s.is_bloated()).unwrap_or(false)
+    if let Some(s) = stats.filter(|s| s.is_bloated()) {
+        if s.live_mib() < COMPACT_AUTO_MAX_LIVE_MIB {
+            return true;
+        }
+        info!(
+            "STARTUP: database is bloated but its live size ({:.0}MiB) exceeds the automatic compaction bound; set FOXY_DB_COMPACT=force to rebuild it",
+            s.live_mib()
+        );
+    }
+    false
 }
 
 /// Copy every row of `table` from `src` into `dst` in chunked multi-row inserts.
@@ -520,20 +649,6 @@ async fn rename_with_retry(from: &std::path::Path, to: &std::path::Path) -> std:
 /// handle has been dropped.
 async fn swap_compacted_file(path: &Path, tmp: &Path) -> bool {
     let bak = with_suffix(path, ".bak");
-    // Move any existing sidecar alongside its main file (best-effort): WAL frames
-    // may hold committed rows, so we relocate the whole db (main + -wal + -shm)
-    // rather than dropping sidecars.
-    async fn move_sidecars(from: &Path, to: &Path) {
-        for suffix in ["-wal", "-shm"] {
-            let from_s = with_suffix(from, suffix);
-            if from_s.exists() {
-                let to_s = with_suffix(to, suffix);
-                let _ = fs::remove_file(&to_s);
-                let _ = rename_with_retry(&from_s, &to_s).await;
-            }
-        }
-    }
-
     // Clear any stale backup (main + sidecars).
     remove_db_artifacts(&bak);
 
@@ -546,7 +661,7 @@ async fn swap_compacted_file(path: &Path, tmp: &Path) -> bool {
         remove_db_artifacts(tmp);
         return false;
     }
-    move_sidecars(path, &bak).await;
+    let _ = move_db_sidecars(path, &bak).await;
 
     // Install the compacted copy (main + its WAL/SHM) at the live path.
     if let Err(e) = rename_with_retry(tmp, path).await {
@@ -555,16 +670,45 @@ async fn swap_compacted_file(path: &Path, tmp: &Path) -> bool {
             e
         );
         let _ = rename_with_retry(&bak, path).await;
-        move_sidecars(&bak, path).await;
+        let _ = move_db_sidecars(&bak, path).await;
         remove_db_artifacts(tmp);
         return false;
     }
-    move_sidecars(tmp, path).await;
+    let _ = move_db_sidecars(tmp, path).await;
     info!(
         "STARTUP: compacted database installed; previous file kept as {}",
         sanitize_log_path(&bak)
     );
     true
+}
+
+/// Set while startup compaction and reopen hold the database.
+static DB_STARTUP_COMPACTION_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static DB_STARTUP_COMPACTION_STARTED: std::sync::Mutex<Option<Instant>> =
+    std::sync::Mutex::new(None);
+
+/// True while startup compaction is holding the database.
+pub(crate) fn db_startup_compaction_active() -> bool {
+    DB_STARTUP_COMPACTION_ACTIVE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Elapsed time for the active startup compaction.
+pub(crate) fn db_startup_compaction_elapsed() -> Option<Duration> {
+    if !db_startup_compaction_active() {
+        return None;
+    }
+    DB_STARTUP_COMPACTION_STARTED
+        .lock()
+        .ok()
+        .and_then(|started| started.map(|at| at.elapsed()))
+}
+
+fn set_db_startup_compaction_active(active: bool) {
+    if active && let Ok(mut started) = DB_STARTUP_COMPACTION_STARTED.lock() {
+        *started = Some(Instant::now());
+    }
+    DB_STARTUP_COMPACTION_ACTIVE.store(active, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Process-wide Turso database handle, mirroring the `Arc<DatabaseConnection>`
@@ -578,7 +722,11 @@ pub(crate) async fn init_turso_database() -> Arc<Database> {
         let path_str = path.to_string_lossy().to_string();
         info!("Ensuring Turso database {}", sanitize_log_path(&path));
 
-        let mut db = build_and_bootstrap(&path_str).await.unwrap_or_else(|e| {
+        sweep_stale_db_artifacts(&path);
+
+        let mut db = build_or_rebuild_after_failure(&path, &path_str)
+            .await
+            .unwrap_or_else(|e| {
             log::error!("Failed to initialize Turso database: {}", e);
             panic!("Failed to initialize Turso database: {}", e);
         });
@@ -588,12 +736,14 @@ pub(crate) async fn init_turso_database() -> Arc<Database> {
         // drop `db` first, compact (panic-safe - never crashes startup), reopen.
         if should_compact_database(&db).await {
             let compact_start = Instant::now();
+            set_db_startup_compaction_active(true);
             drop(db);
             let installed = compact_database_file(&path).await;
-            db = build_and_bootstrap(&path_str).await.unwrap_or_else(|e| {
+            db = build_or_rebuild_after_failure(&path, &path_str).await.unwrap_or_else(|e| {
                 log::error!("Failed to reopen Turso database after compaction: {}", e);
                 panic!("Failed to reopen Turso database after compaction: {}", e);
             });
+            set_db_startup_compaction_active(false);
             if installed {
                 info!(
                     "STARTUP: database compaction complete in {:.2}s",
@@ -647,6 +797,15 @@ pub(crate) async fn build_test_database() -> Arc<Database> {
     Arc::new(db)
 }
 
+/// Shared classifier for transient DB errors used by every retry loop.
+pub(crate) fn db_error_message_is_retryable(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    m.contains("conflict")
+        || m.contains("busy")
+        || m.contains("locked")
+        || m.contains("no transaction is active")
+}
+
 /// Whether a Turso error should be retried by [`db_retry_transaction`].
 ///
 /// Default-mode busy/locked → `Busy`/`BusySnapshot`. MVCC write–write conflicts
@@ -656,10 +815,7 @@ pub(crate) async fn build_test_database() -> Arc<Database> {
 pub(crate) fn db_is_retryable(err: &Error) -> bool {
     match err {
         Error::Busy(_) | Error::BusySnapshot(_) => true,
-        Error::Error(msg) => {
-            let m = msg.to_ascii_lowercase();
-            m.contains("conflict") || m.contains("no transaction is active") || m.contains("locked")
-        }
+        Error::Error(msg) => db_error_message_is_retryable(msg),
         _ => false,
     }
 }
@@ -758,6 +914,112 @@ mod tests {
         let path = dir.path().join("database.db");
         let db = build_and_bootstrap(path.to_str().unwrap()).await.unwrap();
         (dir, db)
+    }
+
+    fn normalize_ddl(sql: &str) -> String {
+        sql.lines()
+            .map(|line| match line.find("--") {
+                Some(idx) => &line[..idx],
+                None => line,
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+            .replace('(', " ( ")
+            .replace(')', " ) ")
+            .replace(',', " , ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_lowercase()
+    }
+
+    #[test]
+    fn subfiles_ddl_matches_bootstrap_schema() {
+        let statements: Vec<String> = TURSO_BOOTSTRAP_SCHEMA
+            .lines()
+            .map(|line| match line.find("--") {
+                Some(idx) => &line[..idx],
+                None => line,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            .split(';')
+            .map(normalize_ddl)
+            .filter(|statement| !statement.is_empty())
+            .collect();
+
+        let schema_table = statements
+            .iter()
+            .find(|statement| statement.starts_with("create table if not exists subfiles"))
+            .expect("bootstrap schema declares the subfiles table");
+        assert_eq!(
+            *schema_table,
+            normalize_ddl(SUBFILES_CREATE_TABLE),
+            "SUBFILES_CREATE_TABLE drifted from sql/turso_schema.sql"
+        );
+
+        for index_sql in SUBFILES_INDEX_CREATE_SQL {
+            let normalized = normalize_ddl(index_sql);
+            assert!(
+                statements.contains(&normalized),
+                "subfiles index DDL drifted from sql/turso_schema.sql: {index_sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn retryable_classifier_matches_transient_errors_only() {
+        assert!(db_error_message_is_retryable("database is locked"));
+        assert!(db_error_message_is_retryable("Write-write conflict"));
+        assert!(db_error_message_is_retryable("Busy: database busy"));
+        assert!(db_error_message_is_retryable(
+            "cannot commit - no transaction is active"
+        ));
+        assert!(!db_error_message_is_retryable(
+            "UNIQUE constraint failed: repositories.remote_url"
+        ));
+        assert!(!db_error_message_is_retryable("no such table: files"));
+        assert!(!db_error_message_is_retryable("disk I/O error"));
+    }
+
+    #[tokio::test]
+    async fn rebuild_backup_moves_database_and_sidecars() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("database.db");
+        fs::write(&path, b"db").unwrap();
+        fs::write(with_suffix(&path, "-wal"), b"wal").unwrap();
+        fs::write(with_suffix(&path, "-shm"), b"shm").unwrap();
+
+        let backup = move_db_artifacts_to_rebuild_backup(&path).await.unwrap();
+
+        assert!(!path.exists());
+        assert!(!with_suffix(&path, "-wal").exists());
+        assert!(!with_suffix(&path, "-shm").exists());
+        assert_eq!(fs::read(&backup).unwrap(), b"db");
+        assert_eq!(fs::read(with_suffix(&backup, "-wal")).unwrap(), b"wal");
+        assert_eq!(fs::read(with_suffix(&backup, "-shm")).unwrap(), b"shm");
+    }
+
+    #[tokio::test]
+    async fn live_wipe_waits_for_shared_db_access() {
+        let db = build_test_database().await;
+        let shared = crate::core::tasks::init_database::acquire_db_shared().await;
+        let wipe_db = db.clone();
+
+        let wipe = tokio::spawn(async move { wipe_and_rebuild_live(&wipe_db).await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert!(
+            !wipe.is_finished(),
+            "live wipe should wait for active shared DB access"
+        );
+
+        drop(shared);
+        tokio::time::timeout(Duration::from_secs(10), wipe)
+            .await
+            .expect("live wipe should finish after shared access is released")
+            .expect("live wipe task should not panic")
+            .expect("live wipe should succeed");
     }
 
     /// Benchmark (run explicitly: `cargo test --release bench_fresh_insert_vs_upsert
@@ -1411,6 +1673,176 @@ mod tests {
                     eprintln!("count {t:<28} = {v:?}");
                 }
                 Err(e) => eprintln!("count {t:<28} ERR {e}"),
+            }
+        }
+    }
+
+    /// Diagnostic: dump the repository/addon link graph of a database copy:
+    /// which repositories exist, how many `repository_addons` links each has,
+    /// and whether any links or addons dangle. Set FOXY_INSPECT_DB to the db
+    /// path (copy only). Run:
+    /// `cargo test -p Foxy inspect_repo_links -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn inspect_repo_links() {
+        let path = std::env::var("FOXY_INSPECT_DB").expect("set FOXY_INSPECT_DB");
+        let db = Builder::new_local(&path).build().await.expect("open db");
+        let conn = db.connect().expect("connect");
+
+        let mut rows = conn
+            .query(
+                "SELECT id, name, remote_url, local_path FROM repositories ORDER BY id",
+                (),
+            )
+            .await
+            .expect("repositories");
+        while let Ok(Some(row)) = rows.next().await {
+            eprintln!(
+                "repo id={:?} name={:?} url={:?} local={:?}",
+                row.get_value(0).ok(),
+                row.get_value(1).ok(),
+                row.get_value(2).ok(),
+                row.get_value(3).ok()
+            );
+        }
+
+        let mut rows = conn
+            .query(
+                "SELECT repository_id, COUNT(*) FROM repository_addons GROUP BY repository_id",
+                (),
+            )
+            .await
+            .expect("link counts");
+        while let Ok(Some(row)) = rows.next().await {
+            eprintln!(
+                "links repository_id={:?} count={:?}",
+                row.get_value(0).ok(),
+                row.get_value(1).ok()
+            );
+        }
+
+        for (label, sql) in [
+            (
+                "dangling links (addon gone)",
+                "SELECT COUNT(*) FROM repository_addons ra LEFT JOIN addons a ON a.id = ra.addon_id WHERE a.id IS NULL",
+            ),
+            (
+                "dangling links (repo gone)",
+                "SELECT COUNT(*) FROM repository_addons ra LEFT JOIN repositories r ON r.id = ra.repository_id WHERE r.id IS NULL",
+            ),
+            (
+                "unlinked addons",
+                "SELECT COUNT(*) FROM addons a LEFT JOIN repository_addons ra ON ra.addon_id = a.id WHERE ra.addon_id IS NULL",
+            ),
+            ("addons total", "SELECT COUNT(*) FROM addons"),
+            ("subfiles total", "SELECT COUNT(*) FROM subfiles"),
+            (
+                "subfiles with local checksum",
+                "SELECT COUNT(*) FROM subfiles WHERE local_checksum != ''",
+            ),
+            (
+                "files with local checksum",
+                "SELECT COUNT(*) FROM files WHERE local_checksum != ''",
+            ),
+            ("files total", "SELECT COUNT(*) FROM files"),
+        ] {
+            match conn.query(sql, ()).await {
+                Ok(mut rows) => {
+                    let v = rows
+                        .next()
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|r| r.get_value(0).ok());
+                    eprintln!("{label:<32} = {v:?}");
+                }
+                Err(e) => eprintln!("{label:<32} ERR {e}"),
+            }
+        }
+
+        let mut rows = conn
+            .query(
+                "SELECT a.local_path, COUNT(*) FROM addons a \
+                 LEFT JOIN repository_addons ra ON ra.addon_id = a.id \
+                 WHERE ra.addon_id IS NULL GROUP BY a.local_path LIMIT 20",
+                (),
+            )
+            .await
+            .expect("unlinked addon paths");
+        while let Ok(Some(row)) = rows.next().await {
+            eprintln!(
+                "unlinked addon local_path={:?} count={:?}",
+                row.get_value(0).ok(),
+                row.get_value(1).ok()
+            );
+        }
+
+        // Id churn: max id far above the row count means rows are being
+        // deleted and recreated across rechecks instead of upserted in place.
+        for t in ["addons", "files", "subfiles", "repositories"] {
+            let sql = format!("SELECT COUNT(*), MIN(id), MAX(id) FROM {t}");
+            match conn.query(&sql, ()).await {
+                Ok(mut rows) => {
+                    if let Ok(Some(row)) = rows.next().await {
+                        eprintln!(
+                            "ids {t:<14} count={:?} min={:?} max={:?}",
+                            row.get_value(0).ok(),
+                            row.get_value(1).ok(),
+                            row.get_value(2).ok()
+                        );
+                    }
+                }
+                Err(e) => eprintln!("ids {t:<14} ERR {e}"),
+            }
+        }
+
+        let mut rows = conn
+            .query(
+                "SELECT substr(local_path, 1, 3), COUNT(*), \
+                 SUM(CASE WHEN local_checksum = '' THEN 1 ELSE 0 END) \
+                 FROM addons GROUP BY substr(local_path, 1, 3)",
+                (),
+            )
+            .await
+            .expect("addon path roots");
+        while let Ok(Some(row)) = rows.next().await {
+            eprintln!(
+                "addon root={:?} count={:?} empty_local_checksum={:?}",
+                row.get_value(0).ok(),
+                row.get_value(1).ok(),
+                row.get_value(2).ok()
+            );
+        }
+
+        // Which repo owns which id range: reveals creation order and whether a
+        // repo's graph was recreated after the other repo's.
+        for (label, sql) in [
+            (
+                "addon id ranges",
+                "SELECT substr(local_path, 1, 3), MIN(id), MAX(id) FROM addons GROUP BY substr(local_path, 1, 3)",
+            ),
+            (
+                "file id ranges",
+                "SELECT substr(local_path, 1, 3), MIN(id), MAX(id) FROM files GROUP BY substr(local_path, 1, 3)",
+            ),
+            (
+                "subfile id ranges",
+                "SELECT substr(f.local_path, 1, 3), MIN(sf.id), MAX(sf.id), COUNT(*) FROM subfiles sf JOIN files f ON f.id = sf.file_id GROUP BY substr(f.local_path, 1, 3)",
+            ),
+        ] {
+            match conn.query(sql, ()).await {
+                Ok(mut rows) => {
+                    while let Ok(Some(row)) = rows.next().await {
+                        eprintln!(
+                            "{label}: root={:?} min={:?} max={:?} extra={:?}",
+                            row.get_value(0).ok(),
+                            row.get_value(1).ok(),
+                            row.get_value(2).ok(),
+                            row.get_value(3).ok()
+                        );
+                    }
+                }
+                Err(e) => eprintln!("{label} ERR {e}"),
             }
         }
     }

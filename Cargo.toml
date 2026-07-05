@@ -3,7 +3,7 @@ members = [".", "foxy-server-backend-cli"]
 
 [package]
 name = "Foxy"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 rust-version = "1.96"
 build = "build.rs"
@@ -16,6 +16,29 @@ license-file = "LICENSE"
 # Line-tables-only debuginfo: keeps usable backtraces while cutting the
 # debuginfo codegen + link cost that dominates incremental rebuilds.
 debug = "line-tables-only"
+
+# Turso runs every statement through interpreted VDBE + B-tree code in
+# turso_core; at opt-level 0 the clean-DB bootstrap insert of 433k subfile rows
+# measured ~15x slower than release (127s vs ~9s), so dev-build logs kept
+# looking like a DB regression that release builds do not have
+# (recheck_clean_db_regression_2026-07-05.md). Optimize the Turso stack in dev
+# so DB timings are representative; the workspace crate stays unoptimized for
+# fast iteration. Proc-macro crates (turso_macros, turso_sdk_kit_macros) are
+# compile-time only and intentionally left out.
+[profile.dev.package.turso]
+opt-level = 3
+[profile.dev.package.turso_core]
+opt-level = 3
+[profile.dev.package.turso_ext]
+opt-level = 3
+[profile.dev.package.turso_parser]
+opt-level = 3
+[profile.dev.package.turso_sdk_kit]
+opt-level = 3
+[profile.dev.package.turso_sync_sdk_kit]
+opt-level = 3
+[profile.dev.package.turso_sync_engine]
+opt-level = 3
 
 [profile.release]
 lto = "thin"

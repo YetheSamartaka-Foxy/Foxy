@@ -3,6 +3,7 @@ use std::path::Path;
 
 use crate::core::addon_metadata::AddonDisplayNameSnapshot;
 use crate::core::arma3_server_query::ServerAddonRequirement;
+use crate::core::utils::fs_safety::resolve_child_dir_case_insensitive;
 use crate::ui::app::{
     Foxy, JoinPreflightAddonOrigin, JoinPreflightAddonSuggestion, JoinPreflightAmbiguousAddon,
     JoinPreflightKnownRemoteAddon, JoinPreflightMatchConfidence, JoinPreflightUnavailableAddon,
@@ -997,7 +998,7 @@ fn repository_addon_path_available(repository: &Repository, addon_name: &str) ->
         return true;
     }
 
-    root_path.join(addon_name.trim()).is_dir()
+    resolve_child_dir_case_insensitive(root_path, addon_name).is_some()
 }
 
 fn source_repository_addon_path_available(repository: &Repository, addon_name: &str) -> bool {
@@ -1006,7 +1007,7 @@ fn source_repository_addon_path_available(repository: &Repository, addon_name: &
         return false;
     }
 
-    Path::new(repo_path).join(addon_name.trim()).is_dir()
+    resolve_child_dir_case_insensitive(Path::new(repo_path), addon_name).is_some()
 }
 
 fn external_addon_path_available(addon_name: &str, path: &str) -> bool {
@@ -1020,8 +1021,7 @@ fn resolve_external_addon_path(addon_name: &str, path: &str) -> Option<std::path
     }
 
     let base_path = Path::new(trimmed_path);
-    let nested_path = base_path.join(addon_name.trim());
-    if nested_path.is_dir() {
+    if let Some(nested_path) = resolve_child_dir_case_insensitive(base_path, addon_name) {
         return Some(nested_path);
     }
 

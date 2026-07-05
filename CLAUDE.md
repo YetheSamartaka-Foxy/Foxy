@@ -1,5 +1,6 @@
 # Claude Code Instructions
 
-See AGENTS.md for project conventions, architecture, and coding standards.
+The canonical agent configuration is AGENTS.md. It is imported below so its
+conventions, architecture notes, and coding standards load every session.
 
-The canonical agent configuration is located in AGENTS.md.
+@AGENTS.md

@@ -412,7 +412,11 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
 
     // --- Apply hash results to data_tree ---
     let apply_parts_started = Instant::now();
+    let mut whole_file_checksums_by_file_idx: HashMap<usize, String> = HashMap::new();
     for file_result in hash_results {
+        if let Some(checksum) = file_result.whole_file_checksum {
+            whole_file_checksums_by_file_idx.insert(file_result.file_idx, checksum);
+        }
         for (part_idx, updated_part) in file_result.updated_parts {
             if let Some(dest) = data_tree.parts.get_mut(part_idx) {
                 *dest = updated_part;
@@ -473,15 +477,6 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
     // keeping pages in cache instead of thrashing on random access.
     part_updates.sort_by_key(|p| p.id);
     let mut parts_persisted = 0;
-    // The metadata rebuild deferred this repository's brand-new part rows (fresh,
-    // empty-`subfiles` load): they live only in the in-memory tree and were never
-    // written to `subfiles`. Persist them here with the local hash state computed in
-    // Phase 1, exactly like the full `calculate_hashes` pipeline does. Without this,
-    // the targeted tree-hash init left the repository with files whose checksums are
-    // populated but with zero part rows; the next quick scan reloads a part-less tree
-    // and Phase 3 wipes every `local_checksum` (the `has_parts == false` branch),
-    // falsely flagging every addon for re-download.
-    //
     // Scope this to the post-rebuild bootstrap (`!freshly_downloaded_files`): the
     // bootstrap hashes the whole set of just-deferred files in one pass, so the tree
     // covers the entire deferred buffer that the flush drains. Per-batch incremental
@@ -614,7 +609,13 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
             }
 
             if !has_parts {
-                file.local_checksum = String::new();
+                if let Some(checksum) = whole_file_checksums_by_file_idx.get(file_idx) {
+                    file.local_checksum = checksum.clone();
+                } else if !old_checksum.is_empty() && old_checksum == file.remote_checksum {
+                    file.local_checksum = old_checksum.clone();
+                } else {
+                    file.local_checksum = String::new();
+                }
             } else if all_match {
                 file.local_checksum = file.remote_checksum.clone();
             } else if parts_match && !layout_matches {

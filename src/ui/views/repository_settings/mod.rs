@@ -5,6 +5,7 @@ mod config_identity;
 mod config_profiles;
 mod config_sync;
 mod configuration;
+mod export_structure;
 mod external_addon_views;
 mod external_addons;
 mod profiles;
@@ -28,6 +29,7 @@ pub(super) enum AddonContextAction {
     RestoreBackup,
     RecheckIntegrity,
     StandaloneDownload,
+    ToggleStructure,
     ForceRedownload,
     Delete,
 }
@@ -35,6 +37,7 @@ pub(super) enum AddonContextAction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ExternalAddonContextAction {
     OpenDirectory,
+    ToggleStructure,
     Delete,
 }
 
@@ -208,6 +211,7 @@ impl Foxy {
                 });
             });
             ui.separator();
+            let mut repository_structure_export_clicked = false;
             {
                 self.ensure_repository_addon_list_cache_cached(
                     repo_index,
@@ -276,8 +280,19 @@ impl Foxy {
                     ui.label(RichText::new(summary_prefix_text).color(color_text_dim));
                     ui.label(RichText::new(external_addons_text).color(color_text_dim))
                         .on_hover_text(external_addons_help);
+                    ui.add_space(12.0);
+                    let export_structure = ui.button(tr("Export Repository Structure"));
+                    if export_structure.hovered() {
+                        ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                    }
+                    if export_structure.clicked() {
+                        repository_structure_export_clicked = true;
+                    }
                 });
                 ui.separator();
+            }
+            if repository_structure_export_clicked {
+                self.export_repository_structure_to_file(repo_index);
             }
 
             // The header (profile selector, status, tab bar) and the per-tab
@@ -516,29 +531,36 @@ impl Foxy {
                             }
                             RepositorySettingsTab::Addons => {
                                 let mut addons_filter = this.addons_filter.clone();
+                                let mut addons_search_files = this.addons_search_files;
                                 let mut addon_state_filter = this.addon_state_filter.clone();
                                 this.render_repository_addons_list_cached(
                                     ui,
                                     repo_index,
                                     crate::ui::app::RepositoryAddonListKind::Addons,
                                     &mut addons_filter,
+                                    &mut addons_search_files,
                                     &mut addon_state_filter,
                                 );
                                 this.addons_filter = addons_filter;
+                                this.addons_search_files = addons_search_files;
                                 this.addon_state_filter = addon_state_filter;
                             }
                             RepositorySettingsTab::OptionalAddons => {
                                 let mut optional_addons_filter =
                                     this.optional_addons_filter.clone();
+                                let mut optional_addons_search_files =
+                                    this.optional_addons_search_files;
                                 let mut addon_state_filter = this.addon_state_filter.clone();
                                 this.render_repository_addons_list_cached(
                                     ui,
                                     repo_index,
                                     crate::ui::app::RepositoryAddonListKind::OptionalAddons,
                                     &mut optional_addons_filter,
+                                    &mut optional_addons_search_files,
                                     &mut addon_state_filter,
                                 );
                                 this.optional_addons_filter = optional_addons_filter;
+                                this.optional_addons_search_files = optional_addons_search_files;
                                 this.addon_state_filter = addon_state_filter;
                             }
                             RepositorySettingsTab::ExternalAddons => {
@@ -548,6 +570,8 @@ impl Foxy {
                                     this.external_addons_origin_filter.clone();
                                 let mut external_addons_group_by_origin =
                                     this.external_addons_group_by_origin;
+                                let mut external_addons_search_files =
+                                    this.external_addons_search_files;
                                 let mut addon_state_filter = this.addon_state_filter.clone();
                                 this.render_repository_external_addons_list_cached(
                                     ui,
@@ -555,12 +579,14 @@ impl Foxy {
                                     &mut external_addons_filter,
                                     &mut external_addons_origin_filter,
                                     &mut external_addons_group_by_origin,
+                                    &mut external_addons_search_files,
                                     &mut addon_state_filter,
                                 );
                                 this.external_addons_filter = external_addons_filter;
                                 this.external_addons_origin_filter = external_addons_origin_filter;
                                 this.external_addons_group_by_origin =
                                     external_addons_group_by_origin;
+                                this.external_addons_search_files = external_addons_search_files;
                                 this.addon_state_filter = addon_state_filter;
                             }
                         };

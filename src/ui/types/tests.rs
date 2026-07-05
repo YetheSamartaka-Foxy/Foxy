@@ -2,10 +2,12 @@ use super::{
     AppUpdateMode, DownloadSummary, DownloadTelemetrySample, Repository, RepositoryProfile,
     SettingsViewState, additional_folder_alias_key, apply_repo_client_parameters,
     apply_repo_dlc_content_from_repo_json, merge_remote_addon_list, normalize_loaded_repository,
-    sanitize_external_addons, sanitize_settings_paths, selected_creator_dlc_codes,
-    split_additional_launch_params,
+    push_arma3_profile_launch_args, sanitize_external_addons, sanitize_settings_paths,
+    selected_creator_dlc_codes, split_additional_launch_params,
 };
+use crate::core::arma3_profiles::Arma3Profile;
 use serde_json::json;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::ui::theme::Theme;
@@ -269,6 +271,138 @@ fn split_additional_launch_params_keeps_quoted_segments_together() {
             "-name=Jane Doe".to_string()
         ]
     );
+}
+
+fn launch_arg_profiles() -> Vec<Arma3Profile> {
+    vec![
+        Arma3Profile {
+            name: "CoreX".to_string(),
+            path: PathBuf::from("C:\\Users\\corex\\Documents\\Arma 3"),
+            is_default: true,
+        },
+        Arma3Profile {
+            name: "Milsim".to_string(),
+            path: PathBuf::from("C:\\Users\\corex\\Documents\\Arma 3 - Other Profiles\\Milsim"),
+            is_default: false,
+        },
+    ]
+}
+
+#[test]
+fn push_arma3_profile_launch_args_omits_name_for_default_profile() {
+    let settings = SettingsViewState::default();
+    let repo = Repository {
+        arma3_profile: Some("CoreX".to_string()),
+        ..Repository::default()
+    };
+    let mut args = Vec::new();
+
+    push_arma3_profile_launch_args(&settings, &repo, &launch_arg_profiles(), &mut args);
+
+    assert!(args.is_empty());
+}
+
+#[test]
+fn push_arma3_profile_launch_args_passes_name_for_named_profile() {
+    let settings = SettingsViewState::default();
+    let repo = Repository {
+        arma3_profile: Some("Milsim".to_string()),
+        ..Repository::default()
+    };
+    let mut args = Vec::new();
+
+    push_arma3_profile_launch_args(&settings, &repo, &launch_arg_profiles(), &mut args);
+
+    assert_eq!(args, vec!["-name=Milsim".to_string()]);
+}
+
+#[test]
+fn push_arma3_profile_launch_args_omits_name_for_unknown_profile() {
+    let settings = SettingsViewState::default();
+    let repo = Repository {
+        arma3_profile: Some("Ghost".to_string()),
+        ..Repository::default()
+    };
+    let mut args = Vec::new();
+
+    push_arma3_profile_launch_args(&settings, &repo, &launch_arg_profiles(), &mut args);
+
+    assert!(args.is_empty());
+}
+
+#[test]
+fn push_arma3_profile_launch_args_prefers_default_over_duplicate_named_profile() {
+    let settings = SettingsViewState::default();
+    let mut profiles = launch_arg_profiles();
+    profiles.push(Arma3Profile {
+        name: "CoreX".to_string(),
+        path: PathBuf::from("C:\\Users\\corex\\Documents\\Arma 3\\Users\\CoreX"),
+        is_default: false,
+    });
+    let repo = Repository {
+        arma3_profile: Some("CoreX".to_string()),
+        ..Repository::default()
+    };
+    let mut args = Vec::new();
+
+    push_arma3_profile_launch_args(&settings, &repo, &profiles, &mut args);
+
+    assert!(args.is_empty());
+}
+
+#[test]
+fn push_arma3_profile_launch_args_custom_dir_requires_profile_under_it() {
+    let settings = SettingsViewState {
+        arma3_profiles_directory: "D:\\Arma Profiles".to_string(),
+        ..SettingsViewState::default()
+    };
+    let mut profiles = launch_arg_profiles();
+    profiles.push(Arma3Profile {
+        name: "Custom".to_string(),
+        path: PathBuf::from("d:/arma profiles/Users/Custom"),
+        is_default: false,
+    });
+
+    let repo = Repository {
+        arma3_profile: Some("Custom".to_string()),
+        ..Repository::default()
+    };
+    let mut args = Vec::new();
+    push_arma3_profile_launch_args(&settings, &repo, &profiles, &mut args);
+    assert_eq!(
+        args,
+        vec![
+            "-profiles=D:\\Arma Profiles".to_string(),
+            "-name=Custom".to_string()
+        ]
+    );
+
+    // A profile living outside the custom directory would be re-created
+    // empty by Arma 3, so -name must be dropped.
+    let repo = Repository {
+        arma3_profile: Some("Milsim".to_string()),
+        ..Repository::default()
+    };
+    let mut args = Vec::new();
+    push_arma3_profile_launch_args(&settings, &repo, &profiles, &mut args);
+    assert_eq!(args, vec!["-profiles=D:\\Arma Profiles".to_string()]);
+}
+
+#[test]
+fn push_arma3_profile_launch_args_ignores_vanilla_profiles_directory() {
+    let Some(documents) = dirs::document_dir() else {
+        return;
+    };
+    let settings = SettingsViewState {
+        arma3_profiles_directory: documents.join("Arma 3").display().to_string(),
+        ..SettingsViewState::default()
+    };
+    let repo = Repository::default();
+    let mut args = Vec::new();
+
+    push_arma3_profile_launch_args(&settings, &repo, &launch_arg_profiles(), &mut args);
+
+    assert!(args.is_empty());
 }
 
 #[test]

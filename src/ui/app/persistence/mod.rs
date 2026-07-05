@@ -31,6 +31,12 @@ impl Foxy {
         config_dir
     }
 
+    pub fn get_repository_visual_folders_path() -> PathBuf {
+        let mut config_dir = Self::get_config_directory();
+        config_dir.push("repository_visual_folders.json");
+        config_dir
+    }
+
     pub fn get_window_state_path() -> PathBuf {
         let mut config_dir = Self::get_config_directory();
         config_dir.push("window_state.json");

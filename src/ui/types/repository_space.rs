@@ -69,3 +69,21 @@ pub struct RepositorySpace {
     #[serde(default)]
     pub entries: Vec<RepositorySpaceEntry>,
 }
+
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+pub struct RepositoryVisualFolder {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub repository_space_id: Option<String>,
+    #[serde(default = "default_repository_visual_folder_color")]
+    pub color_rgb: [u8; 3],
+    #[serde(default)]
+    pub collapsed: bool,
+    #[serde(default)]
+    pub repository_keys: Vec<String>,
+}
+
+pub const fn default_repository_visual_folder_color() -> [u8; 3] {
+    [86, 132, 214]
+}

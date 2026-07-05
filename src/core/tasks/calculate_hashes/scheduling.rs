@@ -3,6 +3,7 @@ use super::*;
 use crate::core::utils::resource_profile::{ResourcePressure, ResourceProfile};
 use crate::core::utils::speed_of_light::{SolLight, sol_line};
 use crate::ui::types::HashIoProfilePreference;
+use sysinfo::Disks;
 
 #[derive(Clone)]
 pub(super) struct FileHashJob {
@@ -42,26 +43,33 @@ impl HashRunProgress {
             initial_parts_done: 0,
         }
     }
-
-    fn with_initial_done(
-        total_files: usize,
-        total_parts: usize,
-        initial_files_done: usize,
-        initial_parts_done: usize,
-    ) -> Self {
-        Self {
-            total_files,
-            total_parts,
-            initial_files_done,
-            initial_parts_done,
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
 pub(super) struct HashSchedulerLimits {
     pub(super) file_concurrency: usize,
     pub(super) global_part_concurrency: usize,
+    pub(super) storage_class: HashStorageClass,
+    pub(super) reason: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HashStorageClass {
+    Hdd,
+    Ssd,
+    Removable,
+    Unknown,
+}
+
+impl std::fmt::Display for HashStorageClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Hdd => write!(f, "hdd"),
+            Self::Ssd => write!(f, "ssd"),
+            Self::Removable => write!(f, "removable"),
+            Self::Unknown => write!(f, "unknown"),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -103,6 +111,7 @@ impl HashProfileDecision {
 
 const MIN_AUTO_BENCHMARK_FILES: usize = 3;
 const MIN_AUTO_BENCHMARK_BYTES: u64 = 256 * 1024 * 1024;
+const LOW_WAIT_AGGRESSIVE_THRESHOLD: f64 = 0.01;
 
 fn cap_auto_hash_profile(
     profile: HashIoProfilePreference,
@@ -156,12 +165,35 @@ fn hash_scheduler_limits_for_resources(
     profile: HashIoProfilePreference,
     resource_profile: ResourceProfile,
 ) -> HashSchedulerLimits {
+    hash_scheduler_limits_for_environment(
+        job_count,
+        total_parts,
+        profile,
+        resource_profile,
+        HashStorageClass::Unknown,
+    )
+}
+
+fn hash_scheduler_limits_for_environment(
+    job_count: usize,
+    total_parts: usize,
+    profile: HashIoProfilePreference,
+    resource_profile: ResourceProfile,
+    storage_class: HashStorageClass,
+) -> HashSchedulerLimits {
+    let avg_parts = avg_parts_per_file(job_count, total_parts);
+
     if profile == HashIoProfilePreference::Conservative {
         let concurrency = job_count.clamp(1, 2);
-        return HashSchedulerLimits {
-            file_concurrency: concurrency,
-            global_part_concurrency: concurrency,
-        };
+        return apply_storage_limit(
+            HashSchedulerLimits {
+                file_concurrency: concurrency,
+                global_part_concurrency: concurrency,
+                storage_class,
+                reason: "conservative profile".to_string(),
+            },
+            avg_parts,
+        );
     }
     if profile == HashIoProfilePreference::Balanced {
         let cpu_budget = hash_cpu_budget();
@@ -171,18 +203,21 @@ fn hash_scheduler_limits_for_resources(
             ResourcePressure::Severe => 2,
         };
         let concurrency = job_count.min(cpu_budget.clamp(2, max_concurrency)).max(1);
-        return HashSchedulerLimits {
-            file_concurrency: concurrency,
-            global_part_concurrency: concurrency,
-        };
+        return apply_storage_limit(
+            HashSchedulerLimits {
+                file_concurrency: concurrency,
+                global_part_concurrency: concurrency,
+                storage_class,
+                reason: format!(
+                    "balanced profile resource_pressure={}",
+                    resource_profile.pressure
+                ),
+            },
+            avg_parts,
+        );
     }
 
     let cpu_budget = hash_cpu_budget();
-    let avg_parts = if job_count == 0 {
-        1.0
-    } else {
-        total_parts as f64 / job_count as f64
-    };
     let file_oversubscription = if avg_parts <= 2.0 {
         FILE_IO_OVERSUBSCRIPTION_LIGHT
     } else if avg_parts <= 8.0 {
@@ -207,10 +242,255 @@ fn hash_scheduler_limits_for_resources(
         .clamp(1, MAX_FILE_JOB_CONCURRENCY)
         .min(resource_cap);
 
-    HashSchedulerLimits {
-        file_concurrency,
-        global_part_concurrency,
+    apply_storage_limit(
+        HashSchedulerLimits {
+            file_concurrency,
+            global_part_concurrency,
+            storage_class,
+            reason: format!(
+                "aggressive profile avg_parts_per_file={:.2} resource_pressure={}",
+                avg_parts, resource_profile.pressure
+            ),
+        },
+        avg_parts,
+    )
+}
+
+fn boosted_aggressive_hash_scheduler_limits_for_environment(
+    job_count: usize,
+    total_parts: usize,
+    resource_profile: ResourceProfile,
+    storage_class: HashStorageClass,
+    reason: &str,
+) -> HashSchedulerLimits {
+    let mut limits = hash_scheduler_limits_for_environment(
+        job_count,
+        total_parts,
+        HashIoProfilePreference::Aggressive,
+        resource_profile,
+        storage_class,
+    );
+    if limits.storage_class == HashStorageClass::Hdd
+        || resource_profile.pressure != ResourcePressure::Normal
+    {
+        return limits;
     }
+
+    let avg_parts = avg_parts_per_file(job_count, total_parts);
+    let cpu_budget = hash_cpu_budget();
+    let part_multiplier = if avg_parts > 64.0 { 3 } else { 2 };
+    let boosted_part_cap = (cpu_budget * FILE_IO_OVERSUBSCRIPTION_LIGHT * part_multiplier)
+        .clamp(1, MAX_FILE_JOB_CONCURRENCY);
+    limits.global_part_concurrency = limits
+        .global_part_concurrency
+        .max(boosted_part_cap)
+        .min(MAX_FILE_JOB_CONCURRENCY);
+    limits.file_concurrency = limits
+        .file_concurrency
+        .max(job_count.min(cpu_budget * FILE_IO_OVERSUBSCRIPTION_LIGHT))
+        .min(job_count.max(1))
+        .min(MAX_FILE_JOB_CONCURRENCY);
+    limits.reason = format!(
+        "{}; boosted aggressive after {} avg_parts_per_file={:.2}",
+        limits.reason, reason, avg_parts
+    );
+    apply_storage_limit(limits, avg_parts)
+}
+
+fn avg_parts_per_file(job_count: usize, total_parts: usize) -> f64 {
+    if job_count == 0 {
+        1.0
+    } else {
+        total_parts as f64 / job_count as f64
+    }
+}
+
+fn is_large_part_workload(job_count: usize, total_parts: usize) -> bool {
+    total_parts >= 128 && avg_parts_per_file(job_count, total_parts) > 32.0
+}
+
+fn apply_storage_limit(mut limits: HashSchedulerLimits, avg_parts: f64) -> HashSchedulerLimits {
+    if limits.storage_class == HashStorageClass::Hdd && avg_parts > 32.0 {
+        let cap = 2usize;
+        limits.file_concurrency = limits.file_concurrency.min(cap).max(1);
+        limits.global_part_concurrency = limits.global_part_concurrency.min(cap).max(1);
+        limits.reason = format!(
+            "{}; hdd large-part cap avg_parts_per_file={:.2}",
+            limits.reason, avg_parts
+        );
+    }
+    limits
+}
+
+fn detect_hash_storage_class(jobs: &[FileHashJob]) -> HashStorageClass {
+    let Some(path) = jobs
+        .iter()
+        .map(|job| job.file_path.trim())
+        .find(|path| !path.is_empty())
+    else {
+        return HashStorageClass::Unknown;
+    };
+    detect_storage_class_for_path(path)
+}
+
+pub(crate) fn detect_storage_class_for_path(path: &str) -> HashStorageClass {
+    let path = path.trim();
+    if path.is_empty() {
+        return HashStorageClass::Unknown;
+    }
+    let path = Path::new(path);
+    let disks = Disks::new_with_refreshed_list();
+    disks
+        .iter()
+        .filter(|disk| storage_path_starts_with_mount(path, disk.mount_point()))
+        .max_by_key(|disk| disk.mount_point().as_os_str().len())
+        .map(|disk| {
+            let kind = format!("{:?}", disk.kind()).to_ascii_lowercase();
+            if kind.contains("hdd") {
+                HashStorageClass::Hdd
+            } else if kind.contains("ssd") {
+                HashStorageClass::Ssd
+            } else if disk.is_removable() {
+                HashStorageClass::Removable
+            } else {
+                HashStorageClass::Unknown
+            }
+        })
+        .unwrap_or(HashStorageClass::Unknown)
+}
+
+fn storage_path_starts_with_mount(path: &Path, mount: &Path) -> bool {
+    path.starts_with(mount)
+        || normalized_storage_path(path).starts_with(&normalized_storage_path(mount))
+}
+
+fn normalized_storage_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_ascii_lowercase()
+}
+
+fn auto_hash_profile_for_environment(
+    job_count: usize,
+    total_parts: usize,
+    resource_profile: ResourceProfile,
+    storage_class: HashStorageClass,
+) -> (HashIoProfilePreference, String) {
+    let avg_parts = avg_parts_per_file(job_count, total_parts);
+    if storage_class == HashStorageClass::Hdd && is_large_part_workload(job_count, total_parts) {
+        return (
+            HashIoProfilePreference::Conservative,
+            format!("hdd large-part workload avg_parts_per_file={avg_parts:.2}"),
+        );
+    }
+
+    let base = match storage_class {
+        HashStorageClass::Ssd => HashIoProfilePreference::Aggressive,
+        HashStorageClass::Hdd | HashStorageClass::Removable => {
+            if avg_parts <= 8.0 {
+                HashIoProfilePreference::Balanced
+            } else {
+                HashIoProfilePreference::Conservative
+            }
+        }
+        HashStorageClass::Unknown => {
+            if avg_parts <= 8.0 {
+                HashIoProfilePreference::Aggressive
+            } else {
+                HashIoProfilePreference::Balanced
+            }
+        }
+    };
+    let (profile, cap_reason) = cap_auto_hash_profile(base, resource_profile);
+    (
+        profile,
+        cap_reason.unwrap_or_else(|| {
+            format!("storage heuristic storage={storage_class} avg_parts_per_file={avg_parts:.2}")
+        }),
+    )
+}
+
+fn benchmark_profiles_for_environment(
+    initial_profile: HashIoProfilePreference,
+    resource_profile: ResourceProfile,
+    storage_class: HashStorageClass,
+    job_count: usize,
+    total_parts: usize,
+) -> Vec<HashIoProfilePreference> {
+    if storage_class == HashStorageClass::Hdd && is_large_part_workload(job_count, total_parts) {
+        return vec![HashIoProfilePreference::Conservative];
+    }
+
+    let candidates: &[HashIoProfilePreference] = match resource_profile.pressure {
+        ResourcePressure::Normal => match storage_class {
+            HashStorageClass::Hdd | HashStorageClass::Removable => &[
+                HashIoProfilePreference::Conservative,
+                HashIoProfilePreference::Balanced,
+            ],
+            _ => &[
+                HashIoProfilePreference::Conservative,
+                HashIoProfilePreference::Balanced,
+                HashIoProfilePreference::Aggressive,
+            ],
+        },
+        ResourcePressure::Constrained => &[
+            HashIoProfilePreference::Conservative,
+            HashIoProfilePreference::Balanced,
+        ],
+        ResourcePressure::Severe => &[HashIoProfilePreference::Conservative],
+    };
+
+    let mut profiles = Vec::with_capacity(candidates.len());
+    profiles.push(initial_profile);
+    for &profile in candidates {
+        let (profile, _) = cap_auto_hash_profile(profile, resource_profile);
+        if !profiles.contains(&profile) {
+            profiles.push(profile);
+        }
+    }
+    profiles
+}
+
+fn benchmark_wait_ratio(metrics: &HashRunMetrics) -> f64 {
+    let wait = metrics.semaphore_wait_elapsed_sum.as_secs_f64();
+    let compute = metrics.blocking_hash_elapsed_sum.as_secs_f64();
+    let total = wait + compute;
+    if total <= f64::EPSILON {
+        0.0
+    } else {
+        wait / total
+    }
+}
+
+fn benchmark_supports_boosted_aggressive(
+    profile: HashIoProfilePreference,
+    metrics: &HashRunMetrics,
+    storage_class: HashStorageClass,
+    resource_profile: ResourceProfile,
+) -> bool {
+    profile == HashIoProfilePreference::Aggressive
+        && storage_class != HashStorageClass::Hdd
+        && resource_profile.pressure == ResourcePressure::Normal
+        && benchmark_wait_ratio(metrics) <= LOW_WAIT_AGGRESSIVE_THRESHOLD
+}
+
+fn log_hash_scheduler_selection(
+    label: &str,
+    requested_profile: HashIoProfilePreference,
+    selected_profile: HashIoProfilePreference,
+    limits: &HashSchedulerLimits,
+) {
+    info!(
+        "Hash scheduler selection: label={} requested_profile={} selected_profile={} storage={} file_concurrency={} global_part_concurrency={} reason={}",
+        label,
+        requested_profile,
+        selected_profile,
+        limits.storage_class,
+        limits.file_concurrency,
+        limits.global_part_concurrency,
+        limits.reason
+    );
 }
 
 pub(super) fn build_file_hash_jobs(
@@ -256,7 +536,7 @@ async fn calculate_whole_file_checksum(
     expected_len: u64,
     semaphore: Arc<Semaphore>,
 ) -> (Option<String>, super::part_hashes::PartHashMetrics) {
-    const WHOLE_FILE_HASH_BUF_SIZE: usize = 1024 * 1024;
+    const WHOLE_FILE_HASH_BUF_SIZE: usize = 4 * 1024 * 1024;
 
     let started = Instant::now();
     let mut metrics = super::part_hashes::PartHashMetrics {
@@ -721,8 +1001,8 @@ fn log_hash_run_metrics(
         metrics.fallback_parts
     );
     // Speed-of-light accounting (see conventions/SPEED_OF_LIGHT.md, O3).
-    // No absolute light is computed in-app; the convention derives it from
-    // the `Hash profile auto benchmark sample` throughput in the same log.
+    // No absolute light is computed in-app; compare this rate to the best
+    // demonstrated hash run for the same storage path.
     info!(
         "{}",
         sol_line(
@@ -836,6 +1116,7 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
 ) -> (Vec<FileHashResult>, HashProfileDecision, bool) {
     let total_parts: usize = jobs.iter().map(|job| job.indexed_parts.len()).sum();
     let resource_profile = ResourceProfile::sample();
+    let storage_class = detect_hash_storage_class(&jobs);
     if resource_profile.pressure != ResourcePressure::Normal {
         info!(
             "Hash scheduler resource pressure detected: {}",
@@ -845,9 +1126,34 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
     if requested_profile == HashIoProfilePreference::Auto
         && let Some(profile) = sticky_auto_profile
     {
-        let (profile, cap_reason) = cap_auto_hash_profile(profile, resource_profile);
-        let limits =
-            hash_scheduler_limits_for_resources(jobs.len(), total_parts, profile, resource_profile);
+        let (profile, cap_reason) = if matches!(
+            storage_class,
+            HashStorageClass::Hdd | HashStorageClass::Removable
+        ) && profile == HashIoProfilePreference::Aggressive
+        {
+            let (storage_profile, storage_reason) = auto_hash_profile_for_environment(
+                jobs.len(),
+                total_parts,
+                resource_profile,
+                storage_class,
+            );
+            (
+                storage_profile,
+                Some(format!(
+                    "sticky auto aggressive capped by storage heuristic: {storage_reason}"
+                )),
+            )
+        } else {
+            cap_auto_hash_profile(profile, resource_profile)
+        };
+        let limits = hash_scheduler_limits_for_environment(
+            jobs.len(),
+            total_parts,
+            profile,
+            resource_profile,
+            storage_class,
+        );
+        log_hash_scheduler_selection("sticky_auto", requested_profile, profile, &limits);
         let run_started = Instant::now();
         let results = recalculate_parts_for_jobs(
             jobs,
@@ -862,7 +1168,7 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
         log_hash_run_metrics("sticky_auto", profile, run_started.elapsed(), &results);
         let mut decision = HashProfileDecision::sticky_auto(profile);
         if let Some(reason) = cap_reason {
-            decision.reason = format!("sticky auto decision capped by {reason}");
+            decision.reason = reason;
         }
         return (results, decision, cancelled);
     }
@@ -879,11 +1185,18 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
         } else {
             requested_profile
         };
-        let limits = hash_scheduler_limits_for_resources(
+        let limits = hash_scheduler_limits_for_environment(
             jobs.len(),
             total_parts,
             effective_profile,
             resource_profile,
+            storage_class,
+        );
+        log_hash_scheduler_selection(
+            "manual_profile",
+            requested_profile,
+            effective_profile,
+            &limits,
         );
         let run_started = Instant::now();
         let results = recalculate_parts_for_jobs(
@@ -912,30 +1225,47 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
         return (results, decision, cancelled);
     }
 
+    let (initial_profile, initial_reason) =
+        auto_hash_profile_for_environment(jobs.len(), total_parts, resource_profile, storage_class);
+    let initial_limits = hash_scheduler_limits_for_environment(
+        jobs.len(),
+        total_parts,
+        initial_profile,
+        resource_profile,
+        storage_class,
+    );
+    info!(
+        "Hash profile auto initial: selected={} remaining_files={} limits={}/{} storage={} reason={}",
+        initial_profile,
+        jobs.len(),
+        initial_limits.file_concurrency,
+        initial_limits.global_part_concurrency,
+        storage_class,
+        initial_reason
+    );
+    log_hash_scheduler_selection(
+        "auto_initial",
+        requested_profile,
+        initial_profile,
+        &initial_limits,
+    );
+
     let benchmark_jobs = split_benchmark_jobs(&mut jobs);
     let benchmark_bytes: u64 = benchmark_jobs.iter().map(job_estimated_bytes).sum();
     if !benchmark_sample_is_sufficient(&benchmark_jobs) {
         warn!(
-            "Hash profile auto benchmark skipped: insufficient sample files={} bytes={} minimum_files={} minimum_bytes={}; using temporary Balanced fallback",
+            "Hash profile auto benchmark skipped: insufficient sample files={} bytes={} minimum_files={} minimum_bytes={}; using storage heuristic",
             benchmark_jobs.len(),
             benchmark_bytes,
             MIN_AUTO_BENCHMARK_FILES,
             MIN_AUTO_BENCHMARK_BYTES
         );
         jobs.extend(benchmark_jobs);
-        let (fallback_profile, cap_reason) =
-            cap_auto_hash_profile(HashIoProfilePreference::Balanced, resource_profile);
-        let limits = hash_scheduler_limits_for_resources(
-            jobs.len(),
-            total_parts,
-            fallback_profile,
-            resource_profile,
-        );
         let run_started = Instant::now();
         let results = recalculate_parts_for_jobs(
             jobs,
-            limits.file_concurrency,
-            limits.global_part_concurrency,
+            initial_limits.file_concurrency,
+            initial_limits.global_part_concurrency,
             progress_tx,
             HashRunProgress::new(total_files, total_parts),
             cancel_rx,
@@ -943,8 +1273,8 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
         .await;
         let (results, cancelled) = results;
         log_hash_run_metrics(
-            "auto_temporary_balanced",
-            fallback_profile,
+            "auto_heuristic",
+            initial_profile,
             run_started.elapsed(),
             &results,
         );
@@ -952,11 +1282,8 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
             results,
             HashProfileDecision {
                 requested: HashIoProfilePreference::Auto,
-                selected: fallback_profile,
-                reason: cap_reason.unwrap_or_else(|| {
-                    "auto benchmark skipped: insufficient sample; session balanced fallback"
-                        .to_string()
-                }),
+                selected: initial_profile,
+                reason: format!("auto benchmark skipped: insufficient sample; {initial_reason}"),
                 benchmarked_files: 0,
                 benchmarked_bytes: 0,
                 benchmark_elapsed: std::time::Duration::ZERO,
@@ -970,24 +1297,20 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
         .iter()
         .map(|job| job.indexed_parts.len())
         .sum();
-    let profiles: &[HashIoProfilePreference] = match resource_profile.pressure {
-        ResourcePressure::Normal => &[
-            HashIoProfilePreference::Conservative,
-            HashIoProfilePreference::Balanced,
-            HashIoProfilePreference::Aggressive,
-        ],
-        ResourcePressure::Constrained => &[
-            HashIoProfilePreference::Conservative,
-            HashIoProfilePreference::Balanced,
-        ],
-        ResourcePressure::Severe => &[HashIoProfilePreference::Conservative],
-    };
+    let benchmark_profiles = benchmark_profiles_for_environment(
+        initial_profile,
+        resource_profile,
+        storage_class,
+        benchmark_jobs.len(),
+        benchmark_total_parts,
+    );
     let benchmark_file_count = benchmark_jobs.len();
+    let benchmark_started = Instant::now();
     let mut best_results = None;
-    let mut best_profile = HashIoProfilePreference::Aggressive;
+    let mut best_profile = initial_profile;
     let mut best_throughput = 0.0f64;
     let mut best_hashed_bytes = 0u64;
-    let benchmark_started = Instant::now();
+    let mut boost_remaining = false;
     if let Some(tx) = progress_tx {
         let _ = tx.send(ProgressEvent::Stage {
             label: "Hashing profile".to_string(),
@@ -995,13 +1318,13 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
         });
     }
 
-    for &profile in profiles {
+    for profile in benchmark_profiles {
         if cancel_rx.as_ref().is_some_and(|rx| *rx.borrow()) {
             return (
                 Vec::new(),
                 HashProfileDecision {
                     requested: HashIoProfilePreference::Auto,
-                    selected: HashIoProfilePreference::Balanced,
+                    selected: initial_profile,
                     reason: "cancelled during auto benchmark".to_string(),
                     benchmarked_files: 0,
                     benchmarked_bytes: 0,
@@ -1012,12 +1335,14 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
             );
         }
         let sample_jobs = benchmark_jobs.clone();
-        let limits = hash_scheduler_limits_for_resources(
+        let limits = hash_scheduler_limits_for_environment(
             sample_jobs.len(),
             benchmark_total_parts,
             profile,
             resource_profile,
+            storage_class,
         );
+        log_hash_scheduler_selection("auto_benchmark", requested_profile, profile, &limits);
         let profile_started = Instant::now();
         let results = recalculate_parts_for_jobs(
             sample_jobs,
@@ -1050,7 +1375,7 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
         let throughput = metrics.hashed_bytes as f64 / elapsed_secs;
         log_hash_run_metrics("auto_benchmark_sample", profile, elapsed, &results);
         info!(
-            "Hash profile auto benchmark sample: profile={} files={} missing_files={} parts={} estimated_bytes={} hashed_bytes={} elapsed={:.2}s throughput={:.2} MB/s limits={}/{}",
+            "Hash profile auto benchmark sample: profile={} files={} missing_files={} parts={} estimated_bytes={} hashed_bytes={} elapsed={:.2}s throughput={:.2} MB/s limits={}/{} wait_ratio={:.4}",
             profile,
             results.len(),
             metrics.missing_files,
@@ -1060,11 +1385,12 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
             elapsed_secs,
             throughput / (1024.0 * 1024.0),
             limits.file_concurrency,
-            limits.global_part_concurrency
+            limits.global_part_concurrency,
+            benchmark_wait_ratio(&metrics)
         );
         if !benchmark_metrics_are_sufficient(&metrics) {
             warn!(
-                "Hash profile auto benchmark rejected: profile={} files={} missing_files={} estimated_bytes={} hashed_bytes={} minimum_files={} minimum_hashed_bytes={}; using temporary Balanced fallback",
+                "Hash profile auto benchmark rejected: profile={} files={} missing_files={} estimated_bytes={} hashed_bytes={} minimum_files={} minimum_hashed_bytes={}; using storage heuristic",
                 profile,
                 metrics.files,
                 metrics.missing_files,
@@ -1073,49 +1399,15 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
                 MIN_AUTO_BENCHMARK_FILES,
                 MIN_AUTO_BENCHMARK_BYTES
             );
-            jobs.extend(benchmark_jobs);
-            let (fallback_profile, cap_reason) =
-                cap_auto_hash_profile(HashIoProfilePreference::Balanced, resource_profile);
-            let limits = hash_scheduler_limits_for_resources(
-                jobs.len(),
-                total_parts,
-                fallback_profile,
-                resource_profile,
-            );
-            let run_started = Instant::now();
-            let results = recalculate_parts_for_jobs(
-                jobs,
-                limits.file_concurrency,
-                limits.global_part_concurrency,
-                progress_tx,
-                HashRunProgress::new(total_files, total_parts),
-                cancel_rx,
-            )
-            .await;
-            let (results, cancelled) = results;
-            log_hash_run_metrics(
-                "auto_temporary_balanced_invalid_benchmark",
-                fallback_profile,
-                run_started.elapsed(),
-                &results,
-            );
-            return (
-                results,
-                HashProfileDecision {
-                    requested: HashIoProfilePreference::Auto,
-                    selected: fallback_profile,
-                    reason: cap_reason.unwrap_or_else(|| {
-                        "auto benchmark rejected: insufficient actual hashed sample; temporary balanced fallback".to_string()
-                    }),
-                    benchmarked_files: 0,
-                    benchmarked_bytes: 0,
-                    benchmark_elapsed: std::time::Duration::ZERO,
-                    sticky: false,
-                },
-                cancelled,
-            );
+            continue;
         }
         if throughput > best_throughput {
+            boost_remaining = benchmark_supports_boosted_aggressive(
+                profile,
+                &metrics,
+                storage_class,
+                resource_profile,
+            );
             best_throughput = throughput;
             best_profile = profile;
             best_hashed_bytes = metrics.hashed_bytes;
@@ -1123,30 +1415,83 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
         }
     }
 
-    let mut benchmark_results = best_results.unwrap_or_default();
-    if best_throughput <= 0.0 {
-        best_profile = HashIoProfilePreference::Aggressive;
-    }
-    let (best_profile, cap_reason) = cap_auto_hash_profile(best_profile, resource_profile);
+    let Some(mut benchmark_results) = best_results else {
+        warn!(
+            "Hash profile auto benchmark produced no valid sample; using storage heuristic profile={}",
+            initial_profile
+        );
+        jobs.extend(benchmark_jobs);
+        let run_started = Instant::now();
+        let results = recalculate_parts_for_jobs(
+            jobs,
+            initial_limits.file_concurrency,
+            initial_limits.global_part_concurrency,
+            progress_tx,
+            HashRunProgress::new(total_files, total_parts),
+            cancel_rx,
+        )
+        .await;
+        let (results, cancelled) = results;
+        log_hash_run_metrics(
+            "auto_heuristic",
+            initial_profile,
+            run_started.elapsed(),
+            &results,
+        );
+        return (
+            results,
+            HashProfileDecision {
+                requested: HashIoProfilePreference::Auto,
+                selected: initial_profile,
+                reason: format!("auto benchmark invalid; {initial_reason}"),
+                benchmarked_files: 0,
+                benchmarked_bytes: 0,
+                benchmark_elapsed: std::time::Duration::ZERO,
+                sticky: false,
+            },
+            cancelled,
+        );
+    };
+
     let benchmark_elapsed = benchmark_started.elapsed();
     let remaining_parts: usize = jobs.iter().map(|job| job.indexed_parts.len()).sum();
-    let limits = hash_scheduler_limits_for_resources(
-        jobs.len(),
-        remaining_parts,
+    let remaining_limits = if boost_remaining {
+        boosted_aggressive_hash_scheduler_limits_for_environment(
+            jobs.len(),
+            remaining_parts,
+            resource_profile,
+            storage_class,
+            "low benchmark wait",
+        )
+    } else {
+        hash_scheduler_limits_for_environment(
+            jobs.len(),
+            remaining_parts,
+            best_profile,
+            resource_profile,
+            storage_class,
+        )
+    };
+    log_hash_scheduler_selection(
+        "auto_selected_remaining",
+        requested_profile,
         best_profile,
-        resource_profile,
+        &remaining_limits,
     );
     info!(
-        "Hash profile auto selected: selected={} benchmark_files={} benchmark_parts={} benchmark_estimated_bytes={} benchmark_hashed_bytes={} benchmark_elapsed={:.2}s remaining_files={} limits={}/{}",
+        "Hash profile auto selected: selected={} initial={} benchmark_files={} benchmark_parts={} benchmark_estimated_bytes={} benchmark_hashed_bytes={} benchmark_elapsed={:.2}s remaining_files={} limits={}/{} storage={} boosted_aggressive={}",
         best_profile,
+        initial_profile,
         benchmark_file_count,
         benchmark_total_parts,
         benchmark_bytes,
         best_hashed_bytes,
         benchmark_elapsed.as_secs_f64(),
         jobs.len(),
-        limits.file_concurrency,
-        limits.global_part_concurrency
+        remaining_limits.file_concurrency,
+        remaining_limits.global_part_concurrency,
+        storage_class,
+        boost_remaining
     );
     if let Some(tx) = progress_tx {
         let _ = tx.send(ProgressEvent::RecheckHashProgress {
@@ -1159,15 +1504,15 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
     let remaining_started = Instant::now();
     let remaining_results = recalculate_parts_for_jobs(
         jobs,
-        limits.file_concurrency,
-        limits.global_part_concurrency,
+        remaining_limits.file_concurrency,
+        remaining_limits.global_part_concurrency,
         progress_tx,
-        HashRunProgress::with_initial_done(
+        HashRunProgress {
             total_files,
             total_parts,
-            benchmark_file_count,
-            benchmark_total_parts,
-        ),
+            initial_files_done: benchmark_file_count,
+            initial_parts_done: benchmark_total_parts,
+        },
         cancel_rx,
     )
     .await;
@@ -1184,7 +1529,17 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
         HashProfileDecision {
             requested: HashIoProfilePreference::Auto,
             selected: best_profile,
-            reason: cap_reason.unwrap_or_else(|| "auto benchmark completed".to_string()),
+            reason: if boost_remaining {
+                format!(
+                    "auto benchmark selected {}; boosted aggressive after low wait; initial: {}",
+                    best_profile, initial_reason
+                )
+            } else {
+                format!(
+                    "auto benchmark selected {}; initial: {}",
+                    best_profile, initial_reason
+                )
+            },
             benchmarked_files: benchmark_file_count,
             benchmarked_bytes: best_hashed_bytes,
             benchmark_elapsed,
@@ -1431,6 +1786,144 @@ mod tests {
             ..valid
         };
         assert!(!benchmark_metrics_are_sufficient(&no_actual_bytes));
+    }
+
+    #[test]
+    fn hdd_large_part_workload_caps_aggressive_to_two_workers() {
+        let limits = hash_scheduler_limits_for_environment(
+            100,
+            10_000,
+            HashIoProfilePreference::Aggressive,
+            normal_resources(),
+            HashStorageClass::Hdd,
+        );
+        assert_eq!(limits.file_concurrency, 2);
+        assert_eq!(limits.global_part_concurrency, 2);
+        assert!(limits.reason.contains("hdd large-part cap"));
+    }
+
+    #[test]
+    fn hdd_small_part_workload_keeps_balanced_parallelism_available() {
+        let limits = hash_scheduler_limits_for_environment(
+            100,
+            200,
+            HashIoProfilePreference::Balanced,
+            normal_resources(),
+            HashStorageClass::Hdd,
+        );
+        assert!(limits.file_concurrency > 2);
+        assert_eq!(limits.storage_class, HashStorageClass::Hdd);
+    }
+
+    #[test]
+    fn auto_profile_on_hdd_large_workload_uses_conservative() {
+        let (profile, reason) = auto_hash_profile_for_environment(
+            100,
+            10_000,
+            normal_resources(),
+            HashStorageClass::Hdd,
+        );
+        assert_eq!(profile, HashIoProfilePreference::Conservative);
+        assert!(reason.contains("hdd large-part workload"));
+    }
+
+    #[test]
+    fn auto_profile_on_ssd_large_workload_keeps_aggressive() {
+        let (profile, reason) = auto_hash_profile_for_environment(
+            100,
+            10_000,
+            normal_resources(),
+            HashStorageClass::Ssd,
+        );
+        assert_eq!(profile, HashIoProfilePreference::Aggressive);
+        assert!(reason.contains("storage heuristic"));
+    }
+
+    #[test]
+    fn auto_profile_on_unknown_large_workload_uses_balanced() {
+        let (profile, reason) = auto_hash_profile_for_environment(
+            100,
+            10_000,
+            normal_resources(),
+            HashStorageClass::Unknown,
+        );
+        assert_eq!(profile, HashIoProfilePreference::Balanced);
+        assert!(reason.contains("storage heuristic"));
+    }
+
+    #[test]
+    fn hdd_large_part_benchmark_profiles_only_allow_conservative() {
+        let profiles = benchmark_profiles_for_environment(
+            HashIoProfilePreference::Conservative,
+            normal_resources(),
+            HashStorageClass::Hdd,
+            100,
+            10_000,
+        );
+        assert_eq!(profiles, vec![HashIoProfilePreference::Conservative]);
+    }
+
+    #[test]
+    fn hdd_small_part_benchmark_profiles_do_not_allow_aggressive() {
+        let profiles = benchmark_profiles_for_environment(
+            HashIoProfilePreference::Balanced,
+            normal_resources(),
+            HashStorageClass::Hdd,
+            100,
+            200,
+        );
+        assert!(profiles.contains(&HashIoProfilePreference::Conservative));
+        assert!(profiles.contains(&HashIoProfilePreference::Balanced));
+        assert!(!profiles.contains(&HashIoProfilePreference::Aggressive));
+    }
+
+    #[test]
+    fn ssd_benchmark_profiles_start_with_initial_profile_and_allow_aggressive() {
+        let profiles = benchmark_profiles_for_environment(
+            HashIoProfilePreference::Aggressive,
+            normal_resources(),
+            HashStorageClass::Ssd,
+            100,
+            10_000,
+        );
+        assert_eq!(profiles.first(), Some(&HashIoProfilePreference::Aggressive));
+        assert!(profiles.contains(&HashIoProfilePreference::Conservative));
+        assert!(profiles.contains(&HashIoProfilePreference::Balanced));
+        assert!(profiles.contains(&HashIoProfilePreference::Aggressive));
+    }
+
+    #[test]
+    fn boosted_aggressive_never_bypasses_hdd_cap() {
+        let limits = boosted_aggressive_hash_scheduler_limits_for_environment(
+            100,
+            10_000,
+            normal_resources(),
+            HashStorageClass::Hdd,
+            "test",
+        );
+        assert_eq!(limits.file_concurrency, 2);
+        assert_eq!(limits.global_part_concurrency, 2);
+        assert!(limits.reason.contains("hdd large-part cap"));
+    }
+
+    #[test]
+    fn boosted_aggressive_increases_ssd_part_cap() {
+        let base = hash_scheduler_limits_for_environment(
+            100,
+            10_000,
+            HashIoProfilePreference::Aggressive,
+            normal_resources(),
+            HashStorageClass::Ssd,
+        );
+        let boosted = boosted_aggressive_hash_scheduler_limits_for_environment(
+            100,
+            10_000,
+            normal_resources(),
+            HashStorageClass::Ssd,
+            "test",
+        );
+        assert!(boosted.global_part_concurrency >= base.global_part_concurrency);
+        assert!(boosted.reason.contains("boosted aggressive"));
     }
 
     fn severe_resources() -> ResourceProfile {

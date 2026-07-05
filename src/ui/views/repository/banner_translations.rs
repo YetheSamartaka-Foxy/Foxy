@@ -127,6 +127,8 @@ impl Foxy {
     pub(super) fn translate_repository_check_stage(&self, stage: &str) -> String {
         if stage == "Preparing" {
             self.t("Preparing")
+        } else if stage == "Optimizing database" {
+            self.t("Optimizing database")
         } else if stage == "Starting remote data recheck" {
             self.t("Starting remote data recheck")
         } else if stage == "Starting quick local check" {

@@ -85,6 +85,25 @@ impl Foxy {
             central_frame.show(ui, |ui| {
                 if let Some(space_id) = self.selected_repository_space_id.clone() {
                     self.render_repository_space_detail(ui, &space_id);
+                } else if let Some(folder_id) = self.selected_repository_visual_folder_id.clone() {
+                    let folder = self
+                        .repository_visual_folders
+                        .iter()
+                        .find(|folder| folder.id == folder_id)
+                        .cloned();
+                    ui.vertical_centered_justified(|ui| {
+                        if let Some(folder) = folder {
+                            ui.heading(folder.name);
+                            ui.label(self.t_fmt(
+                                "Repositories in folder: {count}",
+                                &[("count", folder.repository_keys.len().to_string())],
+                            ));
+                        } else {
+                            self.selected_repository_visual_folder_id = None;
+                            ui.heading(tr("Selected repository"));
+                            ui.label(tr("No repository selected"));
+                        }
+                    });
                 } else if let Some(selected_idx) = self.repository_view_state.selected_repository {
                     let color_primary_accent = self.color_primary_accent();
                     let (
@@ -108,7 +127,9 @@ impl Foxy {
                     let repo_state = self.repo_state_for_address(&repo_address, &repo_path);
                     let status_banner = self
                         .active_repository_check_banner(selected_idx)
-                        .or_else(|| self.active_repository_db_wipe_banner(selected_idx));
+                        .or_else(|| self.active_quick_scan_banner(selected_idx))
+                        .or_else(|| self.active_repository_db_wipe_banner(selected_idx))
+                        .or_else(|| self.active_database_maintenance_banner());
                     let completed_check_banner = self
                         .completed_repository_db_wipe_banner(selected_idx)
                         .or_else(|| self.completed_repository_check_banner(selected_idx));
@@ -254,11 +275,20 @@ impl Foxy {
                                                 profile_changed = true;
                                             }
                                             for p in &self.detected_arma3_profiles {
-                                                let profile_response = ui.selectable_label(
-                                                    repo.arma3_profile.as_deref()
-                                                        == Some(&p.name),
-                                                    &p.name,
-                                                );
+                                                let profile_label = if p.is_default {
+                                                    format!("{} ({})", p.name, tr("default"))
+                                                } else {
+                                                    p.name.clone()
+                                                };
+                                                let profile_response = ui
+                                                    .selectable_label(
+                                                        repo.arma3_profile.as_deref()
+                                                            == Some(&p.name),
+                                                        profile_label,
+                                                    )
+                                                    .on_hover_text(
+                                                        p.path.display().to_string(),
+                                                    );
                                                 if profile_response.hovered() {
                                                     ui.ctx().output_mut(
                                                         Foxy::set_pointing_cursor_output,
@@ -443,6 +473,7 @@ impl Foxy {
                         let detail = status_banner.detail;
                         let hint = status_banner.hint;
                         let progress = status_banner.progress;
+                        let cancellable = status_banner.cancellable;
                         let elapsed_label = status_banner_elapsed_label.unwrap_or_default();
 
                         Frame::NONE
@@ -460,20 +491,23 @@ impl Foxy {
                                             .strong(),
                                     );
                                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                        let cancel_btn = ui.add(
-                                            Button::new(
-                                                RichText::new(self.t("Cancel"))
-                                                    .size((detail_font_size - 1.0).max(13.0)),
-                                            )
-                                            .fill(self.color_action_destructive()),
-                                        );
-                                        if cancel_btn.hovered() {
-                                            ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                                        if cancellable {
+                                            let cancel_btn = ui.add(
+                                                Button::new(
+                                                    RichText::new(self.t("Cancel"))
+                                                        .size((detail_font_size - 1.0).max(13.0)),
+                                                )
+                                                .fill(self.color_action_destructive()),
+                                            );
+                                            if cancel_btn.hovered() {
+                                                ui.ctx()
+                                                    .output_mut(Foxy::set_pointing_cursor_output);
+                                            }
+                                            if cancel_btn.clicked() {
+                                                cancel_sync_requested = true;
+                                            }
+                                            ui.add_space(8.0);
                                         }
-                                        if cancel_btn.clicked() {
-                                            cancel_sync_requested = true;
-                                        }
-                                        ui.add_space(8.0);
                                         ui.label(
                                             RichText::new(elapsed_label.as_str())
                                             .size(hint_font_size)
@@ -725,6 +759,8 @@ impl Foxy {
 
         self.render_repository_context_confirmation(ui.ctx());
         self.render_repository_space_delete_confirmation(ui.ctx());
+        self.render_repository_visual_folder_edit_modal(ui.ctx());
+        self.render_repository_visual_folder_delete_confirmation(ui.ctx());
         self.render_repository_space_bulk_action_modal(ui.ctx());
         self.render_delete_mission_modal(ui.ctx());
         self.render_remove_mission_dependencies_modal(ui.ctx());

@@ -8,6 +8,7 @@ mod reorder;
 mod space_actions;
 mod space_selection;
 mod space_settings;
+mod startup_layout;
 mod sync;
 mod ts3_plugins;
 

@@ -27,6 +27,31 @@ use std::sync::{Mutex as StdMutex, OnceLock};
 
 static ZERO_HIT_CACHE_WARNING_REPOS: OnceLock<StdMutex<StdHashSet<String>>> = OnceLock::new();
 
+static QUICK_SCAN_REPO_LOCKS: OnceLock<StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+    OnceLock::new();
+
+fn quick_scan_repo_lock(
+    repo_url: &str,
+    instance_path: Option<&str>,
+) -> Arc<tokio::sync::Mutex<()>> {
+    let mut key = repo_url.trim().trim_end_matches('/').to_string();
+    key.push('\n');
+    key.push_str(
+        &instance_path
+            .map(crate::core::utils::content_hash::normalize_path)
+            .unwrap_or_default(),
+    );
+    let locks = QUICK_SCAN_REPO_LOCKS.get_or_init(|| StdMutex::new(HashMap::new()));
+    let mut guard = match locks.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard
+        .entry(key)
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
 fn should_warn_persistent_zero_hits(repo_url: &str) -> bool {
     let warned_repos =
         ZERO_HIT_CACHE_WARNING_REPOS.get_or_init(|| StdMutex::new(StdHashSet::new()));
@@ -34,6 +59,13 @@ fn should_warn_persistent_zero_hits(repo_url: &str) -> bool {
         Ok(mut guard) => guard.insert(repo_url.to_string()),
         Err(poisoned) => poisoned.into_inner().insert(repo_url.to_string()),
     }
+}
+
+fn has_conclusive_file_presence_or_size_mismatch(
+    missing_files: usize,
+    size_mismatch_files: usize,
+) -> bool {
+    missing_files > 0 || size_mismatch_files > 0
 }
 
 /// Emit the canonical `SOL op=quick_scan` line (conventions/SPEED_OF_LIGHT.md, O4).
@@ -88,6 +120,74 @@ pub(crate) async fn quick_local_change_diff(
     force_fresh_addon_hash: bool,
     shared_cache: Option<&Arc<Mutex<QuickScanSharedCache>>>,
 ) -> Vec<ModDiffSummary> {
+    quick_local_change_diff_with_preflight(
+        context,
+        repo_url,
+        mod_name_filter,
+        mod_enabled_overrides,
+        progress_tx,
+        auto_tree_verify_on_mismatch,
+        already_eligible,
+        force_fresh_addon_hash,
+        shared_cache,
+        None,
+    )
+    .await
+}
+
+/// Runs quick scan with an already-positive startup preflight.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn quick_local_change_diff_with_preflight(
+    context: Arc<FoxyContext>,
+    repo_url: &str,
+    mod_name_filter: Option<&HashSet<String>>,
+    mod_enabled_overrides: Option<&HashMap<String, bool>>,
+    progress_tx: Option<&Sender<ProgressEvent>>,
+    auto_tree_verify_on_mismatch: bool,
+    already_eligible: bool,
+    force_fresh_addon_hash: bool,
+    shared_cache: Option<&Arc<Mutex<QuickScanSharedCache>>>,
+    precomputed_preflight: Option<QuickScanPreflightResult>,
+) -> Vec<ModDiffSummary> {
+    let repo_lock = quick_scan_repo_lock(repo_url, context.target_local_path.as_deref());
+    let _in_flight_guard = match repo_lock.try_lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            info!(
+                "Quick scan for repo {} is already in flight; waiting for it to finish before re-checking",
+                repo_url
+            );
+            repo_lock.lock().await
+        }
+    };
+    quick_local_change_diff_locked(
+        context,
+        repo_url,
+        mod_name_filter,
+        mod_enabled_overrides,
+        progress_tx,
+        auto_tree_verify_on_mismatch,
+        already_eligible,
+        force_fresh_addon_hash,
+        shared_cache,
+        precomputed_preflight,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn quick_local_change_diff_locked(
+    context: Arc<FoxyContext>,
+    repo_url: &str,
+    mod_name_filter: Option<&HashSet<String>>,
+    mod_enabled_overrides: Option<&HashMap<String, bool>>,
+    progress_tx: Option<&Sender<ProgressEvent>>,
+    auto_tree_verify_on_mismatch: bool,
+    already_eligible: bool,
+    force_fresh_addon_hash: bool,
+    shared_cache: Option<&Arc<Mutex<QuickScanSharedCache>>>,
+    precomputed_preflight: Option<QuickScanPreflightResult>,
+) -> Vec<ModDiffSummary> {
     let quick_scan_total_started = Instant::now();
     let preflight_started = Instant::now();
     let mut checksum_ready_check_elapsed = Duration::default();
@@ -96,15 +196,20 @@ pub(crate) async fn quick_local_change_diff(
     let mut tree_part_stats_load_elapsed = Duration::default();
     let mut tree_verify_elapsed = Duration::default();
 
-    // ── Phase 1: Preflight & Bootstrap ──────────────────────────────────
+    let mut bootstrap_hashed_all_files = false;
+    let mut bootstrap_hashed_file_ids: HashSet<u64> = HashSet::new();
+
     if !already_eligible {
         let checksum_ready_started = Instant::now();
-        let preflight = quick_scan_preflight_for_local_check(context.clone(), repo_url)
-            .await
-            .unwrap_or(QuickScanPreflightResult {
-                remote_ready: false,
-                bootstrap_plan: QuickScanBootstrapPlan::LoadTreeAndRepairMissingChecksums,
-            });
+        let preflight = match precomputed_preflight {
+            Some(preflight) => preflight,
+            None => quick_scan_preflight_for_local_check(context.clone(), repo_url)
+                .await
+                .unwrap_or(QuickScanPreflightResult {
+                    remote_ready: false,
+                    bootstrap_plan: QuickScanBootstrapPlan::LoadTreeAndRepairMissingChecksums,
+                }),
+        };
         checksum_ready_check_elapsed = checksum_ready_started.elapsed();
 
         if !preflight.remote_ready {
@@ -145,6 +250,7 @@ pub(crate) async fn quick_local_change_diff(
                     });
                 }
                 calculate_hashes(context.clone(), repo_url, progress_tx).await;
+                bootstrap_hashed_all_files = true;
                 let _ =
                     refresh_content_hashes_when_tree_matches(context.clone(), repo_url, None).await;
             }
@@ -184,7 +290,7 @@ pub(crate) async fn quick_local_change_diff(
                         }
                         if scoped_bootstrap {
                             let file_ids = tree.files.iter().map(|file| file.id).collect();
-                            let _ = calculate_hashes_for_files(
+                            let hashed = calculate_hashes_for_files(
                                 context.clone(),
                                 repo_url,
                                 &file_ids,
@@ -192,6 +298,7 @@ pub(crate) async fn quick_local_change_diff(
                                 false,
                             )
                             .await;
+                            bootstrap_hashed_file_ids.extend(hashed.processed_file_ids.iter());
                             if let Some(filter) = mod_name_filter
                                 && let Ok(refreshed_tree) =
                                     Tree::load_for_mod_names(context.clone(), repo_url, filter)
@@ -206,6 +313,7 @@ pub(crate) async fn quick_local_change_diff(
                             }
                         } else {
                             calculate_hashes(context.clone(), repo_url, progress_tx).await;
+                            bootstrap_hashed_all_files = true;
                             let _ = refresh_content_hashes_when_tree_matches(
                                 context.clone(),
                                 repo_url,
@@ -253,7 +361,7 @@ pub(crate) async fn quick_local_change_diff(
                                         percent: 0.10,
                                     });
                                 }
-                                let _ = calculate_hashes_for_files(
+                                let hashed = calculate_hashes_for_files(
                                     context.clone(),
                                     repo_url,
                                     &readiness.ready_file_ids,
@@ -261,6 +369,7 @@ pub(crate) async fn quick_local_change_diff(
                                     false,
                                 )
                                 .await;
+                                bootstrap_hashed_file_ids.extend(hashed.processed_file_ids.iter());
                                 if scoped_bootstrap {
                                     if let Some(filter) = mod_name_filter
                                         && let Ok(refreshed_tree) = Tree::load_for_mod_names(
@@ -319,7 +428,6 @@ pub(crate) async fn quick_local_change_diff(
 
     let preflight_elapsed = preflight_started.elapsed();
 
-    // ── Phase 2: Database Load ──────────────────────────────────────────
     let db_load_started = Instant::now();
     let db = context.db();
 
@@ -337,7 +445,8 @@ pub(crate) async fn quick_local_change_diff(
     let repo_load_elapsed = repo_load_started.elapsed();
 
     let display_name_started = Instant::now();
-    crate::core::addon_metadata::regenerate_addon_display_names_for_repo(&db, repo_url).await;
+    crate::core::addon_metadata::regenerate_addon_display_names_for_repo_id(&db, repo.id as i64)
+        .await;
     let display_name_elapsed = display_name_started.elapsed();
 
     let repo_addons_started = Instant::now();
@@ -375,7 +484,7 @@ pub(crate) async fn quick_local_change_diff(
     mod_ids.sort_unstable();
     mod_ids.dedup();
 
-    let chunk_size = SQLITE_MAX_VARIABLES.saturating_sub(10).max(1);
+    let chunk_size = read_chunk_ids();
 
     let addon_rows_started = Instant::now();
     let mut mods: Vec<FoxyMod> = Vec::new();
@@ -445,7 +554,6 @@ pub(crate) async fn quick_local_change_diff(
         });
     }
 
-    // ── Phase 3: Addon Hash Resolution ──────────────────────────────────
     let addon_hash = resolve_addon_hashes(
         &mods,
         mod_enabled_overrides,
@@ -553,7 +661,6 @@ pub(crate) async fn quick_local_change_diff(
         return Vec::new();
     }
 
-    // ── Phase 4: File Resolution & Diff Computation ─────────────────────
     let diff_result = match compute_file_diffs(
         context.clone(),
         repo_url,
@@ -603,7 +710,6 @@ pub(crate) async fn quick_local_change_diff(
         );
     }
 
-    // ── Phase 5: Finalization ───────────────────────────────────────────
     let diffs = diff_result.diffs;
 
     if !diff_result.clean_hash_updates.is_empty() {
@@ -668,27 +774,42 @@ pub(crate) async fn quick_local_change_diff(
         },
     );
 
-    // ── Phase 6: Optional Tree Verify ───────────────────────────────────
-    if auto_tree_verify_on_mismatch && !diff_result.files_needing_tree_verify.is_empty() {
+    let verify_targets: HashSet<u64> = if bootstrap_hashed_all_files {
+        HashSet::new()
+    } else {
+        diff_result
+            .files_needing_tree_verify
+            .difference(&bootstrap_hashed_file_ids)
+            .copied()
+            .collect()
+    };
+    if auto_tree_verify_on_mismatch
+        && !diff_result.files_needing_tree_verify.is_empty()
+        && verify_targets.is_empty()
+    {
+        info!(
+            "Quick scan skipping targeted tree-hash verify for repo={}: all {} flagged files were hashed by this scan's bootstrap",
+            repo_url,
+            diff_result.files_needing_tree_verify.len()
+        );
+    }
+    if auto_tree_verify_on_mismatch && !verify_targets.is_empty() {
         let tree_verify_started = Instant::now();
         info!(
             "Quick scan triggering targeted tree-hash verify for repo={} files={}",
             repo_url,
-            diff_result.files_needing_tree_verify.len()
+            verify_targets.len()
         );
         if let Some(tx) = progress_tx {
             let _ = tx.send(ProgressEvent::Stage {
-                label: format!(
-                    "Verifying tree hashes for {} files",
-                    diff_result.files_needing_tree_verify.len()
-                ),
+                label: format!("Verifying tree hashes for {} files", verify_targets.len()),
                 percent: 0.70,
             });
         }
         let hashed = calculate_hashes_for_files(
             context.clone(),
             repo_url,
-            &diff_result.files_needing_tree_verify,
+            &verify_targets,
             progress_tx,
             true,
         )
@@ -697,7 +818,7 @@ pub(crate) async fn quick_local_change_diff(
             warn!(
                 "Quick scan targeted tree-hash verify reported no updates for repo={} (files={})",
                 repo_url,
-                diff_result.files_needing_tree_verify.len()
+                verify_targets.len()
             );
         }
         let _ = refresh_content_hashes_when_tree_matches(context.clone(), repo_url, None).await;
@@ -720,7 +841,20 @@ pub(crate) async fn quick_local_change_diff(
             addon_hash.addon_hash_hits_persistent,
             diff_result.deep_scan_files_total
         );
-        return Box::pin(quick_local_change_diff(
+        if has_conclusive_file_presence_or_size_mismatch(
+            diff_result.missing_files,
+            diff_result.size_mismatch_files,
+        ) {
+            info!(
+                "Quick scan returning pending update after tree verify for repo={}: missing_files={} size_mismatch_files={} updates={}",
+                repo_url,
+                diff_result.missing_files,
+                diff_result.size_mismatch_files,
+                diff_result.addons_with_updates
+            );
+            return diffs;
+        }
+        return Box::pin(quick_local_change_diff_locked(
             context,
             repo_url,
             mod_name_filter,
@@ -730,6 +864,7 @@ pub(crate) async fn quick_local_change_diff(
             false,
             false,
             shared_cache,
+            None,
         ))
         .await;
     }
@@ -759,4 +894,17 @@ pub(crate) async fn quick_local_change_diff(
     );
 
     diffs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::has_conclusive_file_presence_or_size_mismatch;
+
+    #[test]
+    fn conclusive_mismatch_detects_missing_or_wrong_size_files() {
+        assert!(has_conclusive_file_presence_or_size_mismatch(1, 0));
+        assert!(has_conclusive_file_presence_or_size_mismatch(0, 1));
+        assert!(has_conclusive_file_presence_or_size_mismatch(2, 3));
+        assert!(!has_conclusive_file_presence_or_size_mismatch(0, 0));
+    }
 }

@@ -1,4 +1,33 @@
-﻿# 1.0.0
+﻿# 1.1.0
+## Added
+- Repository visual folders let repositories be grouped, colored, and collapsed in the repository list, independently of repository spaces, with drag-and-drop into folders, folder-level quick check / recheck / update actions, and an option to remove contained repositories when a folder is deleted.
+- Arma 3 profile management in Settings can detect, rename, clone, and safely delete profiles, with confirmation dialogs, protected default profiles, and backup-based deletion.
+- Addon file search: a "Search addon files" toggle for the repository, optional, and external addon lists matches filter terms against files inside addon folders, auto-expanding matching addons, with manual expand/collapse via a context-menu action.
+- An "Export Repository Structure" action.
+- A collapsible per-addon diff in the download view.
+- New themes: Red, Viola, and Austrian Owl.
+- Early experimental macOS build support.
+
+## Changed
+- Startup quick scans are faster and churn less: addon fast-path preflight, serialized per-repo scans, skipping redundant tree-hash verification after bootstrap hashing, and skipping unchanged checksum/content-hash/display-name writes to reduce database churn.
+- Hashing profile detection now tunes scheduling by storage class, using safer auto profiles and capped large-part hashing on HDDs while allowing boosted concurrency on SSDs, with clearer scheduler logging.
+- General hashing and hash-persistence improvements, including a content-hash format without file creation time and automatic bounded startup database compaction and stale-artifact cleanup.
+- Pending-update transfer estimates are more accurate, derived from prepared download targets.
+
+## Fixed
+- Addon folders now resolve case-insensitively across launch, backup, join preflight, force-redownload, and sync paths, avoiding failures on manifest/on-disk case mismatches.
+- Repository-space required repositories are now auto-imported correctly, and a database-wipe race condition was resolved.
+- Theme switching no longer causes garbled characters to appear in non-localized text.
+- A dangling addon inventory cache was fixed.
+- Checksum readiness for partless files is preserved, and quick scans no longer run against incomplete part metadata.
+
+## Removed
+- No user-facing removals in this release.
+
+## Reverted
+- No reverted changes in this release.
+
+# 1.0.0
 ## Added
 - Theme customization support, including importing and exporting themes, built-in theme presets, and a new "Swiftier" theme, with improved color-picker spacing.
 - A UI scale slider was added so the entire interface can be sized up or down to taste.

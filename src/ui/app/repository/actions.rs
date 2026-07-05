@@ -540,6 +540,7 @@ impl Foxy {
         self.save_repository_spaces();
         self.reconcile_repository_space_paths();
         self.maybe_auto_fill_app_update_url_from_metadata();
+        let added_required = self.add_missing_required_repository_space_entries(&space_id);
 
         if !space.icon_image_checksum.is_empty() {
             self.download_and_load_image(
@@ -561,11 +562,83 @@ impl Foxy {
         }
 
         info!("Imported repository space {}", space.name);
+        if added_required > 0 {
+            info!(
+                "Auto-added {} required repositories for repository space {}",
+                added_required, space.name
+            );
+        }
         self.show_success_toast(self.t_fmt(
             "Repository space imported: {name}",
             &[("name", space.name.clone())],
         ));
         space_id
+    }
+
+    fn add_missing_required_repository_space_entries(&mut self, space_id: &str) -> usize {
+        let Some(space) = self
+            .repository_spaces
+            .iter()
+            .find(|space| space.id == space_id)
+            .cloned()
+        else {
+            return 0;
+        };
+
+        let shared_path_key = Self::normalize_repo_path_identity(&space.shared_path);
+        let mut added_count = 0usize;
+        let mut changed = false;
+
+        for entry in space.entries.iter().filter(|entry| entry.required) {
+            let normalized_address = Self::normalize_repository_address_input(&entry.address);
+            if normalized_address.is_empty()
+                || self.repository_space_entry_install_count(space_id, &normalized_address) > 0
+            {
+                continue;
+            }
+
+            let normalized_url = Self::normalize_repo_url(&normalized_address);
+            if !shared_path_key.is_empty()
+                && let Some(repo) =
+                    self.repository_view_state
+                        .repositories
+                        .iter_mut()
+                        .find(|repo| {
+                            repo.repository_space_id.is_none()
+                                && Self::normalize_repo_url(&repo.address) == normalized_url
+                                && Self::normalize_repo_path_identity(&repo.path) == shared_path_key
+                        })
+            {
+                repo.repository_space_id = Some(space_id.to_string());
+                repo.repository_space_entry_address = Some(normalized_address.clone());
+                added_count += 1;
+                changed = true;
+                continue;
+            }
+
+            let mut repo = Repository {
+                name: if entry.name.trim().is_empty() {
+                    Self::default_repository_name_from_address(&normalized_address)
+                } else {
+                    entry.name.clone()
+                },
+                address: normalized_address.clone(),
+                path: space.shared_path.clone(),
+                ..Repository::default()
+            };
+            repo.repository_space_id = Some(space_id.to_string());
+            repo.repository_space_entry_address = Some(normalized_address);
+
+            self.repository_view_state.repositories.push(repo);
+            added_count += 1;
+            changed = true;
+        }
+
+        if changed {
+            self.save_repositories();
+        }
+
+        added_count
     }
 
     /// Drain completed background repository-space manifest fetches and apply

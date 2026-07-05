@@ -104,7 +104,8 @@ pub(crate) async fn upsert_repository_entry(
 ) -> Result<FoxyRepository, DbErr> {
     debug!("Upserting repository entry for {}", repository_url);
     let db = context.db();
-    db.execute(
+    db.execute_retry(
+        "upsert repository entry",
         "INSERT INTO repositories \
          (name, remote_url, image, local_path, remote_checksum, local_checksum, local_content_hash, foxy_mode) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
@@ -190,25 +191,39 @@ pub async fn load_repository_by_remote_url(
     repository_from_row(&row)
 }
 
-/// Queries foxy_mode for a repository by its remote URL using the shared database.
-pub async fn is_repository_foxy(remote_url: &str) -> Option<bool> {
+/// Queries foxy_mode for a repository instance using the shared database.
+pub async fn is_repository_foxy(remote_url: &str, local_path: &str) -> Option<bool> {
     use crate::core::db::FoxyDb;
     use crate::core::tasks::init_database::init_database;
     let db = FoxyDb::from_handle(init_database().await);
-    let result = db
-        .query_one(
-            "SELECT foxy_mode FROM repositories WHERE remote_url = ? LIMIT 1",
+    let rows = match db
+        .query_all(
+            "SELECT foxy_mode, local_path FROM repositories WHERE remote_url = ? ORDER BY id ASC",
             params![remote_url],
         )
-        .await;
-    match result {
-        Ok(Some(row)) => row
-            .get_string("foxy_mode")
-            .ok()
-            .map(|mode| FoxyMode::from_db_str(&mode).is_foxy()),
-        Ok(None) => None,
-        Err(_) => None,
+        .await
+    {
+        Ok(rows) => rows,
+        Err(_) => return None,
+    };
+    let local_path_key = normalize_repository_local_path_identity(local_path);
+    let mut fallback_mode: Option<String> = None;
+    for row in &rows {
+        let Ok(mode) = row.get_string("foxy_mode") else {
+            continue;
+        };
+        if fallback_mode.is_none() {
+            fallback_mode = Some(mode.clone());
+        }
+        if !local_path_key.is_empty()
+            && row
+                .get_string("local_path")
+                .is_ok_and(|path| normalize_repository_local_path_identity(&path) == local_path_key)
+        {
+            return Some(FoxyMode::from_db_str(&mode).is_foxy());
+        }
     }
+    fallback_mode.map(|mode| FoxyMode::from_db_str(&mode).is_foxy())
 }
 
 #[cfg(test)]

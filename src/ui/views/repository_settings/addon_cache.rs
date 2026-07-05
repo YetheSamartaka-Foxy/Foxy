@@ -1,12 +1,16 @@
 use super::normalize_local_path_for_compare;
 use crate::core::db::{FoxyDb, params};
 use crate::ui::app::{
-    AddonInventoryPathCacheEntry, Foxy, RepositoryAddonListKind, RepositoryAddonSizeLoadResult,
+    AddonFolderEntry, AddonFolderStructure, AddonInventoryPathCacheEntry, Foxy,
+    RepositoryAddonListKind, RepositoryAddonSizeLoadResult,
 };
 use crate::ui::i18n::locale_compare;
 use crate::ui::search_filter::MultiEntryFilter;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use tokio::runtime::Runtime;
+
+const MAX_ADDON_STRUCTURE_FILES: usize = 5000;
 
 impl Foxy {
     pub(crate) fn ensure_repository_addon_size_cache_loaded(&mut self) {
@@ -287,6 +291,70 @@ impl Foxy {
             .or_else(|| paths.first().map(|entry| entry.path.clone()))
     }
 
+    pub(super) fn ensure_repository_addon_file_structure_cached(
+        &mut self,
+        kind: RepositoryAddonListKind,
+        source_index: usize,
+    ) {
+        let Some(addon_path) = self
+            .repository_addon_list_cache_cached(kind)
+            .preferred_paths
+            .get(source_index)
+            .and_then(|path| path.clone())
+        else {
+            return;
+        };
+        let path_key = normalize_local_path_for_compare(&addon_path).to_lowercase();
+        let already_loaded = self
+            .repository_addon_list_cache_cached(kind)
+            .file_entries_by_source
+            .get(source_index)
+            .and_then(|structure| structure.as_ref())
+            .is_some_and(|structure| structure.path_key == path_key);
+        if already_loaded {
+            return;
+        }
+
+        let structure = scan_addon_folder_structure(&addon_path, &path_key);
+        let cache = self.repository_addon_list_cache_mut_cached(kind);
+        if let Some(slot) = cache.file_entries_by_source.get_mut(source_index) {
+            *slot = Some(structure);
+        }
+    }
+
+    pub(super) fn ensure_repository_external_addon_file_structure_cached(
+        &mut self,
+        row_index: usize,
+    ) {
+        let Some(addon_path) = self
+            .repository_external_addons_list_cache
+            .rows
+            .get(row_index)
+            .map(|row| row.path.clone())
+        else {
+            return;
+        };
+        let path_key = normalize_local_path_for_compare(&addon_path).to_lowercase();
+        let already_loaded = self
+            .repository_external_addons_list_cache
+            .file_entries_by_row
+            .get(row_index)
+            .and_then(|structure| structure.as_ref())
+            .is_some_and(|structure| structure.path_key == path_key);
+        if already_loaded {
+            return;
+        }
+
+        let structure = scan_addon_folder_structure(&addon_path, &path_key);
+        if let Some(slot) = self
+            .repository_external_addons_list_cache
+            .file_entries_by_row
+            .get_mut(row_index)
+        {
+            *slot = Some(structure);
+        }
+    }
+
     pub(crate) fn ensure_repository_addon_list_cache_cached(
         &mut self,
         repo_index: usize,
@@ -400,11 +468,15 @@ impl Foxy {
             cache.remote_size_bytes_by_source = remote_size_bytes_by_source;
             cache.sorted_indices = sorted_indices;
             cache.preferred_paths = preferred_paths;
+            cache.file_entries_by_source = vec![None; source_len];
+            cache.expanded_source_indices.clear();
+            cache.file_search_matches_by_source = vec![false; source_len];
             cache.filtered_indices.clear();
             cache.filter_lower.clear();
             cache.state_filter.clear();
             cache.favorites_only_filter = false;
             cache.client_side_only_filter = false;
+            cache.include_file_search_filter = false;
             cache.filters_dirty = true;
             // Names and resolved paths changed, so the shaped galleys are stale.
             cache.galleys = Default::default();
@@ -606,6 +678,7 @@ impl Foxy {
         true
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn ensure_filtered_repository_addon_indices_cached(
         &mut self,
         repo_index: usize,
@@ -614,6 +687,7 @@ impl Foxy {
         addon_state_filter: &str,
         favorites_only: bool,
         client_side_only: bool,
+        include_file_search: bool,
     ) {
         self.ensure_repository_addon_list_cache_cached(repo_index, kind);
 
@@ -626,21 +700,48 @@ impl Foxy {
                 || cache.state_filter != addon_state_filter
                 || cache.favorites_only_filter != favorites_only
                 || cache.client_side_only_filter != client_side_only
+                || cache.include_file_search_filter != include_file_search
         };
 
         if !needs_rebuild {
             return;
         }
 
-        let filtered_indices = {
+        if include_file_search && !multi_filter.is_empty() {
+            let indices = self
+                .repository_addon_list_cache_cached(kind)
+                .sorted_indices
+                .clone();
+            for source_index in indices {
+                self.ensure_repository_addon_file_structure_cached(kind, source_index);
+            }
+        }
+
+        let (filtered_indices, file_search_matches_by_source) = {
             let cache = self.repository_addon_list_cache_cached(kind);
-            cache
+            let mut file_search_matches_by_source = vec![false; cache.source_names.len()];
+            let include_file_search = include_file_search && !multi_filter.is_empty();
+            let filtered_indices = cache
                 .sorted_indices
                 .iter()
                 .copied()
                 .filter(|&source_index| {
                     let matches_text_filter = multi_filter
                         .matches_any_normalized(&[cache.normalized_names[source_index].as_str()]);
+                    let matches_file_filter = include_file_search
+                        && cache
+                            .file_entries_by_source
+                            .get(source_index)
+                            .and_then(|structure| structure.as_ref())
+                            .is_some_and(|structure| {
+                                structure.files.iter().any(|file| {
+                                    multi_filter.matches_any_normalized(&[
+                                        file.name_lower.as_str(),
+                                        file.path_lower.as_str(),
+                                    ])
+                                })
+                            });
+                    file_search_matches_by_source[source_index] = matches_file_filter;
                     let matches_state_filter = match addon_state_filter {
                         "Enabled" => cache.enabled_by_source[source_index],
                         "Disabled" => !cache.enabled_by_source[source_index],
@@ -650,21 +751,24 @@ impl Foxy {
                         !favorites_only || cache.favorite_by_source[source_index];
                     let matches_client_side_filter =
                         !client_side_only || cache.client_side_by_source[source_index];
-                    matches_text_filter
+                    (matches_text_filter || matches_file_filter)
                         && matches_state_filter
                         && matches_favorite_filter
                         && matches_client_side_filter
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            (filtered_indices, file_search_matches_by_source)
         };
 
         let cache = self.repository_addon_list_cache_mut_cached(kind);
         cache.filtered_indices = filtered_indices;
+        cache.file_search_matches_by_source = file_search_matches_by_source;
         cache.galley_prewarm_cursor = 0;
         cache.filter_lower = filter_lower;
         cache.state_filter = addon_state_filter.to_string();
         cache.favorites_only_filter = favorites_only;
         cache.client_side_only_filter = client_side_only;
+        cache.include_file_search_filter = include_file_search;
         cache.filters_dirty = false;
     }
 
@@ -1101,6 +1205,9 @@ impl Foxy {
             cache.favorite_by_row = favorite_by_row;
             cache.client_side_by_row = client_side_by_row;
             cache.forced_client_side_by_row = forced_client_side_by_row;
+            cache.file_entries_by_row = vec![None; cache.rows.len()];
+            cache.expanded_row_indices.clear();
+            cache.file_search_matches_by_row = vec![false; cache.rows.len()];
             cache.enabled_count = enabled_count;
             cache.enabled_size_bytes = enabled_size_bytes;
             cache.filtered_size_bytes = 0;
@@ -1112,6 +1219,7 @@ impl Foxy {
             cache.state_filter.clear();
             cache.favorites_only_filter = false;
             cache.client_side_only_filter = false;
+            cache.include_file_search_filter = false;
             cache.filters_dirty = true;
             // Row names, paths and origins changed, so the shaped galleys are stale.
             cache.galleys = Default::default();
@@ -1286,6 +1394,7 @@ impl Foxy {
         true
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn ensure_filtered_repository_external_addon_indices_cached(
         &mut self,
         repo_index: usize,
@@ -1294,6 +1403,7 @@ impl Foxy {
         addon_state_filter: &str,
         favorites_only: bool,
         client_side_only: bool,
+        include_file_search: bool,
     ) {
         self.ensure_repository_external_addons_base_cache_cached(repo_index);
 
@@ -1306,6 +1416,7 @@ impl Foxy {
                 || cache.state_filter != addon_state_filter
                 || cache.favorites_only_filter != favorites_only
                 || cache.client_side_only_filter != client_side_only
+                || cache.include_file_search_filter != include_file_search
         };
 
         if !needs_rebuild {
@@ -1313,9 +1424,23 @@ impl Foxy {
         }
 
         let multi_filter = MultiEntryFilter::parse(filter);
-        let (filtered_indices, grouped_filtered_indices, filtered_size_bytes) = {
+        if include_file_search && !multi_filter.is_empty() {
+            let row_count = self.repository_external_addons_list_cache.rows.len();
+            for row_index in 0..row_count {
+                self.ensure_repository_external_addon_file_structure_cached(row_index);
+            }
+        }
+
+        let (
+            filtered_indices,
+            grouped_filtered_indices,
+            filtered_size_bytes,
+            file_search_matches_by_row,
+        ) = {
             let cache = &self.repository_external_addons_list_cache;
             let mut filtered_size_bytes = 0;
+            let mut file_search_matches_by_row = vec![false; cache.rows.len()];
+            let include_file_search = include_file_search && !multi_filter.is_empty();
             let filtered_indices: Vec<usize> = cache
                 .rows
                 .iter()
@@ -1326,6 +1451,20 @@ impl Foxy {
                         row.path_lower.as_str(),
                         row.origin_lower.as_str(),
                     ]);
+                    let matches_file_filter = include_file_search
+                        && cache
+                            .file_entries_by_row
+                            .get(index)
+                            .and_then(|structure| structure.as_ref())
+                            .is_some_and(|structure| {
+                                structure.files.iter().any(|file| {
+                                    multi_filter.matches_any_normalized(&[
+                                        file.name_lower.as_str(),
+                                        file.path_lower.as_str(),
+                                    ])
+                                })
+                            });
+                    file_search_matches_by_row[index] = matches_file_filter;
                     let matches_origin_filter =
                         origin_filter == "All" || row.origin.as_str() == origin_filter;
                     let matches_state_filter = match addon_state_filter {
@@ -1337,7 +1476,7 @@ impl Foxy {
                     let matches_client_side_filter =
                         !client_side_only || cache.client_side_by_row[index];
 
-                    let matches = matches_text_filter
+                    let matches = (matches_text_filter || matches_file_filter)
                         && matches_origin_filter
                         && matches_state_filter
                         && matches_favorite_filter
@@ -1378,6 +1517,7 @@ impl Foxy {
                 filtered_indices,
                 grouped_filtered_indices,
                 filtered_size_bytes,
+                file_search_matches_by_row,
             )
         };
 
@@ -1385,12 +1525,14 @@ impl Foxy {
         cache.filtered_indices = filtered_indices;
         cache.grouped_filtered_indices = grouped_filtered_indices;
         cache.filtered_size_bytes = filtered_size_bytes;
+        cache.file_search_matches_by_row = file_search_matches_by_row;
         cache.galley_prewarm_cursor = 0;
         cache.filter_lower = filter_lower;
         cache.origin_filter = origin_filter.to_string();
         cache.state_filter = addon_state_filter.to_string();
         cache.favorites_only_filter = favorites_only;
         cache.client_side_only_filter = client_side_only;
+        cache.include_file_search_filter = include_file_search;
         cache.filters_dirty = false;
     }
 
@@ -1628,6 +1770,83 @@ fn repository_external_addon_visible_for_repo(
     matching_repo_roots
         .iter()
         .any(|(_, repo)| repo.repository_space_id.as_deref() == Some(current_space_id))
+}
+
+fn scan_addon_folder_structure(addon_path: &str, path_key: &str) -> AddonFolderStructure {
+    let root = Path::new(addon_path);
+    let mut structure = AddonFolderStructure {
+        path_key: path_key.to_string(),
+        files: Vec::new(),
+        truncated: false,
+    };
+
+    let Ok(metadata) = std::fs::metadata(root) else {
+        return structure;
+    };
+    if metadata.is_file() {
+        let display_path = root
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| addon_path.to_string());
+        push_addon_folder_entry(&mut structure.files, display_path);
+        return structure;
+    }
+    if !metadata.is_dir() {
+        return structure;
+    }
+
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_symlink() {
+                continue;
+            }
+
+            let path = entry.path();
+            if file_type.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+
+            let display_path = path
+                .strip_prefix(root)
+                .unwrap_or(path.as_path())
+                .to_string_lossy()
+                .replace('\\', "/");
+            push_addon_folder_entry(&mut structure.files, display_path);
+            if structure.files.len() >= MAX_ADDON_STRUCTURE_FILES {
+                structure.truncated = true;
+                stack.clear();
+                break;
+            }
+        }
+    }
+
+    structure
+        .files
+        .sort_by(|left, right| locale_compare(&left.path_lower, &right.path_lower));
+    structure
+}
+
+fn push_addon_folder_entry(files: &mut Vec<AddonFolderEntry>, display_path: String) {
+    let name_lower = PathBuf::from(&display_path)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_lowercase())
+        .unwrap_or_else(|| display_path.to_lowercase());
+    files.push(AddonFolderEntry {
+        path_lower: display_path.to_lowercase(),
+        display_path,
+        name_lower,
+    });
 }
 
 #[cfg(test)]

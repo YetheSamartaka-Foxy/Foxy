@@ -1,4 +1,8 @@
-use super::{RepositoryListSectionContextAction, RepositorySpaceRowContextAction};
+use super::{
+    RepositoryListSectionContextAction, RepositorySpaceRowContextAction,
+    RepositoryVisualFolderRowContextAction,
+};
+use crate::core::api::SyncMode;
 use crate::ui::app::{Foxy, RepositoryListContextAction, RepositoryListRow, RepositoryListSection};
 use crate::ui::context_menu::{ContextMenuItem, attach_context_menu};
 use crate::ui::types::Repository;
@@ -14,7 +18,7 @@ impl Foxy {
         &mut self,
         ui: &mut Ui,
         section: RepositoryListSection,
-        section_action: &mut Option<RepositoryListSection>,
+        section_action: &mut Option<(RepositoryListSection, RepositoryListSectionContextAction)>,
     ) {
         if section == RepositoryListSection::Repositories {
             ui.add_space(8.0);
@@ -77,20 +81,28 @@ impl Foxy {
             ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
         }
         if response.clicked() {
-            *section_action = Some(section);
+            *section_action = Some((section, RepositoryListSectionContextAction::ToggleCollapsed));
         }
 
         let mut context_action = None;
         attach_context_menu(
             &response,
-            &[ContextMenuItem::new(
-                RepositoryListSectionContextAction::ToggleCollapsed,
-                toggle_label,
-            )],
+            &[
+                ContextMenuItem::new(
+                    RepositoryListSectionContextAction::ToggleCollapsed,
+                    toggle_label,
+                ),
+                ContextMenuItem::new(
+                    RepositoryListSectionContextAction::CreateFolder,
+                    self.t("Create folder"),
+                )
+                .separator_before()
+                .disabled_if(section != RepositoryListSection::Repositories),
+            ],
             &mut context_action,
         );
-        if context_action == Some(RepositoryListSectionContextAction::ToggleCollapsed) {
-            *section_action = Some(section);
+        if let Some(action) = context_action {
+            *section_action = Some((section, action));
         }
     }
 
@@ -197,6 +209,7 @@ impl Foxy {
         }
         if resp.clicked() {
             self.selected_repository_space_id = Some(space_id.clone());
+            self.selected_repository_visual_folder_id = None;
             self.repository_view_state.selected_repository = None;
             self.clear_completed_repository_check_banner_for_repo_change(None);
             info!("Selected repository space {}", space_name);
@@ -215,6 +228,11 @@ impl Foxy {
                     },
                 ),
                 ContextMenuItem::new(
+                    RepositorySpaceRowContextAction::CreateFolder,
+                    self.t("Create folder"),
+                )
+                .separator_before(),
+                ContextMenuItem::new(
                     RepositorySpaceRowContextAction::Delete,
                     self.t("Delete repository space"),
                 )
@@ -227,8 +245,215 @@ impl Foxy {
             Some(RepositorySpaceRowContextAction::ToggleCollapsed) => {
                 self.set_repository_space_collapsed(&space_id, !collapsed);
             }
+            Some(RepositorySpaceRowContextAction::CreateFolder) => {
+                self.open_create_repository_visual_folder(Some(space_id));
+            }
             Some(RepositorySpaceRowContextAction::Delete) => {
                 self.pending_repository_space_delete_id = Some(space_id);
+            }
+            None => {}
+        }
+    }
+
+    fn render_repository_visual_folder_row(
+        &mut self,
+        ui: &mut Ui,
+        row_slot: usize,
+        folder_idx: usize,
+    ) {
+        let (folder_id, folder_name, collapsed, color_rgb, repository_count) = {
+            let folder = &self.repository_visual_folders[folder_idx];
+            (
+                folder.id.clone(),
+                folder.name.clone(),
+                folder.collapsed,
+                folder.color_rgb,
+                folder.repository_keys.len(),
+            )
+        };
+        let is_selected =
+            self.selected_repository_visual_folder_id.as_deref() == Some(folder_id.as_str());
+        let folder_color = egui::Color32::from_rgb(color_rgb[0], color_rgb[1], color_rgb[2]);
+        // Fill the whole row with the folder's color; the selection is shown via
+        // a brighter, thicker accent border rather than by changing the fill.
+        let fill = folder_color;
+        let display_font_size = (self
+            .settings_view_state
+            .font_sizes
+            .repository_view
+            .status_banner as f32
+            - 6.0)
+            .max(14.0);
+        // Choose black/white label text for readability over an arbitrary folder color.
+        let luminance = 2126 * u32::from(color_rgb[0])
+            + 7152 * u32::from(color_rgb[1])
+            + 722 * u32::from(color_rgb[2]);
+        let text_color = if luminance < 1_275_000 {
+            egui::Color32::WHITE
+        } else {
+            egui::Color32::BLACK
+        };
+        let toggle_text_color = self.color_text_normal();
+        let folder_label = self.t_fmt(
+            "{name} ({count})",
+            &[
+                ("name", folder_name.clone()),
+                ("count", repository_count.to_string()),
+            ],
+        );
+        let text = galley_cache::lazy_galley_colored(
+            ui,
+            self.repository_list_galleys.slot(row_slot, 0),
+            egui::FontId::proportional(display_font_size),
+            text_color,
+            || Self::truncate_display_name(&folder_label, 24),
+        );
+        let row_height = Self::repository_list_row_height();
+        let toggle_width = 28.0;
+        let toggle_gap = 4.0;
+        let main_width = (ui.available_width() - toggle_width - toggle_gap).max(40.0);
+        let (stroke_color, stroke_width) = if is_selected {
+            (self.color_primary_accent(), 2.5)
+        } else {
+            (folder_color, 1.5)
+        };
+        let toggle_hover = if collapsed {
+            self.t("Expand folder")
+        } else {
+            self.t("Collapse folder")
+        };
+
+        let mut toggle_clicked = false;
+        let resp = ui
+            .horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = toggle_gap;
+                let area = Vec2::new(main_width, row_height);
+                let resp = ui
+                    .add_sized(
+                        area,
+                        Button::new(text)
+                            .fill(fill)
+                            .stroke(Stroke::new(stroke_width, stroke_color))
+                            .truncate(),
+                    )
+                    .interact(Sense::click());
+                if resp.hovered() {
+                    ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                }
+
+                let toggle = ui
+                    .add_sized(
+                        Vec2::new(toggle_width, row_height),
+                        Button::new(
+                            RichText::new(if collapsed { "+" } else { "-" })
+                                .strong()
+                                .size(display_font_size + 4.0)
+                                .color(toggle_text_color),
+                        )
+                        .fill(self.color_widget_bg())
+                        .stroke(Stroke::new(1.0, folder_color)),
+                    )
+                    .on_hover_text(toggle_hover);
+                if toggle.hovered() {
+                    ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                }
+                if toggle.clicked() {
+                    toggle_clicked = true;
+                }
+                resp
+            })
+            .inner;
+
+        if toggle_clicked {
+            self.set_repository_visual_folder_collapsed(&folder_id, !collapsed);
+        }
+        if resp.clicked() {
+            self.selected_repository_visual_folder_id = Some(folder_id.clone());
+            self.selected_repository_space_id = None;
+            self.repository_view_state.selected_repository = None;
+            self.clear_completed_repository_check_banner_for_repo_change(None);
+            info!("Selected repository folder {}", folder_name);
+        }
+
+        if self.drag_source_repo_index.is_some()
+            && let Some(pointer_pos) = ui.ctx().pointer_latest_pos()
+            && resp.rect.contains(pointer_pos)
+        {
+            self.drag_drop_target_visual_folder_id = Some(folder_id.clone());
+            ui.painter().rect_stroke(
+                resp.rect,
+                CornerRadius::same(6),
+                Stroke::new(2.0, stroke_color),
+                egui::StrokeKind::Outside,
+            );
+        }
+
+        let mut context_action = None;
+        attach_context_menu(
+            &resp,
+            &[
+                ContextMenuItem::new(
+                    RepositoryVisualFolderRowContextAction::ToggleCollapsed,
+                    if collapsed {
+                        self.t("Expand folder")
+                    } else {
+                        self.t("Collapse folder")
+                    },
+                ),
+                ContextMenuItem::new(
+                    RepositoryVisualFolderRowContextAction::Rename,
+                    self.t("Rename folder"),
+                )
+                .separator_before(),
+                ContextMenuItem::new(
+                    RepositoryVisualFolderRowContextAction::ChangeColor,
+                    self.t("Change folder color"),
+                ),
+                ContextMenuItem::new(
+                    RepositoryVisualFolderRowContextAction::QuickLocalCheck,
+                    self.t("Quick local check folder"),
+                )
+                .separator_before(),
+                ContextMenuItem::new(
+                    RepositoryVisualFolderRowContextAction::RemoteRecheck,
+                    self.t("Remote recheck folder"),
+                ),
+                ContextMenuItem::new(
+                    RepositoryVisualFolderRowContextAction::Update,
+                    self.t("Update folder"),
+                ),
+                ContextMenuItem::new(
+                    RepositoryVisualFolderRowContextAction::Delete,
+                    self.t("Delete folder"),
+                )
+                .separator_before()
+                .danger(),
+            ],
+            &mut context_action,
+        );
+        match context_action {
+            Some(RepositoryVisualFolderRowContextAction::ToggleCollapsed) => {
+                self.set_repository_visual_folder_collapsed(&folder_id, !collapsed);
+            }
+            Some(RepositoryVisualFolderRowContextAction::Rename)
+            | Some(RepositoryVisualFolderRowContextAction::ChangeColor) => {
+                self.open_edit_repository_visual_folder(&folder_id);
+            }
+            Some(RepositoryVisualFolderRowContextAction::QuickLocalCheck) => {
+                self.queue_repository_visual_folder_sync(&folder_id, SyncMode::QuickCheckOnly);
+            }
+            Some(RepositoryVisualFolderRowContextAction::RemoteRecheck) => {
+                self.queue_repository_visual_folder_sync(&folder_id, SyncMode::RemoteRefreshOnly);
+            }
+            Some(RepositoryVisualFolderRowContextAction::Update) => {
+                self.queue_repository_visual_folder_sync(&folder_id, SyncMode::Download);
+            }
+            Some(RepositoryVisualFolderRowContextAction::Delete) => {
+                self.pending_repository_visual_folder_delete =
+                    Some(crate::ui::app::RepositoryVisualFolderDeleteState {
+                        folder_id,
+                        delete_repositories: false,
+                    });
             }
             None => {}
         }
@@ -240,7 +465,7 @@ impl Foxy {
         row_slot: usize,
         row: RepositoryListRow,
         repository_context_action: &mut Option<(usize, RepositoryListContextAction)>,
-        section_action: &mut Option<RepositoryListSection>,
+        section_action: &mut Option<(RepositoryListSection, RepositoryListSectionContextAction)>,
     ) {
         match row {
             RepositoryListRow::SectionLabel(section) => {
@@ -249,12 +474,15 @@ impl Foxy {
             RepositoryListRow::SpaceHeader(space_idx) => {
                 self.render_repository_list_space_row(ui, row_slot, space_idx);
             }
-            RepositoryListRow::Repository(repo_idx) => {
+            RepositoryListRow::FolderHeader(folder_idx) => {
+                self.render_repository_visual_folder_row(ui, row_slot, folder_idx);
+            }
+            RepositoryListRow::Repository { repo_idx, indented } => {
                 self.render_repository_list_row(
                     ui,
                     row_slot,
                     repo_idx,
-                    false,
+                    indented,
                     repository_context_action,
                 );
             }
@@ -300,6 +528,7 @@ impl Foxy {
             )
         };
         let can_go_to_space = repo_space_id.is_some();
+        let can_remove_from_folder = self.repository_visual_folder_for_repo(repo_index).is_some();
         let db_wipe_pending = self.is_repository_db_wipe_pending(&address);
         let icon = self.cached_icons.get(&icon_checksum);
         let state = self.repo_state_for_address(&address, &repo_path);
@@ -422,6 +651,7 @@ impl Foxy {
             let prev_selected = self.repository_view_state.selected_repository;
             self.repository_view_state.selected_repository = Some(repo_index);
             self.selected_repository_space_id = None;
+            self.selected_repository_visual_folder_id = None;
             self.clear_completed_repository_check_banner_for_repo_change(Some(repo_index));
             info!(
                 "Selected repository {}",
@@ -463,6 +693,11 @@ impl Foxy {
                     self.t("Go to repository space"),
                 )
                 .disabled_if(!can_go_to_space),
+                ContextMenuItem::new(
+                    RepositoryListContextAction::RemoveFromVisualFolder,
+                    self.t("Remove from folder"),
+                )
+                .disabled_if(!can_remove_from_folder),
                 ContextMenuItem::new(
                     RepositoryListContextAction::OpenLocalPath,
                     self.t("Open repository local path"),

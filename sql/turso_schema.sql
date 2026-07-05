@@ -181,7 +181,7 @@ CREATE INDEX IF NOT EXISTS idx_addons_remote_local
 CREATE INDEX IF NOT EXISTS idx_addons_name_local_path_remote_checksum
     ON addons(name, local_path, remote_checksum);
 CREATE INDEX IF NOT EXISTS idx_addons_display_name
-    ON addons(display_name);
+    ON addons("display_name");
 CREATE INDEX IF NOT EXISTS idx_addons_client_side
     ON addons(client_side);
 

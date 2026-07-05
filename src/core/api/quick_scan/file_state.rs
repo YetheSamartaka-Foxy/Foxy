@@ -3,7 +3,7 @@ use super::super::*;
 use super::content_hash::{
     calculate_fast_addon_folder_content_hash, calculate_fast_file_content_hash,
 };
-use super::persistent_cache::addon_root_fingerprint;
+use super::persistent_cache::AddonRootFingerprint;
 use super::shared_cache::QuickScanSharedCache;
 
 #[derive(Clone, Default)]
@@ -20,8 +20,11 @@ pub(super) struct AddonFolderState {
     pub(super) content_hash: String,
 }
 
-pub(super) fn probe_addon_folder_state(path: &str) -> AddonFolderState {
-    let fingerprint = addon_root_fingerprint(path);
+/// Probe using a fingerprint the caller already walked.
+pub(super) fn probe_addon_folder_state_with_fingerprint(
+    path: &str,
+    fingerprint: &AddonRootFingerprint,
+) -> AddonFolderState {
     if !fingerprint.exists || !fingerprint.is_dir {
         return AddonFolderState::default();
     }

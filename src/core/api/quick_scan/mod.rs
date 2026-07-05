@@ -14,7 +14,7 @@ mod worker;
 
 // Public API (re-exported by api/mod.rs)
 pub use worker::{
-    StartupRepositoryInstance, filter_repo_urls_with_db_entry, plan_startup_quick_scan_repos,
+    StartupRepositoryInstance, filter_repo_instances_with_db_entry, plan_startup_quick_scan_repos,
     recalculate_hashes_for_addon_by_name, spawn_quick_local_scan, spawn_quick_local_scan_instances,
 };
 
@@ -31,6 +31,7 @@ pub(crate) use local_path_preflight::{
 
 // Items used by sync_pipeline.rs
 pub(super) use pending_updates::{
+    apply_download_target_estimates_to_pending_updates,
     apply_patch_plan_estimates_to_pending_updates, collect_repo_download_targets,
     pending_update_mod_scope, persist_pending_updates,
     refresh_patch_plan_metadata_for_pending_updates,

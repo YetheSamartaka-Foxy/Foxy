@@ -21,7 +21,9 @@ use super::i18n::I18n;
 use super::memory::ProcessVirtualMemoryMap;
 use super::palette;
 use super::tray::TrayManager;
-use crate::core::api::{self, ModDiffSummary, ProgressEvent, QuickScanResult, SyncMode};
+use crate::core::api::{
+    self, ModDiffSummary, ProgressEvent, QuickScanProgressEvent, QuickScanResult, SyncMode,
+};
 use crate::core::utils::addon_backup;
 use tokio::sync::broadcast::Receiver as BroadcastReceiver;
 use tokio::sync::watch;
@@ -34,6 +36,29 @@ pub use state::*;
 
 /// Last logged display metrics: (monitor resolution, app resolution, scale percent).
 pub type DisplayMetricsSnapshot = (Option<[i32; 2]>, Option<[i32; 2]>, i32);
+
+#[derive(Clone, Debug)]
+pub(crate) struct QuickScanProgressState {
+    pub(crate) started_at: Instant,
+    pub(crate) stage_label: Option<String>,
+    pub(crate) stage_percent: Option<f32>,
+    pub(crate) hash_counter: Option<(usize, usize)>,
+    pub(crate) hash_part_counter: Option<(usize, usize)>,
+    pub(crate) last_repaint: Option<Instant>,
+}
+
+impl QuickScanProgressState {
+    pub(crate) fn new(now: Instant) -> Self {
+        Self {
+            started_at: now,
+            stage_label: None,
+            stage_percent: None,
+            hash_counter: None,
+            hash_part_counter: None,
+            last_repaint: None,
+        }
+    }
+}
 
 pub struct Foxy {
     pub app_icon: Option<egui::TextureHandle>,
@@ -48,9 +73,13 @@ pub struct Foxy {
     pub repository_list_data_version: u64,
     pub drag_source_repo_index: Option<usize>,
     pub drag_drop_target_index: Option<usize>,
+    pub drag_drop_target_visual_folder_id: Option<String>,
     pub repository_spaces_version: u64,
     pub repository_spaces: Vec<RepositorySpace>,
+    pub repository_visual_folders_version: u64,
+    pub repository_visual_folders: Vec<RepositoryVisualFolder>,
     pub selected_repository_space_id: Option<String>,
+    pub selected_repository_visual_folder_id: Option<String>,
     pub repository_space_detail_filter: String,
     pub repository_space_detail_filter_space_id: Option<String>,
     pub show_add_repository_modal: bool,
@@ -102,6 +131,9 @@ pub struct Foxy {
     pub detected_arma3_profiles: Vec<crate::core::arma3_profiles::Arma3Profile>,
     /// The auto-detected "currently active" Arma 3 profile name.
     pub detected_active_arma3_profile: Option<String>,
+    /// Pending rename/clone/delete action from the Arma 3 profile manager
+    /// in the application settings, awaiting confirmation in a modal.
+    pub pending_arma3_profile_action: Option<crate::ui::views::settings::Arma3ProfileAction>,
     /// Cached editor missions for the currently viewed repository.
     pub cached_missions: Option<CachedMissionList>,
     pub previous_debug_mode: bool,
@@ -138,10 +170,13 @@ pub struct Foxy {
     pub current_help_tab: HelpTab,
     pub current_about_tab: AboutTab,
     pub addons_filter: String,
+    pub addons_search_files: bool,
     pub optional_addons_filter: String,
     pub external_addons_filter: String,
     pub external_addons_origin_filter: String,
     pub external_addons_group_by_origin: bool,
+    pub optional_addons_search_files: bool,
+    pub external_addons_search_files: bool,
     pub addon_state_filter: String,
     pub addon_favorites_only_filter: bool,
     pub addon_client_side_only_filter: bool,
@@ -192,6 +227,8 @@ pub struct Foxy {
     pending_cached_update_loads: HashSet<String>,
     pub quick_scan_rx: StdReceiver<QuickScanResult>,
     pub quick_scan_tx: StdSender<QuickScanResult>,
+    pub quick_scan_progress_rx: StdReceiver<QuickScanProgressEvent>,
+    pub quick_scan_progress_tx: StdSender<QuickScanProgressEvent>,
     pub quick_scan_worker: Option<std::thread::JoinHandle<()>>,
     startup_quick_scan_filter_rx: Option<StdReceiver<StartupQuickScanFilterResult>>,
     startup_quick_scan_filter_worker: Option<std::thread::JoinHandle<()>>,
@@ -204,12 +241,17 @@ pub struct Foxy {
     pub pending_quick_scan_prevalidated_urls: HashSet<String>,
     pub pending_quick_scan_force_fresh_addon_hash_urls: HashSet<String>,
     pub quick_scan_pending: HashSet<String>,
+    pub active_quick_scan_instance_keys: HashSet<String>,
+    pub quick_scan_progress_by_instance: HashMap<String, QuickScanProgressState>,
     pub repo_db_reset_pending_recheck: HashSet<String>,
     pending_repository_db_wipes: HashSet<String>,
     pending_repository_force_redownloads: HashSet<String>,
     pending_repository_db_wipe_started_at: HashMap<String, Instant>,
     repository_db_wipe_rx: StdReceiver<RepositoryDbWipeResult>,
     repository_db_wipe_tx: StdSender<RepositoryDbWipeResult>,
+    /// Completion channel for the global settings database wipe.
+    database_wipe_rx: StdReceiver<Result<(), String>>,
+    pub(crate) database_wipe_tx: StdSender<Result<(), String>>,
     addon_backup_task_rx: StdReceiver<AddonBackupTaskResult>,
     addon_backup_task_tx: StdSender<AddonBackupTaskResult>,
     pub addon_backup_worker: Option<std::thread::JoinHandle<()>>,
@@ -257,8 +299,10 @@ pub struct Foxy {
     pub backend_worker: Option<std::thread::JoinHandle<()>>,
     startup_pending_restore_rx: Option<StdReceiver<Vec<StartupPendingUpdateRestoreRecord>>>,
     startup_pending_restore_worker: Option<std::thread::JoinHandle<()>>,
+    pub startup_repository_layout_logged: bool,
     pub startup_recheck_queue: VecDeque<(String, String, SyncMode)>,
     pub repository_space_sync_queue: VecDeque<(String, usize, SyncMode)>,
+    pub repository_visual_folder_sync_queue: VecDeque<(usize, SyncMode)>,
     pub addon_hash_recalc_queue: VecDeque<(String, String)>,
     /// The scheduled job currently executing its recheck/download pipeline, if
     /// any. Runtime-only; never persisted. See `src/ui/app/scheduling/`.
@@ -317,6 +361,8 @@ pub struct Foxy {
     pub repo_foxy_modes: HashMap<String, bool>,
     pub pending_repository_context_confirmation: Option<RepositoryContextConfirmAction>,
     pub pending_repository_space_delete_id: Option<String>,
+    pub pending_repository_visual_folder_edit: Option<RepositoryVisualFolderEditState>,
+    pub pending_repository_visual_folder_delete: Option<RepositoryVisualFolderDeleteState>,
     pub startup_frame_rendered: bool,
     pub startup_tasks_started: bool,
     pub close_requested_at: Option<Instant>,
@@ -353,6 +399,10 @@ pub struct Foxy {
     pub default_repo_image_texture_bytes: usize,
     pub last_applied_palette: Option<palette::PaletteColors>,
     pub cached_color32: Option<CachedPaletteColor32>,
+    /// Size of egui's font atlas the last time the persistent galley caches were
+    /// checked. A change signals an atlas recreation/growth that invalidates any
+    /// `Arc<Galley>` held across frames, so we drop those caches the frame it moves.
+    pub last_font_image_size: [usize; 2],
     pub last_saved_window_state: Option<WindowState>,
     /// Used to log monitor/app resolutions at startup and whenever they change.
     pub last_logged_display_metrics: Option<DisplayMetricsSnapshot>,

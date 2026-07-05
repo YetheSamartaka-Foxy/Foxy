@@ -66,10 +66,8 @@ impl FoxyDb {
 
     /// Execute a single write statement with transient-error retry, returning the
     /// number of affected rows. The statement runs in its own `BEGIN CONCURRENT`
-    /// transaction (when MVCC is enabled, plan.md §5.2 Stage B) so independent
-    /// bulk writers commit concurrently without a global write permit;
-    /// write–write conflicts abort at COMMIT and are retried here. Falls back to a
-    /// plain `BEGIN` when MVCC is off.
+    /// transaction when MVCC is enabled; otherwise it uses plain `BEGIN`.
+    /// The statement may re-run after rollback, so it must be idempotent.
     pub(crate) async fn execute_retry(
         &self,
         label: &'static str,
@@ -87,10 +85,9 @@ impl FoxyDb {
         } else {
             "BEGIN"
         };
-        // Serialize on the write gate so concurrent bulk writers don't convoy on
-        // Turso's single internal writer (after_turso_regression_analysis2.md).
-        // Held across all retries; released when `_gate` drops on return.
-        let (_gate, gate_wait) = crate::core::tasks::init_database::acquire_db_write_gate().await;
+        // Release the write gate before retry backoff, then re-acquire it.
+        let (mut gate, mut gate_wait) =
+            crate::core::tasks::init_database::acquire_db_write_gate().await;
         // Per-category write instrumentation (plan.md §5.4) so this label shows up
         // in the final write-category report again. Timer starts AFTER the gate so
         // `total_ms` is pure write work and `permit_wait_ms` is the gate wait.
@@ -118,9 +115,14 @@ impl FoxyDb {
                 }
                 Err(e) if attempt < MAX_RETRIES && dberr_is_retryable(&e) => {
                     let _ = turso_execute(&conn, "ROLLBACK", Vec::new()).await;
+                    drop(gate);
                     let backoff =
                         std::time::Duration::from_millis(50 * 2u64.saturating_pow(attempt as u32));
                     tokio::time::sleep(backoff).await;
+                    let (reacquired, extra_wait) =
+                        crate::core::tasks::init_database::acquire_db_write_gate().await;
+                    gate = reacquired;
+                    gate_wait += extra_wait;
                     attempt += 1;
                 }
                 Err(e) => {
@@ -208,12 +210,26 @@ impl FoxyDb {
         Ok(OwnedDbTxn {
             conn,
             _permit: permit,
-            _shared: Some(shared),
+            _barrier: OwnedDbBarrierGuard::Shared(shared),
         })
     }
 
-    /// Run `work` inside a transaction with retry on transient busy/conflict
-    /// errors.
+    /// Begin an owned transaction while holding the exclusive DB barrier. Use this
+    /// for schema-level bulk operations that must not overlap readers, while still
+    /// keeping normal foreign key enforcement on.
+    pub(crate) async fn begin_exclusive(&self) -> Result<OwnedDbTxn, DbErr> {
+        let exclusive = crate::core::tasks::init_database::acquire_db_exclusive().await;
+        let (permit, _gate_wait) = crate::core::tasks::init_database::acquire_db_write_gate().await;
+        let conn = connect_turso(&self.db).await?;
+        turso_execute(&conn, "BEGIN", Vec::new()).await?;
+        Ok(OwnedDbTxn {
+            conn,
+            _permit: permit,
+            _barrier: OwnedDbBarrierGuard::Exclusive(exclusive),
+        })
+    }
+
+    /// Run idempotent work inside a transaction with transient-error retry.
     pub(crate) async fn transaction<F>(&self, label: &str, work: F) -> Result<(), DbErr>
     where
         F: for<'a> Fn(
@@ -290,8 +306,8 @@ pub(crate) struct OwnedDbTxn {
     /// commit/rollback (which consume `self`) or on drop. `None` only if the gate
     /// semaphore was closed (never in practice).
     _permit: Option<tokio::sync::OwnedSemaphorePermit>,
-    /// Shared DB barrier guard (see [`DB_EXCLUSIVE`]); released with the txn.
-    _shared: Option<tokio::sync::OwnedRwLockReadGuard<()>>,
+    /// DB barrier guard (see [`DB_EXCLUSIVE`]); released with the txn.
+    _barrier: OwnedDbBarrierGuard,
 }
 
 impl OwnedDbTxn {
@@ -318,6 +334,11 @@ impl OwnedDbTxn {
             .await
             .map(|_| ())
     }
+}
+
+enum OwnedDbBarrierGuard {
+    Shared(tokio::sync::OwnedRwLockReadGuard<()>),
+    Exclusive(tokio::sync::OwnedRwLockWriteGuard<()>),
 }
 
 // --- Turso storage layer --------------------------------------------------------
@@ -383,11 +404,7 @@ async fn turso_query_all(
 }
 
 fn dberr_is_retryable(e: &DbErr) -> bool {
-    let m = e.to_string().to_ascii_lowercase();
-    m.contains("conflict")
-        || m.contains("busy")
-        || m.contains("locked")
-        || m.contains("no transaction is active")
+    crate::core::tasks::db_turso::db_error_message_is_retryable(&e.to_string())
 }
 
 async fn turso_transaction<F>(
@@ -422,18 +439,10 @@ where
     } else {
         "BEGIN"
     };
-    // Serialize on the write gate so the metadata-rebuild fan-out (up to ~16
-    // concurrent mod tasks, each calling this) commits back-to-back instead of
-    // convoying inside Turso's single internal writer
-    // (after_turso_regression_analysis2.md). Held across retries; released on
-    // return when `_gate` drops.
-    let (_gate, gate_wait) = crate::core::tasks::init_database::acquire_db_write_gate().await;
-    // Per-category write instrumentation (plan.md §5.4): attribute this label's
-    // wall time + retry deltas so the final write-category report covers every
-    // seam transaction (`file parts upsert`, `persist files/mods/repos`,
-    // `download target rebuild`, …) again, not just the bulk part-hash persist.
-    // Timer starts AFTER the gate so `total_ms` is write work and `permit_wait_ms`
-    // captures the gate queue wait.
+    // Release the write gate before retry backoff, then re-acquire it.
+    let (mut gate, mut gate_wait) =
+        crate::core::tasks::init_database::acquire_db_write_gate().await;
+    // Start after the gate so total_ms is write work and permit_wait_ms is queue wait.
     let metric_baseline = crate::core::tasks::init_database::sqlite_perf_snapshot();
     let metric_started = std::time::Instant::now();
     let mut attempt = 0;
@@ -459,10 +468,15 @@ where
             }
             Err(e) if attempt < MAX_RETRIES && dberr_is_retryable(&e) => {
                 let _ = turso_execute(&conn, "ROLLBACK", Vec::new()).await;
+                drop(gate);
                 let backoff =
                     std::time::Duration::from_millis(50 * 2u64.saturating_pow(attempt as u32));
                 log::debug!("{label}: retryable DB error (attempt {}): {e}", attempt + 1);
                 tokio::time::sleep(backoff).await;
+                let (reacquired, extra_wait) =
+                    crate::core::tasks::init_database::acquire_db_write_gate().await;
+                gate = reacquired;
+                gate_wait += extra_wait;
                 attempt += 1;
             }
             Err(e) => {

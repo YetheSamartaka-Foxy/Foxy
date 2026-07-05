@@ -135,12 +135,17 @@ impl Foxy {
         }
 
         let repository_status_visible = self.current_view == FoxyView::RepositoryList
-            && (self.syncing_repository.is_some() || !self.pending_repository_db_wipes.is_empty());
+            && (self.syncing_repository.is_some()
+                || !self.pending_repository_db_wipes.is_empty()
+                // Keep the startup database maintenance banner's elapsed time live.
+                || crate::core::tasks::db_turso::db_startup_compaction_active());
+        let quick_scan_status_visible = self.current_view == FoxyView::RepositoryList
+            && !self.active_quick_scan_instance_keys.is_empty();
         let addon_backup_status_visible = self.current_view == FoxyView::RepositorySettings
             && self.addon_backup_status.as_ref().is_some_and(|status| {
                 self.selected_repository_for_settings == Some(status.repo_index)
             });
-        if repository_status_visible || addon_backup_status_visible {
+        if repository_status_visible || quick_scan_status_visible || addon_backup_status_visible {
             Self::merge_repaint_interval(&mut interval, STATUS_REPAINT_INTERVAL);
         }
 
@@ -182,6 +187,7 @@ impl Foxy {
 
         self.apply_runtime_palette_visuals(&ctx);
         self.apply_runtime_ui_scale(&ctx);
+        self.invalidate_galley_caches_on_font_atlas_change(&ctx);
         self.handle_global_accessibility_shortcuts(&ctx);
         self.log_display_metrics_if_changed(&ctx);
         self.update_fps_estimate(&ctx);
@@ -234,8 +240,10 @@ impl Foxy {
         self.poll_restore_pending_updates();
         self.poll_startup_quick_scan_filter_results();
         self.poll_fs_watch_results();
+        self.poll_quick_scan_progress();
         self.poll_quick_scan_results();
         self.poll_repository_db_wipe_results();
+        self.poll_database_wipe_result();
         self.poll_addon_delete_results();
         self.poll_addon_backup_results();
         self.poll_repository_settings_addon_preload_results();
@@ -260,7 +268,9 @@ impl Foxy {
         self.poll_cached_update_load_results();
         self.maybe_dispatch_persistence_requests(false);
         self.process_startup_rechecks();
+        self.maybe_log_startup_repository_layout();
         self.process_repository_space_sync_queue();
+        self.process_repository_visual_folder_sync_queue();
         self.process_scheduled_jobs(&ctx);
         self.process_addon_hash_recalc_queue();
         self.maybe_sample_memory_diagnostics();
@@ -490,6 +500,10 @@ impl Foxy {
         let Some(prompt) = self.pending_db_schema_wipe else {
             return;
         };
+        if crate::core::tasks::db_schema_version::is_current() {
+            self.pending_db_schema_wipe = None;
+            return;
+        }
 
         // A wipe must not race an in-flight sync (it drops the tables the sync
         // is writing). Mirror the settings wipe dialog's guard.

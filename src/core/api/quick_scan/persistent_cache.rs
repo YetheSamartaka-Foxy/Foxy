@@ -30,10 +30,22 @@ pub(super) struct PersistentAddonHashEntry {
     pub(super) fingerprint: AddonRootFingerprint,
     pub(super) content_hash: String,
     pub(super) updated_unix_ms: u64,
+    /// Last scan hit/write time used for save-time eviction.
+    #[serde(default)]
+    pub(super) last_seen_unix_ms: u64,
+}
+
+impl PersistentAddonHashEntry {
+    fn effective_last_seen_unix_ms(&self) -> u64 {
+        self.last_seen_unix_ms.max(self.updated_unix_ms)
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct PersistentAddonHashCacheFile {
+    /// Content-hash format generation for cached `content_hash` values.
+    #[serde(default)]
+    format: u32,
     entries: HashMap<String, PersistentAddonHashEntry>,
 }
 
@@ -69,12 +81,22 @@ pub(super) fn load_persistent_addon_hash_cache() -> HashMap<String, PersistentAd
 
     match serde_json::from_str::<PersistentAddonHashCacheFile>(&payload) {
         Ok(cache) => {
+            let current_format = crate::core::tasks::db_schema_version::CONTENT_HASH_FORMAT;
+            if cache.format != current_format {
+                info!(
+                    "Persistent addon hash cache format {} != current {}; discarding {} entries (content-hash algorithm changed)",
+                    cache.format,
+                    current_format,
+                    cache.entries.len()
+                );
+                return HashMap::new();
+            }
             let stale_count = cache
                 .entries
                 .values()
                 .filter(|e| {
                     let age_ms = now_unix_ms().saturating_sub(e.updated_unix_ms);
-                    age_ms > PERSISTENT_CACHE_TTL_MS
+                    !e.fingerprint.content_fingerprint_ready && age_ms > PERSISTENT_CACHE_TTL_MS
                 })
                 .count();
             info!(
@@ -101,8 +123,23 @@ pub(super) fn save_persistent_addon_hash_cache(
 ) {
     let started = std::time::Instant::now();
     let path = quick_scan_addon_hash_cache_path();
+    let eviction_cutoff = now_unix_ms().saturating_sub(PERSISTENT_CACHE_EVICT_AFTER_MS);
+    let retained: HashMap<String, PersistentAddonHashEntry> = entries
+        .iter()
+        .filter(|(_, entry)| entry.effective_last_seen_unix_ms() >= eviction_cutoff)
+        .map(|(key, entry)| (key.clone(), entry.clone()))
+        .collect();
+    let evicted = entries.len().saturating_sub(retained.len());
+    if evicted > 0 {
+        info!(
+            "Persistent addon hash cache evicting {} unused entries (older than {} days)",
+            evicted,
+            PERSISTENT_CACHE_EVICT_AFTER_MS / (24 * 60 * 60 * 1000)
+        );
+    }
     let file = PersistentAddonHashCacheFile {
-        entries: entries.clone(),
+        format: crate::core::tasks::db_schema_version::CONTENT_HASH_FORMAT,
+        entries: retained,
     };
     let payload = match serde_json::to_vec(&file) {
         Ok(payload) => payload,
@@ -148,7 +185,7 @@ pub(super) fn save_persistent_addon_hash_cache(
 
     info!(
         "Persistent addon hash cache saved: entries={} size={} bytes elapsed={:.2?}",
-        entries.len(),
+        file.entries.len(),
         payload.len(),
         started.elapsed()
     );
@@ -312,11 +349,11 @@ pub(super) fn persistent_addon_fingerprint_is_current(
     addon_root_fingerprint_stable_match(cached, current) || cached == current
 }
 
-/// Maximum age for a persistent addon hash cache entry (24 hours).
-/// Entries older than this are treated as stale even if the fingerprint
-/// still matches, guarding against filesystem drivers that do not
-/// reliably update modification timestamps (e.g., some network shares).
+/// Maximum age for legacy entries whose fingerprints predate the content-aware format.
 const PERSISTENT_CACHE_TTL_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// Save-time eviction window for entries no scan still touches.
+const PERSISTENT_CACHE_EVICT_AFTER_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 
 pub(super) fn persistent_addon_fingerprint_matches(
     entry: &PersistentAddonHashEntry,
@@ -325,9 +362,11 @@ pub(super) fn persistent_addon_fingerprint_matches(
     if entry.content_hash.is_empty() {
         return false;
     }
-    let age_ms = now_unix_ms().saturating_sub(entry.updated_unix_ms);
-    if age_ms > PERSISTENT_CACHE_TTL_MS {
-        return false;
+    if !entry.fingerprint.content_fingerprint_ready {
+        let age_ms = now_unix_ms().saturating_sub(entry.updated_unix_ms);
+        if age_ms > PERSISTENT_CACHE_TTL_MS {
+            return false;
+        }
     }
     addon_root_fingerprint_stable_match(&entry.fingerprint, current)
 }
@@ -342,7 +381,7 @@ pub(super) fn persistent_addon_fingerprint_mismatch_reasons(
         reasons.push("empty_content_hash");
     }
     let age_ms = now_unix_ms().saturating_sub(entry.updated_unix_ms);
-    if age_ms > PERSISTENT_CACHE_TTL_MS {
+    if !cached.content_fingerprint_ready && age_ms > PERSISTENT_CACHE_TTL_MS {
         reasons.push("expired");
     }
     if !cached.content_fingerprint_ready || !current.content_fingerprint_ready {
@@ -413,6 +452,7 @@ mod tests {
             fingerprint: cached,
             content_hash: "HASH".to_string(),
             updated_unix_ms: now_unix_ms(),
+            last_seen_unix_ms: 0,
         };
 
         assert!(persistent_addon_fingerprint_matches(&entry, &current));
@@ -433,6 +473,7 @@ mod tests {
             fingerprint: cached,
             content_hash: "HASH".to_string(),
             updated_unix_ms: now_unix_ms(),
+            last_seen_unix_ms: 0,
         };
 
         assert!(!persistent_addon_fingerprint_matches(&entry, &current));
@@ -476,20 +517,58 @@ mod tests {
             fingerprint: cached,
             content_hash: String::new(), // empty hash
             updated_unix_ms: now_unix_ms(),
+            last_seen_unix_ms: 0,
         };
         assert!(!persistent_addon_fingerprint_matches(&entry, &current));
     }
 
+    /// Content-aware fingerprint matches do not expire by age.
     #[test]
-    fn persistent_fingerprint_rejects_stale_entry() {
+    fn persistent_fingerprint_survives_age_when_content_ready() {
         let cached = stable_fingerprint("S:\\Mods\\@Addon");
         let current = stable_fingerprint("S:\\Mods\\@Addon");
         let entry = PersistentAddonHashEntry {
             fingerprint: cached,
             content_hash: "VALID_HASH".to_string(),
+            updated_unix_ms: 1, // far beyond the legacy TTL
+            last_seen_unix_ms: 0,
+        };
+        assert!(persistent_addon_fingerprint_matches(&entry, &current));
+    }
+
+    #[test]
+    fn persistent_fingerprint_rejects_expired_legacy_entry() {
+        let mut cached = stable_fingerprint("S:\\Mods\\@Addon");
+        cached.content_fingerprint_ready = false;
+        let current = stable_fingerprint("S:\\Mods\\@Addon");
+        let entry = PersistentAddonHashEntry {
+            fingerprint: cached,
+            content_hash: "VALID_HASH".to_string(),
             updated_unix_ms: 1, // very old timestamp
+            last_seen_unix_ms: 0,
         };
         assert!(!persistent_addon_fingerprint_matches(&entry, &current));
+        let reasons = persistent_addon_fingerprint_mismatch_reasons(&entry, &current);
+        assert!(reasons.contains(&"expired"));
+    }
+
+    #[test]
+    fn effective_last_seen_prefers_newest_timestamp() {
+        let entry = PersistentAddonHashEntry {
+            fingerprint: stable_fingerprint("S:\\Mods\\@Addon"),
+            content_hash: "HASH".to_string(),
+            updated_unix_ms: 10,
+            last_seen_unix_ms: 20,
+        };
+        assert_eq!(entry.effective_last_seen_unix_ms(), 20);
+
+        let legacy = PersistentAddonHashEntry {
+            fingerprint: stable_fingerprint("S:\\Mods\\@Addon"),
+            content_hash: "HASH".to_string(),
+            updated_unix_ms: 10,
+            last_seen_unix_ms: 0,
+        };
+        assert_eq!(legacy.effective_last_seen_unix_ms(), 10);
     }
 
     #[test]

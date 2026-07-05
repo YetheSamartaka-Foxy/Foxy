@@ -43,18 +43,10 @@ pub(crate) async fn remote_mods_with_data(
 ) {
     let rebuild_start = std::time::Instant::now();
 
-    // Fresh bulk-load fast path (after_turso_regression_analysis6.md, Step 1 / "Option
-    // B"): if `subfiles` is globally empty (post-whole-wipe force-redownload or first
-    // download) the part insert is a pure append of brand-new rows, so the part insert
-    // switches to a plain conflict-free INSERT via `context.fresh_subfiles_load` instead
-    // of the `ON CONFLICT (file_id, path)` upsert. The indexes are kept LIVE: analysis
-    // #6 measured that dropping + rebuilding them added a serial ~13.78s index rebuild
-    // on the critical path, while the insert work it saved was already hidden behind the
-    // HTTP manifest fetch + single-writer permit_wait - i.e. deferral was a net loss.
-    // Must be decided + set BEFORE spawning so every mod task sees the flag. Gated on
-    // emptiness so incremental rebuilds (sibling rows present) keep the safe upsert path.
-    // Repository-space note: this check is intentionally scoped to the current
-    // repository instance, not the global `subfiles` table.
+    // If this repository has no linked subfile rows yet, the per-mod metadata
+    // tasks can buffer brand-new parts as conflict-free rows. The short-lived
+    // `fresh_subfiles_load` flag is only for this fan-out window; buffered rows
+    // keep a separate fresh marker for the later hash-bootstrap flush.
     let fresh_bulk_load = repository_subfiles_empty(&context.db(), repository.id as i64).await;
     if fresh_bulk_load {
         info!(

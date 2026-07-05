@@ -13,6 +13,7 @@ pub enum RepositoryListContextAction {
     ForceRedownload,
     CloneWithSuffix,
     GoToRepositorySpace,
+    RemoveFromVisualFolder,
     OpenLocalPath,
     MoveUp,
     MoveDown,
@@ -23,6 +24,21 @@ pub enum RepositoryContextConfirmAction {
     Delete(usize),
     WipeRepositoryDb(usize),
     ForceRedownload(usize),
+}
+
+#[derive(Clone, Debug)]
+pub struct RepositoryVisualFolderEditState {
+    pub folder_id: Option<String>,
+    pub repository_space_id: Option<String>,
+    pub name_buffer: String,
+    pub color_rgb: [u8; 3],
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RepositoryVisualFolderDeleteState {
+    pub folder_id: String,
+    pub delete_repositories: bool,
 }
 
 #[derive(Clone, Debug)]

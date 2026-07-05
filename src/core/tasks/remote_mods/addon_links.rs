@@ -35,7 +35,7 @@ pub(super) async fn reconcile_repository_addon_links(
             Box::pin(async move {
                 // Insert desired links (chunked multi-row INSERT ... ON CONFLICT DO NOTHING).
                 if !desired_ids.is_empty() {
-                    let chunk_size = (SQLITE_MAX_VARIABLES / 2).max(1);
+                    let chunk_size = crate::core::tasks::init_database::bulk_write_rows_for(2);
                     for chunk in desired_ids.chunks(chunk_size) {
                         let placeholders = vec!["(?, ?)"; chunk.len()].join(", ");
                         let sql = format!(

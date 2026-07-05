@@ -268,6 +268,8 @@ impl Foxy {
             .italics()
             .color(self.color_text_dim()),
         );
+        ui.add_space(6.0);
+        self.render_arma3_profile_management(ui, horizontal_padding);
         ui.separator();
 
         // Steam Directory

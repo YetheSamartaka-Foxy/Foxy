@@ -1,4 +1,5 @@
 use super::super::quick_scan::{
+    apply_download_target_estimates_to_pending_updates,
     apply_patch_plan_estimates_to_pending_updates, collect_files_with_missing_local_tree_hashes,
     collect_repo_download_targets, collect_unexpected_files_for_repo_mods,
     delete_unexpected_local_files, format_local_path_mismatch_message, log_addon_path_disk_state,
@@ -16,6 +17,7 @@ use super::hashing::{
     render_hash_total_summary, run_incremental_hash_batch,
 };
 use super::summary::{PipelineSummary, StageEntry};
+use crate::core::api::FileDiffKind;
 use crate::core::db::{DbValue, FoxyDb, params};
 use crate::core::models::download_target_file::fetch_all_download_targets_with_mod_and_name;
 use crate::core::models::modification::ADDON_COLUMNS;
@@ -179,6 +181,10 @@ fn should_refresh_delta_plan_after_quick_verify(
     !builds_download_plan && has_pending_updates && !delta_plan_estimate_refreshed
 }
 
+fn quick_verify_already_eligible(cached_pending_scope: Option<&HashSet<String>>) -> bool {
+    cached_pending_scope.is_some_and(|scope| !scope.is_empty())
+}
+
 fn should_defer_remote_metadata_part_inserts(mode: SyncMode, force_redownload: bool) -> bool {
     !force_redownload
         && matches!(
@@ -312,7 +318,7 @@ async fn collect_missing_addon_path_summary(
         });
     }
 
-    let chunk_size = SQLITE_MAX_VARIABLES.saturating_sub(10).max(1);
+    let chunk_size = read_chunk_ids();
     let mut mods = Vec::new();
     for chunk in mod_ids.chunks(chunk_size) {
         let placeholders = vec!["?"; chunk.len()].join(", ");
@@ -439,6 +445,18 @@ fn render_final_update_report(
     lines.join("\n")
 }
 
+/// Resolves once the user cancels the sync or the sender is dropped.
+async fn sync_cancel_requested(cancel_rx: &mut watch::Receiver<bool>) {
+    loop {
+        if *cancel_rx.borrow() {
+            return;
+        }
+        if cancel_rx.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
 async fn wait_for_download_resume(
     download_pause_rx: &mut watch::Receiver<bool>,
     cancel_rx: &mut watch::Receiver<bool>,
@@ -465,7 +483,7 @@ async fn wait_for_download_resume(
 
 async fn estimate_download_queue_bytes(context: Arc<FoxyContext>, file_ids: &HashSet<u64>) -> u64 {
     let db = context.db();
-    let chunk_size = SQLITE_MAX_VARIABLES.saturating_sub(10).max(1);
+    let chunk_size = read_chunk_ids();
     let mut total = 0u64;
     let mut ids: Vec<i64> = file_ids.iter().map(|file_id| *file_id as i64).collect();
     ids.sort_unstable();
@@ -500,7 +518,7 @@ async fn existing_download_targets_are_tiny(
     }
 
     let db = context.db();
-    let chunk_size = SQLITE_MAX_VARIABLES.saturating_sub(10).max(1);
+    let chunk_size = read_chunk_ids();
     let mut checked = 0usize;
     let mut ids: Vec<i64> = file_ids.iter().map(|file_id| *file_id as i64).collect();
     ids.sort_unstable();
@@ -550,7 +568,8 @@ async fn invalidate_force_redownload_hash_baseline(
         let placeholders = vec!["?"; chunk.len()].join(", ");
         let values: Vec<DbValue> = chunk.iter().copied().map(DbValue::from).collect();
         affected = affected.saturating_add(
-            db.execute(
+            db.execute_retry(
+                "invalidate force-redownload file baseline",
                 &format!(
                     "UPDATE files \
                      SET local_checksum = '', local_content_hash = '' \
@@ -564,7 +583,8 @@ async fn invalidate_force_redownload_hash_baseline(
 
         let values: Vec<DbValue> = chunk.iter().copied().map(DbValue::from).collect();
         affected = affected.saturating_add(
-            db.execute(
+            db.execute_retry(
+                "invalidate force-redownload part baseline",
                 &format!(
                     "UPDATE subfiles \
                      SET local_checksum = '', local_length = 0, local_start = 0 \
@@ -770,9 +790,31 @@ async fn run_repository_pipeline(
     let mut sqlite_perf_guard =
         SqlitePerfRunGuard::start(normalized_repo_url.clone(), mode, overall_start);
 
+    // Surface startup DB maintenance while context creation is blocked.
+    if crate::core::tasks::db_turso::db_startup_compaction_active() {
+        send_progress_event(
+            &progress_tx,
+            ProgressEvent::Stage {
+                label: "Optimizing database".into(),
+                percent: 0.05,
+            },
+            &operation_id,
+        );
+    }
+    let base_context = tokio::select! {
+        context = create_context_with_recheck_level(RecheckLevel::DEFAULT) => context,
+        _ = sync_cancel_requested(&mut cancel_rx) => {
+            info!(
+                "Sync cancelled while waiting for database availability: op={} repo={}",
+                operation_id,
+                sanitize_log_url(&repository_url)
+            );
+            send_progress_event(&progress_tx, ProgressEvent::Cancelled, &operation_id);
+            return;
+        }
+    };
     let mut context = Arc::new(
-        create_context_with_recheck_level(RecheckLevel::DEFAULT)
-            .await
+        base_context
             .as_ref()
             .clone()
             .with_download_target_queueing(builds_download_plan)
@@ -935,7 +977,7 @@ async fn run_repository_pipeline(
             Some(&mod_enabled_overrides),
             Some(&progress_tx),
             true,
-            false,
+            quick_verify_already_eligible(cached_pending_scope.as_ref()),
             false,
             None,
         )
@@ -1273,6 +1315,11 @@ async fn run_repository_pipeline(
                                 needs_update: true,
                                 total_bytes: f.length,
                                 changed_parts,
+                                change_kind: if f.local_checksum.is_empty() {
+                                    FileDiffKind::Added
+                                } else {
+                                    FileDiffKind::Modified
+                                },
                             });
                         }
                     }
@@ -2275,18 +2322,28 @@ async fn run_repository_pipeline(
             }
         }
 
-        if !force_redownload
-            && !download_file_ids.is_empty()
-            && let Some(adjusted_mods) = apply_patch_plan_estimates_to_pending_updates(
+        if !force_redownload && !download_file_ids.is_empty() {
+            if let Some(adjusted_mods) = apply_download_target_estimates_to_pending_updates(
+                context.clone(),
+                &normalized_repo_url,
+                Some(&pending_mod_names),
+            )
+            .await
+            {
+                mods = adjusted_mods;
+                emit_progress!(ProgressEvent::Diff { mods: mods.clone() });
+                persist_pending_updates(context.clone(), &normalized_repo_url, &mods).await;
+            } else if let Some(adjusted_mods) = apply_patch_plan_estimates_to_pending_updates(
                 context.clone(),
                 &normalized_repo_url,
                 &mods,
             )
             .await
-        {
-            mods = adjusted_mods;
-            emit_progress!(ProgressEvent::Diff { mods: mods.clone() });
-            persist_pending_updates(context.clone(), &normalized_repo_url, &mods).await;
+            {
+                mods = adjusted_mods;
+                emit_progress!(ProgressEvent::Diff { mods: mods.clone() });
+                persist_pending_updates(context.clone(), &normalized_repo_url, &mods).await;
+            }
         }
 
         if prepare_download_plan && !download_file_ids.is_empty() {
@@ -2473,19 +2530,18 @@ async fn run_repository_pipeline(
     // background transaction overlapped with the download. The incremental hash worker
     // awaits this handle before its first tree load, so the rows are guaranteed present
     // by the time any reader needs them. No-op when nothing was deferred.
-    let deferred_part_insert_handle: Option<tokio::task::JoinHandle<()>> =
-        if force_redownload && context.should_defer_part_inserts() {
-            let flush_context = context.clone();
-            let handle = tokio::spawn(async move {
-                flush_deferred_part_inserts(flush_context).await;
-            });
-            // Close the defer window now that the buffer has been handed to the flush
-            // task; any later writes in this session use the normal inline path.
-            context.set_defer_part_inserts(false);
-            Some(handle)
-        } else {
-            None
-        };
+    let deferred_part_insert_handle: Option<tokio::task::JoinHandle<bool>> = if force_redownload
+        && context.should_defer_part_inserts()
+    {
+        let flush_context = context.clone();
+        let handle = tokio::spawn(async move { flush_deferred_part_inserts(flush_context).await });
+        // Close the defer window now that the buffer has been handed to the flush
+        // task; any later writes in this session use the normal inline path.
+        context.set_defer_part_inserts(false);
+        Some(handle)
+    } else {
+        None
+    };
     // The worker blocks on the deferred insert (~22s) before its first tree load, so
     // the channel must hold the completions that arrive during that window without
     // spilling them to the (post-download) final hash stage. 2048 comfortably covers
@@ -2513,10 +2569,16 @@ async fn run_repository_pipeline(
         // A++: ensure the deferred part insert has completed before the first tree
         // load (the only `subfiles` reader on the force path). Completions that arrive
         // during this wait buffer in the widened channel rather than spilling.
-        if let Some(handle) = deferred_part_insert_handle
-            && let Err(err) = handle.await
-        {
-            warn!("Deferred part insert task failed before incremental hashing: {err}");
+        if let Some(handle) = deferred_part_insert_handle {
+            match handle.await {
+                Ok(true) => {}
+                Ok(false) => {
+                    warn!("Deferred part insert task failed before incremental hashing");
+                }
+                Err(err) => {
+                    warn!("Deferred part insert task failed before incremental hashing: {err}");
+                }
+            }
         }
         let mut hashed_file_ids: HashSet<u64> = HashSet::new();
         let mut pending_file_ids: HashSet<u64> = HashSet::new();
@@ -3481,6 +3543,22 @@ mod tests {
         assert!(!should_refresh_delta_plan_after_quick_verify(
             false, true, true
         ));
+    }
+
+    #[test]
+    fn cached_pending_scope_prevalidates_quick_verify() {
+        let mut scope = HashSet::new();
+        scope.insert("@ace3".to_string());
+
+        assert!(quick_verify_already_eligible(Some(&scope)));
+    }
+
+    #[test]
+    fn missing_or_empty_pending_scope_keeps_quick_verify_preflight() {
+        let empty_scope = HashSet::new();
+
+        assert!(!quick_verify_already_eligible(None));
+        assert!(!quick_verify_already_eligible(Some(&empty_scope)));
     }
 
     #[test]

@@ -123,7 +123,8 @@ pub(crate) async fn replace_download_patch_ops_for_file(
                     return Ok(());
                 }
 
-                let rows_per_chunk = (SQLITE_MAX_VARIABLES / PATCH_OP_INSERT_BINDS).max(1);
+                let rows_per_chunk =
+                    crate::core::tasks::init_database::bulk_write_rows_for(PATCH_OP_INSERT_BINDS);
                 let row_placeholder = format!("({})", ["?"; PATCH_OP_INSERT_BINDS].join(", "));
                 for chunk in ops.chunks(rows_per_chunk) {
                     let placeholders =

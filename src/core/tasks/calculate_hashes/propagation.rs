@@ -63,7 +63,8 @@ pub(crate) async fn pre_propagate_sibling_checksums(
     // Propagate file-level checksums from sibling files with the same local_path
     // and remote_checksum that are already synced.
     let file_updates = match db
-        .execute(
+        .execute_retry(
+            "pre-propagate sibling file checksums",
             r#"UPDATE files SET local_checksum = remote_checksum
                WHERE local_checksum != remote_checksum
                AND remote_checksum != ''
@@ -102,7 +103,8 @@ pub(crate) async fn pre_propagate_sibling_checksums(
 
     // Propagate addon-level checksums from siblings with same name + local_path.
     let addon_updates = match db
-        .execute(
+        .execute_retry(
+            "pre-propagate sibling addon checksums",
             r#"UPDATE addons SET local_checksum = remote_checksum
                WHERE local_checksum != remote_checksum
                AND remote_checksum != ''

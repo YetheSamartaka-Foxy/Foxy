@@ -5,8 +5,10 @@ use crate::ui::app::{
 use crate::ui::i18n::{tr, tr_fmt};
 use crate::ui::search_filter::MultiEntryFilter;
 use crate::ui::views::galley_cache;
+use crate::ui::views::repository::RepositoryListSectionContextAction;
 use eframe::egui::{self, Align, Button, Margin, RichText, ScrollArea, TextEdit, Ui, Vec2};
 use log::{info, warn};
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 impl Foxy {
@@ -26,7 +28,14 @@ impl Foxy {
                     .map(|space| space.id.clone())
                     .unwrap_or_else(|| space_idx.to_string()),
             ),
-            RepositoryListRow::Repository(repo_idx) => (
+            RepositoryListRow::FolderHeader(folder_idx) => (
+                "repository_list_visual_folder".to_string(),
+                self.repository_visual_folders
+                    .get(folder_idx)
+                    .map(|folder| folder.id.clone())
+                    .unwrap_or_else(|| folder_idx.to_string()),
+            ),
+            RepositoryListRow::Repository { repo_idx, .. } => (
                 "repository_list_repository".to_string(),
                 self.repository_view_state
                     .repositories
@@ -37,6 +46,48 @@ impl Foxy {
         }
     }
 
+    fn append_repository_visual_folder_rows(
+        &self,
+        rows: &mut Vec<RepositoryListRow>,
+        source_indices: &[usize],
+        repository_space_id: Option<&str>,
+        repo_keys: &[String],
+    ) -> HashSet<usize> {
+        let mut used = HashSet::new();
+        for (folder_idx, folder) in self.repository_visual_folders.iter().enumerate() {
+            if folder.repository_space_id.as_deref() != repository_space_id {
+                continue;
+            }
+
+            let children = source_indices
+                .iter()
+                .copied()
+                .filter(|repo_idx| {
+                    repo_keys
+                        .get(*repo_idx)
+                        .is_some_and(|repo_key| folder.repository_keys.contains(repo_key))
+                })
+                .collect::<Vec<_>>();
+            if children.is_empty() && !self.repository_list_cache.filter_raw.trim().is_empty() {
+                continue;
+            }
+
+            rows.push(RepositoryListRow::FolderHeader(folder_idx));
+            for repo_idx in &children {
+                used.insert(*repo_idx);
+            }
+            if !folder.collapsed {
+                for repo_idx in children {
+                    rows.push(RepositoryListRow::Repository {
+                        repo_idx,
+                        indented: true,
+                    });
+                }
+            }
+        }
+        used
+    }
+
     pub(super) fn rebuild_repository_list_cache_if_needed(&mut self) {
         let filter_changed =
             self.repository_list_cache.filter_raw != self.repository_view_state.repository_filter;
@@ -44,6 +95,8 @@ impl Foxy {
             self.repository_list_cache.repositories_version != self.repository_list_data_version;
         let spaces_changed =
             self.repository_list_cache.spaces_version != self.repository_spaces_version;
+        let visual_folders_changed = self.repository_list_cache.visual_folders_version
+            != self.repository_visual_folders_version;
         let repo_states_changed =
             self.repository_list_cache.repo_states_version != self.repo_states_version;
         let spaces_collapsed_changed = self.repository_list_cache.repository_spaces_collapsed
@@ -53,6 +106,7 @@ impl Foxy {
         if !filter_changed
             && !repositories_changed
             && !spaces_changed
+            && !visual_folders_changed
             && !repo_states_changed
             && !spaces_collapsed_changed
             && !repositories_collapsed_changed
@@ -92,6 +146,10 @@ impl Foxy {
                     .space_index_by_id
                     .insert(space.id.clone(), space_idx);
             }
+        }
+        if visual_folders_changed {
+            self.repository_list_cache.visual_folders_version =
+                self.repository_visual_folders_version;
         }
 
         if filter_changed {
@@ -147,6 +205,12 @@ impl Foxy {
 
         let mut grouped_space_children = vec![Vec::new(); self.repository_spaces.len()];
         let mut ungrouped_indices = Vec::new();
+        let repo_keys = self
+            .repository_view_state
+            .repositories
+            .iter()
+            .map(|repo| Self::repo_instance_key(&repo.address, &repo.path))
+            .collect::<Vec<_>>();
         for &repo_idx in &self.repository_list_cache.filtered_indices {
             let repo = &self.repository_view_state.repositories[repo_idx];
             if let Some(space_id) = repo.repository_space_id.as_deref()
@@ -163,43 +227,61 @@ impl Foxy {
             ungrouped_indices.push(repo_idx);
         }
 
-        self.repository_list_cache.rows.clear();
+        let mut rows = Vec::new();
         if !self.repository_spaces.is_empty() {
-            self.repository_list_cache
-                .rows
-                .push(RepositoryListRow::SectionLabel(
-                    RepositoryListSection::Spaces,
-                ));
+            rows.push(RepositoryListRow::SectionLabel(
+                RepositoryListSection::Spaces,
+            ));
             if !self.repository_view_state.repository_spaces_collapsed {
                 for (space_idx, children) in grouped_space_children.iter().enumerate() {
-                    self.repository_list_cache
-                        .rows
-                        .push(RepositoryListRow::SpaceHeader(space_idx));
+                    rows.push(RepositoryListRow::SpaceHeader(space_idx));
                     if !self.repository_spaces[space_idx].collapsed {
+                        let space_id = self.repository_spaces[space_idx].id.as_str();
+                        let used = self.append_repository_visual_folder_rows(
+                            &mut rows,
+                            children,
+                            Some(space_id),
+                            &repo_keys,
+                        );
                         for &repo_idx in children {
-                            self.repository_list_cache
-                                .rows
-                                .push(RepositoryListRow::Repository(repo_idx));
+                            if !used.contains(&repo_idx) {
+                                rows.push(RepositoryListRow::Repository {
+                                    repo_idx,
+                                    indented: false,
+                                });
+                            }
                         }
                     }
                 }
             }
         }
 
-        if !ungrouped_indices.is_empty() {
-            self.repository_list_cache
-                .rows
-                .push(RepositoryListRow::SectionLabel(
-                    RepositoryListSection::Repositories,
-                ));
+        let outside_folders_exist = self
+            .repository_visual_folders
+            .iter()
+            .any(|folder| folder.repository_space_id.is_none());
+        if !ungrouped_indices.is_empty() || outside_folders_exist {
+            rows.push(RepositoryListRow::SectionLabel(
+                RepositoryListSection::Repositories,
+            ));
             if !self.repository_view_state.repositories_collapsed {
+                let used = self.append_repository_visual_folder_rows(
+                    &mut rows,
+                    &ungrouped_indices,
+                    None,
+                    &repo_keys,
+                );
                 for repo_idx in ungrouped_indices {
-                    self.repository_list_cache
-                        .rows
-                        .push(RepositoryListRow::Repository(repo_idx));
+                    if !used.contains(&repo_idx) {
+                        rows.push(RepositoryListRow::Repository {
+                            repo_idx,
+                            indented: false,
+                        });
+                    }
                 }
             }
         }
+        self.repository_list_cache.rows = rows;
 
         let rebuild_elapsed = rebuild_started_at.elapsed();
         if rebuild_elapsed > Duration::from_millis(2) {
@@ -303,7 +385,10 @@ impl Foxy {
 
                 let mut repository_context_action: Option<(usize, RepositoryListContextAction)> =
                     None;
-                let mut section_action: Option<RepositoryListSection> = None;
+                let mut section_action: Option<(
+                    RepositoryListSection,
+                    RepositoryListSectionContextAction,
+                )> = None;
                 let row_count = self.repository_list_cache.rows.len();
                 let repository_rows_generation = galley_cache::fingerprint((
                     self.repository_list_data_version,
@@ -316,8 +401,12 @@ impl Foxy {
                         .iter()
                         .map(|row| match row {
                             RepositoryListRow::SectionLabel(section) => match section {
-                                RepositoryListSection::Spaces => (0_u8, 0_usize, 0_u8),
-                                RepositoryListSection::Repositories => (0_u8, 1_usize, 0_u8),
+                                RepositoryListSection::Spaces => {
+                                    (0_u8, 0_usize, 0_u8, 0_u8, [0, 0, 0])
+                                }
+                                RepositoryListSection::Repositories => {
+                                    (0_u8, 1_usize, 0_u8, 0_u8, [0, 0, 0])
+                                }
                             },
                             RepositoryListRow::SpaceHeader(space_idx) => (
                                 1_u8,
@@ -326,19 +415,36 @@ impl Foxy {
                                     .get(*space_idx)
                                     .is_some_and(|space| space.collapsed)
                                     as u8,
+                                0_u8,
+                                [0, 0, 0],
                             ),
-                            RepositoryListRow::Repository(repo_idx) => self
+                            RepositoryListRow::FolderHeader(folder_idx) => self
+                                .repository_visual_folders
+                                .get(*folder_idx)
+                                .map(|folder| {
+                                    (
+                                        2_u8,
+                                        *folder_idx,
+                                        folder.collapsed as u8,
+                                        0_u8,
+                                        folder.color_rgb,
+                                    )
+                                })
+                                .unwrap_or((2_u8, *folder_idx, 0_u8, 0_u8, [0, 0, 0])),
+                            RepositoryListRow::Repository { repo_idx, indented } => self
                                 .repository_view_state
                                 .repositories
                                 .get(*repo_idx)
                                 .map(|repo| {
                                     (
-                                        2_u8,
+                                        3_u8,
                                         *repo_idx,
                                         self.repo_state_for_address(&repo.address, &repo.path) as u8,
+                                        *indented as u8,
+                                        [0, 0, 0],
                                     )
                                 })
-                                .unwrap_or((2_u8, *repo_idx, 0_u8)),
+                                .unwrap_or((3_u8, *repo_idx, 0_u8, 0_u8, [0, 0, 0])),
                         })
                         .collect::<Vec<_>>(),
                 ));
@@ -352,6 +458,9 @@ impl Foxy {
                         self.color_text_normal().to_array(),
                     )),
                 );
+                if self.drag_source_repo_index.is_some() {
+                    self.drag_drop_target_visual_folder_id = None;
+                }
                 ScrollArea::vertical().show_rows(
                     ui,
                     Self::repository_list_row_height(),
@@ -378,7 +487,12 @@ impl Foxy {
                 if self.drag_source_repo_index.is_some()
                     && !ui.ctx().input(|i| i.pointer.any_down())
                 {
-                    if let (Some(from), Some(to)) =
+                    if let (Some(from), Some(folder_id)) = (
+                        self.drag_source_repo_index,
+                        self.drag_drop_target_visual_folder_id.clone(),
+                    ) {
+                        self.assign_repository_to_visual_folder(from, &folder_id);
+                    } else if let (Some(from), Some(to)) =
                         (self.drag_source_repo_index, self.drag_drop_target_index)
                         && let Some(target) = Self::repository_drop_target_index(
                             from,
@@ -390,10 +504,18 @@ impl Foxy {
                     }
                     self.drag_source_repo_index = None;
                     self.drag_drop_target_index = None;
+                    self.drag_drop_target_visual_folder_id = None;
                 }
 
-                if let Some(section) = section_action {
-                    self.toggle_repository_list_section_collapsed(section);
+                if let Some((section, action)) = section_action {
+                    match action {
+                        RepositoryListSectionContextAction::ToggleCollapsed => {
+                            self.toggle_repository_list_section_collapsed(section);
+                        }
+                        RepositoryListSectionContextAction::CreateFolder => {
+                            self.open_create_repository_visual_folder(None);
+                        }
+                    }
                 }
 
                 if let Some((repo_idx, action)) = repository_context_action {
@@ -433,6 +555,9 @@ impl Foxy {
                                     space_name
                                 );
                             }
+                        }
+                        RepositoryListContextAction::RemoveFromVisualFolder => {
+                            self.remove_repository_from_visual_folder(repo_idx);
                         }
                         RepositoryListContextAction::CloneWithSuffix => {
                             self.repository_view_state.selected_repository = Some(repo_idx);

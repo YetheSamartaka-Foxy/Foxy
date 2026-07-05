@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use log::warn;
 
+use crate::core::utils::fs_safety::resolve_child_dir_case_insensitive;
 use crate::core::utils::{addon_backup, app_paths};
 use crate::ui::app::{
     AddonBackupTaskAction, AddonBackupTaskResult, AddonBackupTaskStatus, BackupManagerNotice, Foxy,
@@ -204,7 +205,11 @@ impl Foxy {
             ));
         }
 
-        let fallback = Path::new(repo_path).join(addon_name);
+        // Resolve the addon folder tolerant of case differences between the
+        // manifest name and the on-disk folder; fall back to the plain join when
+        // no matching folder exists yet (e.g. a not-yet-downloaded addon).
+        let fallback = resolve_child_dir_case_insensitive(Path::new(repo_path), addon_name)
+            .unwrap_or_else(|| Path::new(repo_path).join(addon_name));
         let candidate = preferred_path
             .map(str::trim)
             .filter(|path| !path.is_empty())

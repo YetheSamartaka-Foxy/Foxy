@@ -4,9 +4,12 @@ mod app_paths;
 mod application;
 mod backup;
 mod customization;
+mod profile_manager;
 mod scheduling;
 mod tools;
 mod ts3_plugins;
+
+pub use profile_manager::Arma3ProfileAction;
 
 use crate::ui::app::Foxy;
 use crate::ui::fonts::{self};

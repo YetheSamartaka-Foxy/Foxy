@@ -4,7 +4,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::core::db::{DbValue, FoxyDb, params};
-use crate::core::tasks::init_database::SQLITE_MAX_VARIABLES;
+use crate::core::tasks::init_database::{bulk_write_chunk_rows, read_chunk_ids};
 
 pub(crate) type AddonDisplayNameSnapshot = HashMap<String, HashMap<String, String>>;
 
@@ -100,27 +100,7 @@ pub(crate) async fn backfill_missing_addon_display_names(db: &FoxyDb) {
     );
 }
 
-pub(crate) async fn regenerate_addon_display_names_for_repo(db: &FoxyDb, repo_url: &str) {
-    let repo_row = match db
-        .query_one(
-            "SELECT id FROM repositories WHERE remote_url = ? LIMIT 1",
-            params![repo_url],
-        )
-        .await
-    {
-        Ok(Some(repo)) => repo,
-        Ok(None) => return,
-        Err(err) => {
-            warn!(
-                "Failed to load repository for addon display-name regeneration {}: {}",
-                repo_url, err
-            );
-            return;
-        }
-    };
-    let Ok(repo_id) = repo_row.get_i64("id") else {
-        return;
-    };
+pub(crate) async fn regenerate_addon_display_names_for_repo_id(db: &FoxyDb, repo_id: i64) {
     let ids: Vec<i64> = match db
         .query_all(
             "SELECT addon_id FROM repository_addons WHERE repository_id = ?",
@@ -134,8 +114,8 @@ pub(crate) async fn regenerate_addon_display_names_for_repo(db: &FoxyDb, repo_ur
             .collect(),
         Err(err) => {
             warn!(
-                "Failed to load repository addon links for display-name regeneration {}: {}",
-                repo_url, err
+                "Failed to load repository addon links for display-name regeneration (repo_id={}): {}",
+                repo_id, err
             );
             return;
         }
@@ -147,26 +127,26 @@ pub(crate) async fn regenerate_addon_display_names_for_ids(db: &FoxyDb, ids: &[i
     if ids.is_empty() {
         return;
     }
-    let mut updates: Vec<(i64, String)> = Vec::new();
+    let mut addons: Vec<(i64, String, String)> = Vec::new();
     let mut sorted = ids.to_vec();
     sorted.sort_unstable();
     sorted.dedup();
-    for chunk in sorted.chunks(SQLITE_MAX_VARIABLES.saturating_sub(10).max(1)) {
+    for chunk in sorted.chunks(read_chunk_ids()) {
         let placeholders = vec!["?"; chunk.len()].join(", ");
-        let sql = format!("SELECT id, local_path FROM addons WHERE id IN ({placeholders})");
+        let sql =
+            format!("SELECT id, local_path, display_name FROM addons WHERE id IN ({placeholders})");
         let values: Vec<DbValue> = chunk.iter().copied().map(DbValue::from).collect();
         match db.query_all(&sql, values).await {
             Ok(batch) => {
                 for row in batch {
-                    let (Ok(id), Ok(local_path)) =
-                        (row.get_i64("id"), row.get_string("local_path"))
-                    else {
+                    let (Ok(id), Ok(local_path), Ok(display_name)) = (
+                        row.get_i64("id"),
+                        row.get_string("local_path"),
+                        row.get_string("display_name"),
+                    ) else {
                         continue;
                     };
-                    updates.push((
-                        id,
-                        extract_addon_display_name(&local_path).unwrap_or_default(),
-                    ));
+                    addons.push((id, local_path, display_name));
                 }
             }
             Err(err) => {
@@ -178,6 +158,28 @@ pub(crate) async fn regenerate_addon_display_names_for_ids(db: &FoxyDb, ids: &[i
             }
         }
     }
+
+    // Keep synchronous mod.cpp parsing off the async executor.
+    let updates = match tokio::task::spawn_blocking(move || {
+        addons
+            .into_iter()
+            .filter_map(|(id, local_path, current_name)| {
+                let parsed = extract_addon_display_name(&local_path)?;
+                (parsed != current_name).then_some((id, parsed))
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    {
+        Ok(updates) => updates,
+        Err(err) => {
+            warn!(
+                "Failed to parse mod.cpp files for display-name regeneration: {}",
+                err
+            );
+            return;
+        }
+    };
     persist_addon_display_names(db, &updates).await;
 }
 
@@ -233,7 +235,7 @@ async fn persist_addon_display_names(db: &FoxyDb, updates: &[(i64, String)]) {
     if updates.is_empty() {
         return;
     }
-    for chunk in updates.chunks(SQLITE_MAX_VARIABLES / 2) {
+    for chunk in updates.chunks(bulk_write_chunk_rows()) {
         let placeholders = vec!["(?, ?)"; chunk.len()].join(", ");
         let sql = format!(
             "WITH data(id, display_name) AS (VALUES {})

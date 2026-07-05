@@ -1,10 +1,14 @@
 use super::super::*;
 use super::db_helpers::load_patch_download_bytes_by_file_ids;
 use crate::core::db::{DbValue, FoxyDb, params};
+use crate::core::models::download_target_file::fetch_all_download_targets_with_mod_and_name;
 use crate::core::models::modification::ADDON_COLUMNS;
 use crate::core::models::modification_file::FILE_COLUMNS;
 use crate::core::models::modification_file_part::{
     FoxyModFilePart, SUBFILE_COLUMNS, part_display_path,
+};
+use crate::core::tasks::download_files::{
+    apply_download_plan_bytes, build_download_estimate_diffs,
 };
 use crate::core::tasks::remote_file_parts::{
     FilePartData, FilePartsPayload, remote_file_parts_batch,
@@ -211,7 +215,7 @@ pub(crate) async fn refresh_patch_plan_metadata_for_pending_updates(
         return 0;
     }
 
-    let chunk_size = SQLITE_MAX_VARIABLES.saturating_sub(10).max(1);
+    let chunk_size = read_chunk_ids();
     let mut allowed_mod_ids = HashSet::new();
     for chunk in mod_ids.chunks(chunk_size) {
         let placeholders = vec!["?"; chunk.len()].join(", ");
@@ -427,7 +431,7 @@ pub(crate) async fn apply_patch_plan_estimates_to_pending_updates(
         return None;
     }
 
-    let chunk_size = SQLITE_MAX_VARIABLES.saturating_sub(10).max(1);
+    let chunk_size = read_chunk_ids();
     let mut mod_rows = Vec::new();
     for chunk in scoped_mod_ids.chunks(chunk_size) {
         let placeholders = vec!["?"; chunk.len()].join(", ");
@@ -592,6 +596,50 @@ pub(crate) async fn apply_patch_plan_estimates_to_pending_updates(
     Some(adjusted)
 }
 
+pub(crate) async fn apply_download_target_estimates_to_pending_updates(
+    context: Arc<FoxyContext>,
+    repo_url: &str,
+    allowed_mod_names: Option<&HashSet<String>>,
+) -> Option<Vec<ModDiffSummary>> {
+    let (file_ids, _) =
+        collect_repo_download_targets(context.clone(), repo_url, allowed_mod_names).await;
+    if file_ids.is_empty() {
+        return None;
+    }
+
+    let mut targets = match fetch_all_download_targets_with_mod_and_name(context.clone()).await {
+        Ok(targets) => targets,
+        Err(err) => {
+            warn!(
+                "Failed to load download targets for pending estimate repo={}: {}",
+                repo_url, err
+            );
+            return None;
+        }
+    };
+    let pre_filter_targets = targets.len();
+    targets.retain(|target| file_ids.contains(&target.download.file_id));
+    if targets.is_empty() {
+        return None;
+    }
+
+    let (patchable_file_ids, planned_bytes, full_bytes) =
+        apply_download_plan_bytes(context, &mut targets).await;
+    let mods = build_download_estimate_diffs(&targets);
+    info!(
+        "Download-target pending estimate applied for repo={}: mods={} files={} dropped_targets={} patch_files={} planned_transfer_bytes={} full_bytes={}",
+        repo_url,
+        mods.len(),
+        targets.len(),
+        pre_filter_targets.saturating_sub(targets.len()),
+        patchable_file_ids.len(),
+        planned_bytes,
+        full_bytes
+    );
+
+    Some(mods)
+}
+
 pub(crate) async fn pending_update_mod_scope(
     db: &FoxyDb,
     repo_url: &str,
@@ -645,6 +693,7 @@ mod tests {
             needs_update: true,
             total_bytes,
             changed_parts: 1,
+            change_kind: FileDiffKind::Modified,
         }
     }
 

@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use log::{info, warn};
 
+use crate::core::utils::fs_safety::resolve_child_dir_case_insensitive;
 use crate::ui::app::{
     AddonInventoryEntry, AddonInventoryViewCache, Foxy, RepositoryAddonListCache,
     RepositoryExternalAddonsListCache, RepositorySettingsAddonPreloadResult,
@@ -627,9 +628,20 @@ impl Foxy {
 
         let mut args = Vec::new();
 
+        // Re-detect profiles at launch time so -name decisions reflect the
+        // current on-disk state, not a cached list.
+        let custom_profiles_dir = self.settings_view_state.arma3_profiles_directory.trim();
+        let custom_profiles_dir = if custom_profiles_dir.is_empty() {
+            None
+        } else {
+            Some(std::path::Path::new(custom_profiles_dir))
+        };
+        let detected_profiles =
+            crate::core::arma3_profiles::detect_all_profiles(custom_profiles_dir);
         crate::ui::types::push_arma3_profile_launch_args(
             &self.settings_view_state,
             repo,
+            &detected_profiles,
             &mut args,
         );
 
@@ -942,19 +954,19 @@ fn resolve_launch_mod_paths(repo: &Repository, arma3_directory: &str) -> Vec<Str
     }
 
     for addon in &enabled_addons {
-        let addon_path = std::path::Path::new(repo_path).join(addon);
-        if addon_path.exists() {
+        if let Some(addon_path) =
+            resolve_child_dir_case_insensitive(std::path::Path::new(repo_path), addon)
+        {
             resolved_addons.push(addon_path.to_string_lossy().to_string());
+        } else if let Some(arma3_addon_path) =
+            resolve_child_dir_case_insensitive(std::path::Path::new(arma3_directory), addon)
+        {
+            resolved_addons.push(arma3_addon_path.to_string_lossy().to_string());
         } else {
-            let arma3_addon_path = std::path::Path::new(arma3_directory).join(addon);
-            if arma3_addon_path.exists() {
-                resolved_addons.push(arma3_addon_path.to_string_lossy().to_string());
-            } else {
-                log::error!(
-                    "Addon not found in repository or Arma 3 directory: {}",
-                    addon
-                );
-            }
+            log::error!(
+                "Addon not found in repository or Arma 3 directory: {}",
+                addon
+            );
         }
     }
 
@@ -980,8 +992,7 @@ fn resolve_external_launch_addon_path(addon: &str, path: &str) -> Option<std::pa
     }
 
     let base_path = std::path::Path::new(trimmed_path);
-    let nested_path = base_path.join(addon.trim());
-    if nested_path.is_dir() {
+    if let Some(nested_path) = resolve_child_dir_case_insensitive(base_path, addon) {
         return Some(nested_path);
     }
 

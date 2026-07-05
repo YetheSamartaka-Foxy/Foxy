@@ -15,6 +15,7 @@ Keep this file as the compact root router. Put detailed conventions in `conventi
 - Do not reformat unrelated code, rename unrelated items, or change dependencies unless the task requires it.
 - Do not log secrets, tokens, or user file paths.
 - Never use em dashes (—) or en dashes (–) in any text (code, comments, docs, UI strings, commit messages, changelog). Use a plain hyphen `-` instead.
+- Default to writing no comment. Add one only to explain a non-obvious *why* (a safety invariant, an ordering constraint, a subtle edge case) that the code cannot state itself, and keep it to one or two lines. Never add narrative bug-history, dated regression stories, benchmark anecdotes, decorative separators, restated-code, or "what this obvious line does" comments; put operational context in logs, tests, commit messages, or conventions docs instead. When editing existing code, do not leave behind comments that narrate the change you just made.
 - Do not edit runtime `database.db`, logs, caches, backups, temp patch artifacts, or user config files unless explicitly requested.
 - Use `rg`/`rg --files` for discovery, inspect the nearest `mod.rs`, and confirm behavior in code before changing it.
 - Check for nested `AGENTS.md` files before editing a subtree; more-specific instructions apply to files under that directory.
@@ -61,7 +62,7 @@ Keep this file as the compact root router. Put detailed conventions in `conventi
 - Download execution is patch-first when a persisted patch plan exists, with automatic fallback to full-file download if patch validation or apply fails.
 - Schema changes edit the bootstrap `sql/turso_schema.sql` and, when an existing local DB cannot keep using it, bump `DB_SCHEMA_VERSION` (`src/core/tasks/db_schema_version.rs`) to trigger the startup wipe-and-rebuild prompt; config or manifest schema changes require updated examples in the same change.
 - App update metadata can come from repository-space or repository manifests; empty settings may be auto-filled, but non-empty settings are treated as user override.
-- Arma 3, Steam Workshop, TeamSpeak 3, editor missions, repo-provided launch parameters, and DLC metadata are user-facing integration areas; inspect the relevant UI/core code before changing them.
+- Arma 3, Arma 3 profile management, Steam Workshop, TeamSpeak 3, editor missions, repo-provided launch parameters, and DLC metadata are user-facing integration areas; inspect the relevant UI/core code before changing them.
 - A repository *instance* is identified by `(remote_url, local_path)`, never by URL alone. The same URL installed to a different folder (a standalone install, or the same repo joined to a repository space) is an independent instance with its own addons/files/pending-update state. URL is only a within-folder tiebreaker (repos in one space share `space.shared_path` as their folder, so URL distinguishes distinct repos there). DB key is the composite UNIQUE on `repositories (remote_url, local_path)` in `sql/turso_schema.sql`. Any code that purges, wipes, dedups, or keys repo status by URL alone is a bug - scope it by `(url, local_path)`. See `conventions/CORE_CONVENTIONS.md` (core/DB) and `conventions/UI_CONVENTIONS.md` (status maps).
 - Windows builds use `build.rs` plus `windres` icon resources, and `src/main.rs` handles console attachment for CLI/debug output. The embedded resource object `app_icon.o` is committed to git; `build.rs` only re-runs `windres` when `BUILD_ICON=1` but always links `app_icon.o`. CI does not set `BUILD_ICON`, so editing `app_icon.rc` alone has no effect on release builds - regenerate and commit `app_icon.o`, or prefer the Inno Setup installer (`installer/windows/foxy-setup.iss`) for things like elevation/AppCompat flags.
 - Dev rebuild time is dominated by rustc re-processing the single ~103k-LOC monolithic binary crate, not codegen or linking. `[profile.dev] debug = "line-tables-only"` is the adopted mitigation; `rust-lld` and `sccache` were measured to give no net benefit as defaults. The real future lever is splitting the binary into library crates - do not re-litigate toolchain/linker tweaks.
@@ -79,10 +80,12 @@ Keep this file as the compact root router. Put detailed conventions in `conventi
 ---
 
 ## Communication
+- Answer in the fewest words that fully address the request. Lead with the answer; skip preamble, restating the question, and closing summaries.
+- Default to a few sentences or a short bullet list. Reserve headings and multi-section write-ups for genuinely large or multi-part tasks the user asked to see laid out.
 - Keep progress updates sparse and high-signal. Prefer one short sentence only when starting a new phase, making edits, waiting on long commands, or hitting a blocker.
 - Avoid verbose running summaries, repeated status prints, and blow-by-blow narration of routine discovery or validation.
 - Do not paste large command outputs unless the user asks. Summarize only the result and any actionable failures.
-- Keep final handoffs compact by default: changed files, validation, and notable caveats only.
+- Keep final handoffs compact by default: changed files, validation, and notable caveats only. Do not re-explain code you just wrote unless asked.
 
 ---
 

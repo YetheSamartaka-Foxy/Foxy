@@ -56,6 +56,13 @@ use crate::core::utils::format::sanitize_log_path;
 /// dropped index does not linger.
 pub const DB_SCHEMA_VERSION: u32 = 24;
 
+/// Content-hash format generation understood by this binary.
+pub const CONTENT_HASH_FORMAT: u32 = 2;
+
+fn legacy_content_hash_format() -> u32 {
+    1
+}
+
 /// Persisted database metadata sidecar (`db_meta.json`).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DbMeta {
@@ -66,6 +73,9 @@ pub struct DbMeta {
     /// launch - but a *further* schema bump will prompt again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dismissed_for_version: Option<u32>,
+    /// Content-hash format generation the stored baselines were built with.
+    #[serde(default = "legacy_content_hash_format")]
+    pub content_hash_format: u32,
 }
 
 /// Information handed to the UI so it can render the wipe prompt.
@@ -189,6 +199,7 @@ pub fn evaluate_and_bootstrap() -> Option<DbSchemaWipePrompt> {
             write_meta(&DbMeta {
                 schema_version: version,
                 dismissed_for_version: None,
+                content_hash_format: CONTENT_HASH_FORMAT,
             });
             None
         }
@@ -243,7 +254,31 @@ pub fn mark_wiped() {
     write_meta(&DbMeta {
         schema_version: DB_SCHEMA_VERSION,
         dismissed_for_version: None,
+        content_hash_format: CONTENT_HASH_FORMAT,
     });
+}
+
+/// Whether stored content-hash baselines must be blanked and lazily rebuilt.
+pub(crate) fn content_hash_baselines_need_retire() -> bool {
+    read_meta().is_some_and(|meta| meta.content_hash_format < CONTENT_HASH_FORMAT)
+}
+
+/// Record that stored baselines are now on the current content-hash format.
+pub(crate) fn mark_content_hash_format_current() {
+    let Some(mut meta) = read_meta() else {
+        return;
+    };
+    log::info!(
+        "Recording content-hash format {} after baseline retire",
+        CONTENT_HASH_FORMAT
+    );
+    meta.content_hash_format = CONTENT_HASH_FORMAT;
+    write_meta(&meta);
+}
+
+/// Whether the persisted schema metadata is already current for this binary.
+pub fn is_current() -> bool {
+    read_meta().is_some_and(|meta| meta.schema_version >= DB_SCHEMA_VERSION)
 }
 
 /// Record that the user dismissed the wipe prompt for `target` and chose to keep
@@ -258,6 +293,9 @@ pub fn mark_dismissed(stored: u32, target: u32) {
     write_meta(&DbMeta {
         schema_version: stored,
         dismissed_for_version: Some(target),
+        content_hash_format: read_meta()
+            .map(|meta| meta.content_hash_format)
+            .unwrap_or_else(legacy_content_hash_format),
     });
 }
 
@@ -289,6 +327,7 @@ mod tests {
         let meta = DbMeta {
             schema_version: 21,
             dismissed_for_version: None,
+            ..Default::default()
         };
         assert_eq!(decide(Some(&meta), true, 21), SchemaDecision::UpToDate);
     }
@@ -299,6 +338,7 @@ mod tests {
         let meta = DbMeta {
             schema_version: 30,
             dismissed_for_version: None,
+            ..Default::default()
         };
         assert_eq!(decide(Some(&meta), true, 21), SchemaDecision::UpToDate);
     }
@@ -308,6 +348,7 @@ mod tests {
         let meta = DbMeta {
             schema_version: 21,
             dismissed_for_version: None,
+            ..Default::default()
         };
         assert_eq!(
             decide(Some(&meta), true, 22),
@@ -323,6 +364,7 @@ mod tests {
         let meta = DbMeta {
             schema_version: 21,
             dismissed_for_version: Some(22),
+            ..Default::default()
         };
         assert_eq!(decide(Some(&meta), true, 22), SchemaDecision::Dismissed);
     }
@@ -335,6 +377,7 @@ mod tests {
         let meta = DbMeta {
             schema_version: 0,
             dismissed_for_version: Some(24),
+            ..Default::default()
         };
         assert_eq!(decide(Some(&meta), true, 24), SchemaDecision::Dismissed);
         assert_eq!(
@@ -352,6 +395,7 @@ mod tests {
         let meta = DbMeta {
             schema_version: 21,
             dismissed_for_version: Some(22),
+            ..Default::default()
         };
         assert_eq!(
             decide(Some(&meta), true, 23),
@@ -367,6 +411,7 @@ mod tests {
         let meta = DbMeta {
             schema_version: 21,
             dismissed_for_version: Some(22),
+            ..Default::default()
         };
         let json = serde_json::to_string(&meta).unwrap();
         let parsed: DbMeta = serde_json::from_str(&json).unwrap();
@@ -378,5 +423,25 @@ mod tests {
         let parsed: DbMeta = serde_json::from_str(r#"{"schema_version": 21}"#).unwrap();
         assert_eq!(parsed.schema_version, 21);
         assert_eq!(parsed.dismissed_for_version, None);
+    }
+
+    #[test]
+    fn meta_without_content_hash_format_is_legacy_format_one() {
+        let parsed: DbMeta = serde_json::from_str(r#"{"schema_version": 24}"#).unwrap();
+        assert_eq!(parsed.content_hash_format, 1);
+        assert!(parsed.content_hash_format < CONTENT_HASH_FORMAT);
+    }
+
+    #[test]
+    fn meta_content_hash_format_roundtrips() {
+        let meta = DbMeta {
+            schema_version: 24,
+            dismissed_for_version: None,
+            content_hash_format: CONTENT_HASH_FORMAT,
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        let parsed: DbMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.content_hash_format, CONTENT_HASH_FORMAT);
+        assert_eq!(meta, parsed);
     }
 }

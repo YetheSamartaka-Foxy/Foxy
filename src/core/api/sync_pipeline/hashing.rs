@@ -6,8 +6,8 @@ use crate::core::tasks::calculate_hashes::{
     calculate_hashes_for_files_with_profile_and_sticky_auto,
 };
 use crate::core::tasks::init_database::{
-    SQLITE_MAX_VARIABLES, SqliteWriteMetricSnapshot, log_sqlite_write_metrics_since,
-    sqlite_perf_snapshot, sqlite_write_metrics_snapshot,
+    SqliteWriteMetricSnapshot, log_sqlite_write_metrics_since, sqlite_perf_snapshot,
+    sqlite_write_metrics_snapshot,
 };
 use crate::core::utils::format::sanitize_log_url;
 use crate::ui::types::HashIoProfilePreference;
@@ -18,7 +18,7 @@ async fn collect_already_verified_file_ids(
     file_ids: &HashSet<u64>,
 ) -> HashSet<u64> {
     let db = context.db();
-    let chunk_size = SQLITE_MAX_VARIABLES.saturating_sub(10).max(1);
+    let chunk_size = read_chunk_ids();
     let mut verified = HashSet::new();
     let mut ids: Vec<i64> = file_ids.iter().map(|id| *id as i64).collect();
     ids.sort_unstable();

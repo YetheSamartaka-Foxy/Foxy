@@ -226,22 +226,26 @@ impl Foxy {
                                         self.show_wipe_db_confirmation = false;
                                         log::warn!("Database wipe confirmed");
                                         // Run the database wipe on a background thread
-                                        // to avoid blocking the UI draw loop.
-                                        std::thread::spawn(|| {
-                                            match tokio::runtime::Runtime::new() {
+                                        let database_wipe_tx = self.database_wipe_tx.clone();
+                                        std::thread::spawn(move || {
+                                            let result = match tokio::runtime::Runtime::new() {
                                                 Ok(rt) => {
                                                     if let Err(e) = rt.block_on(
                                                         crate::core::tasks::init_database::wipe_database_live(),
                                                     ) {
                                                         log::error!("Failed to wipe database: {}", e);
+                                                        Err(e)
                                                     } else {
                                                         info!("Database wipe completed");
+                                                        Ok(())
                                                     }
                                                 }
                                                 Err(e) => {
                                                     log::error!("Failed to create runtime for database wipe: {}", e);
+                                                    Err(e.to_string())
                                                 }
-                                            }
+                                            };
+                                            let _ = database_wipe_tx.send(result);
                                         });
                                         // Clear in-memory state
                                         self.clear_mod_diff_cache();

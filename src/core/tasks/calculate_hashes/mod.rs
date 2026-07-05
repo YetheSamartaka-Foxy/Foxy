@@ -8,8 +8,8 @@ use crate::core::models::modification_file_part::{FoxyModFilePart, part_display_
 use crate::core::models::repository::FoxyRepository;
 use crate::core::models::trait_has_local_checksum::HasLocalChecksum;
 use crate::core::tasks::init_database::{
-    DB_WRITE_SEMAPHORE, SQLITE_MAX_VARIABLES, sqlite_is_locked_error, sqlite_labeled_write_scope,
-    sqlite_perf_snapshot, sqlite_sleep_for_lock_retry,
+    DB_WRITE_SEMAPHORE, sqlite_is_locked_error, sqlite_labeled_write_scope, sqlite_perf_snapshot,
+    sqlite_sleep_for_lock_retry,
 };
 use crate::core::utils::content_hash::FlexHasher;
 use futures::stream::{self, StreamExt};
@@ -65,4 +65,4 @@ pub(crate) use propagation::{
     finalize_repository_hashes_from_tree, pre_propagate_sibling_checksums,
     propagate_checksums_to_siblings,
 };
-pub(crate) use scheduling::AddonHashMetrics;
+pub(crate) use scheduling::{AddonHashMetrics, HashStorageClass, detect_storage_class_for_path};

@@ -45,9 +45,9 @@ impl Foxy {
             .iter()
             .enumerate()
             .filter_map(|(row_idx, row)| match row {
-                RepositoryListRow::SpaceHeader(_) | RepositoryListRow::Repository(_) => {
-                    Some(row_idx)
-                }
+                RepositoryListRow::SpaceHeader(_)
+                | RepositoryListRow::FolderHeader(_)
+                | RepositoryListRow::Repository { .. } => Some(row_idx),
                 RepositoryListRow::SectionLabel(_) => None,
             })
             .collect()
@@ -59,9 +59,15 @@ impl Foxy {
             .iter()
             .enumerate()
             .find_map(|(row_idx, row)| match row {
-                RepositoryListRow::Repository(repo_idx) => {
+                RepositoryListRow::Repository { repo_idx, .. } => {
                     (self.repository_view_state.selected_repository == Some(*repo_idx))
                         .then_some(row_idx)
+                }
+                RepositoryListRow::FolderHeader(folder_idx) => {
+                    let folder = self.repository_visual_folders.get(*folder_idx)?;
+                    (self.selected_repository_visual_folder_id.as_deref()
+                        == Some(folder.id.as_str()))
+                    .then_some(row_idx)
                 }
                 RepositoryListRow::SpaceHeader(space_idx) => {
                     let space = self.repository_spaces.get(*space_idx)?;
@@ -78,7 +84,7 @@ impl Foxy {
         };
 
         match row {
-            RepositoryListRow::Repository(repo_idx) => {
+            RepositoryListRow::Repository { repo_idx, .. } => {
                 if self
                     .repository_view_state
                     .repositories
@@ -89,6 +95,7 @@ impl Foxy {
                 }
                 self.repository_view_state.selected_repository = Some(repo_idx);
                 self.selected_repository_space_id = None;
+                self.selected_repository_visual_folder_id = None;
                 self.clear_completed_repository_check_banner_for_repo_change(Some(repo_idx));
                 self.pending_mission_duplicate = None;
                 self.pending_mission_delete = None;
@@ -103,6 +110,24 @@ impl Foxy {
                     return false;
                 };
                 self.selected_repository_space_id = Some(space.id.clone());
+                self.selected_repository_visual_folder_id = None;
+                self.repository_view_state.selected_repository = None;
+                self.repository_selection = None;
+                self.clear_completed_repository_check_banner_for_repo_change(None);
+                self.pending_mission_duplicate = None;
+                self.pending_mission_delete = None;
+                self.pending_mission_remove_dependencies = None;
+                self.editor_mission_search.clear();
+                self.editor_mission_folder.clear();
+                self.editor_mission_terrain_filter.clear();
+                true
+            }
+            RepositoryListRow::FolderHeader(folder_idx) => {
+                let Some(folder) = self.repository_visual_folders.get(folder_idx) else {
+                    return false;
+                };
+                self.selected_repository_visual_folder_id = Some(folder.id.clone());
+                self.selected_repository_space_id = None;
                 self.repository_view_state.selected_repository = None;
                 self.repository_selection = None;
                 self.clear_completed_repository_check_banner_for_repo_change(None);
@@ -184,6 +209,8 @@ impl Foxy {
         if self.show_add_repository_modal
             || self.pending_repository_context_confirmation.is_some()
             || self.pending_repository_space_delete_id.is_some()
+            || self.pending_repository_visual_folder_edit.is_some()
+            || self.pending_repository_visual_folder_delete.is_some()
             || self.pending_repository_space_bulk_action.is_some()
             || self.pending_repository_duplicate_add.is_some()
             || self.pending_mission_duplicate.is_some()

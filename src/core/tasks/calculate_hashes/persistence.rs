@@ -1,5 +1,6 @@
 use super::*;
 use crate::core::db::{DbErr, DbValue, FoxyDb, params};
+use crate::core::tasks::init_database::bulk_write_rows_for;
 
 pub fn calculate_hash_from_items<T: HasLocalChecksum>(items: &mut [T]) -> String {
     items.sort_by_key(|item| item.order());
@@ -25,28 +26,6 @@ pub fn calculate_hash_from_items<T: HasLocalChecksum>(items: &mut [T]) -> String
         hasher.update(item.local_checksum().as_bytes());
     }
     hasher.finalize_hex()
-}
-
-fn sqlite_upsert_batch_size(columns_per_row: usize) -> usize {
-    (SQLITE_MAX_VARIABLES / columns_per_row)
-        .saturating_sub(1)
-        .max(1)
-}
-
-/// Rows per statement for the bulk part-hash persist `UPDATE … FROM (VALUES …)`.
-/// Turso's per-statement cost is superlinear in row count, so a small tuned chunk
-/// (~256 rows) is ~3–4× faster than packing thousands of rows per statement
-/// (`bench_bulk_update_chunk`: 256 rows ≈ 12 µs/row vs 8 190 rows ≈ 45 µs/row).
-/// See [`bulk_write_chunk_rows`]. Capped by the bind-variable ceiling for safety.
-fn bulk_persist_update_batch_size(params_per_row: usize) -> usize {
-    use crate::core::tasks::init_database::{bulk_write_chunk_rows, sqlite_variable_limit};
-    bulk_write_chunk_rows()
-        .min(
-            (sqlite_variable_limit() / params_per_row)
-                .saturating_sub(1)
-                .max(1),
-        )
-        .max(1)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,26 +66,9 @@ pub(super) async fn persist_part_checksums<F>(
         return;
     }
 
-    // Every non-empty batch uses the set-based `UPDATE … FROM (VALUES …)` path.
-    // The earlier per-row `UPDATE … WHERE id = ?` fast path (used for batches up to
-    // 512 rows) issued one statement per row: acceptable under bundled SQLite, but
-    // ~7x slower per row under Turso (after_turso_regression_analysis.md §"Hash
-    // Persistence Details" / Likely Cause #4 - 106 calls, 20.8k rows, 10.6s). The
-    // single chunked CTE statement below is strictly fewer round-trips for the same
-    // rows, so it now serves small batches too.
-    //
-    // Bulk path: one transaction, chunked `UPDATE … FROM (VALUES …)`. Each part
-    // row is written exactly once. The previous temp-table strategy wrote every
-    // row twice - once into a `_part_hash_batch` temp B-tree, then again into
-    // `subfiles` via the join - which roughly doubled the write volume and, under
-    // Turso's MVCC commit, dominated the persist cost (measured ~12x slower than
-    // the SQLite baseline). A CTE of bound VALUES feeds the same set-based UPDATE
-    // without materializing a temp table: no DDL, no second write, no teardown.
-    // Turso manages its own WAL, so the old `wal_autocheckpoint`/`wal_checkpoint`
-    // PRAGMAs (no-ops on this engine) are gone as well. Callers pre-sort by PK so
-    // each batch walks the `subfiles` B-tree roughly sequentially.
+    // Use one chunked set-based update; callers pre-sort by PK for sequential B-tree walks.
     let params_per_row = 4usize;
-    let update_batch_size = bulk_persist_update_batch_size(params_per_row);
+    let update_batch_size = bulk_write_rows_for(params_per_row);
 
     let persist_started = Instant::now();
     let sqlite_baseline = sqlite_perf_snapshot();
@@ -416,7 +378,7 @@ pub(super) async fn persist_file_checksums<F>(
     let started = Instant::now();
     let sqlite_baseline = sqlite_perf_snapshot();
     let mut chunks = 0usize;
-    let batch_size = sqlite_upsert_batch_size(9);
+    let batch_size = bulk_write_rows_for(9);
     let suppressed = suppress_wal_autocheckpoint(db).await;
     for chunk in file_updates.chunks(PERSIST_LOG_INTERVAL) {
         chunks += 1;
@@ -429,7 +391,7 @@ pub(super) async fn persist_file_checksums<F>(
                         let placeholders =
                             vec!["(?, ?, ?, ?, ?, ?, ?, ?, ?)"; batch.len()].join(", ");
                         let sql = format!(
-                            "INSERT INTO files (id, name, remote_path, local_path, local_checksum, remote_checksum, local_content_hash, length, data_order) VALUES {placeholders} ON CONFLICT(id) DO UPDATE SET local_checksum = excluded.local_checksum"
+                            "INSERT INTO files (id, name, remote_path, local_path, local_checksum, remote_checksum, local_content_hash, length, data_order) VALUES {placeholders} ON CONFLICT(id) DO UPDATE SET local_checksum = excluded.local_checksum WHERE files.local_checksum IS NOT excluded.local_checksum"
                         );
                         let mut values: Vec<DbValue> = Vec::with_capacity(batch.len() * 9);
                         for f in batch {
@@ -479,7 +441,7 @@ pub(super) async fn persist_mod_checksums<F>(
     let started = Instant::now();
     let sqlite_baseline = sqlite_perf_snapshot();
     let mut chunks = 0usize;
-    let batch_size = sqlite_upsert_batch_size(10);
+    let batch_size = bulk_write_rows_for(12);
     let suppressed = suppress_wal_autocheckpoint(db).await;
     for chunk in mod_updates.chunks(PERSIST_LOG_INTERVAL) {
         chunks += 1;
@@ -492,7 +454,7 @@ pub(super) async fn persist_mod_checksums<F>(
                         let placeholders =
                             vec!["(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"; batch.len()].join(", ");
                         let sql = format!(
-                            "INSERT INTO addons (id, name, display_name, remote_path, local_path, client_side, enabled, local_checksum, remote_checksum, local_content_hash, required, data_order) VALUES {placeholders} ON CONFLICT(id) DO UPDATE SET local_checksum = excluded.local_checksum"
+                            "INSERT INTO addons (id, name, display_name, remote_path, local_path, client_side, enabled, local_checksum, remote_checksum, local_content_hash, required, data_order) VALUES {placeholders} ON CONFLICT(id) DO UPDATE SET local_checksum = excluded.local_checksum WHERE addons.local_checksum IS NOT excluded.local_checksum"
                         );
                         let mut values: Vec<DbValue> = Vec::with_capacity(batch.len() * 12);
                         for m in batch {
@@ -545,7 +507,7 @@ pub(super) async fn persist_repository_checksums<F>(
     let started = Instant::now();
     let sqlite_baseline = sqlite_perf_snapshot();
     let mut chunks = 0usize;
-    let batch_size = sqlite_upsert_batch_size(8);
+    let batch_size = bulk_write_rows_for(9);
     for chunk in repo_updates.chunks(PERSIST_LOG_INTERVAL) {
         chunks += 1;
         let chunk_rows = Arc::new(chunk.to_vec());
@@ -557,7 +519,7 @@ pub(super) async fn persist_repository_checksums<F>(
                         let placeholders =
                             vec!["(?, ?, ?, ?, ?, ?, ?, ?, ?)"; batch.len()].join(", ");
                         let sql = format!(
-                            "INSERT INTO repositories (id, name, remote_url, local_path, image, local_checksum, remote_checksum, local_content_hash, foxy_mode) VALUES {placeholders} ON CONFLICT(id) DO UPDATE SET local_checksum = excluded.local_checksum"
+                            "INSERT INTO repositories (id, name, remote_url, local_path, image, local_checksum, remote_checksum, local_content_hash, foxy_mode) VALUES {placeholders} ON CONFLICT(id) DO UPDATE SET local_checksum = excluded.local_checksum WHERE repositories.local_checksum IS NOT excluded.local_checksum"
                         );
                         let mut values: Vec<DbValue> = Vec::with_capacity(batch.len() * 9);
                         for r in batch {
@@ -627,52 +589,16 @@ pub(super) fn calculate_compound_content_hash(ordered_hashes: &[(i64, String)]) 
 mod tests {
     use super::*;
 
-    // ── sqlite_upsert_batch_size ──────────────────────────────────────
-
     #[test]
-    fn upsert_batch_size_10_columns() {
-        // 999 / 10 - 1 = 98
-        assert_eq!(sqlite_upsert_batch_size(10), 98);
-    }
-
-    #[test]
-    fn upsert_batch_size_9_columns() {
-        // 999 / 9 - 1 = 110
-        assert_eq!(sqlite_upsert_batch_size(9), 110);
-    }
-
-    #[test]
-    fn upsert_batch_size_4_columns() {
-        // 999 / 4 - 1 = 248
-        assert_eq!(sqlite_upsert_batch_size(4), 248);
-    }
-
-    #[test]
-    fn upsert_batch_size_2_columns() {
-        // 999 / 2 - 1 = 498
-        assert_eq!(sqlite_upsert_batch_size(2), 498);
-    }
-
-    #[test]
-    fn upsert_batch_size_large_column_count_floors_to_one() {
-        // 999 / 1000 = 0, saturating_sub(1) = 0, max(1) = 1
-        assert_eq!(sqlite_upsert_batch_size(1000), 1);
-    }
-
-    // ── persist_part_checksums SQL generation ──────────────────────────
-
-    #[test]
-    fn part_persist_update_batch_size_uses_bulk_limit() {
-        // The bulk UPDATE … FROM (VALUES …) uses 4 params per row. With Turso's
-        // high variable limit this packs thousands of rows per statement, well
-        // above the 248-row batches the 999-variable limit would force.
-        let params_per_row = 4usize;
-        let batch_size = bulk_persist_update_batch_size(params_per_row);
-        assert!(
-            batch_size >= 248,
-            "bulk batch size should be >= 248, got {}",
-            batch_size
-        );
+    fn rollup_persists_use_tuned_write_knee() {
+        for params_per_row in [4usize, 9, 12] {
+            let batch_size = bulk_write_rows_for(params_per_row);
+            assert_eq!(
+                batch_size,
+                crate::core::tasks::init_database::bulk_write_chunk_rows()
+            );
+            assert_eq!(batch_size, 256);
+        }
     }
 
     #[test]
@@ -700,8 +626,6 @@ mod tests {
         assert_eq!(sql.matches('?').count(), 4);
     }
 
-    // ── calculate_compound_content_hash ────────────────────────────────
-
     #[test]
     fn compound_content_hash_empty_returns_empty() {
         assert_eq!(calculate_compound_content_hash(&[]), String::new());
@@ -721,9 +645,7 @@ mod tests {
         assert_ne!(a, b);
     }
 
-    // ── bulk part-hash persist against a real Turso engine ─────────────
-
-    /// Seeds enough subfiles to span several chunked `UPDATE … FROM (VALUES …)`
+    /// Seeds enough subfiles to span several chunked `UPDATE FROM VALUES`
     /// statements, then verifies every part's local columns are written and the
     /// progress callback reports the full count.
     #[tokio::test]
@@ -789,6 +711,58 @@ mod tests {
             .get_i64("c")
             .unwrap();
         assert_eq!(updated, n as i64, "every seeded part must be updated");
+    }
+
+    #[tokio::test]
+    async fn file_checksum_persist_skips_unchanged_rows_and_applies_changes() {
+        use crate::core::tasks::db_turso::build_test_database;
+
+        let db = FoxyDb::from_handle(build_test_database().await);
+        db.execute(
+            "INSERT INTO files (id, name, remote_path, local_path, local_checksum, local_content_hash) \
+             VALUES (1, 'f1', 'rp1', 'lp1', 'SAME', 'CONTENT1'), (2, 'f2', 'rp2', 'lp2', 'OLD', 'CONTENT2')",
+            params![],
+        )
+        .await
+        .expect("seed files");
+
+        let updates = vec![
+            FoxyModFile {
+                id: 1,
+                name: "f1".to_string(),
+                remote_path: "rp1".to_string(),
+                local_path: "lp1".to_string(),
+                local_checksum: "SAME".to_string(),
+                ..Default::default()
+            },
+            FoxyModFile {
+                id: 2,
+                name: "f2".to_string(),
+                remote_path: "rp2".to_string(),
+                local_path: "lp2".to_string(),
+                local_checksum: "NEW".to_string(),
+                ..Default::default()
+            },
+        ];
+        persist_file_checksums(&db, &updates, |_| {}).await;
+
+        let rows = db
+            .query_all(
+                "SELECT id, local_checksum, local_content_hash FROM files ORDER BY id",
+                params![],
+            )
+            .await
+            .expect("query files");
+        assert_eq!(rows[0].get_string("local_checksum").unwrap(), "SAME");
+        assert_eq!(
+            rows[0].get_string("local_content_hash").unwrap(),
+            "CONTENT1"
+        );
+        assert_eq!(rows[1].get_string("local_checksum").unwrap(), "NEW");
+        assert_eq!(
+            rows[1].get_string("local_content_hash").unwrap(),
+            "CONTENT2"
+        );
     }
 
     #[tokio::test]

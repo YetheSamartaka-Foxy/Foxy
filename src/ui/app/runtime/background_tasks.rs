@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use log::{debug, info, warn};
 
 use crate::core::api::{self, SyncMode};
-use crate::ui::app::{Foxy, StartupQuickScanFilterResult};
+use crate::ui::app::{Foxy, QuickScanProgressState, StartupQuickScanFilterResult};
 use crate::ui::types::{RepoState, sanitize_user_path};
 
 const FS_WATCH_DOWNLOAD_GRACE_MS: u64 = 3_000;
@@ -19,6 +19,66 @@ fn unix_time_millis() -> u64 {
 }
 
 impl Foxy {
+    fn mark_quick_scan_instances_active(
+        &mut self,
+        repositories: impl IntoIterator<Item = api::StartupRepositoryInstance>,
+    ) {
+        let mut changed = false;
+        let now = std::time::Instant::now();
+        for repository in repositories {
+            let key = Self::repo_instance_key(&repository.repo_url, &repository.local_path);
+            changed |= self.active_quick_scan_instance_keys.insert(key);
+            self.quick_scan_progress_by_instance
+                .entry(Self::repo_instance_key(
+                    &repository.repo_url,
+                    &repository.local_path,
+                ))
+                .or_insert_with(|| QuickScanProgressState::new(now));
+        }
+        if changed {
+            self.needs_repaint = true;
+        }
+    }
+
+    fn mark_quick_scan_urls_active(&mut self, repo_urls: &[String]) {
+        let normalized_urls: HashSet<String> = repo_urls
+            .iter()
+            .map(|url| Self::normalize_repo_url(url))
+            .collect();
+        let repositories = self
+            .repository_view_state
+            .repositories
+            .iter()
+            .filter(|repo| normalized_urls.contains(&Self::normalize_repo_url(&repo.address)))
+            .map(|repo| api::StartupRepositoryInstance {
+                repo_url: repo.address.clone(),
+                local_path: repo.path.clone(),
+            })
+            .collect::<Vec<_>>();
+        self.mark_quick_scan_instances_active(repositories);
+    }
+
+    pub(in crate::ui::app) fn clear_quick_scan_instance_active(
+        &mut self,
+        repo_url: &str,
+        local_path: &str,
+    ) {
+        let key = Self::repo_instance_key(repo_url, local_path);
+        self.quick_scan_progress_by_instance.remove(&key);
+        if self.active_quick_scan_instance_keys.remove(&key) {
+            self.needs_repaint = true;
+        }
+    }
+
+    pub(in crate::ui::app) fn clear_queued_quick_scan_for_url(&mut self, repo_url: &str) {
+        let normalized = Self::normalize_repo_url(repo_url);
+        self.pending_quick_scan_urls.remove(&normalized);
+        self.pending_quick_scan_prevalidated_urls
+            .remove(&normalized);
+        self.pending_quick_scan_force_fresh_addon_hash_urls
+            .remove(&normalized);
+    }
+
     pub(in crate::ui::app) fn suppress_fs_watch_for_active_download(&self) {
         self.fs_watch_suppressed_until_ms
             .store(u64::MAX, Ordering::Relaxed);
@@ -70,18 +130,25 @@ impl Foxy {
             return;
         }
 
-        let candidate_urls: Vec<String> = candidates
+        let candidate_instances: Vec<api::StartupRepositoryInstance> = candidates
             .iter()
-            .map(|(_, normalized, _)| normalized.clone())
+            .map(|(_, normalized_url, path)| api::StartupRepositoryInstance {
+                repo_url: normalized_url.clone(),
+                local_path: path.clone(),
+            })
             .collect();
-        let existing_urls = api::filter_repo_urls_with_db_entry(candidate_urls);
+        let existing_instances = api::filter_repo_instances_with_db_entry(candidate_instances);
 
         let mut queued = 0usize;
         let mut skipped_no_db = 0usize;
         for (address, normalized_url, path) in candidates {
-            if !existing_urls.contains(&normalized_url) {
+            let instance = api::StartupRepositoryInstance {
+                repo_url: normalized_url,
+                local_path: path.clone(),
+            };
+            if !existing_instances.contains(&instance) {
                 debug!(
-                    "Skipping startup recheck for {}: no prior database entry",
+                    "Skipping startup recheck for {}: no prior database entry for this folder",
                     address
                 );
                 skipped_no_db += 1;
@@ -210,15 +277,25 @@ impl Foxy {
         self.startup_quick_scan_filter_worker = Some(std::thread::spawn(move || {
             let requested_repositories = normalized_requested_repositories;
             let mut plan = api::plan_startup_quick_scan_repos(requested_repositories.clone());
+            // Fall back only when eligibility planning did not run.
             if requested > 0
+                && !plan.completed
                 && plan.eligible_repositories.is_empty()
                 && plan.remote_changed_repositories.is_empty()
             {
                 info!(
-                    "Startup quick scan eligibility returned 0 of {} repositories; falling back to requested set",
+                    "Startup quick scan eligibility worker could not run for {} repositories; falling back to requested set",
                     requested
                 );
                 plan.eligible_repositories = requested_repositories;
+            } else if plan.completed
+                && plan.eligible_repositories.is_empty()
+                && plan.remote_changed_repositories.is_empty()
+            {
+                info!(
+                    "Startup quick scan eligibility found 0 of {} repositories ready; respecting the verdict",
+                    requested
+                );
             }
             if tx
                 .send(StartupQuickScanFilterResult {
@@ -262,11 +339,13 @@ impl Foxy {
                 payload.prevalidated_repositories.into_iter().collect();
             let eligible_repositories = payload.eligible_repositories;
             if self.syncing_repository.is_none() && self.quick_scan_worker.is_none() {
+                self.mark_quick_scan_instances_active(eligible_repositories.iter().cloned());
                 self.quick_scan_worker = Some(api::spawn_quick_local_scan_instances(
                     eligible_repositories,
                     prevalidated_repositories,
                     HashSet::new(),
                     self.quick_scan_tx.clone(),
+                    Some(self.quick_scan_progress_tx.clone()),
                     self.repaint_ctx.clone(),
                 ));
             } else {
@@ -374,17 +453,79 @@ impl Foxy {
             "Starting quick scan worker for {} repositories",
             repo_urls.len()
         );
+        self.mark_quick_scan_urls_active(&repo_urls);
         self.quick_scan_worker = Some(api::spawn_quick_local_scan(
             repo_urls,
             prevalidated_repo_urls,
             force_fresh_addon_hash_repo_urls,
             self.quick_scan_tx.clone(),
+            Some(self.quick_scan_progress_tx.clone()),
             self.repaint_ctx.clone(),
         ));
     }
 
+    pub fn poll_quick_scan_progress(&mut self) {
+        let mut processed = 0usize;
+        while let Ok(progress) = self.quick_scan_progress_rx.try_recv() {
+            processed += 1;
+            let key = Self::repo_instance_key(&progress.repo_url, &progress.local_path);
+            match progress.event {
+                api::ProgressEvent::Stage { label, percent } => {
+                    let uses_hash_counter = Self::stage_label_uses_hash_counter(&label);
+                    let state = self
+                        .quick_scan_progress_by_instance
+                        .entry(key)
+                        .or_insert_with(|| QuickScanProgressState::new(std::time::Instant::now()));
+                    state.stage_label = Some(label);
+                    state.stage_percent = Some(percent);
+                    if !uses_hash_counter {
+                        state.hash_counter = None;
+                        state.hash_part_counter = None;
+                    }
+                    self.needs_repaint = true;
+                }
+                api::ProgressEvent::RecheckHashProgress {
+                    checked_files,
+                    total_files,
+                    checked_parts,
+                    total_parts,
+                } => {
+                    let state = self
+                        .quick_scan_progress_by_instance
+                        .entry(key)
+                        .or_insert_with(|| QuickScanProgressState::new(std::time::Instant::now()));
+                    state.hash_counter = Some((checked_files, total_files));
+                    state.hash_part_counter = Some((checked_parts, total_parts));
+                    let now = std::time::Instant::now();
+                    let should_repaint = checked_files == total_files
+                        || checked_parts == total_parts
+                        || state
+                            .last_repaint
+                            .is_none_or(|last| now.duration_since(last).as_millis() >= 250);
+                    if should_repaint {
+                        state.last_repaint = Some(now);
+                        self.needs_repaint = true;
+                    }
+                }
+                api::ProgressEvent::Failed(_)
+                | api::ProgressEvent::Finished
+                | api::ProgressEvent::Cancelled => {
+                    self.quick_scan_progress_by_instance.remove(&key);
+                    self.needs_repaint = true;
+                }
+                _ => {}
+            }
+
+            if processed >= 512 {
+                self.needs_repaint = true;
+                break;
+            }
+        }
+    }
+
     pub fn poll_quick_scan_results(&mut self) {
         while let Ok(result) = self.quick_scan_rx.try_recv() {
+            self.clear_quick_scan_instance_active(&result.repo_url, &result.local_path);
             if self.syncing_repository.is_some() {
                 let deferred_repo_url = result.repo_url;
                 self.pending_quick_scan_urls
@@ -451,6 +592,7 @@ impl Foxy {
                 result.mods.iter().filter(|m| m.needs_update).count()
             );
             let repo_address = self.repository_view_state.repositories[idx].address.clone();
+            self.clear_queued_quick_scan_for_url(&repo_address);
             self.cache_pending_updates_for_url(&repo_address, &repo_path, result.mods.clone());
             self.set_repo_state_for_address(&repo_address, &repo_path, RepoState::PendingUpdate);
             self.quick_scan_pending.remove(&result.repo_url);
@@ -474,6 +616,11 @@ impl Foxy {
         if quick_scan_finished {
             info!("Quick scan worker finished");
             self.quick_scan_worker = None;
+            if !self.active_quick_scan_instance_keys.is_empty() {
+                self.active_quick_scan_instance_keys.clear();
+                self.quick_scan_progress_by_instance.clear();
+                self.needs_repaint = true;
+            }
             if self.syncing_repository.is_none() && !self.pending_quick_scan_urls.is_empty() {
                 let repo_urls: Vec<String> = self.pending_quick_scan_urls.drain().collect();
                 let prevalidated_repo_urls: HashSet<String> = repo_urls
@@ -493,11 +640,13 @@ impl Foxy {
                     "Restarting quick scan worker for {} queued repositories",
                     repo_urls.len()
                 );
+                self.mark_quick_scan_urls_active(&repo_urls);
                 self.quick_scan_worker = Some(api::spawn_quick_local_scan(
                     repo_urls,
                     prevalidated_repo_urls,
                     force_fresh_addon_hash_repo_urls,
                     self.quick_scan_tx.clone(),
+                    Some(self.quick_scan_progress_tx.clone()),
                     self.repaint_ctx.clone(),
                 ));
             }

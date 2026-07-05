@@ -14,6 +14,22 @@ pub struct Arma3Profile {
     pub is_default: bool,
 }
 
+/// Percent-encode a profile name into its on-disk folder name, mirroring
+/// [`percent_decode`]. Arma 3 keeps ASCII letters, digits, `-` and `_`
+/// literal and encodes everything else (e.g., "John Doe" -> "John%20Doe",
+/// "Player [TAG]" -> "Player%20%5BTAG%5D").
+pub fn percent_encode(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    for byte in input.bytes() {
+        if byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' {
+            result.push(byte as char);
+        } else {
+            result.push_str(&format!("%{:02X}", byte));
+        }
+    }
+    result
+}
+
 /// Percent-decode a folder name (e.g., "John%20Doe" -> "John Doe").
 fn percent_decode(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
@@ -395,6 +411,392 @@ fn fallback_default(known_profiles: &[Arma3Profile]) -> Option<String> {
         .map(|p| p.name.clone())
 }
 
+/// Why a proposed profile name was rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileNameError {
+    Empty,
+    TooLong,
+    UnsupportedCharacters,
+    Reserved,
+}
+
+/// Why a profile management operation (rename/clone/delete) failed.
+#[derive(Debug)]
+pub enum ProfileOpError {
+    InvalidName(ProfileNameError),
+    TargetAlreadyExists,
+    SourceMissing,
+    DefaultProfileProtected,
+    UnsafePath,
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for ProfileOpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidName(reason) => write!(f, "invalid profile name ({:?})", reason),
+            Self::TargetAlreadyExists => write!(f, "a profile with that name already exists"),
+            Self::SourceMissing => write!(f, "profile files were not found on disk"),
+            Self::DefaultProfileProtected => write!(f, "the default profile cannot be deleted"),
+            Self::UnsafePath => write!(f, "the profile path cannot be modified safely"),
+            Self::Io(err) => write!(f, "io error: {}", err),
+        }
+    }
+}
+
+/// Validate a proposed new profile name. The allowed character set is kept
+/// conservative on purpose: it only contains characters whose on-disk
+/// encoding by Arma 3 is known, so `-name=<name>` resolves to the folder
+/// Foxy creates instead of silently spawning a fresh empty profile.
+pub fn validate_new_profile_name(name: &str) -> Result<(), ProfileNameError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(ProfileNameError::Empty);
+    }
+    if name.chars().count() > 64 {
+        return Err(ProfileNameError::TooLong);
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_' | '[' | ']'))
+    {
+        return Err(ProfileNameError::UnsupportedCharacters);
+    }
+    let upper = name.to_ascii_uppercase();
+    let reserved = matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (upper.len() == 4
+            && (upper.starts_with("COM") || upper.starts_with("LPT"))
+            && upper.as_bytes()[3].is_ascii_digit());
+    if reserved {
+        return Err(ProfileNameError::Reserved);
+    }
+    Ok(())
+}
+
+/// Normalized comparison key for directory paths (separator- and, on
+/// Windows, case-insensitive).
+fn dir_key(path: &Path) -> String {
+    let mut key = path.to_string_lossy().replace('\\', "/");
+    while key.ends_with('/') {
+        key.pop();
+    }
+    if cfg!(windows) {
+        key.make_ascii_lowercase();
+    }
+    key
+}
+
+/// Whether two paths refer to the same directory after normalization.
+pub fn paths_refer_to_same_dir(a: &Path, b: &Path) -> bool {
+    dir_key(a) == dir_key(b)
+}
+
+/// Whether `child` is `root` or lives underneath it, using the same
+/// normalization as [`paths_refer_to_same_dir`].
+pub fn path_is_under(child: &Path, root: &Path) -> bool {
+    let child_key = dir_key(child);
+    let root_key = dir_key(root);
+    child_key == root_key || child_key.starts_with(&format!("{}/", root_key))
+}
+
+/// Whether `path` is one of the vanilla Arma 3 profile locations in
+/// Documents. Passing such a path as `-profiles` makes the game relocate
+/// player profiles into a `Users` subfolder and start with fresh settings
+/// and keybinds, so callers must never forward these as `-profiles`.
+pub fn is_vanilla_profiles_location(path: &Path) -> bool {
+    let Some(documents) = dirs::document_dir() else {
+        return false;
+    };
+    paths_refer_to_same_dir(path, &documents.join("Arma 3"))
+        || paths_refer_to_same_dir(path, &documents.join("Arma 3 - Other Profiles"))
+}
+
+/// The vanilla root for named ("Other") profiles, used as the clone target
+/// when the source is the default profile.
+pub fn other_profiles_root() -> Option<PathBuf> {
+    dirs::document_dir().map(|documents| documents.join("Arma 3 - Other Profiles"))
+}
+
+/// Collect the profile file renames/copies for a profile directory: every
+/// file named `<stem>.<...>Arma3Profile<...>` is mapped to the same name
+/// with `new_name` as the stem (covers `.Arma3Profile`,
+/// `.vars.Arma3Profile`, `.3den.Arma3Profile` and backup variants).
+fn profile_file_transfers(
+    dir: &Path,
+    source_stem: &str,
+    new_name: &str,
+) -> Result<Vec<(PathBuf, String)>, ProfileOpError> {
+    let prefix = format!("{}.", source_stem);
+    let mut transfers = Vec::new();
+    let entries = fs::read_dir(dir).map_err(ProfileOpError::Io)?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let file_name = entry.file_name().to_string_lossy().to_string();
+        if !file_name.starts_with(&prefix) {
+            continue;
+        }
+        let remainder = &file_name[source_stem.len()..];
+        if !remainder.to_ascii_lowercase().contains("arma3profile") {
+            continue;
+        }
+        transfers.push((path, format!("{}{}", new_name, remainder)));
+    }
+    Ok(transfers)
+}
+
+/// Rename an Arma 3 profile on disk: profile files get the new stem and,
+/// for profiles living in their own folder, the folder is renamed to the
+/// percent-encoded new name. Default-profile and profiles-root locations
+/// are renamed in place (files only). Returns the profile directory after
+/// the rename.
+pub fn rename_profile(
+    profile: &Arma3Profile,
+    new_name: &str,
+    protected_roots: &[PathBuf],
+) -> Result<PathBuf, ProfileOpError> {
+    let new_name = new_name.trim();
+    validate_new_profile_name(new_name).map_err(ProfileOpError::InvalidName)?;
+    if !profile.path.is_dir() {
+        return Err(ProfileOpError::SourceMissing);
+    }
+    let source_stem =
+        find_arma3_profile_file(&profile.path).ok_or(ProfileOpError::SourceMissing)?;
+    if new_name == source_stem {
+        return Err(ProfileOpError::TargetAlreadyExists);
+    }
+
+    let rename_in_place = profile.is_default
+        || protected_roots
+            .iter()
+            .any(|root| paths_refer_to_same_dir(root, &profile.path));
+
+    let transfers = profile_file_transfers(&profile.path, &source_stem, new_name)?;
+    if transfers.is_empty() {
+        return Err(ProfileOpError::SourceMissing);
+    }
+    for (_, target_name) in &transfers {
+        if profile.path.join(target_name).exists() {
+            return Err(ProfileOpError::TargetAlreadyExists);
+        }
+    }
+
+    let target_dir = if rename_in_place {
+        None
+    } else {
+        let parent = profile.path.parent().ok_or(ProfileOpError::UnsafePath)?;
+        let target_dir = parent.join(percent_encode(new_name));
+        if target_dir.exists() {
+            return Err(ProfileOpError::TargetAlreadyExists);
+        }
+        Some(target_dir)
+    };
+
+    let mut renamed: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for (source, target_name) in &transfers {
+        let target = profile.path.join(target_name);
+        if let Err(err) = fs::rename(source, &target) {
+            for (orig, moved) in renamed.iter().rev() {
+                let _ = fs::rename(moved, orig);
+            }
+            return Err(ProfileOpError::Io(err));
+        }
+        renamed.push((source.clone(), target));
+    }
+
+    let Some(target_dir) = target_dir else {
+        info!(
+            "Renamed Arma 3 profile files in place: {} -> {}",
+            source_stem, new_name
+        );
+        return Ok(profile.path.clone());
+    };
+    match fs::rename(&profile.path, &target_dir) {
+        Ok(()) => {
+            info!("Renamed Arma 3 profile: {} -> {}", source_stem, new_name);
+            Ok(target_dir)
+        }
+        Err(err) => {
+            for (orig, moved) in renamed.iter().rev() {
+                let _ = fs::rename(moved, orig);
+            }
+            Err(ProfileOpError::Io(err))
+        }
+    }
+}
+
+/// Clone an Arma 3 profile: copies only the profile files (settings,
+/// keybinds, editor preferences) into a new percent-encoded folder. The
+/// default profile is cloned into `fallback_named_root` (normally
+/// `Documents\Arma 3 - Other Profiles`); named profiles are cloned next to
+/// the source folder. Returns the new profile directory.
+pub fn clone_profile(
+    profile: &Arma3Profile,
+    new_name: &str,
+    fallback_named_root: &Path,
+    protected_roots: &[PathBuf],
+) -> Result<PathBuf, ProfileOpError> {
+    let new_name = new_name.trim();
+    validate_new_profile_name(new_name).map_err(ProfileOpError::InvalidName)?;
+    if !profile.path.is_dir() {
+        return Err(ProfileOpError::SourceMissing);
+    }
+    let source_stem =
+        find_arma3_profile_file(&profile.path).ok_or(ProfileOpError::SourceMissing)?;
+
+    let profile_is_root = protected_roots
+        .iter()
+        .any(|root| paths_refer_to_same_dir(root, &profile.path));
+    let dest_root = if profile.is_default {
+        fallback_named_root.to_path_buf()
+    } else if profile_is_root {
+        profile.path.join("Users")
+    } else {
+        profile
+            .path
+            .parent()
+            .ok_or(ProfileOpError::UnsafePath)?
+            .to_path_buf()
+    };
+    let dest_dir = dest_root.join(percent_encode(new_name));
+    if dest_dir.exists() {
+        return Err(ProfileOpError::TargetAlreadyExists);
+    }
+
+    let transfers = profile_file_transfers(&profile.path, &source_stem, new_name)?;
+    if transfers.is_empty() {
+        return Err(ProfileOpError::SourceMissing);
+    }
+
+    fs::create_dir_all(&dest_dir).map_err(ProfileOpError::Io)?;
+    for (source, target_name) in &transfers {
+        if let Err(err) = fs::copy(source, dest_dir.join(target_name)) {
+            let _ = fs::remove_dir_all(&dest_dir);
+            return Err(ProfileOpError::Io(err));
+        }
+    }
+    info!("Cloned Arma 3 profile: {} -> {}", source_stem, new_name);
+    Ok(dest_dir)
+}
+
+/// Delete an Arma 3 profile by moving its folder into `trash_root` instead
+/// of removing it outright, so an accidental delete stays recoverable. The
+/// default profile and profile-root directories are refused. Returns the
+/// path the profile folder was moved to.
+pub fn delete_profile(
+    profile: &Arma3Profile,
+    trash_root: &Path,
+    protected_roots: &[PathBuf],
+) -> Result<PathBuf, ProfileOpError> {
+    if profile.is_default {
+        return Err(ProfileOpError::DefaultProfileProtected);
+    }
+    if protected_roots
+        .iter()
+        .any(|root| paths_refer_to_same_dir(root, &profile.path))
+    {
+        return Err(ProfileOpError::UnsafePath);
+    }
+    if !profile.path.is_dir() {
+        return Err(ProfileOpError::SourceMissing);
+    }
+    if find_arma3_profile_file(&profile.path).is_none() {
+        return Err(ProfileOpError::UnsafePath);
+    }
+    // Require at least two ancestors so shallow paths like a drive root or
+    // a direct drive child can never be deleted through this code path.
+    if profile
+        .path
+        .parent()
+        .and_then(|parent| parent.parent())
+        .is_none()
+    {
+        return Err(ProfileOpError::UnsafePath);
+    }
+
+    fs::create_dir_all(trash_root).map_err(ProfileOpError::Io)?;
+    let folder_name = profile
+        .path
+        .file_name()
+        .ok_or(ProfileOpError::UnsafePath)?
+        .to_string_lossy()
+        .to_string();
+    let timestamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S");
+    let mut dest = trash_root.join(format!("{}_{}", timestamp, folder_name));
+    let mut counter = 1;
+    while dest.exists() {
+        dest = trash_root.join(format!("{}_{}_{}", timestamp, counter, folder_name));
+        counter += 1;
+    }
+
+    if fs::rename(&profile.path, &dest).is_err() {
+        // Cross-device move: fall back to copy + remove.
+        copy_dir_recursive(&profile.path, &dest).map_err(ProfileOpError::Io)?;
+        fs::remove_dir_all(&profile.path).map_err(ProfileOpError::Io)?;
+    }
+    info!(
+        "Deleted Arma 3 profile {} (moved to backup location)",
+        profile.name
+    );
+    Ok(dest)
+}
+
+fn copy_dir_recursive(source: &Path, dest: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dest)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let target = dest.join(entry.file_name());
+        if entry.path().is_dir() {
+            copy_dir_recursive(&entry.path(), &target)?;
+        } else {
+            fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether an Arma 3 game process is currently running. Profile files are
+/// held and rewritten by the game, so management operations are refused
+/// while it runs.
+pub fn is_arma3_running() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        for image in ["arma3_x64.exe", "arma3.exe"] {
+            let output = std::process::Command::new("tasklist")
+                .args([
+                    "/FI",
+                    &format!("IMAGENAME eq {}", image),
+                    "/FO",
+                    "CSV",
+                    "/NH",
+                ])
+                .output();
+            if let Ok(out) = output
+                && out.status.success()
+                && String::from_utf8_lossy(&out.stdout)
+                    .to_lowercase()
+                    .contains(image)
+            {
+                return true;
+            }
+        }
+        false
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let system = sysinfo::System::new_all();
+        system.processes().values().any(|process| {
+            process
+                .name()
+                .to_string_lossy()
+                .to_ascii_lowercase()
+                .starts_with("arma3")
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,5 +859,183 @@ mod tests {
     #[test]
     fn parse_name_from_params_missing() {
         assert_eq!(parse_name_from_params("-skipIntro -noSplash"), None);
+    }
+
+    #[test]
+    fn percent_encode_round_trips_supported_names() {
+        for name in ["SimpleName", "John Doe", "Player [TAG]", "a-b_c 1"] {
+            assert_eq!(percent_decode(&percent_encode(name)), name);
+        }
+        assert_eq!(percent_encode("John Doe"), "John%20Doe");
+        assert_eq!(percent_encode("Player [TAG]"), "Player%20%5BTAG%5D");
+    }
+
+    #[test]
+    fn validate_new_profile_name_rules() {
+        assert_eq!(validate_new_profile_name("CoreX"), Ok(()));
+        assert_eq!(validate_new_profile_name("John Doe [TAG]"), Ok(()));
+        assert_eq!(
+            validate_new_profile_name("   "),
+            Err(ProfileNameError::Empty)
+        );
+        assert_eq!(
+            validate_new_profile_name("a.b"),
+            Err(ProfileNameError::UnsupportedCharacters)
+        );
+        assert_eq!(
+            validate_new_profile_name("we/ird"),
+            Err(ProfileNameError::UnsupportedCharacters)
+        );
+        assert_eq!(
+            validate_new_profile_name("com1"),
+            Err(ProfileNameError::Reserved)
+        );
+        let long_name = "x".repeat(65);
+        assert_eq!(
+            validate_new_profile_name(&long_name),
+            Err(ProfileNameError::TooLong)
+        );
+    }
+
+    fn make_profile_dir(root: &Path, folder: &str, stem: &str) -> PathBuf {
+        let dir = root.join(folder);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(format!("{stem}.Arma3Profile")), "keybinds").unwrap();
+        fs::write(dir.join(format!("{stem}.vars.Arma3Profile")), "vars").unwrap();
+        fs::write(dir.join(format!("{stem}.3den.Arma3Profile")), "eden").unwrap();
+        fs::write(dir.join("unrelated.txt"), "keep").unwrap();
+        dir
+    }
+
+    #[test]
+    fn rename_profile_renames_files_and_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = make_profile_dir(root.path(), "Old%20Name", "Old Name");
+        let profile = Arma3Profile {
+            name: "Old Name".to_string(),
+            path: dir,
+            is_default: false,
+        };
+
+        let new_dir = rename_profile(&profile, "New Name", &[]).unwrap();
+
+        assert_eq!(new_dir, root.path().join("New%20Name"));
+        assert!(new_dir.join("New Name.Arma3Profile").is_file());
+        assert!(new_dir.join("New Name.vars.Arma3Profile").is_file());
+        assert!(new_dir.join("New Name.3den.Arma3Profile").is_file());
+        assert!(new_dir.join("unrelated.txt").is_file());
+        assert!(!root.path().join("Old%20Name").exists());
+    }
+
+    #[test]
+    fn rename_profile_default_renames_files_in_place() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = make_profile_dir(root.path(), "Arma 3", "CoreX");
+        let profile = Arma3Profile {
+            name: "CoreX".to_string(),
+            path: dir.clone(),
+            is_default: true,
+        };
+
+        let result_dir = rename_profile(&profile, "Renamed", &[]).unwrap();
+
+        assert_eq!(result_dir, dir);
+        assert!(dir.join("Renamed.Arma3Profile").is_file());
+        assert!(!dir.join("CoreX.Arma3Profile").exists());
+    }
+
+    #[test]
+    fn rename_profile_rejects_existing_target() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = make_profile_dir(root.path(), "One", "One");
+        make_profile_dir(root.path(), "Two", "Two");
+        let profile = Arma3Profile {
+            name: "One".to_string(),
+            path: dir,
+            is_default: false,
+        };
+
+        assert!(matches!(
+            rename_profile(&profile, "Two", &[]),
+            Err(ProfileOpError::TargetAlreadyExists)
+        ));
+    }
+
+    #[test]
+    fn clone_profile_copies_profile_files_only() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = make_profile_dir(root.path(), "Arma 3", "CoreX");
+        let other_root = root.path().join("Arma 3 - Other Profiles");
+        let profile = Arma3Profile {
+            name: "CoreX".to_string(),
+            path: dir,
+            is_default: true,
+        };
+
+        let dest = clone_profile(&profile, "CoreX Copy", &other_root, &[]).unwrap();
+
+        assert_eq!(dest, other_root.join("CoreX%20Copy"));
+        assert!(dest.join("CoreX Copy.Arma3Profile").is_file());
+        assert!(dest.join("CoreX Copy.vars.Arma3Profile").is_file());
+        assert!(!dest.join("unrelated.txt").exists());
+        assert_eq!(
+            fs::read_to_string(dest.join("CoreX Copy.Arma3Profile")).unwrap(),
+            "keybinds"
+        );
+    }
+
+    #[test]
+    fn delete_profile_moves_folder_to_trash_and_protects_default() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = make_profile_dir(root.path(), "nested/Clone", "Clone");
+        let trash = root.path().join("trash");
+        let profile = Arma3Profile {
+            name: "Clone".to_string(),
+            path: dir.clone(),
+            is_default: false,
+        };
+
+        let moved_to = delete_profile(&profile, &trash, &[]).unwrap();
+
+        assert!(!dir.exists());
+        assert!(moved_to.join("Clone.Arma3Profile").is_file());
+
+        let default_profile = Arma3Profile {
+            name: "Main".to_string(),
+            path: make_profile_dir(root.path(), "Arma 3", "Main"),
+            is_default: true,
+        };
+        assert!(matches!(
+            delete_profile(&default_profile, &trash, &[]),
+            Err(ProfileOpError::DefaultProfileProtected)
+        ));
+    }
+
+    #[test]
+    fn delete_profile_refuses_protected_roots() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = make_profile_dir(root.path(), "custom/root", "Server");
+        let profile = Arma3Profile {
+            name: "Server".to_string(),
+            path: dir.clone(),
+            is_default: false,
+        };
+
+        assert!(matches!(
+            delete_profile(&profile, &root.path().join("trash"), &[dir]),
+            Err(ProfileOpError::UnsafePath)
+        ));
+    }
+
+    #[test]
+    fn paths_refer_to_same_dir_normalizes_separators() {
+        assert!(paths_refer_to_same_dir(
+            Path::new("C:/Users/x/Documents/Arma 3/"),
+            Path::new("C:\\Users\\x\\Documents\\Arma 3")
+        ));
+        assert!(!paths_refer_to_same_dir(
+            Path::new("C:/Users/x/Documents/Arma 3"),
+            Path::new("C:/Users/x/Documents/Arma 3 - Other Profiles")
+        ));
     }
 }

@@ -8,6 +8,7 @@ use crate::cli::args::{
 };
 use crate::cli::exit_codes;
 use crate::core::api::{self, SyncMode};
+use crate::core::utils::fs_safety::resolve_child_dir_case_insensitive;
 use crate::ui::app::Foxy;
 use crate::ui::types::{Repository, RepositoryProfile};
 use serde_json::json;
@@ -204,7 +205,8 @@ fn cmd_addon_force_redownload(
         ));
     }
 
-    let target = Path::new(repo.path.trim()).join(addon_name);
+    let target = resolve_child_dir_case_insensitive(Path::new(repo.path.trim()), addon_name)
+        .unwrap_or_else(|| Path::new(repo.path.trim()).join(addon_name));
     if !is_safe_addon_path(repo.path.trim(), &target) {
         return Err(CommandError::validation(
             "addon.force-redownload",

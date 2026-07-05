@@ -1,6 +1,7 @@
 use super::super::*;
 use crate::core::utils::addon_backup;
 use crate::core::utils::format::sanitize_log_path;
+use crate::core::utils::fs_safety::resolve_child_dir_case_insensitive;
 
 pub(super) fn backup_pending_addons_for_download(
     backup_root_raw: &str,
@@ -46,7 +47,8 @@ pub(super) fn backup_pending_addons_for_download(
             operation_id,
         );
 
-        let addon_path = Path::new(repo_root).join(addon_name);
+        let addon_path = resolve_child_dir_case_insensitive(Path::new(repo_root), addon_name)
+            .unwrap_or_else(|| Path::new(repo_root).join(addon_name));
         if !addon_path.exists() {
             skipped_missing += 1;
             info!(

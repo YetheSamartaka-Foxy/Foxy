@@ -119,6 +119,8 @@ impl Foxy {
             self.backend_progress_rx = Some(rx);
             self.cancel_tx = Some(cancel_tx);
             self.clear_progress_event_history();
+            self.clear_quick_scan_instance_active(&repo.address, &repo.path);
+            self.clear_queued_quick_scan_for_url(&repo.address);
             // A background sync (e.g. a startup recheck of a *different*
             // repository) must not wipe the just-finished download summary that
             // the update modal is still showing. Preserve that display state
@@ -686,7 +688,11 @@ impl Foxy {
             return false;
         }
 
-        let fallback_path = Path::new(repo_path).join(addon_name);
+        let fallback_path = crate::core::utils::fs_safety::resolve_child_dir_case_insensitive(
+            Path::new(repo_path),
+            addon_name,
+        )
+        .unwrap_or_else(|| Path::new(repo_path).join(addon_name));
         let requested_path = addon_path
             .map(str::trim)
             .filter(|p| !p.is_empty())
