@@ -376,6 +376,7 @@ impl Foxy {
             backend_worker: None,
             startup_pending_restore_rx: None,
             startup_pending_restore_worker: None,
+            startup_repository_layout_logged: false,
             sync_started_at: None,
             startup_recheck_queue: VecDeque::new(),
             repository_space_sync_queue: VecDeque::new(),

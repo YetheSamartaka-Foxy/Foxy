@@ -299,6 +299,7 @@ pub struct Foxy {
     pub backend_worker: Option<std::thread::JoinHandle<()>>,
     startup_pending_restore_rx: Option<StdReceiver<Vec<StartupPendingUpdateRestoreRecord>>>,
     startup_pending_restore_worker: Option<std::thread::JoinHandle<()>>,
+    pub startup_repository_layout_logged: bool,
     pub startup_recheck_queue: VecDeque<(String, String, SyncMode)>,
     pub repository_space_sync_queue: VecDeque<(String, usize, SyncMode)>,
     pub repository_visual_folder_sync_queue: VecDeque<(usize, SyncMode)>,

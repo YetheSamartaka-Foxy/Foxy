@@ -840,6 +840,12 @@ impl Foxy {
             self.pending_quick_scan_urls.len()
         ));
 
+        manifest.push_str("\n[repository_layout]\n");
+        for line in self.repository_layout_lines() {
+            manifest.push_str(&line);
+            manifest.push('\n');
+        }
+
         manifest.push_str("\n[zip_contents]\n");
         for path in log_entries {
             let file_name = path

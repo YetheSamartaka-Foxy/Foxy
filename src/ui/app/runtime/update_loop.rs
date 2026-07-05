@@ -268,6 +268,7 @@ impl Foxy {
         self.poll_cached_update_load_results();
         self.maybe_dispatch_persistence_requests(false);
         self.process_startup_rechecks();
+        self.maybe_log_startup_repository_layout();
         self.process_repository_space_sync_queue();
         self.process_repository_visual_folder_sync_queue();
         self.process_scheduled_jobs(&ctx);
