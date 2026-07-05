@@ -304,6 +304,7 @@ impl Foxy {
                     }
 
                     if success {
+                        self.invalidate_addon_inventory_cache();
                         self.download_progress = Some(("Finished".to_string(), 1.0));
                     } else {
                         self.download_progress = Some((self.t("Download failed"), 1.0));

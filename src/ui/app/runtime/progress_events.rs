@@ -664,6 +664,7 @@ impl Foxy {
                             self.download_summary = None;
                             self.update_modal_open = false;
                         } else if finished_successfully {
+                            self.invalidate_addon_inventory_cache();
                             self.download_progress = Some(("Finished".to_string(), 1.0));
                             self.download_finished = true;
                             self.download_finished_repo = last_repo;
