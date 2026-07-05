@@ -81,6 +81,14 @@ scripts\build-windows-installer.bat
 # Linux
 ./scripts/build-linux-installer.sh
 TARGET=aarch64-unknown-linux-gnu ./scripts/build-linux-installer.sh
+
+# macOS Apple Silicon, local experimental build
+./scripts/build-macos-installer.sh
+```
+
+Native Windows-to-macOS installer builds are not supported by this repo. The macOS dmg path needs macOS SDK/linker support and `hdiutil`. From Windows, use an SSH-accessible Mac and copy the dmg back:
+```powershell
+pwsh scripts\build-macos-installer.ps1 -RemoteHost user@mac-host -RemoteRepoPath /Users/user/Foxy
 ```
 
 Linux cross-build from Windows (Docker/Podman):
