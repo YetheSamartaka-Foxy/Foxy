@@ -9,7 +9,6 @@ const STEAM_START_TIMEOUT: Duration = Duration::from_secs(30);
 const STEAM_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const STEAM_SETTLE_DELAY: Duration = Duration::from_secs(5);
 const ARMA3_APP_ID: &str = "107410";
-const ARMA3_APP_MANIFEST: &str = "appmanifest_107410.acf";
 
 #[cfg(target_os = "windows")]
 const STEAM_EXECUTABLE: &str = "steam.exe";
@@ -228,32 +227,57 @@ fn is_snap_steam_data_root(path: &Path) -> bool {
 }
 
 /// Returns the Arma 3 executable path within the given directory.
+#[allow(dead_code)]
 pub fn arma3_executable_path(arma3_dir: &Path) -> PathBuf {
     arma3_dir.join(ARMA3_EXECUTABLE)
 }
 
 pub fn arma3_launch_command(arma3_dir: &Path, steam_directory: &str) -> Option<SteamLaunchCommand> {
+    steam_app_launch_command(
+        ARMA3_APP_ID.parse().ok()?,
+        arma3_dir,
+        &[ARMA3_EXECUTABLE],
+        steam_directory,
+    )
+}
+
+pub fn steam_app_launch_command(
+    app_id: u32,
+    install_dir: &Path,
+    executable_names: &[&str],
+    steam_directory: &str,
+) -> Option<SteamLaunchCommand> {
     #[cfg(target_os = "windows")]
     {
+        let _ = app_id;
         let _ = steam_directory;
+        let executable_name = executable_names.first().copied()?;
+        let program = executable_names
+            .iter()
+            .map(|name| install_dir.join(name))
+            .find(|candidate| candidate.exists())
+            .unwrap_or_else(|| install_dir.join(executable_name));
         Some(SteamLaunchCommand {
-            program: arma3_executable_path(arma3_dir),
+            program,
             args: Vec::new(),
         })
     }
 
     #[cfg(target_os = "linux")]
     {
-        let _ = arma3_dir;
+        let _ = install_dir;
+        let _ = executable_names;
         let mut command = resolve_steam_launch_command(steam_directory)?;
         command.args.push("-applaunch".to_string());
-        command.args.push(ARMA3_APP_ID.to_string());
-        return Some(command);
+        command.args.push(app_id.to_string());
+        Some(command)
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
-        let _ = arma3_dir;
+        let _ = app_id;
+        let _ = install_dir;
+        let _ = executable_names;
         let _ = steam_directory;
         None
     }
@@ -279,20 +303,34 @@ pub fn is_valid_arma3_dir(path: &Path) -> bool {
 }
 
 pub fn detect_arma3_install_directory(steam_directory: &str) -> Option<PathBuf> {
+    detect_steam_app_install_directory(steam_directory, 107410, &["Arma 3"], is_valid_arma3_dir)
+}
+
+pub fn detect_steam_app_install_directory(
+    steam_directory: &str,
+    app_id: u32,
+    default_install_dirs: &[&str],
+    validate: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
     let library_roots = steam_library_roots(steam_directory);
 
     for library_root in &library_roots {
-        if let Some(path) = arma3_dir_from_manifest(library_root)
-            && is_valid_arma3_dir(&path)
+        if let Some(path) = steam_app_dir_from_manifest(library_root, app_id)
+            && validate(&path)
         {
             return Some(path);
         }
     }
 
     for library_root in &library_roots {
-        let candidate = library_root.join("steamapps").join("common").join("Arma 3");
-        if is_valid_arma3_dir(&candidate) {
-            return Some(candidate);
+        for default_install_dir in default_install_dirs {
+            let candidate = library_root
+                .join("steamapps")
+                .join("common")
+                .join(default_install_dir);
+            if validate(&candidate) {
+                return Some(candidate);
+            }
         }
     }
 
@@ -433,15 +471,16 @@ fn read_steam_libraryfolders(steam_root: &Path) -> Vec<PathBuf> {
     folders
 }
 
-fn arma3_dir_from_manifest(library_root: &Path) -> Option<PathBuf> {
+fn steam_app_dir_from_manifest(library_root: &Path, app_id: u32) -> Option<PathBuf> {
     let steamapps = find_child_dir_case_insensitive(library_root, "steamapps")?;
-    let manifest = steamapps.join(ARMA3_APP_MANIFEST);
+    let app_id_text = app_id.to_string();
+    let manifest = steamapps.join(format!("appmanifest_{}.acf", app_id));
     let contents = fs::read_to_string(manifest).ok()?;
     let tokens = vdf_tokens(&contents);
 
     if !tokens
         .windows(2)
-        .any(|pair| pair[0].eq_ignore_ascii_case("appid") && pair[1].trim() == ARMA3_APP_ID)
+        .any(|pair| pair[0].eq_ignore_ascii_case("appid") && pair[1].trim() == app_id_text)
     {
         return None;
     }
@@ -451,7 +490,7 @@ fn arma3_dir_from_manifest(library_root: &Path) -> Option<PathBuf> {
         .find(|pair| pair[0].eq_ignore_ascii_case("installdir"))
         .map(|pair| unescape_vdf_path(&pair[1]))
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "Arma 3".to_string());
+        .unwrap_or_else(|| app_id_text.clone());
 
     Some(steamapps.join("common").join(install_dir))
 }
@@ -697,7 +736,7 @@ mod tests {
         fs::create_dir_all(&arma_dir).unwrap();
         fs::write(arma_dir.join(ARMA3_EXECUTABLE), "").unwrap();
         fs::write(
-            steamapps.join(ARMA3_APP_MANIFEST),
+            steamapps.join("appmanifest_107410.acf"),
             r#""AppState"
 {
     "appid" "107410"
@@ -737,7 +776,7 @@ mod tests {
         )
         .unwrap();
         fs::write(
-            library_steamapps.join(ARMA3_APP_MANIFEST),
+            library_steamapps.join("appmanifest_107410.acf"),
             r#""AppState"
 {
     "appid" "107410"

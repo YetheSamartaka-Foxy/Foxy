@@ -217,7 +217,7 @@ impl Foxy {
     }
 
     fn image_cache_path(checksum_hex: &str) -> PathBuf {
-        let mut images_dir = Self::get_config_directory();
+        let mut images_dir = Self::get_game_space_directory();
         images_dir.push("images");
         if !images_dir.exists() && std::fs::create_dir_all(&images_dir).is_err() {
             warn!("Failed to create image cache directory");

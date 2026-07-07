@@ -112,7 +112,7 @@ impl Foxy {
         false
     }
 
-    pub(super) fn render_ts3_plugins_settings(&mut self, ui: &mut Ui) {
+    pub(crate) fn render_ts3_plugins_settings(&mut self, ui: &mut Ui) {
         let horizontal_padding = 15.0;
 
         // Kick off background scan if we have no cache and no scan in flight.

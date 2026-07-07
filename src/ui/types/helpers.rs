@@ -277,6 +277,8 @@ pub fn path_is_inside_onedrive(path: &str) -> bool {
 
 pub fn sanitize_settings_paths(settings: &mut SettingsViewState) {
     settings.arma3_directory = sanitize_user_path_value(&settings.arma3_directory);
+    settings.twwh3_directory = sanitize_user_path_value(&settings.twwh3_directory);
+    settings.reforger_directory = sanitize_user_path_value(&settings.reforger_directory);
     settings.arma3_profiles_directory =
         sanitize_user_path_value(&settings.arma3_profiles_directory);
     settings.steam_directory = sanitize_user_path_value(&settings.steam_directory);
@@ -291,6 +293,20 @@ pub fn sanitize_settings_paths(settings: &mut SettingsViewState) {
             settings.arma3_directory
         );
         settings.arma3_directory.clear();
+    }
+    if path_is_inside_onedrive(&settings.twwh3_directory) {
+        log::warn!(
+            "Clearing Total War: WARHAMMER III directory because it is inside a OneDrive folder: {}",
+            settings.twwh3_directory
+        );
+        settings.twwh3_directory.clear();
+    }
+    if path_is_inside_onedrive(&settings.reforger_directory) {
+        log::warn!(
+            "Clearing Arma Reforger directory because it is inside a OneDrive folder: {}",
+            settings.reforger_directory
+        );
+        settings.reforger_directory.clear();
     }
     if path_is_inside_onedrive(&settings.arma3_profiles_directory) {
         log::warn!(

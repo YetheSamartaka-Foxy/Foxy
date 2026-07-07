@@ -1,12 +1,16 @@
 mod addon;
 mod agent_gui;
+mod config;
 mod direct_download;
+mod game;
 mod launch;
 mod profile;
 mod repo;
 mod server;
 mod settings;
 mod space;
+mod steam_helper;
+mod workshop;
 
 use crate::cli::args::{CliArgs, CliCommand};
 use crate::cli::exit_codes;
@@ -29,13 +33,17 @@ use tokio::sync::{broadcast, watch};
 
 use self::addon::run_addon_command;
 use self::agent_gui::run_agent_gui_command;
+use self::config::run_config_command;
 use self::direct_download::cmd_direct_download;
+use self::game::run_game_command;
 use self::launch::cmd_launch;
 use self::profile::run_profile_command;
 use self::repo::run_repo_command;
 use self::server::run_server_command;
 use self::settings::run_settings_command;
 use self::space::run_space_command;
+use self::steam_helper::run_steam_helper_command;
+use self::workshop::run_workshop_command;
 
 #[derive(Clone, Debug)]
 pub struct CommandSuccess {
@@ -94,8 +102,29 @@ struct AppState {
 
 impl AppState {
     fn load() -> Result<Self, CommandError> {
-        let mut settings: SettingsViewState = read_json_or_default(&Foxy::get_settings_path())
-            .map_err(|e| CommandError::operation("settings.load", e))?;
+        let merged = crate::core::game::spaces::read_merged_settings_value(
+            &Foxy::get_app_settings_path(),
+            &Foxy::get_game_settings_path(),
+        )
+        .map_err(|e| CommandError::operation("settings.load", e))?;
+        let mut settings: SettingsViewState = match merged {
+            Some(value) => {
+                let defaults = serde_json::to_value(SettingsViewState::default()).map_err(|e| {
+                    CommandError::operation(
+                        "settings.load",
+                        format!("Failed to serialize default settings: {}", e),
+                    )
+                })?;
+                let value = crate::core::game::spaces::merge_value_over_defaults(defaults, value);
+                serde_json::from_value(value).map_err(|e| {
+                    CommandError::operation(
+                        "settings.load",
+                        format!("Failed to parse settings: {}", e),
+                    )
+                })?
+            }
+            None => SettingsViewState::default(),
+        };
         sanitize_settings(&mut settings);
 
         let mut repositories: Vec<Repository> =
@@ -119,14 +148,31 @@ impl AppState {
     fn save_settings(&self) -> Result<(), CommandError> {
         let mut settings = self.settings.clone();
         sanitize_settings(&mut settings);
-        write_json_pretty(&Foxy::get_settings_path(), &settings)
-            .map_err(|e| CommandError::operation("settings.save", e))
+        let value = serde_json::to_value(&settings).map_err(|e| {
+            CommandError::operation(
+                "settings.save",
+                format!("Failed to serialize settings: {}", e),
+            )
+        })?;
+        crate::core::game::spaces::write_split_settings(
+            &value,
+            &Foxy::get_app_settings_path(),
+            &Foxy::get_game_settings_path(),
+        )
+        .map_err(|e| CommandError::operation("settings.save", e))
     }
 
     fn save_repositories(&self) -> Result<(), CommandError> {
         let repositories = repositories_for_save(&self.repositories);
         write_json_pretty(&Foxy::get_repositories_path(), &repositories)
             .map_err(|e| CommandError::operation("repo.save", e))
+    }
+
+    fn save_spaces(&self) -> Result<(), CommandError> {
+        let mut spaces = self.spaces.clone();
+        sanitize_repository_spaces_paths(&mut spaces);
+        write_json_pretty(&Foxy::get_repository_spaces_path(), &spaces)
+            .map_err(|e| CommandError::operation("space.save", e))
     }
 }
 
@@ -155,6 +201,7 @@ fn ensure_backend_ready() {
 }
 
 pub fn run_command(cli: &CliArgs, command: CliCommand) -> Result<CommandSuccess, CommandError> {
+    crate::core::game::spaces::ensure_game_spaces_layout();
     let started = Instant::now();
     let result = match command {
         CliCommand::Version => Ok(CommandSuccess {
@@ -175,6 +222,10 @@ pub fn run_command(cli: &CliArgs, command: CliCommand) -> Result<CommandSuccess,
         CliCommand::Addon { command } => run_addon_command(cli, command),
         CliCommand::Profile { command } => run_profile_command(cli, command),
         CliCommand::Space { command } => run_space_command(cli, command),
+        CliCommand::Game { command } => run_game_command(cli, command),
+        CliCommand::Config { command } => run_config_command(cli, command),
+        CliCommand::Workshop { command } => run_workshop_command(cli, command),
+        CliCommand::SteamHelper { command } => run_steam_helper_command(command),
         CliCommand::Server { command } => run_server_command(cli, command),
         CliCommand::DirectDownload(args) => cmd_direct_download(cli, args),
         CliCommand::Launch(args) => cmd_launch(cli, args),

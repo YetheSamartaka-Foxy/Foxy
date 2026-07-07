@@ -3,7 +3,6 @@ mod cli;
 mod config;
 mod discover;
 mod hash;
-mod pbo;
 mod srf;
 mod types;
 mod update_manifest;

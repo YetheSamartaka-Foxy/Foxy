@@ -3,15 +3,13 @@ use std::path::{Path, PathBuf};
 
 use log::{info, warn};
 
-use crate::core::utils::fs_safety::resolve_child_dir_case_insensitive;
 use crate::ui::app::{
     AddonInventoryEntry, AddonInventoryViewCache, Foxy, RepositoryAddonListCache,
     RepositoryExternalAddonsListCache, RepositorySettingsAddonPreloadResult,
 };
 use crate::ui::types::{
     Repository, RepositoryProfile, RepositoryServer, UpdateSummaryNotice,
-    additional_folder_alias_key, sanitize_additional_folder_alias, selected_creator_dlc_codes,
-    split_additional_launch_params,
+    additional_folder_alias_key, sanitize_additional_folder_alias,
 };
 
 impl Foxy {
@@ -592,114 +590,25 @@ impl Foxy {
         repo: &Repository,
         server: Option<&RepositoryServer>,
     ) -> Option<std::process::Command> {
-        let arma3_directory = self.settings_view_state.arma3_directory.trim();
-
-        #[cfg(target_os = "windows")]
-        if arma3_directory.is_empty() {
-            log::warn!(
-                "Cannot create launch command: Arma 3 directory is not configured (raw value {:?})",
-                self.settings_view_state.arma3_directory
+        // Repository launch plans are Arma-shaped; never hand one to another
+        // game's module even if a non-Arma space somehow reaches this path.
+        let module = crate::core::game::registry().active();
+        if module.id() != crate::core::game::arma3::ARMA3_GAME_ID {
+            warn!(
+                "Repository launch is not supported for the active game space (game {})",
+                module.id()
             );
             return None;
         }
-
-        let arma3_dir_path = if arma3_directory.is_empty() {
-            std::path::Path::new(".")
-        } else {
-            std::path::Path::new(arma3_directory)
+        let plan =
+            crate::core::game::arma3::build_launch_plan(&self.settings_view_state, repo, server)
+                .ok()?;
+        let ctx = crate::core::game::GameLaunchCtx {
+            install_dir: &self.settings_view_state.arma3_directory,
+            steam_directory: &self.settings_view_state.steam_directory,
         };
-        #[cfg(target_os = "windows")]
-        if !arma3_dir_path.exists() {
-            log::warn!(
-                "Cannot create launch command: Arma 3 directory does not exist: {}",
-                arma3_directory
-            );
-            return None;
-        }
-
-        #[cfg(target_os = "windows")]
-        if !crate::core::steam::is_valid_arma3_dir(arma3_dir_path) {
-            log::warn!(
-                "Cannot create launch command: Arma 3 directory is not valid: {}",
-                arma3_directory
-            );
-            return None;
-        }
-
-        let mut args = Vec::new();
-
-        // Re-detect profiles at launch time so -name decisions reflect the
-        // current on-disk state, not a cached list.
-        let custom_profiles_dir = self.settings_view_state.arma3_profiles_directory.trim();
-        let custom_profiles_dir = if custom_profiles_dir.is_empty() {
-            None
-        } else {
-            Some(std::path::Path::new(custom_profiles_dir))
-        };
-        let detected_profiles =
-            crate::core::arma3_profiles::detect_all_profiles(custom_profiles_dir);
-        crate::ui::types::push_arma3_profile_launch_args(
-            &self.settings_view_state,
-            repo,
-            &detected_profiles,
-            &mut args,
-        );
-
-        if repo.skip_intro {
-            args.push("-skipIntro".to_string());
-        }
-        if repo.no_splash {
-            args.push("-noSplash".to_string());
-        }
-        if repo.world_empty {
-            args.push("-world=empty".to_string());
-        }
-        if repo.load_mission_to_memory {
-            args.push("-loadMissionToMemory".to_string());
-        }
-        if repo.enable_ht {
-            args.push("-enableHT".to_string());
-        }
-        if repo.huge_pages {
-            args.push("-hugePages".to_string());
-        }
-        if repo.no_logs {
-            args.push("-noLogs".to_string());
-        }
-
-        if !repo.additional_params.is_empty() {
-            args.extend(split_additional_launch_params(&repo.additional_params));
-        }
-
-        let resolved_addons = resolve_launch_mod_paths(repo, arma3_directory);
-        if !resolved_addons.is_empty() {
-            let mod_param = format!("-mod={}", resolved_addons.join(";"));
-            args.push(mod_param);
-        }
-
-        if let Some(server) = server {
-            args.push(format!("-connect={}", server.address));
-            args.push(format!("-port={}", server.port));
-            if !server.password.is_empty() {
-                args.push(format!("-password={}", server.password));
-            }
-        }
-
-        let steam_directory = self.settings_view_state.steam_directory.trim();
-        let Some(launch) =
-            crate::core::steam::arma3_launch_command(arma3_dir_path, steam_directory)
-        else {
-            log::warn!("Cannot create launch command: Steam launch command is unavailable");
-            return None;
-        };
-        let mut command = std::process::Command::new(launch.program);
-        command.args(launch.args);
-        command.args(&args);
-        if !arma3_directory.is_empty() && arma3_dir_path.exists() {
-            command.current_dir(arma3_directory);
-        }
-
-        Some(command)
+        let command = module.build_launch(&plan, &ctx).ok()?;
+        Some(command.into_process_command())
     }
 
     fn normalized_repo_url_for_index(&self, repo_index: usize) -> Option<String> {
@@ -920,152 +829,6 @@ impl Foxy {
     }
 }
 
-fn resolve_launch_mod_paths(repo: &Repository, arma3_directory: &str) -> Vec<String> {
-    let creator_dlc_codes = selected_creator_dlc_codes(repo);
-    let enabled_addons: Vec<String> = repo
-        .addons
-        .iter()
-        .map(|(addon, enabled)| (addon, *enabled))
-        .chain(
-            repo.optional_addons
-                .iter()
-                .map(|(addon, enabled)| (addon, *enabled)),
-        )
-        .filter_map(|(addon, enabled)| if enabled { Some(addon.clone()) } else { None })
-        .collect();
-    let enabled_external_addons = repo
-        .external_addons
-        .iter()
-        .filter(|(_, enabled, _)| *enabled)
-        .collect::<Vec<_>>();
-
-    if creator_dlc_codes.is_empty()
-        && enabled_addons.is_empty()
-        && enabled_external_addons.is_empty()
-    {
-        return Vec::new();
-    }
-
-    let mut resolved_addons: Vec<String> = Vec::new();
-    let repo_path = repo.path.trim();
-
-    for creator_dlc_code in creator_dlc_codes {
-        resolved_addons.push(creator_dlc_code.to_string());
-    }
-
-    for addon in &enabled_addons {
-        if let Some(addon_path) =
-            resolve_child_dir_case_insensitive(std::path::Path::new(repo_path), addon)
-        {
-            resolved_addons.push(addon_path.to_string_lossy().to_string());
-        } else if let Some(arma3_addon_path) =
-            resolve_child_dir_case_insensitive(std::path::Path::new(arma3_directory), addon)
-        {
-            resolved_addons.push(arma3_addon_path.to_string_lossy().to_string());
-        } else {
-            log::error!(
-                "Addon not found in repository or Arma 3 directory: {}",
-                addon
-            );
-        }
-    }
-
-    for (addon, _, path) in enabled_external_addons {
-        if let Some(external_path) = resolve_external_launch_addon_path(addon, path) {
-            resolved_addons.push(external_path.to_string_lossy().to_string());
-        } else {
-            log::error!(
-                "External addon not found at configured path: addon={} path={}",
-                addon,
-                path
-            );
-        }
-    }
-
-    resolved_addons
-}
-
-fn resolve_external_launch_addon_path(addon: &str, path: &str) -> Option<std::path::PathBuf> {
-    let trimmed_path = path.trim();
-    if trimmed_path.is_empty() {
-        return None;
-    }
-
-    let base_path = std::path::Path::new(trimmed_path);
-    if let Some(nested_path) = resolve_child_dir_case_insensitive(base_path, addon) {
-        return Some(nested_path);
-    }
-
-    if base_path.is_dir() {
-        if workshop_id_from_launch_path(trimmed_path).is_some() {
-            return Some(base_path.to_path_buf());
-        }
-        let base_name = base_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default();
-        if base_name.trim_start().starts_with('@') {
-            return Some(base_path.to_path_buf());
-        }
-        let base_name = normalize_launch_addon_name(base_name);
-        let addon_key = normalize_launch_addon_name(addon);
-        if !base_name.is_empty() && base_name == addon_key {
-            return Some(base_path.to_path_buf());
-        }
-    }
-
-    None
-}
-
-fn workshop_id_from_launch_path(path: &str) -> Option<String> {
-    let normalized = path.trim().replace('\\', "/");
-    let parts = normalized
-        .split('/')
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
-
-    for window in parts.windows(4) {
-        if window[0].eq_ignore_ascii_case("workshop")
-            && window[1].eq_ignore_ascii_case("content")
-            && window[2] == "107410"
-            && window[3].chars().all(|ch| ch.is_ascii_digit())
-        {
-            return Some(window[3].to_string());
-        }
-    }
-
-    for pair in parts.windows(2) {
-        if pair[0] == "107410" && pair[1].chars().all(|ch| ch.is_ascii_digit()) {
-            return Some(pair[1].to_string());
-        }
-    }
-
-    None
-}
-
-fn normalize_launch_addon_name(name: &str) -> String {
-    name.trim()
-        .trim_matches('"')
-        .trim_matches('\'')
-        .chars()
-        .filter_map(|ch| {
-            if ch.is_whitespace() || matches!(ch, '-' | '_' | '.') {
-                Some('_')
-            } else if ch == '@' {
-                None
-            } else if ch.is_ascii() {
-                Some(ch.to_ascii_lowercase())
-            } else {
-                ch.to_lowercase().next()
-            }
-        })
-        .collect::<String>()
-        .split('_')
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join("_")
-}
-
 fn addon_directory_total_size(path: &Path) -> std::io::Result<u64> {
     let metadata = std::fs::metadata(path)?;
     if metadata.is_file() {
@@ -1093,82 +856,4 @@ fn addon_directory_total_size(path: &Path) -> std::io::Result<u64> {
         }
     }
     Ok(total)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn external_launch_addon_resolves_repo_root_plus_addon_folder() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let addon_dir = dir.path().join("@burnem_redux");
-        std::fs::create_dir(&addon_dir).expect("addon dir");
-
-        let resolved =
-            resolve_external_launch_addon_path("@burnem_redux", &dir.path().to_string_lossy())
-                .expect("external addon path should resolve");
-
-        assert_eq!(resolved, addon_dir);
-    }
-
-    #[test]
-    fn external_launch_addon_rejects_repo_root_when_addon_folder_is_missing() {
-        let dir = tempfile::tempdir().expect("temp dir");
-
-        let resolved =
-            resolve_external_launch_addon_path("@burnem_redux", &dir.path().to_string_lossy());
-
-        assert!(resolved.is_none());
-    }
-
-    #[test]
-    fn external_launch_addon_accepts_direct_at_folder_with_display_name() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let addon_dir = dir.path().join("@burnem_redux");
-        std::fs::create_dir(&addon_dir).expect("addon dir");
-
-        let resolved =
-            resolve_external_launch_addon_path("Burn Em Redux", &addon_dir.to_string_lossy())
-                .expect("direct @addon path should resolve");
-
-        assert_eq!(resolved, addon_dir);
-    }
-
-    #[test]
-    fn external_launch_addon_accepts_direct_workshop_id_folder_with_display_name() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let addon_dir = dir
-            .path()
-            .join("steamapps")
-            .join("workshop")
-            .join("content")
-            .join("107410")
-            .join("463939057");
-        std::fs::create_dir_all(&addon_dir).expect("workshop addon dir");
-
-        let resolved = resolve_external_launch_addon_path("ACE", &addon_dir.to_string_lossy())
-            .expect("direct workshop ID folder path should resolve");
-
-        assert_eq!(resolved, addon_dir);
-    }
-
-    #[test]
-    fn launch_mod_paths_include_external_addons_without_repo_addons() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let addon_dir = dir.path().join("@client_mod");
-        std::fs::create_dir(&addon_dir).expect("addon dir");
-        let repo = Repository {
-            external_addons: vec![(
-                "@client_mod".to_string(),
-                true,
-                addon_dir.to_string_lossy().to_string(),
-            )],
-            ..Repository::default()
-        };
-
-        let resolved = resolve_launch_mod_paths(&repo, "");
-
-        assert_eq!(resolved, vec![addon_dir.to_string_lossy().to_string()]);
-    }
 }

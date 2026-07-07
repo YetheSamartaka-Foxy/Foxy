@@ -14,7 +14,7 @@ use rfd::FileDialog;
 use super::render_wrapped_info_row;
 
 impl Foxy {
-    pub(super) fn render_additional_search_folders(&mut self, ui: &mut Ui) {
+    pub(crate) fn render_additional_search_folders(&mut self, ui: &mut Ui) {
         let horizontal_padding = 15.0;
 
         ui.vertical(|ui| {
@@ -36,8 +36,12 @@ impl Foxy {
                 ui.add_space(horizontal_padding);
                 let text_edit_width = ui.available_width() - 2.0 * horizontal_padding;
                 ui.add(
-                    TextEdit::singleline(&mut self.settings_view_state.additional_folders_filter)
-                        .desired_width(text_edit_width),
+                    TextEdit::singleline(
+                        &mut self
+                            .edited_game_space_settings_mut()
+                            .additional_folders_filter,
+                    )
+                    .desired_width(text_edit_width),
                 );
                 ui.add_space(horizontal_padding);
             });
@@ -67,11 +71,13 @@ impl Foxy {
                             self.show_error_toast(self.t("This path is inside a OneDrive folder. OneDrive sync can cause file access conflicts. Please choose a different location."));
                         } else {
                             info!("Added additional search folder {}", folder.display());
-                            self.settings_view_state
+                            self.edited_game_space_settings_mut()
                                 .additional_folders
                                 .push(path_str);
-                            self.save_settings();
-                            self.invalidate_addon_inventory_cache();
+                            self.save_edited_game_space_settings();
+                            if self.editing_active_game_space() {
+                                self.invalidate_addon_inventory_cache();
+                            }
                         }
                     }
                 ui.add_space(horizontal_padding);
@@ -79,15 +85,16 @@ impl Foxy {
             ui.separator();
 
             ScrollArea::vertical().show(ui, |ui| {
-                let multi_filter =
-                    MultiEntryFilter::parse(&self.settings_view_state.additional_folders_filter);
-                let folder_count = self.settings_view_state.additional_folders.len();
+                let multi_filter = MultiEntryFilter::parse(
+                    &self.edited_game_space_settings().additional_folders_filter,
+                );
+                let folder_count = self.edited_game_space_settings().additional_folders.len();
 
                 for i in 0..folder_count {
-                    let folder = self.settings_view_state.additional_folders[i].clone();
+                    let folder = self.edited_game_space_settings().additional_folders[i].clone();
                     let folder_alias_key = additional_folder_alias_key(&folder);
                     let mut alias_value = self
-                        .settings_view_state
+                        .edited_game_space_settings()
                         .additional_folder_aliases
                         .get(&folder_alias_key)
                         .cloned()
@@ -130,30 +137,32 @@ impl Foxy {
                                         if alias_response.changed() {
                                             let sanitized_alias =
                                                 sanitize_additional_folder_alias(&alias_value);
-                                            if sanitized_alias.is_empty() {
-                                                if self
-                                                    .settings_view_state
+                                            let alias_changed = if sanitized_alias.is_empty() {
+                                                self.edited_game_space_settings_mut()
                                                     .additional_folder_aliases
                                                     .remove(&folder_alias_key)
                                                     .is_some()
-                                                {
-                                                    self.save_settings();
-                                                    self.invalidate_addon_inventory_cache();
-                                                }
                                             } else {
-                                                let current_alias = self
-                                                    .settings_view_state
+                                                let settings =
+                                                    self.edited_game_space_settings_mut();
+                                                let current_alias = settings
                                                     .additional_folder_aliases
                                                     .get(&folder_alias_key)
                                                     .map(String::as_str);
-                                                if current_alias != Some(sanitized_alias.as_str()) {
-                                                    self.settings_view_state
-                                                        .additional_folder_aliases
-                                                        .insert(
-                                                            folder_alias_key.clone(),
-                                                            sanitized_alias,
-                                                        );
-                                                    self.save_settings();
+                                                if current_alias != Some(sanitized_alias.as_str())
+                                                {
+                                                    settings.additional_folder_aliases.insert(
+                                                        folder_alias_key.clone(),
+                                                        sanitized_alias,
+                                                    );
+                                                    true
+                                                } else {
+                                                    false
+                                                }
+                                            };
+                                            if alias_changed {
+                                                self.save_edited_game_space_settings();
+                                                if self.editing_active_game_space() {
                                                     self.invalidate_addon_inventory_cache();
                                                 }
                                             }
@@ -275,7 +284,7 @@ impl Foxy {
         });
     }
 
-    pub(super) fn render_settings_folder_removal_confirmation(&mut self, ui: &mut Ui) {
+    pub(crate) fn render_settings_folder_removal_confirmation(&mut self, ui: &mut Ui) {
         let Some(action) = self.pending_settings_folder_removal.clone() else {
             return;
         };
@@ -346,19 +355,26 @@ impl Foxy {
         self.pending_settings_folder_removal = None;
         match action {
             SettingsFolderRemovalConfirmAction::AdditionalSearchFolder { folder } => {
-                if let Some(index) = self
-                    .settings_view_state
+                let settings = self.edited_game_space_settings_mut();
+                let removed = if let Some(index) = settings
                     .additional_folders
                     .iter()
                     .position(|existing| existing == &folder)
                 {
-                    info!("Removed additional search folder {}", folder);
-                    let removed_folder = self.settings_view_state.additional_folders.remove(index);
-                    self.settings_view_state
+                    let removed_folder = settings.additional_folders.remove(index);
+                    settings
                         .additional_folder_aliases
                         .remove(&additional_folder_alias_key(&removed_folder));
-                    self.save_settings();
-                    self.invalidate_addon_inventory_cache();
+                    true
+                } else {
+                    false
+                };
+                if removed {
+                    info!("Removed additional search folder {}", folder);
+                    self.save_edited_game_space_settings();
+                    if self.editing_active_game_space() {
+                        self.invalidate_addon_inventory_cache();
+                    }
                 }
             }
             SettingsFolderRemovalConfirmAction::CleanupFolder { folder } => {

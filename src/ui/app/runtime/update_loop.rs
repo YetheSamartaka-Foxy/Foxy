@@ -220,6 +220,9 @@ impl Foxy {
             return;
         }
 
+        self.poll_persistence_results();
+        self.process_pending_game_space_switch(&ctx);
+
         if self.startup_frame_rendered && !self.startup_tasks_started {
             self.startup_tasks_started = true;
             if !self.settings_view_state.debug_mode {
@@ -379,6 +382,12 @@ impl Foxy {
                             }
                             FoxyView::SwiftyMigration => {
                                 self.render_swifty_migration_view(ui, frame);
+                            }
+                            FoxyView::GameSpaces => {
+                                self.render_game_spaces_view(ui, frame);
+                            }
+                            FoxyView::GameSpaceSettings => {
+                                self.render_game_space_settings_view(ui, frame);
                             }
                             FoxyView::None => {}
                         }

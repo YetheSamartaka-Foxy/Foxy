@@ -3,7 +3,6 @@ use std::path::Path;
 
 use crate::cli::GenerationMode;
 use crate::hash;
-use crate::pbo;
 use crate::types::{
     FoxyAddonFile, FoxyAddonJson, FoxyAddonPart, FoxyAddonsJson, ModEntry, ProcessedMod,
     RepoConfig, RepoJson, SrfFile, SrfManifest, SrfPart,
@@ -39,7 +38,7 @@ pub fn write_mod_srf(processed_mod: &ProcessedMod, output_dir: &Path) -> Result<
                 path: f.relative_path.replace('/', "\\"),
                 checksum: f.checksums.unwrap_md5().to_string(),
                 length: f.length,
-                file_type: if pbo::is_pbo(Path::new(&f.relative_path)) {
+                file_type: if is_pbo_manifest_file(Path::new(&f.relative_path)) {
                     "SwiftyPboFile".to_string()
                 } else {
                     "SwiftyFile".to_string()
@@ -89,7 +88,7 @@ pub fn write_foxy_addon_json(processed_mod: &ProcessedMod, output_dir: &Path) ->
                 path: f.relative_path.replace('\\', "/"),
                 checksum: f.checksums.unwrap_blake3().to_string(),
                 length: f.length,
-                file_type: if pbo::is_pbo(Path::new(&f.relative_path)) {
+                file_type: if is_pbo_manifest_file(Path::new(&f.relative_path)) {
                     "FoxyPboFile".to_string()
                 } else {
                     "FoxyFile".to_string()
@@ -111,6 +110,10 @@ pub fn write_foxy_addon_json(processed_mod: &ProcessedMod, output_dir: &Path) ->
     std::fs::write(&path, json).with_context(|| format!("Failed to write {}", path.display()))?;
 
     Ok(())
+}
+
+fn is_pbo_manifest_file(path: &Path) -> bool {
+    foxy_formats::builtin_registry().format_id_for_path(path) == Some(foxy_formats::PBO_FORMAT_ID)
 }
 
 // ---------------------------------------------------------------------------
@@ -315,7 +318,7 @@ mod tests {
                     path: f.relative_path.replace('/', "\\"),
                     checksum: f.checksums.unwrap_md5().to_string(),
                     length: f.length,
-                    file_type: if pbo::is_pbo(Path::new(&f.relative_path)) {
+                    file_type: if is_pbo_manifest_file(Path::new(&f.relative_path)) {
                         "SwiftyPboFile".to_string()
                     } else {
                         "SwiftyFile".to_string()

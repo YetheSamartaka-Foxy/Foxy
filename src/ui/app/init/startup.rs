@@ -319,6 +319,7 @@ impl Foxy {
             fs_watch_rx,
             fs_watch_tx,
             fs_watch_worker: None,
+            fs_watch_stop: None,
             fs_watch_suppressed_until_ms,
             deferred_fs_scan: HashSet::new(),
             pending_quick_scan_urls: HashSet::new(),
@@ -500,6 +501,11 @@ impl Foxy {
             // Swifty migration
             swifty_migration_state:
                 crate::ui::views::swifty_migration::types::SwiftyMigrationState::default(),
+            // Game spaces
+            game_spaces_view_state: crate::ui::views::game_spaces::GameSpacesViewState::default(),
+            game_space_settings_view_state:
+                crate::ui::views::game_spaces::settings::GameSpaceSettingsViewState::default(),
+            pending_game_space_switch: None,
         };
         app.load_settings();
         app.pending_renderer_fallback_notice =
@@ -670,10 +676,11 @@ impl Foxy {
     pub(crate) fn startup_storage_paths(&self) -> Vec<api::StartupStoragePath> {
         let mut paths = vec![
             api::StartupStoragePath::new("app_data", Self::get_config_directory()),
+            api::StartupStoragePath::new("game_space", Self::get_game_space_directory()),
             api::StartupStoragePath::new("logs", crate::core::utils::app_paths::foxy_logs_dir()),
             api::StartupStoragePath::new(
                 "database",
-                Self::get_config_directory().join("database.db"),
+                Self::get_game_space_directory().join("database.db"),
             ),
             api::StartupStoragePath::new("temp", self.effective_temp_directory()),
         ];
@@ -685,6 +692,16 @@ impl Foxy {
             &mut paths,
             "arma3",
             self.settings_view_state.arma3_directory.trim(),
+        );
+        push_configured_path(
+            &mut paths,
+            "twwh3",
+            self.settings_view_state.twwh3_directory.trim(),
+        );
+        push_configured_path(
+            &mut paths,
+            "reforger",
+            self.settings_view_state.reforger_directory.trim(),
         );
         push_configured_path(
             &mut paths,

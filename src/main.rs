@@ -351,6 +351,7 @@ fn launch_ui(debug_mode: bool, agent_gui: AgentGuiLaunchConfig) {
         }
     }
 
+    core::game::spaces::ensure_game_spaces_layout();
     core::tasks::init_database::check_and_wipe_database();
     ui::window::main(debug_mode, agent_gui);
 }

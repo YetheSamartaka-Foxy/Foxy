@@ -959,6 +959,9 @@ fn run_scenario(cli: &CliArgs, args: AgentGuiScenarioArgs) -> Result<CommandSucc
 
 /// Allowed config basenames a fixture may write. Never the multi-GB database or
 /// anything outside the isolated config dir (harness security rule).
+/// Fixtures intentionally use the legacy flat layout: the app's one-shot
+/// migration splits them into `app_settings.json`, `games.json`, and
+/// `games/<space>/` on its first start against the fixture dir.
 const FIXTURE_ALLOWED_FILES: &[&str] = &[
     "settings.json",
     "repositories.json",

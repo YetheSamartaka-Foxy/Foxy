@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "foxy-server-backend-cli"]
+members = [".", "foxy-formats", "foxy-server-backend-cli"]
 
 [package]
 name = "Foxy"
@@ -90,17 +90,16 @@ icu_locale_core = "2.2.0"
 # Enable Wayland data-control clipboard support while keeping X11 support on Linux.
 arboard = { version = "3.6.1", default-features = false, features = ["image-data", "wayland-data-control"] }
 semver = "1.0.28"
-# Turso: pure-Rust, async-native, SQLite-compatible engine - Foxy's persistence
-# engine (plan.md). `sync` (remote/replication) intentionally off - this is
-# local-file only (`Builder::new_local`). default-features off drops `fts`
-# (tantivy full-text search - unused) and `mimalloc` (which installs a
-# process-wide #[global_allocator] and pulls a C `cc` build; we keep Foxy's
-# default allocator). Phase-0 finding, plan.md §2.
+# Turso is used as a local-file persistence engine. Remote sync is intentionally
+# off; default features stay off to avoid unused FTS support and a process-wide
+# allocator override.
 turso = { version = "0.6.1", default-features = false }
 fs4 = "1.1.0"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 sysinfo = "0.39.5"
 jmespath = "0.5.0"
+steamworks = "0.13.1"
+foxy-formats = { path = "foxy-formats" }
 
 [dev-dependencies]
 tempfile = "3.27.0"

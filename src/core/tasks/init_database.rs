@@ -1,7 +1,7 @@
 //! Database lifecycle + write instrumentation.
 //!
-//! After the Turso cutover (plan.md §7 Phase 4) the engine itself is built and
-//! bootstrapped in [`crate::core::tasks::db_turso`]; this module keeps the
+//! The Turso engine itself is built and bootstrapped in
+//! [`crate::core::tasks::db_turso`]; this module keeps the
 //! process-wide `init_database()` entry point (delegating to Turso), the
 //! filesystem wipe markers, and the write-path instrumentation (perf counters,
 //! write permits, lock-retry helpers) that the bulk write paths and sync
@@ -12,19 +12,18 @@ use log::info;
 use once_cell::sync::Lazy;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use tokio::sync::OnceCell;
 use tokio::sync::Semaphore;
 
-use crate::core::utils::app_paths;
 use crate::core::utils::format::sanitize_log_path;
 
 /// Legacy SQLite-era bind budget for SQL shapes that do not use tuned chunk helpers.
 pub(crate) const SQLITE_MAX_VARIABLES: usize = 999;
 /// Raw SQL bulk operations (not a query builder) can use a higher bind-variable
-/// ceiling. Turso accepts far more (≥250k, plan.md §11); the historical SQLite
+/// ceiling. Turso accepts far more than 250k; the historical SQLite
 /// 3.32+ limit of 32,766 is kept as a conservative, well-tested chunking bound.
 const SQLITE_BULK_VARIABLE_LIMIT: usize = 32_766;
 const SQLITE_WRITE_PERMITS_CAP: usize = 8;
@@ -144,8 +143,8 @@ fn sqlite_write_permits() -> usize {
         .clamp(1, SQLITE_WRITE_PERMITS_CAP)
 }
 
-/// Default write-permit count. On the Turso/MVCC storage layer (Stage B, plan.md
-/// §5.2/§5.3) the write path no longer acquires the permit at all - the value
+/// Default write-permit count. On the Turso/MVCC storage layer the write path
+/// no longer acquires the permit at all - the value
 /// only feeds the metadata-rebuild fan-out ceilings (`mod_task_limit` /
 /// `part_task_limit`), so default it to CPU count to widen concurrent-writer
 /// fan-out.
@@ -383,7 +382,7 @@ pub(crate) fn log_sqlite_write_metrics_since(
 }
 
 /// Maximum number of bind variables for raw SQL bulk operations. Turso accepts
-/// far more than SQLite (≥250k, plan.md §11), but the conservative SQLite-era
+/// far more than SQLite, but the conservative SQLite-era
 /// 32,766 ceiling is kept as a well-tested chunking bound.
 ///
 /// Overridable via `FOXY_DB_VAR_LIMIT` so the bulk-statement chunk size can be
@@ -432,25 +431,23 @@ pub(crate) fn bulk_write_rows_for(params_per_row: usize) -> usize {
         .max(1)
 }
 
-/// Process-wide database handle. Builds/bootstraps the Turso engine via
-/// [`crate::core::tasks::db_turso`] and runs the post-init addon-display-name
-/// backfill exactly once (plan.md §5.1).
+/// Process-wide database handle for the active game space. Builds/bootstraps
+/// the Turso engine via [`crate::core::tasks::db_turso`] and runs the
+/// post-init maintenance passes (content-hash baseline retirement, addon
+/// display-name backfill) once per database file, so a runtime game-space
+/// switch maintains the newly opened space's database too.
 pub(crate) async fn init_database() -> crate::core::db::DbHandle {
-    static BACKFILLED: OnceCell<()> = OnceCell::const_new();
-    static CONTENT_HASH_FORMAT_CHECKED: OnceCell<()> = OnceCell::const_new();
+    static MAINTAINED_DB_PATHS: tokio::sync::Mutex<Option<std::collections::HashSet<PathBuf>>> =
+        tokio::sync::Mutex::const_new(None);
 
-    let db = crate::core::tasks::db_turso::init_turso_database().await;
-    CONTENT_HASH_FORMAT_CHECKED
-        .get_or_init(|| async {
-            retire_stale_content_hash_baselines(&db).await;
-        })
-        .await;
-    BACKFILLED
-        .get_or_init(|| async {
-            let backfill_db = crate::core::db::FoxyDb::from_turso(db.clone());
-            crate::core::addon_metadata::backfill_missing_addon_display_names(&backfill_db).await;
-        })
-        .await;
+    let (path, db) = crate::core::tasks::db_turso::init_turso_database_with_path().await;
+    let mut maintained = MAINTAINED_DB_PATHS.lock().await;
+    let maintained = maintained.get_or_insert_with(std::collections::HashSet::new);
+    if maintained.insert(path) {
+        retire_stale_content_hash_baselines(&db).await;
+        let backfill_db = crate::core::db::FoxyDb::from_turso(db.clone());
+        crate::core::addon_metadata::backfill_missing_addon_display_names(&backfill_db).await;
+    }
     db
 }
 
@@ -501,8 +498,8 @@ async fn retire_stale_content_hash_baselines(db: &crate::core::db::DbHandle) {
 }
 
 pub fn wipe_database_sync() {
-    let base_dir = app_paths::foxy_data_dir();
-    let marker_path = base_dir.join(".wipe_database_on_next_start");
+    let base_dir = crate::core::game::spaces::active_game_space_dir();
+    let marker_path = base_dir.join(crate::core::tasks::db_turso::WIPE_MARKER_FILE_NAME);
 
     info!("Marking database for wipe on next startup...");
 
@@ -515,8 +512,8 @@ pub fn wipe_database_sync() {
 /// Check for wipe marker and delete database files if present.
 /// Call this BEFORE init_database() to ensure files aren't locked.
 pub fn check_and_wipe_database() {
-    let base_dir = app_paths::foxy_data_dir();
-    let marker_path = base_dir.join(".wipe_database_on_next_start");
+    let base_dir = crate::core::game::spaces::active_game_space_dir();
+    let marker_path = base_dir.join(crate::core::tasks::db_turso::WIPE_MARKER_FILE_NAME);
 
     if !marker_path.exists() {
         return;
@@ -524,18 +521,7 @@ pub fn check_and_wipe_database() {
 
     info!("Wipe marker found, deleting database files...");
 
-    let db_artifacts = [
-        "database.db",
-        "database.db-wal",
-        "database.db-shm",
-        "database.db.compacting",
-        "database.db.compacting-wal",
-        "database.db.compacting-shm",
-        "database.db.bak",
-        "database.db.bak-wal",
-        "database.db.bak-shm",
-    ];
-    for name in db_artifacts {
+    for name in crate::core::tasks::db_turso::DATABASE_ARTIFACT_FILE_NAMES {
         let path = base_dir.join(name);
         if path.exists() {
             match fs::remove_file(&path) {
@@ -549,7 +535,7 @@ pub fn check_and_wipe_database() {
             let name = entry.file_name();
             if name
                 .to_string_lossy()
-                .starts_with("database.db.rebuild-backup-")
+                .starts_with(crate::core::tasks::db_turso::DATABASE_REBUILD_BACKUP_PREFIX)
             {
                 let path = entry.path();
                 match fs::remove_file(&path) {
@@ -569,8 +555,8 @@ pub fn check_and_wipe_database() {
 }
 
 /// Wipe the database by dropping all tables and re-applying the bootstrap schema
-/// on the live Turso handle (plan.md §5.1). Works while the app is running
-/// because it reuses the existing engine handle.
+/// on the live Turso handle. Works while the app is running because it reuses
+/// the existing engine handle.
 pub async fn wipe_database_live() -> Result<(), String> {
     let db = crate::core::tasks::db_turso::init_turso_database().await;
     crate::core::tasks::db_turso::wipe_and_rebuild_live(&db)

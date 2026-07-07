@@ -1,0 +1,24 @@
+{
+  "active_game_space_id": "arma3",
+  "last_opened_game_space_id": "arma3",
+  "game_spaces": [
+    {
+      "id": "arma3",
+      "game_id": "arma3",
+      "display_name": "Arma 3",
+      "created_at": 0
+    },
+    {
+      "id": "twwh3",
+      "game_id": "twwh3",
+      "display_name": "Total War: WARHAMMER III",
+      "created_at": 0
+    },
+    {
+      "id": "reforger",
+      "game_id": "reforger",
+      "display_name": "Arma Reforger",
+      "created_at": 0
+    }
+  ]
+}

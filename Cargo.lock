@@ -17,6 +17,7 @@ dependencies = [
  "egui",
  "flate2",
  "flexi_logger",
+ "foxy-formats",
  "fs4",
  "futures",
  "hex",
@@ -37,6 +38,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "sha2",
+ "steamworks",
  "sys-locale",
  "sysinfo",
  "tempfile",
@@ -2176,6 +2178,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "foxy-formats"
+version = "1.1.0"
+
+[[package]]
 name = "foxy-server-backend-cli"
 version = "1.1.0"
 dependencies = [
@@ -2183,6 +2189,7 @@ dependencies = [
  "blake3",
  "clap",
  "env_logger",
+ "foxy-formats",
  "glob",
  "hex",
  "indicatif",
@@ -5791,6 +5798,24 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
+
+[[package]]
+name = "steamworks"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5ff29921f6a7e8c85b0c971ec3c42002b9f535e3b8f4358cb22911d43709739a"
+dependencies = [
+ "bitflags 2.13.0",
+ "paste",
+ "steamworks-sys",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "steamworks-sys"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae139f051204a4af015d4f0ed3a1f7a51020d03a44c7cf249168c543d88131e9"
 
 [[package]]
 name = "strict-num"

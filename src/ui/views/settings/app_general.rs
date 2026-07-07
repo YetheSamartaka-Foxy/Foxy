@@ -7,7 +7,7 @@ use log::{info, warn};
 use super::render_wrapped_info_row;
 
 impl Foxy {
-    fn render_wrapped_settings_checkbox(
+    pub(super) fn render_wrapped_settings_checkbox(
         ui: &mut Ui,
         checked: &mut bool,
         label: String,
@@ -366,82 +366,6 @@ impl Foxy {
                             &mut self.settings_view_state.auto_backup_on_update,
                             tr("Auto backup addons before update"),
                             Some(tr("Automatically create a backup of each addon before downloading updates so you can restore the previous version if needed.")),
-                            row_width,
-                            changed,
-                        );
-                        Self::render_wrapped_settings_checkbox(
-                            ui,
-                            &mut self.settings_view_state.apply_repo_json_client_parameters,
-                            tr("Auto apply repo.json launch parameters"),
-                            Some(tr("Automatically apply launch parameters from the repository's repo.json when launching Arma 3.")),
-                            row_width,
-                            changed,
-                        );
-                        Self::render_wrapped_settings_checkbox(
-                            ui,
-                            &mut self.settings_view_state.apply_repo_json_dlc_content,
-                            tr("Auto apply repo.json DLC content"),
-                            Some(tr("Automatically enable DLC content specified by the repository's repo.json when launching Arma 3.")),
-                            row_width,
-                            changed,
-                        );
-                        Self::render_wrapped_settings_checkbox(
-                            ui,
-                            &mut self.settings_view_state.warn_editor_external_addons,
-                            tr("Warn before launching editor with external addons"),
-                            Some(tr(
-                                "Show a confirmation before opening Eden Editor when additional/external addons are enabled.",
-                            )),
-                            row_width,
-                            changed,
-                        );
-                        Self::render_wrapped_settings_checkbox(
-                            ui,
-                            &mut self.settings_view_state.enable_editor_mission_list,
-                            tr("Show Editor Missions list"),
-                            Some(tr(
-                                "Show the Editor Missions section in the repository view. Can be overridden per repository.",
-                            )),
-                            row_width,
-                            changed,
-                        );
-                        Self::render_wrapped_settings_checkbox(
-                            ui,
-                            &mut self.settings_view_state.enable_server_list,
-                            tr("Show Servers list"),
-                            Some(tr(
-                                "Show the Servers section in the repository view. Can be overridden per repository.",
-                            )),
-                            row_width,
-                            changed,
-                        );
-                        Self::render_wrapped_settings_checkbox(
-                            ui,
-                            &mut self.settings_view_state.check_server_addons_before_join,
-                            tr("Check server addons before joining"),
-                            Some(tr(
-                                "Before joining a server, query its addon list and offer to enable matching disabled local addons.",
-                            )),
-                            row_width,
-                            changed,
-                        );
-                        Self::render_wrapped_settings_checkbox(
-                            ui,
-                            &mut self.settings_view_state.check_ts3_running_before_join,
-                            tr("Check TeamSpeak is running before joining"),
-                            Some(tr(
-                                "Before joining a server with a repository that ships TeamSpeak plugins, warn if TeamSpeak 3 is not running and offer to launch it.",
-                            )),
-                            row_width,
-                            changed,
-                        );
-                        Self::render_wrapped_settings_checkbox(
-                            ui,
-                            &mut self.settings_view_state.check_steam_running_before_launch,
-                            tr("Check Steam is running before launching"),
-                            Some(tr(
-                                "Before launching or joining, warn if Steam is not running (Arma 3 needs Steam) and offer to launch it.",
-                            )),
                             row_width,
                             changed,
                         );

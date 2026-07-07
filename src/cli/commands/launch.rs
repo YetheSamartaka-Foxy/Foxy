@@ -11,6 +11,16 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 
 pub fn cmd_launch(cli: &CliArgs, args: LaunchArgs) -> Result<CommandSuccess, CommandError> {
+    let active = crate::core::game::spaces::active_game_space();
+    if active.game_id != crate::core::game::arma3::ARMA3_GAME_ID {
+        return Err(CommandError::validation(
+            "launch",
+            format!(
+                "launch starts Arma 3 repositories, but the active game space {} is for game {}. Use `foxy game launch` for the active game.",
+                active.space_id, active.game_id
+            ),
+        ));
+    }
     let state = AppState::load()?;
     let idx = find_repository_index(&state.repositories, &args.selector)?;
     let repo = state.repositories[idx].clone();
@@ -62,6 +72,17 @@ pub fn cmd_launch(cli: &CliArgs, args: LaunchArgs) -> Result<CommandSuccess, Com
         ));
     }
 
+    let extra_file_activation = crate::core::game::extra_files::activate_for_launch(
+        &crate::core::game::spaces::active_game_space_dir(),
+        &state.settings.arma3_directory,
+    )
+    .map_err(|err| {
+        CommandError::operation(
+            "launch",
+            format!("Failed to apply extra files before launch: {}", err),
+        )
+    })?;
+
     let steam_status = match ensure_steam_running(&state.settings.steam_directory) {
         Ok(SteamEnsureResult::AlreadyRunning) => "already_running",
         Ok(SteamEnsureResult::Started) => "started",
@@ -103,6 +124,11 @@ pub fn cmd_launch(cli: &CliArgs, args: LaunchArgs) -> Result<CommandSuccess, Com
             "args": launch_spec.args,
             "cwd": launch_spec.cwd.display().to_string(),
             "steam_status": steam_status,
+            "extra_files": {
+                "activated": extra_file_activation.activated.len(),
+                "failed": extra_file_activation.failed.len(),
+                "skipped_disabled": extra_file_activation.skipped_disabled
+            },
             "execute": true,
             "pid": child.id()
         }),

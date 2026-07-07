@@ -1,14 +1,13 @@
-//! Turso data-layer keystone (plan.md §5.1, §5.4, §6) - Phase 2 staging.
+//! Turso data-layer keystone.
 //!
 //! This is the Turso counterpart of the SeaORM/SQLite keystone in
 //! `init_database.rs`: it builds the local database, applies the single
 //! authoritative bootstrap schema (`sql/turso_schema.sql`), hands out tuned
 //! connections, and wraps write transactions in a retry loop matched to Turso's
-//! error variants. After the Phase-4 cutover this is the live persistence engine
-//! for the GUI, CLI, and `foxy-server-backend-cli` (plan.md §7).
+//! error variants. This is the live persistence engine for the GUI, CLI, and
+//! `foxy-server-backend-cli`.
 //!
-//! Everything here is informed by the Phase-0 compatibility-audit findings
-//! recorded in plan.md §11:
+//! Compatibility findings carried into this module:
 //! - FKs are OFF by default → enabled per-connection.
 //! - Honored PRAGMAs: `foreign_keys`, `synchronous`, `temp_store`, `cache_size`.
 //! - `busy_timeout` is a `Connection` method, not a PRAGMA.
@@ -27,10 +26,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::FutureExt;
 use log::{debug, info, warn};
-use tokio::sync::OnceCell;
 use turso::{Builder, Connection, Database, Error};
 
-use crate::core::utils::app_paths;
 use crate::core::utils::format::sanitize_log_path;
 
 /// The folded bootstrap schema (migrations 01..21 in final state). Applied once
@@ -78,12 +75,29 @@ pub(crate) const SUBFILES_INDEX_NAMES: [&str; 2] = [
 const DB_BUSY_TIMEOUT: Duration = Duration::from_millis(5000);
 const DB_MAX_RETRIES: usize = 5;
 
-/// Filesystem path to `database.db` in the Foxy data dir, creating the parent
-/// directory and an empty file if missing (mirrors `init_database::database_url`
-/// but returns a plain path - Turso's `Builder::new_local` takes a path, not a
-/// `sqlite://` URL).
+/// Every file the Turso engine may leave beside `database.db`. Shared by the
+/// startup wipe and the game-space layout migration.
+pub(crate) const DATABASE_ARTIFACT_FILE_NAMES: [&str; 9] = [
+    "database.db",
+    "database.db-wal",
+    "database.db-shm",
+    "database.db.compacting",
+    "database.db.compacting-wal",
+    "database.db.compacting-shm",
+    "database.db.bak",
+    "database.db.bak-wal",
+    "database.db.bak-shm",
+];
+
+pub(crate) const DATABASE_REBUILD_BACKUP_PREFIX: &str = "database.db.rebuild-backup-";
+
+pub(crate) const WIPE_MARKER_FILE_NAME: &str = ".wipe_database_on_next_start";
+
+/// Filesystem path to `database.db` in the active game space dir, creating the
+/// parent directory and an empty file if missing (Turso's `Builder::new_local`
+/// takes a path, not a `sqlite://` URL).
 pub(crate) fn database_file_path() -> PathBuf {
-    let db_path = app_paths::foxy_data_dir().join("database.db");
+    let db_path = crate::core::game::spaces::active_game_space_dir().join("database.db");
     if let Some(parent) = db_path.parent()
         && let Err(e) = fs::create_dir_all(parent)
     {
@@ -98,7 +112,7 @@ pub(crate) fn database_file_path() -> PathBuf {
 
 /// Open + bootstrap a Turso database at `path`. Factored out of
 /// [`init_turso_database`] so the engine and schema can be validated against a
-/// temp path in tests without the process-wide `OnceCell`.
+/// temp path in tests without the process-wide handle slot.
 pub(crate) async fn build_and_bootstrap(path: &str) -> turso::Result<Database> {
     let db = Builder::new_local(path).build().await?;
     // Schema creation needs FK enforcement on so the CASCADE chains are recorded.
@@ -167,7 +181,7 @@ pub(crate) async fn wipe_and_rebuild_live(db: &Database) -> turso::Result<()> {
     Ok(())
 }
 
-/// Whether Turso's MVCC concurrent-write mode (Stage B, plan.md §5.2) is active.
+/// Whether Turso's MVCC concurrent-write mode is active.
 ///
 /// Defaults **OFF**. MVCC (`journal_mode='mvcc'` + `BEGIN CONCURRENT`) is still
 /// beta and measured *much* slower than single-writer WAL for this app's
@@ -181,8 +195,8 @@ pub(crate) async fn wipe_and_rebuild_live(db: &Database) -> turso::Result<()> {
 /// busy_timeout + retry (benchmarked: 16 writers, 0 retries). Reproducers:
 /// `bench_mvcc_write_degradation` / `bench_mvcc_concurrent_writers`.
 ///
-/// Set `FOXY_DB_MVCC=1` (or `true`/`on`/`yes`) to opt back into Stage B for
-/// experiments once the engine's MVCC write path matures.
+/// Set `FOXY_DB_MVCC=1` (or `true`/`on`/`yes`) to opt back in for experiments
+/// once the engine's MVCC write path matures.
 pub(crate) fn mvcc_enabled() -> bool {
     matches!(
         std::env::var("FOXY_DB_MVCC")
@@ -197,8 +211,8 @@ pub(crate) fn mvcc_enabled() -> bool {
 
 /// Read back the engine's effective `journal_mode` for a tuned connection.
 /// Used at startup to confirm the file is on single-writer WAL (not a leftover
-/// `mvcc` from the default-on era) - the regression-analysis benchmark (plan.md
-/// §4, after_turso_regression_analysis.md rec #1) keys off this line.
+/// `mvcc` from the default-on era); the regression-analysis benchmark keys off
+/// this line.
 pub(crate) async fn read_journal_mode(conn: &Connection) -> Option<String> {
     let mut rows = conn.query("PRAGMA journal_mode", ()).await.ok()?;
     let row = rows.next().await.ok()??;
@@ -215,10 +229,8 @@ pub(crate) async fn connect_tuned(db: &Database) -> turso::Result<Connection> {
     conn.pragma_update("synchronous", "NORMAL").await?;
     conn.pragma_update("temp_store", "MEMORY").await?;
     conn.pragma_update("cache_size", "-16384").await?; // 16 MiB page cache
-    // Stage B (plan.md §5.2): MVCC concurrent writes - opt-in only (default off;
-    // see `mvcc_enabled` for the perf rationale). When enabled, set per-connection
-    // so every task's connection shares the mode; paired with `BEGIN CONCURRENT`
-    // in the seam's write path.
+    // MVCC concurrent writes are opt-in only. When enabled, set per-connection
+    // so every task's connection shares the mode; paired with `BEGIN CONCURRENT`.
     //
     // Default (off) sets single-writer WAL. Setting it EXPLICITLY (rather than
     // leaving it unset) is required to MIGRATE an existing database created under
@@ -711,75 +723,103 @@ fn set_db_startup_compaction_active(active: bool) {
     DB_STARTUP_COMPACTION_ACTIVE.store(active, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Process-wide Turso database handle, mirroring the `Arc<DatabaseConnection>`
-/// shape so it slots into `FoxyContext` at cutover.
+/// Slot holding the handle for the active game space's database, keyed by
+/// file path so switching the active space at runtime opens the target
+/// space's database. Dropping the previous handle here is safe: in-flight
+/// tasks that cloned it keep the old database alive until they finish.
+static DB_SLOT: tokio::sync::Mutex<Option<(PathBuf, Arc<Database>)>> =
+    tokio::sync::Mutex::const_new(None);
+
+/// Process-wide Turso database handle for the active game space, mirroring
+/// the `Arc<DatabaseConnection>` shape so it slots into `FoxyContext`.
 pub(crate) async fn init_turso_database() -> Arc<Database> {
-    static DB: OnceCell<Arc<Database>> = OnceCell::const_new();
+    init_turso_database_with_path().await.1
+}
 
-    DB.get_or_init(|| async {
-        let init_start = Instant::now();
-        let path = database_file_path();
-        let path_str = path.to_string_lossy().to_string();
-        info!("Ensuring Turso database {}", sanitize_log_path(&path));
+/// Same as [`init_turso_database`], also returning the file path the handle
+/// was opened for, so callers that key one-time per-database work never race
+/// a concurrent game-space switch by re-resolving the path themselves.
+pub(crate) async fn init_turso_database_with_path() -> (PathBuf, Arc<Database>) {
+    let path = database_file_path();
+    let mut slot = DB_SLOT.lock().await;
+    if let Some((open_path, db)) = slot.as_ref()
+        && *open_path == path
+    {
+        return (path, db.clone());
+    }
+    if slot.is_some() {
+        info!(
+            "Active game space changed; opening database {}",
+            sanitize_log_path(&path)
+        );
+    }
+    let db = open_and_prepare_database(&path).await;
+    *slot = Some((path.clone(), db.clone()));
+    (path, db)
+}
 
-        sweep_stale_db_artifacts(&path);
+async fn open_and_prepare_database(path: &Path) -> Arc<Database> {
+    let init_start = Instant::now();
+    let path_str = path.to_string_lossy().to_string();
+    info!("Ensuring Turso database {}", sanitize_log_path(path));
 
-        let mut db = build_or_rebuild_after_failure(&path, &path_str)
-            .await
-            .unwrap_or_else(|e| {
+    sweep_stale_db_artifacts(path);
+
+    let mut db = build_or_rebuild_after_failure(path, &path_str)
+        .await
+        .unwrap_or_else(|e| {
             log::error!("Failed to initialize Turso database: {}", e);
             panic!("Failed to initialize Turso database: {}", e);
         });
 
-        // Inspect for free-page bloat and, if needed, rebuild a dense copy
-        // (analysis4 P0). The file swap needs no open handle to the source, so
-        // drop `db` first, compact (panic-safe - never crashes startup), reopen.
-        if should_compact_database(&db).await {
-            let compact_start = Instant::now();
-            set_db_startup_compaction_active(true);
-            drop(db);
-            let installed = compact_database_file(&path).await;
-            db = build_or_rebuild_after_failure(&path, &path_str).await.unwrap_or_else(|e| {
+    // Inspect for free-page bloat and, if needed, rebuild a dense copy
+    // (analysis4 P0). The file swap needs no open handle to the source, so
+    // drop `db` first, compact (panic-safe - never crashes startup), reopen.
+    if should_compact_database(&db).await {
+        let compact_start = Instant::now();
+        set_db_startup_compaction_active(true);
+        drop(db);
+        let installed = compact_database_file(path).await;
+        db = build_or_rebuild_after_failure(path, &path_str)
+            .await
+            .unwrap_or_else(|e| {
                 log::error!("Failed to reopen Turso database after compaction: {}", e);
                 panic!("Failed to reopen Turso database after compaction: {}", e);
             });
-            set_db_startup_compaction_active(false);
-            if installed {
-                info!(
-                    "STARTUP: database compaction complete in {:.2}s",
-                    compact_start.elapsed().as_secs_f64()
-                );
-            }
+        set_db_startup_compaction_active(false);
+        if installed {
+            info!(
+                "STARTUP: database compaction complete in {:.2}s",
+                compact_start.elapsed().as_secs_f64()
+            );
         }
+    }
 
-        // Confirm the effective journal mode once at startup (plan.md §4): the
-        // file must be on single-writer WAL unless MVCC was explicitly opted in.
-        // An unexpected `mvcc` here is the signature of the force-redownload hang
-        // (see `mvcc_enabled` rationale).
-        match connect_tuned(&db).await {
-            Ok(conn) => {
-                let mode = read_journal_mode(&conn)
-                    .await
-                    .unwrap_or_else(|| "unknown".to_string());
-                info!(
-                    "STARTUP: Turso journal_mode={} mvcc_enabled={} write_gate_permits={} var_limit={}",
-                    mode,
-                    mvcc_enabled(),
-                    crate::core::tasks::init_database::DB_WRITE_GATE.available_permits(),
-                    crate::core::tasks::init_database::sqlite_variable_limit(),
-                );
-            }
-            Err(e) => warn!("STARTUP: could not read Turso journal_mode: {}", e),
+    // Confirm once per open that the file is on single-writer WAL unless
+    // MVCC was explicitly opted in.
+    // An unexpected `mvcc` here is the signature of the force-redownload hang
+    // (see `mvcc_enabled` rationale).
+    match connect_tuned(&db).await {
+        Ok(conn) => {
+            let mode = read_journal_mode(&conn)
+                .await
+                .unwrap_or_else(|| "unknown".to_string());
+            info!(
+                "STARTUP: Turso journal_mode={} mvcc_enabled={} write_gate_permits={} var_limit={}",
+                mode,
+                mvcc_enabled(),
+                crate::core::tasks::init_database::DB_WRITE_GATE.available_permits(),
+                crate::core::tasks::init_database::sqlite_variable_limit(),
+            );
         }
+        Err(e) => warn!("STARTUP: could not read Turso journal_mode: {}", e),
+    }
 
-        info!(
-            "STARTUP: Turso database initialized in {:.2}s",
-            init_start.elapsed().as_secs_f64()
-        );
-        Arc::new(db)
-    })
-    .await
-    .clone()
+    info!(
+        "STARTUP: Turso database initialized in {:.2}s",
+        init_start.elapsed().as_secs_f64()
+    );
+    Arc::new(db)
 }
 
 /// Build a throwaway file-backed Turso database with the full bootstrap schema,
@@ -828,7 +868,7 @@ fn db_retry_backoff(attempt: usize) -> Duration {
 
 /// Run `work` inside a transaction on `conn`, retrying on Turso's transient
 /// busy/conflict errors with exponential backoff. The `concurrent` flag selects
-/// `BEGIN CONCURRENT` (Stage B / MVCC) vs a plain `BEGIN` (Stage A); under MVCC
+/// `BEGIN CONCURRENT` (MVCC) vs a plain `BEGIN`; under MVCC
 /// the conflict is detected at the write or commit and the whole txn is retried.
 ///
 /// Statements inside `work` run on the same `conn` (Turso ties transaction state

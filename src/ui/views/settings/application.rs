@@ -13,7 +13,6 @@ impl Foxy {
         let mut path_change_flags = ApplicationPathChangeFlags {
             settings: false,
             addons: false,
-            profiles: false,
         };
 
         ScrollArea::vertical().show(ui, |ui| {
@@ -43,15 +42,11 @@ impl Foxy {
 
         self.render_application_settings_wipe_db_confirmation(ui);
         self.render_application_settings_reset_confirmation(ui);
-        self.render_arma3_profile_action_modal(ui);
 
         if path_change_flags.settings {
             self.save_settings();
             if path_change_flags.addons {
                 self.invalidate_addon_inventory_cache();
-            }
-            if path_change_flags.profiles {
-                self.refresh_detected_arma3_profiles();
             }
             if !ui.ctx().egui_wants_keyboard_input() {
                 self.show_success_toast(self.t("Settings saved"));

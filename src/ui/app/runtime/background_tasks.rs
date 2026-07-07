@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::TryRecvError as StdTryRecvError;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -677,12 +678,27 @@ impl Foxy {
             "Starting filesystem watcher for {} paths",
             watch_paths.len()
         );
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.fs_watch_stop = Some(stop.clone());
         self.fs_watch_worker = Some(api::spawn_repo_fs_watcher(
             watch_paths.into_iter().collect(),
             self.fs_watch_suppressed_until_ms.clone(),
             self.fs_watch_tx.clone(),
             self.repaint_ctx.clone(),
+            stop,
         ));
+    }
+
+    /// Signal the filesystem watcher to exit and forget its handle so a
+    /// later [`Self::start_fs_watcher`] starts a fresh one (used when the
+    /// active game space switches and the watched folders change).
+    pub fn stop_fs_watcher(&mut self) {
+        if let Some(stop) = self.fs_watch_stop.take() {
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        if self.fs_watch_worker.take().is_some() {
+            info!("Filesystem watcher stop requested");
+        }
     }
 
     /// Keep only the filesystem-watch repository URLs whose auto quick-scan

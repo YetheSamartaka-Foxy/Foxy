@@ -1,5 +1,5 @@
+use super::format_layout::local_file_matches_part_layout;
 use super::part_hashes::PartSpanSource;
-use super::pbo_layout::local_file_matches_part_layout;
 use super::persistence::{
     calculate_hash_from_items, persist_file_checksums, persist_mod_checksums,
     persist_part_checksums, persist_repository_checksums,

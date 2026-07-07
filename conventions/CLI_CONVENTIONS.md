@@ -10,7 +10,10 @@
 - `--json` output should remain machine-readable and stable.
 - Destructive actions should require `--yes`.
 - Support `--dry-run` where feasible.
-- CLI must operate on the same config/data root as UI (`settings.json`, `repositories.json`, `repository_spaces.json`, `window_state.json`, `database.db`) and honor `--config-dir`.
+- CLI must operate on the same config/data root as UI (app-global `app_settings.json`/`games.json`/`window_state.json`, plus per-game-space `game_settings.json`/`repositories.json`/`repository_spaces.json`/`database.db` under `games/<space_id>/`) and honor `--config-dir`.
+- Per-game-space files resolve from the active game space in `games.json`. `foxy game list|use|create|remove` manages game spaces; `game use` takes effect immediately for subsequent CLI commands and on the next UI start. `game remove` is destructive and requires `--yes`.
+- `foxy game launch` is the repository-free launcher for active generic game spaces. For `twwh3`, it reads enabled managed Workshop items, writes `used_mods.txt`/`my_mods.txt`, then launches with the generated manifest argument. Without `--execute`, or with global `--dry-run`, it must only preview the command and manifest.
+- Steam Workshop management is per active game space through `foxy workshop list|add|import|remove|set|freeze|unfreeze|export|resolve`. Network or Steam-touching paths support explicit backend selection (`steam-helper`, `steamcmd`, or `none`) and destructive removal keeps `--yes`.
 
 ## Server Backend CLI
 

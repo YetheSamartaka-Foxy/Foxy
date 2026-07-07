@@ -57,7 +57,7 @@ pub(super) fn now_unix_ms() -> u64 {
 }
 
 fn quick_scan_addon_hash_cache_path() -> PathBuf {
-    let mut path = app_paths::foxy_data_dir();
+    let mut path = crate::core::game::spaces::active_game_space_dir();
     path.push("quick_scan_addon_hash_cache.json");
     path
 }

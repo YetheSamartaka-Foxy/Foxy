@@ -101,6 +101,14 @@ fn cmd_settings_set(
         state.settings.arma3_directory = sanitize_user_path(&v.display().to_string());
         changed = true;
     }
+    if let Some(v) = args.twwh3_dir {
+        state.settings.twwh3_directory = sanitize_user_path(&v.display().to_string());
+        changed = true;
+    }
+    if let Some(v) = args.reforger_dir {
+        state.settings.reforger_directory = sanitize_user_path(&v.display().to_string());
+        changed = true;
+    }
     if let Some(v) = args.arma3_profiles_dir {
         state.settings.arma3_profiles_directory = sanitize_user_path(&v.display().to_string());
         changed = true;

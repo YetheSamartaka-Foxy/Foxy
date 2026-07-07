@@ -235,6 +235,7 @@ pub struct Foxy {
     pub fs_watch_rx: StdReceiver<api::FsChangeEvent>,
     pub fs_watch_tx: StdSender<api::FsChangeEvent>,
     pub fs_watch_worker: Option<std::thread::JoinHandle<()>>,
+    pub fs_watch_stop: Option<Arc<std::sync::atomic::AtomicBool>>,
     pub fs_watch_suppressed_until_ms: Arc<AtomicU64>,
     pub deferred_fs_scan: HashSet<String>,
     pub pending_quick_scan_urls: HashSet<String>,
@@ -437,4 +438,11 @@ pub struct Foxy {
     pub app_update_changelogs_requested: bool,
     // Swifty migration
     pub swifty_migration_state: crate::ui::views::swifty_migration::types::SwiftyMigrationState,
+    // Game spaces
+    pub game_spaces_view_state: crate::ui::views::game_spaces::GameSpacesViewState,
+    pub game_space_settings_view_state:
+        crate::ui::views::game_spaces::settings::GameSpaceSettingsViewState,
+    /// Runtime game-space switch waiting for pending saves to drain before it
+    /// swaps the active space and reloads.
+    pub pending_game_space_switch: Option<crate::core::game::spaces::GameSpaceEntry>,
 }

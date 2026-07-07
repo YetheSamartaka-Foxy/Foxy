@@ -18,6 +18,27 @@ const EDITOR_LAUNCH_COOLDOWN: Duration = Duration::from_secs(30);
 const JOIN_PREFLIGHT_CACHE_TTL: Duration = Duration::from_secs(60);
 
 impl Foxy {
+    fn activate_extra_files_before_launch(&mut self) {
+        let space_dir = crate::core::game::spaces::active_game_space_dir();
+        let game_dir = crate::core::game::registry()
+            .active()
+            .install_dir_from_settings(&self.settings_view_state)
+            .to_string();
+        match crate::core::game::extra_files::activate_for_launch(&space_dir, &game_dir) {
+            Ok(summary) => {
+                if !summary.failed.is_empty() {
+                    warn!(
+                        "Extra-file activation had {} failure(s) before launch",
+                        summary.failed.len()
+                    );
+                }
+            }
+            Err(err) => {
+                warn!("Extra-file activation failed before launch: {}", err);
+            }
+        }
+    }
+
     fn enabled_external_addons_for_editor_warning(repo: &Repository) -> Vec<String> {
         let mut addons: Vec<String> = repo
             .external_addons
@@ -61,6 +82,14 @@ impl Foxy {
         launch_label: &str,
     ) -> LaunchDispatchResult {
         let Some(command) = self.create_launch_command(effective, server) else {
+            if crate::core::game::registry().active().id()
+                != crate::core::game::arma3::ARMA3_GAME_ID
+            {
+                self.show_error_toast(
+                    self.t("Launching repositories is only supported in Arma 3 game spaces."),
+                );
+                return LaunchDispatchResult::Failed;
+            }
             let arma3_directory = self.settings_view_state.arma3_directory.trim();
             #[cfg(target_os = "linux")]
             {
@@ -75,15 +104,18 @@ impl Foxy {
             {
                 if arma3_directory.is_empty() {
                     self.show_error_toast(
-                        self.t("Arma 3 directory is not configured. Set it in Settings."),
+                        self.t(
+                            "Arma 3 directory is not configured. Set it in Game space settings.",
+                        ),
                     );
                 } else if !std::path::Path::new(arma3_directory).exists() {
-                    self.show_error_toast(
-                        self.t("Arma 3 directory does not exist. Check the path in Settings."),
-                    );
-                } else if !crate::core::steam::is_valid_arma3_dir(std::path::Path::new(
-                    arma3_directory,
-                )) {
+                    self.show_error_toast(self.t(
+                        "Arma 3 directory does not exist. Check the path in Game space settings.",
+                    ));
+                } else if !crate::core::game::registry()
+                    .active()
+                    .validate_install_dir(std::path::Path::new(arma3_directory))
+                {
                     self.show_error_toast(
                         self.t("Arma 3 executable not found at the configured path."),
                     );
@@ -95,6 +127,7 @@ impl Foxy {
         let executable = command.get_program().to_os_string();
         let args: Vec<OsString> = command.get_args().map(|arg| arg.to_os_string()).collect();
         let cwd: Option<PathBuf> = command.get_current_dir().map(Path::to_path_buf);
+        self.activate_extra_files_before_launch();
 
         if steam::is_steam_running() {
             return match spawn_launch_process(&executable, &args, cwd.as_deref()) {
@@ -866,6 +899,7 @@ impl Foxy {
         let executable = command.get_program().to_os_string();
         let args: Vec<OsString> = command.get_args().map(|a| a.to_os_string()).collect();
         let cwd: Option<PathBuf> = command.get_current_dir().map(Path::to_path_buf);
+        self.activate_extra_files_before_launch();
 
         if steam::is_steam_running() {
             match spawn_launch_process(&executable, &args, cwd.as_deref()) {

@@ -2382,6 +2382,22 @@ impl Foxy {
             | FoxyView::VersionBrowser => {
                 self.open_reference_view(parsed);
             }
+            FoxyView::GameSpaces => {
+                if self.current_view != FoxyView::GameSpaces {
+                    self.open_game_spaces_view();
+                }
+            }
+            FoxyView::GameSpaceSettings => {
+                if self.current_view != FoxyView::GameSpaceSettings {
+                    self.open_active_game_space_settings();
+                }
+                if let Some(tab) = tab {
+                    self.game_space_settings_view_state.current_tab =
+                        parse_agent_gui_game_space_settings_tab(tab).ok_or_else(|| {
+                            format!("Unsupported game-space-settings tab '{}'", tab)
+                        })?;
+                }
+            }
             FoxyView::RepositoryList | FoxyView::SwiftyMigration | FoxyView::None => {
                 self.current_view = parsed;
                 self.last_view = FoxyView::None;
@@ -5655,6 +5671,8 @@ pub fn parse_agent_gui_view(view: &str) -> Option<FoxyView> {
         "app-update" | "update" => Some(FoxyView::AppUpdate),
         "version-browser" | "versions" => Some(FoxyView::VersionBrowser),
         "swifty-migration" | "migration" => Some(FoxyView::SwiftyMigration),
+        "game-spaces" | "games" => Some(FoxyView::GameSpaces),
+        "game-space-settings" | "game-settings" => Some(FoxyView::GameSpaceSettings),
         "none" => Some(FoxyView::None),
         _ => None,
     }
@@ -5674,16 +5692,27 @@ pub fn parse_agent_gui_settings_tab(tab: &str) -> Option<String> {
     let tab = match normalize_selector(tab).as_str() {
         "application" | "app" => "Application",
         "backup-manager" | "backup" | "backups" => "Backup Manager",
-        "additional-search-folders" | "additional-folders" | "search-folders" | "folders" => {
-            "Additional search folders"
-        }
         "cleanup" => "Cleanup",
         "direct-download" | "download" => "Direct download",
-        "ts3-plugin" | "ts3-plugins" | "ts3" | "teamspeak" => "TS3 Plugin",
+        "scheduling" | "schedule" => "Scheduling",
         "customization" | "customisation" | "customize" | "customise" => "Customization",
         _ => return None,
     };
     Some(tab.to_string())
+}
+
+pub fn parse_agent_gui_game_space_settings_tab(
+    tab: &str,
+) -> Option<crate::ui::views::game_spaces::settings::GameSpaceSettingsTab> {
+    use crate::ui::views::game_spaces::settings::GameSpaceSettingsTab;
+    match normalize_selector(tab).as_str() {
+        "game" | "game-space" | "general" => Some(GameSpaceSettingsTab::Game),
+        "additional-search-folders" | "additional-folders" | "search-folders" | "folders" => {
+            Some(GameSpaceSettingsTab::SearchFolders)
+        }
+        "ts3-plugin" | "ts3-plugins" | "ts3" | "teamspeak" => Some(GameSpaceSettingsTab::Ts3Plugin),
+        _ => None,
+    }
 }
 
 fn repo_state_name(state: RepoState) -> &'static str {
@@ -5707,6 +5736,8 @@ fn view_to_agent_name(view: FoxyView) -> &'static str {
         FoxyView::AppUpdate => "app-update",
         FoxyView::VersionBrowser => "version-browser",
         FoxyView::SwiftyMigration => "swifty-migration",
+        FoxyView::GameSpaces => "game-spaces",
+        FoxyView::GameSpaceSettings => "game-space-settings",
         FoxyView::None => "none",
     }
 }
@@ -5747,6 +5778,10 @@ mod tests {
         assert_eq!(
             parse_agent_gui_view("repo-settings"),
             Some(FoxyView::RepositorySettings)
+        );
+        assert_eq!(
+            parse_agent_gui_view("game-space-settings"),
+            Some(FoxyView::GameSpaceSettings)
         );
         assert_eq!(parse_agent_gui_view("missing"), None);
     }
@@ -5957,22 +5992,41 @@ mod tests {
             Some("Backup Manager")
         );
         assert_eq!(
-            parse_agent_gui_settings_tab("additional-search-folders").as_deref(),
-            Some("Additional search folders")
-        );
-        assert_eq!(
             parse_agent_gui_settings_tab("direct-download").as_deref(),
             Some("Direct download")
         );
         assert_eq!(
-            parse_agent_gui_settings_tab("ts3").as_deref(),
-            Some("TS3 Plugin")
+            parse_agent_gui_settings_tab("scheduling").as_deref(),
+            Some("Scheduling")
         );
         assert_eq!(
             parse_agent_gui_settings_tab("customization").as_deref(),
             Some("Customization")
         );
+        assert_eq!(
+            parse_agent_gui_settings_tab("additional-search-folders"),
+            None
+        );
+        assert_eq!(parse_agent_gui_settings_tab("ts3"), None);
         assert_eq!(parse_agent_gui_settings_tab("missing"), None);
+    }
+
+    #[test]
+    fn parses_game_space_settings_tab_aliases() {
+        use crate::ui::views::game_spaces::settings::GameSpaceSettingsTab;
+        assert_eq!(
+            parse_agent_gui_game_space_settings_tab("game"),
+            Some(GameSpaceSettingsTab::Game)
+        );
+        assert_eq!(
+            parse_agent_gui_game_space_settings_tab("additional-search-folders"),
+            Some(GameSpaceSettingsTab::SearchFolders)
+        );
+        assert_eq!(
+            parse_agent_gui_game_space_settings_tab("ts3"),
+            Some(GameSpaceSettingsTab::Ts3Plugin)
+        );
+        assert_eq!(parse_agent_gui_game_space_settings_tab("missing"), None);
     }
 
     #[test]

@@ -183,15 +183,25 @@ fn preferred_renderer() -> PreferredRenderer {
 }
 
 fn load_renderer_preference() -> UiRendererPreference {
-    let settings_path = Foxy::get_settings_path();
-    let Ok(json_string) = std::fs::read_to_string(&settings_path) else {
-        return UiRendererPreference::default();
+    let merged = match crate::core::game::spaces::read_merged_settings_value(
+        &Foxy::get_app_settings_path(),
+        &Foxy::get_game_settings_path(),
+    ) {
+        Ok(Some(merged)) => merged,
+        Ok(None) => return UiRendererPreference::default(),
+        Err(err) => {
+            log::warn!(
+                "Failed to load settings while resolving renderer preference: {}",
+                err
+            );
+            return UiRendererPreference::default();
+        }
     };
-    match serde_json::from_str::<SettingsViewState>(&json_string) {
+    match serde_json::from_value::<SettingsViewState>(merged) {
         Ok(settings) => settings.ui_renderer,
         Err(err) => {
             log::warn!(
-                "Failed to parse settings.json while resolving renderer preference: {}",
+                "Failed to parse settings while resolving renderer preference: {}",
                 err
             );
             UiRendererPreference::default()
@@ -238,22 +248,26 @@ fn consume_wgpu_crash_marker() -> bool {
 }
 
 fn switch_renderer_setting_to_glow() {
-    let settings_path = Foxy::get_settings_path();
-    let mut settings = match std::fs::read_to_string(&settings_path) {
-        Ok(json_string) => match serde_json::from_str::<SettingsViewState>(&json_string) {
+    let app_settings_path = Foxy::get_app_settings_path();
+    let game_settings_path = Foxy::get_game_settings_path();
+    let mut settings = match crate::core::game::spaces::read_merged_settings_value(
+        &app_settings_path,
+        &game_settings_path,
+    ) {
+        Ok(Some(merged)) => match serde_json::from_value::<SettingsViewState>(merged) {
             Ok(settings) => settings,
             Err(err) => {
                 log::warn!(
-                    "Failed to parse settings.json while applying renderer fallback: {}",
+                    "Failed to parse settings while applying renderer fallback: {}",
                     err
                 );
                 return;
             }
         },
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => SettingsViewState::default(),
+        Ok(None) => SettingsViewState::default(),
         Err(err) => {
             log::warn!(
-                "Failed to read settings.json while applying renderer fallback: {}",
+                "Failed to read settings while applying renderer fallback: {}",
                 err
             );
             return;
@@ -265,28 +279,19 @@ fn switch_renderer_setting_to_glow() {
     }
 
     settings.ui_renderer = UiRendererPreference::Glow;
-    if let Some(parent) = settings_path.parent()
-        && let Err(err) = std::fs::create_dir_all(parent)
-    {
-        log::warn!(
-            "Failed to create settings directory {} while applying renderer fallback: {}",
-            parent.display(),
-            err
-        );
-        return;
-    }
-
-    match serde_json::to_string_pretty(&settings) {
-        Ok(serialized) => {
-            if let Err(err) = std::fs::write(&settings_path, serialized) {
-                log::warn!(
-                    "Failed to persist renderer fallback setting {}: {}",
-                    settings_path.display(),
-                    err
-                );
-            }
+    let settings_value = match serde_json::to_value(&settings) {
+        Ok(value) => value,
+        Err(err) => {
+            log::warn!("Failed to serialize renderer fallback setting: {}", err);
+            return;
         }
-        Err(err) => log::warn!("Failed to serialize renderer fallback setting: {}", err),
+    };
+    if let Err(err) = crate::core::game::spaces::write_split_settings(
+        &settings_value,
+        &app_settings_path,
+        &game_settings_path,
+    ) {
+        log::warn!("Failed to persist renderer fallback setting: {}", err);
     }
 }
 

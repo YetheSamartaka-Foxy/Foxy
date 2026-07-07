@@ -1,5 +1,4 @@
 use std::fs;
-use std::io::ErrorKind;
 
 use log::{debug, error, info};
 
@@ -13,98 +12,111 @@ use crate::ui::types::{
 
 impl Foxy {
     pub fn load_settings(&mut self) {
-        let settings_path = Self::get_settings_path();
         let mut can_persist_detected_directories = false;
-        match fs::read_to_string(&settings_path) {
-            Ok(json_string) => match serde_json::from_str::<serde_json::Value>(&json_string) {
-                Ok(settings_json) => {
-                    let app_update_mode_was_saved = settings_json.get("app_update_mode").is_some();
-                    let app_update_mode_override_was_saved =
-                        settings_json.get("app_update_mode_user_override").is_some();
-                    let mut settings =
-                        match serde_json::from_value::<SettingsViewState>(settings_json) {
-                            Ok(settings) => settings,
-                            Err(err) => {
-                                log::error!("Failed to parse settings.json: {}", err);
-                                return;
-                            }
-                        };
-                    if app_update_mode_was_saved && !app_update_mode_override_was_saved {
-                        settings.app_update_mode_user_override = true;
+        match crate::core::game::spaces::read_merged_settings_value(
+            &Self::get_app_settings_path(),
+            &Self::get_game_settings_path(),
+        ) {
+            Ok(Some(settings_json)) => {
+                let app_update_mode_was_saved = settings_json.get("app_update_mode").is_some();
+                let app_update_mode_override_was_saved =
+                    settings_json.get("app_update_mode_user_override").is_some();
+                let default_settings_json = match serde_json::to_value(SettingsViewState::default())
+                {
+                    Ok(value) => value,
+                    Err(err) => {
+                        log::error!("Failed to serialize default settings: {}", err);
+                        return;
                     }
-                    self.settings_view_state = settings;
-                    (
-                        self.settings_view_state.locale,
-                        self.settings_view_state.locale_preference_migrated,
-                    ) = migrate_locale_preference(
-                        &self.settings_view_state.locale,
-                        self.settings_view_state.locale_preference_migrated,
-                    );
-                    if self.settings_view_state.download_speed_limit_mbps == Some(0) {
-                        self.settings_view_state.download_speed_limit_mbps = Some(1);
+                };
+                let settings_json = crate::core::game::spaces::merge_value_over_defaults(
+                    default_settings_json,
+                    settings_json,
+                );
+                let mut settings = match serde_json::from_value::<SettingsViewState>(settings_json)
+                {
+                    Ok(settings) => settings,
+                    Err(err) => {
+                        log::error!("Failed to parse settings: {}", err);
+                        return;
                     }
-                    if self.settings_view_state.backup_max_age_days == Some(0) {
-                        self.settings_view_state.backup_max_age_days = None;
-                    }
-                    self.settings_view_state.app_update_url =
-                        self.settings_view_state.app_update_url.trim().to_string();
-                    if self.settings_view_state.app_update_url.is_empty() {
-                        self.settings_view_state.app_update_url_user_override = false;
-                    }
-                    sanitize_settings_paths(&mut self.settings_view_state);
-                    normalize_settings_launch_behavior(&mut self.settings_view_state);
-                    for notice in &mut self.settings_view_state.update_summary_notices {
-                        notice.repository_url = Self::normalize_repo_url(&notice.repository_url);
-                        if notice.pending_ack_count == 0 {
-                            notice.pending_ack_count = 1;
-                        }
-                    }
-                    for session in &mut self.settings_view_state.active_update_sessions {
-                        session.repository_url = Self::normalize_repo_url(&session.repository_url);
-                    }
-                    self.settings_view_state
-                        .active_update_sessions
-                        .retain(|session| !session.mods.is_empty());
-                    // Discard stale notices that carry no meaningful update info
-                    // (e.g. leftover from a no-op download after a DB wipe).
-                    self.settings_view_state
-                        .update_summary_notices
-                        .retain(|notice| notice.summary.has_meaningful_content());
-                    if !self.settings_view_state.update_view_font_hierarchy_migrated {
-                        self.settings_view_state
-                            .font_sizes
-                            .update_view
-                            .migrate_heading_hierarchy();
-                        self.settings_view_state.update_view_font_hierarchy_migrated = true;
-                        info!("Migrated update-view font heading hierarchy to new defaults");
-                    }
-                    self.settings_view_state.font_sizes.clamp_to_limits();
-                    self.settings_view_state.ui_scale_percent = self
-                        .settings_view_state
-                        .ui_scale_percent
-                        .clamp(MIN_UI_SCALE_PERCENT, MAX_UI_SCALE_PERCENT);
-                    self.settings_view_state.ui_scale_percent_draft =
-                        self.settings_view_state.ui_scale_percent;
-                    self.i18n.set_language(&self.settings_view_state.locale);
-                    debug!("Loaded settings.json");
-                    if self.settings_view_state.arma3_directory.trim().is_empty() {
-                        info!("Arma 3 directory is not configured in settings");
-                    } else {
-                        info!(
-                            "Arma 3 directory: {}",
-                            self.settings_view_state.arma3_directory
-                        );
-                    }
-                    can_persist_detected_directories = true;
+                };
+                if app_update_mode_was_saved && !app_update_mode_override_was_saved {
+                    settings.app_update_mode_user_override = true;
                 }
-                Err(err) => log::error!("Failed to parse settings.json: {}", err),
-            },
-            Err(err) if err.kind() == ErrorKind::NotFound => {
-                info!("settings.json not found, using default settings");
+                self.settings_view_state = settings;
+                (
+                    self.settings_view_state.locale,
+                    self.settings_view_state.locale_preference_migrated,
+                ) = migrate_locale_preference(
+                    &self.settings_view_state.locale,
+                    self.settings_view_state.locale_preference_migrated,
+                );
+                if self.settings_view_state.download_speed_limit_mbps == Some(0) {
+                    self.settings_view_state.download_speed_limit_mbps = Some(1);
+                }
+                if self.settings_view_state.backup_max_age_days == Some(0) {
+                    self.settings_view_state.backup_max_age_days = None;
+                }
+                self.settings_view_state.app_update_url =
+                    self.settings_view_state.app_update_url.trim().to_string();
+                if self.settings_view_state.app_update_url.is_empty() {
+                    self.settings_view_state.app_update_url_user_override = false;
+                }
+                sanitize_settings_paths(&mut self.settings_view_state);
+                normalize_settings_launch_behavior(&mut self.settings_view_state);
+                for notice in &mut self.settings_view_state.update_summary_notices {
+                    notice.repository_url = Self::normalize_repo_url(&notice.repository_url);
+                    if notice.pending_ack_count == 0 {
+                        notice.pending_ack_count = 1;
+                    }
+                }
+                for session in &mut self.settings_view_state.active_update_sessions {
+                    session.repository_url = Self::normalize_repo_url(&session.repository_url);
+                }
+                self.settings_view_state
+                    .active_update_sessions
+                    .retain(|session| !session.mods.is_empty());
+                // Discard stale notices that carry no meaningful update info
+                // (e.g. leftover from a no-op download after a DB wipe).
+                self.settings_view_state
+                    .update_summary_notices
+                    .retain(|notice| notice.summary.has_meaningful_content());
+                if !self.settings_view_state.update_view_font_hierarchy_migrated {
+                    self.settings_view_state
+                        .font_sizes
+                        .update_view
+                        .migrate_heading_hierarchy();
+                    self.settings_view_state.update_view_font_hierarchy_migrated = true;
+                    info!("Migrated update-view font heading hierarchy to new defaults");
+                }
+                self.settings_view_state.font_sizes.clamp_to_limits();
+                self.settings_view_state.ui_scale_percent = self
+                    .settings_view_state
+                    .ui_scale_percent
+                    .clamp(MIN_UI_SCALE_PERCENT, MAX_UI_SCALE_PERCENT);
+                self.settings_view_state.ui_scale_percent_draft =
+                    self.settings_view_state.ui_scale_percent;
+                self.i18n.set_language(&self.settings_view_state.locale);
+                debug!("Loaded app_settings.json and game_settings.json");
+                let module = crate::core::game::registry().active();
+                let install_dir = module.install_dir_from_settings(&self.settings_view_state);
+                if install_dir.trim().is_empty() {
+                    info!(
+                        "{} directory is not configured in settings",
+                        module.display_name()
+                    );
+                } else {
+                    info!("{} directory: {}", module.display_name(), install_dir);
+                }
+                can_persist_detected_directories = true;
+            }
+            Ok(None) => {
+                info!("Settings files not found, using default settings");
                 can_persist_detected_directories = true;
             }
             Err(err) => {
-                error!("Failed to read settings.json: {}", err);
+                error!("Failed to load settings: {}", err);
             }
         }
 
@@ -123,30 +135,66 @@ impl Foxy {
                 debug!("Steam directory is empty and auto-detection did not find an install");
             }
         }
+        // Detection only ever fills the active module's own install field so a
+        // non-Arma space never gets its game path written into the Arma 3
+        // setting (or vice versa).
+        let active_module = crate::core::game::registry().active();
+        let is_arma3_space = active_module.id() == crate::core::game::arma3::ARMA3_GAME_ID;
+        let active_install_setting_id = active_module
+            .settings_schema()
+            .install_dir_setting()
+            .map(|setting| setting.id);
         if can_persist_detected_directories
-            && self.settings_view_state.arma3_directory.trim().is_empty()
+            && active_module
+                .install_dir_from_settings(&self.settings_view_state)
+                .trim()
+                .is_empty()
         {
             if let Some(path) =
-                steam::detect_arma3_install_directory(&self.settings_view_state.steam_directory)
+                active_module.detect_install_dir(&crate::core::game::GameDetectCtx {
+                    steam_directory: &self.settings_view_state.steam_directory,
+                })
             {
                 let path = path.display().to_string();
                 if path_is_inside_onedrive(&path) {
-                    debug!(
-                        "Auto-detected Arma 3 directory is inside OneDrive and was not persisted"
-                    );
+                    debug!("Auto-detected game directory is inside OneDrive and was not persisted");
                 } else {
-                    self.settings_view_state.arma3_directory = path;
-                    info!(
-                        "Auto-detected Arma 3 directory: {}",
-                        self.settings_view_state.arma3_directory
-                    );
-                    detected_settings_changed = true;
+                    match active_install_setting_id {
+                        Some("arma3_directory") => {
+                            self.settings_view_state.arma3_directory = path;
+                            info!(
+                                "Auto-detected Arma 3 directory: {}",
+                                self.settings_view_state.arma3_directory
+                            );
+                            detected_settings_changed = true;
+                        }
+                        Some("twwh3_directory") => {
+                            self.settings_view_state.twwh3_directory = path;
+                            info!(
+                                "Auto-detected Total War: WARHAMMER III directory: {}",
+                                self.settings_view_state.twwh3_directory
+                            );
+                            detected_settings_changed = true;
+                        }
+                        Some("reforger_directory") => {
+                            self.settings_view_state.reforger_directory = path;
+                            info!(
+                                "Auto-detected Arma Reforger directory: {}",
+                                self.settings_view_state.reforger_directory
+                            );
+                            detected_settings_changed = true;
+                        }
+                        _ => {}
+                    }
                 }
             } else {
-                debug!("Arma 3 directory is empty and auto-detection did not find an install");
+                debug!(
+                    "Active game install directory is empty and auto-detection did not find an install"
+                );
             }
         }
         if can_persist_detected_directories
+            && is_arma3_space
             && self
                 .settings_view_state
                 .teamspeak3_directory
@@ -184,7 +232,8 @@ impl Foxy {
         self.show_memory_diagnostics_window = false;
         self.i18n
             .set_language(&normalize_language(&self.settings_view_state.locale));
-        let _ = fs::remove_file(Self::get_settings_path());
+        let _ = fs::remove_file(Self::get_app_settings_path());
+        let _ = fs::remove_file(Self::get_game_settings_path());
     }
 
     pub fn repo_auto_recheck_on_launch(&self, repo: &Repository) -> bool {

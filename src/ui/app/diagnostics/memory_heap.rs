@@ -223,6 +223,8 @@ impl Foxy {
     pub(super) fn heap_bytes_of_settings(settings: &SettingsViewState) -> usize {
         let mut total = Self::heap_bytes_of_string(&settings.current_tab)
             + Self::heap_bytes_of_string(&settings.arma3_directory)
+            + Self::heap_bytes_of_string(&settings.twwh3_directory)
+            + Self::heap_bytes_of_string(&settings.reforger_directory)
             + Self::heap_bytes_of_string(&settings.arma3_profiles_directory)
             + Self::heap_bytes_of_string(&settings.steam_directory)
             + Self::heap_bytes_of_string(&settings.temp_directory)

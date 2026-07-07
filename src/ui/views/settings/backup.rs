@@ -595,7 +595,7 @@ impl Foxy {
 
         let logs_dir = app_paths::foxy_logs_dir();
 
-        // Collect log files (non-recursive – logs sit directly in the folder).
+        // Collect log files (non-recursive - logs sit directly in the folder).
         let mut entries: Vec<_> = fs::read_dir(&logs_dir)
             .map_err(|e| format!("Failed to read log directory: {e}"))?
             .filter_map(|entry| {
@@ -690,7 +690,7 @@ impl Foxy {
             .iter()
             .map(|path| file_size(path).unwrap_or_default())
             .sum::<u64>();
-        let database_dir = Self::get_config_directory();
+        let database_dir = Self::get_game_space_directory();
         let database_db = database_dir.join("database.db");
         let database_wal = database_dir.join("database.db-wal");
         let database_shm = database_dir.join("database.db-shm");
@@ -791,8 +791,12 @@ impl Foxy {
             Self::format_bytes_short(database_total_size)
         ));
         manifest.push_str(&format!(
-            "settings_json={}\n",
-            Self::format_optional_bytes(file_size(database_dir.join("settings.json")))
+            "app_settings_json={}\n",
+            Self::format_optional_bytes(file_size(Self::get_app_settings_path()))
+        ));
+        manifest.push_str(&format!(
+            "game_settings_json={}\n",
+            Self::format_optional_bytes(file_size(database_dir.join("game_settings.json")))
         ));
         manifest.push_str(&format!(
             "repositories_json={}\n",
@@ -875,7 +879,7 @@ impl Foxy {
         let mut file = std::fs::File::open(path).ok()?;
         let file_len = file.metadata().ok()?.len();
 
-        // Read the last 4 KiB – more than enough to contain the final line.
+        // Read the last 4 KiB - more than enough to contain the final line.
         let start = file_len.saturating_sub(4096);
         file.seek(SeekFrom::Start(start)).ok()?;
 

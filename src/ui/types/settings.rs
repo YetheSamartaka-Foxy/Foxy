@@ -53,6 +53,10 @@ pub struct SettingsViewState {
     pub current_tab: String,
     pub arma3_directory: String,
     #[serde(default)]
+    pub twwh3_directory: String,
+    #[serde(default)]
+    pub reforger_directory: String,
+    #[serde(default)]
     pub arma3_profiles_directory: String,
     #[serde(default)]
     pub steam_directory: String,
@@ -257,6 +261,8 @@ impl Default for SettingsViewState {
             backup_max_age_days: default_backup_max_age_days(),
             current_tab: "Application".to_string(),
             arma3_directory: String::new(),
+            twwh3_directory: String::new(),
+            reforger_directory: String::new(),
             arma3_profiles_directory: String::new(),
             steam_directory: String::new(),
             teamspeak3_directory: String::new(),

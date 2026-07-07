@@ -306,6 +306,8 @@ impl Foxy {
             .resizable(false)
             .frame(sidepanel_frame)
             .show(ui, |ui| {
+                self.render_game_space_header(ui);
+
                 let add_repository_font_size = self
                     .settings_view_state
                     .font_sizes

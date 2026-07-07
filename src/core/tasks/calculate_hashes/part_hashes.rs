@@ -1,7 +1,8 @@
-use super::pbo_layout::{
-    LocalPartSpan, has_pbo_part_markers, map_local_part_spans, parse_local_pbo_layout,
+use super::format_layout::{
+    map_local_part_spans, parse_local_content_layout, remote_parts_format_id,
 };
 use super::*;
+use foxy_formats::LocalPartSpan;
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct PartHashMetrics {
@@ -163,16 +164,20 @@ pub(super) async fn calculate_part_hashes(
     }
     metrics.metadata_elapsed = metadata_started.elapsed();
 
-    // Detect PBO layout for local span remapping before opening the file
+    // Detect local archive layout for local span remapping before opening the file
     let layout_started = Instant::now();
-    let has_pbo_markers = has_pbo_part_markers(&parts);
-    let local_span_overrides = if span_source == PartSpanSource::DetectLocalLayout
-        && has_pbo_markers
+    let remote_format_id = remote_parts_format_id(file_path, &parts);
+    let local_span_overrides = if let (PartSpanSource::DetectLocalLayout, Some(format_id)) =
+        (span_source, remote_format_id)
     {
         metrics.layout_files = 1;
         let parser_path = file_path.to_string();
         let parser_started = Instant::now();
-        match tokio::task::spawn_blocking(move || parse_local_pbo_layout(&parser_path)).await {
+        match tokio::task::spawn_blocking(move || {
+            parse_local_content_layout(format_id, &parser_path)
+        })
+        .await
+        {
             Ok(Ok(layout)) => {
                 metrics.layout_parse_elapsed = parser_started.elapsed();
                 metrics.layout_entries = layout.entry_count;
@@ -181,23 +186,23 @@ pub(super) async fn calculate_part_hashes(
                 let end_start = layout.end.start;
                 let end_len = layout.end.length;
                 let map_started = Instant::now();
-                let spans = map_local_part_spans(&parts, layout);
+                let spans = map_local_part_spans(&parts, &layout);
                 metrics.layout_map_elapsed = map_started.elapsed();
                 let mapped = spans.iter().filter(|span| span.is_some()).count();
                 let fallback = total_parts.saturating_sub(mapped);
                 metrics.mapped_parts = mapped;
                 metrics.fallback_parts = fallback;
                 debug!(
-                    "Local PBO span remap for {}: mapped_parts={} fallback_parts={} header_len={} end_start={} end_len={}",
-                    pbo_name, mapped, fallback, header_len, end_start, end_len
+                    "Local {} span remap for {}: mapped_parts={} fallback_parts={} header_len={} end_start={} end_len={}",
+                    format_id, pbo_name, mapped, fallback, header_len, end_start, end_len
                 );
                 Arc::new(spans)
             }
             Ok(Err(err)) => {
                 metrics.layout_parse_elapsed = parser_started.elapsed();
                 warn!(
-                    "Local PBO span remap failed for {}: {}. Falling back to remote offsets.",
-                    pbo_name, err
+                    "Local {} span remap failed for {}: {}. Falling back to remote offsets.",
+                    format_id, pbo_name, err
                 );
                 metrics.fallback_parts = total_parts;
                 Arc::new(vec![None; total_parts])
@@ -205,15 +210,15 @@ pub(super) async fn calculate_part_hashes(
             Err(err) => {
                 metrics.layout_parse_elapsed = parser_started.elapsed();
                 warn!(
-                    "Local PBO span remap task failed for {}: {}. Falling back to remote offsets.",
-                    pbo_name, err
+                    "Local {} span remap task failed for {}: {}. Falling back to remote offsets.",
+                    format_id, pbo_name, err
                 );
                 metrics.fallback_parts = total_parts;
                 Arc::new(vec![None; total_parts])
             }
         }
     } else {
-        if span_source == PartSpanSource::RemoteLayout && has_pbo_markers {
+        if span_source == PartSpanSource::RemoteLayout && remote_format_id.is_some() {
             metrics.remote_span_files = 1;
             debug!(
                 "Using remote part spans for freshly materialized download {} (parts={})",
@@ -226,7 +231,7 @@ pub(super) async fn calculate_part_hashes(
     if metrics.layout_files > 0 && (total_parts >= 64 || metrics.layout_elapsed.as_millis() >= 100)
     {
         info!(
-            "PBO layout metrics: file={} parts={} entries={} entry_payload_bytes={} mapped_parts={} fallback_parts={} parse={:.3}s map={:.3}s total={:.3}s",
+            "Content layout metrics: file={} parts={} entries={} entry_payload_bytes={} mapped_parts={} fallback_parts={} parse={:.3}s map={:.3}s total={:.3}s",
             pbo_name,
             total_parts,
             metrics.layout_entries,

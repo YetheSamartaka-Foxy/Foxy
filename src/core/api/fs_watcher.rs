@@ -2,6 +2,7 @@ use super::logging::request_background_repaint;
 use super::*;
 use crate::core::db::params;
 use crate::core::utils::format::sanitize_log_path_str;
+use std::sync::atomic::AtomicBool;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn unix_time_millis() -> u64 {
@@ -159,6 +160,7 @@ pub fn spawn_repo_fs_watcher(
     suppress_until_ms: Arc<AtomicU64>,
     result_tx: StdSender<FsChangeEvent>,
     repaint_ctx: Option<egui::Context>,
+    stop: Arc<AtomicBool>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         info!(
@@ -231,6 +233,10 @@ pub fn spawn_repo_fs_watcher(
         let mut last_event_at = Instant::now();
 
         loop {
+            if stop.load(Ordering::Relaxed) {
+                info!("Filesystem watcher stopped");
+                break;
+            }
             match rx.recv_timeout(Duration::from_millis(200)) {
                 Ok(Ok(event)) => {
                     for path in event.paths {

@@ -8,7 +8,7 @@ pub struct CliArgs {
     #[arg(
         long,
         global = true,
-        help = "Override config root directory (contains settings.json, repositories.json, repository_spaces.json)"
+        help = "Override config root directory (contains app_settings.json, games.json, and per game space data under games/<space>/)"
     )]
     pub config_dir: Option<PathBuf>,
     #[arg(long, global = true, help = "Emit machine-readable JSON output")]
@@ -98,6 +98,26 @@ pub enum CliCommand {
     Space {
         #[command(subcommand)]
         command: SpaceCommand,
+    },
+    /// Manage game spaces (list, switch, create, remove).
+    Game {
+        #[command(subcommand)]
+        command: GameCommand,
+    },
+    /// Export or import portable Foxy config packs.
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+    /// Manage Steam Workshop items for the active game space.
+    Workshop {
+        #[command(subcommand)]
+        command: WorkshopCommand,
+    },
+    #[command(hide = true)]
+    SteamHelper {
+        #[command(subcommand)]
+        command: SteamHelperCommand,
     },
     /// Inspect Arma 3 server metadata.
     Server {
@@ -1086,6 +1106,10 @@ pub struct SettingsSetArgs {
     pub enable_server_list: Option<bool>,
     #[arg(long, help = "Set Arma 3 installation directory")]
     pub arma3_dir: Option<PathBuf>,
+    #[arg(long, help = "Set Total War: WARHAMMER III installation directory")]
+    pub twwh3_dir: Option<PathBuf>,
+    #[arg(long, help = "Set Arma Reforger installation directory")]
+    pub reforger_dir: Option<PathBuf>,
     #[arg(long, help = "Set Arma 3 profiles directory passed as -profiles")]
     pub arma3_profiles_dir: Option<PathBuf>,
     #[arg(long, help = "Set Steam installation directory")]
@@ -1302,6 +1326,375 @@ pub enum SpaceCommand {
     List,
     /// Sync all repositories attached to one repository space.
     Sync(SpaceSyncArgs),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum GameCommand {
+    /// List game spaces and which one is active.
+    List,
+    /// Set the active game space (loads on next UI start; CLI commands use it immediately).
+    Use(GameUseArgs),
+    /// Create a new game space for a registered game.
+    Create(GameCreateArgs),
+    /// Remove a game space's Foxy workspace (requires --yes).
+    Remove(GameRemoveArgs),
+    /// Build or execute the active game-space launcher without a repository.
+    Launch(GameLaunchArgs),
+    /// Manage Arma Reforger Workshop GUID folders for the active game space.
+    Reforger {
+        #[command(subcommand)]
+        command: ReforgerCommand,
+    },
+}
+
+#[derive(Args, Debug)]
+pub struct GameUseArgs {
+    /// Game space id (see `foxy game list`).
+    pub space_id: String,
+}
+
+#[derive(Args, Debug)]
+pub struct GameCreateArgs {
+    /// Display name of the new game space.
+    pub name: String,
+    #[arg(
+        long,
+        default_value = "arma3",
+        help = "Game module id for the new space"
+    )]
+    pub game: String,
+}
+
+#[derive(Args, Debug)]
+pub struct GameRemoveArgs {
+    /// Game space id (see `foxy game list`).
+    pub space_id: String,
+}
+
+#[derive(Args, Debug)]
+pub struct GameLaunchArgs {
+    #[arg(
+        long,
+        help = "Execute launch immediately (without this flag, command prints launch spec)"
+    )]
+    pub execute: bool,
+    #[arg(long, help = "Include disabled Workshop items in the launch manifest")]
+    pub include_disabled: bool,
+    #[arg(long, help = "Optional TW:WH3 save name for continue-campaign launch")]
+    pub save_name: Option<String>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ReforgerCommand {
+    /// List managed Arma Reforger addons.
+    List,
+    /// Register one GUID folder, optionally copying it into Foxy's managed store.
+    Add(ReforgerAddArgs),
+    /// Import many GUIDs from text, URLs, or a file.
+    Import(ReforgerImportArgs),
+    /// Remove one managed GUID entry.
+    Remove(ReforgerRemoveArgs),
+    /// Enable or disable one managed GUID.
+    Set(ReforgerSetArgs),
+    /// Freeze one present GUID folder into a Foxy-managed snapshot.
+    Freeze(ReforgerFreezeArgs),
+    /// Resume launching from the live GUID folder.
+    Unfreeze(ReforgerUnfreezeArgs),
+    /// Export managed GUIDs.
+    Export(ReforgerExportArgs),
+    /// Resolve the path Foxy will launch for one GUID.
+    Resolve(ReforgerResolveArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct ReforgerAddArgs {
+    /// Reforger Workshop GUID or URL.
+    pub guid: String,
+    #[arg(long, help = "Display name stored in reforger_addons.json")]
+    pub name: Option<String>,
+    #[arg(long, help = "Existing GUID folder to copy into Foxy's managed store")]
+    pub source: Option<PathBuf>,
+    #[arg(long, help = "Add the GUID disabled")]
+    pub disabled: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ReforgerImportArgs {
+    /// Reforger Workshop GUIDs or URLs. Use quotes for a pasted multiline list.
+    pub input: Vec<String>,
+    #[arg(long, help = "Read additional GUIDs or URLs from a text file")]
+    pub from_file: Option<PathBuf>,
+    #[arg(long, help = "Folder containing one child directory per GUID")]
+    pub source_root: Option<PathBuf>,
+    #[arg(long, help = "Import entries disabled")]
+    pub disabled: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ReforgerRemoveArgs {
+    /// Reforger Workshop GUID or URL.
+    pub guid: String,
+    #[arg(long, help = "Delete Foxy's managed live and frozen copies")]
+    pub delete_data: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ReforgerSetArgs {
+    /// Reforger Workshop GUID or URL.
+    pub guid: String,
+    #[arg(long, help = "Target enabled state (true/false)")]
+    pub enabled: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ReforgerFreezeArgs {
+    /// Reforger Workshop GUID or URL.
+    pub guid: String,
+}
+
+#[derive(Args, Debug)]
+pub struct ReforgerUnfreezeArgs {
+    /// Reforger Workshop GUID or URL.
+    pub guid: String,
+}
+
+#[derive(Args, Debug)]
+pub struct ReforgerExportArgs {
+    #[arg(long, help = "Include disabled items")]
+    pub all: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ReforgerResolveArgs {
+    /// Reforger Workshop GUID or URL.
+    pub guid: String,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ConfigCommand {
+    /// Export the active game space to a .foxypack archive.
+    Export(ConfigExportArgs),
+    /// Import a .foxypack archive into the active game space.
+    Import(ConfigImportArgs),
+    /// Manage active game-space extra files.
+    ExtraFile {
+        #[command(subcommand)]
+        command: ConfigExtraFileCommand,
+    },
+}
+
+#[derive(Args, Debug)]
+pub struct ConfigExportArgs {
+    /// Destination .foxypack path.
+    pub output: PathBuf,
+}
+
+#[derive(Args, Debug)]
+pub struct ConfigImportArgs {
+    /// Source .foxypack path.
+    pub input: PathBuf,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ConfigExtraFileCommand {
+    /// List managed extra files.
+    List,
+    /// Add a file or folder to the managed extra-file store.
+    Add(ConfigExtraFileAddArgs),
+    /// Remove a managed extra file by id.
+    Remove(ConfigExtraFileRemoveArgs),
+    /// Enable or disable one managed extra file.
+    Set(ConfigExtraFileSetArgs),
+    /// Copy enabled extra files to their configured destinations.
+    Activate,
+}
+
+#[derive(Args, Debug)]
+pub struct ConfigExtraFileAddArgs {
+    #[arg(long, help = "Display name")]
+    pub name: String,
+    #[arg(long, help = "Source file or folder to copy into the Foxy store")]
+    pub source: PathBuf,
+    #[arg(
+        long,
+        help = "Destination path, absolute or using {game_dir} as the game install directory"
+    )]
+    pub destination: String,
+    #[arg(long, help = "Add the entry disabled")]
+    pub disabled: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ConfigExtraFileRemoveArgs {
+    /// Extra-file id from `foxy config extra-file list`.
+    pub id: String,
+}
+
+#[derive(Args, Debug)]
+pub struct ConfigExtraFileSetArgs {
+    /// Extra-file id from `foxy config extra-file list`.
+    pub id: String,
+    #[arg(long, help = "Target enabled state (true/false)")]
+    pub enabled: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum WorkshopCommand {
+    /// List managed Steam Workshop items.
+    List,
+    /// Add one Steam Workshop item by id or URL.
+    Add(WorkshopAddArgs),
+    /// Import many Steam Workshop item ids or URLs.
+    Import(WorkshopImportArgs),
+    /// Remove one managed Steam Workshop item.
+    Remove(WorkshopRemoveArgs),
+    /// Enable or disable one managed Steam Workshop item.
+    Set(WorkshopSetArgs),
+    /// Freeze one installed Workshop item into Foxy's managed snapshot store.
+    Freeze(WorkshopFreezeArgs),
+    /// Resume launching from Steam's live Workshop folder.
+    Unfreeze(WorkshopUnfreezeArgs),
+    /// Export managed Workshop ids or URLs.
+    Export(WorkshopExportArgs),
+    /// Resolve the path Foxy will launch for one Workshop item.
+    Resolve(WorkshopResolveArgs),
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkshopDownloadBackend {
+    SteamHelper,
+    Steamcmd,
+    None,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkshopExportFormat {
+    Ids,
+    Urls,
+}
+
+#[derive(Args, Debug)]
+pub struct WorkshopAddArgs {
+    /// Steam Workshop item id or URL.
+    pub item: String,
+    #[arg(long, help = "Override title stored in workshop.json")]
+    pub name: Option<String>,
+    #[arg(long, help = "Add the item disabled")]
+    pub disabled: bool,
+    #[command(flatten)]
+    pub download: WorkshopDownloadArgs,
+}
+
+#[derive(Args, Debug)]
+pub struct WorkshopImportArgs {
+    /// Steam Workshop ids or URLs. Use quotes for a pasted multiline list.
+    pub input: Vec<String>,
+    #[arg(long, help = "Read additional ids or URLs from a text file")]
+    pub from_file: Option<PathBuf>,
+    #[arg(
+        long,
+        help = "Treat input ids as Steam collection ids and import their children"
+    )]
+    pub collection: bool,
+    #[arg(long, help = "Import entries disabled")]
+    pub disabled: bool,
+    #[command(flatten)]
+    pub download: WorkshopDownloadArgs,
+}
+
+#[derive(Args, Debug)]
+pub struct WorkshopDownloadArgs {
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = WorkshopDownloadBackend::SteamHelper,
+        help = "Download backend: steam-helper, steamcmd, or none"
+    )]
+    pub backend: WorkshopDownloadBackend,
+    #[arg(long, help = "Alias for --backend none")]
+    pub skip_download: bool,
+    #[arg(long, help = "Do not call Steam Web API metadata endpoints")]
+    pub skip_metadata: bool,
+    #[arg(long, default_value_t = 300, help = "Steam helper timeout in seconds")]
+    pub timeout_seconds: u64,
+    #[arg(
+        long,
+        help = "Path to steamcmd executable when --backend steamcmd is used"
+    )]
+    pub steamcmd: Option<PathBuf>,
+    #[arg(long, help = "SteamCMD login user; defaults to anonymous")]
+    pub steamcmd_user: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct WorkshopRemoveArgs {
+    /// Steam Workshop item id or URL.
+    pub item: String,
+    #[arg(long, help = "Delete Steam's content folder and Foxy's frozen copies")]
+    pub delete_data: bool,
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = WorkshopDownloadBackend::SteamHelper,
+        help = "Unsubscribe backend: steam-helper or none"
+    )]
+    pub backend: WorkshopDownloadBackend,
+    #[arg(long, default_value_t = 300, help = "Steam helper timeout in seconds")]
+    pub timeout_seconds: u64,
+}
+
+#[derive(Args, Debug)]
+pub struct WorkshopSetArgs {
+    /// Steam Workshop item id or URL.
+    pub item: String,
+    #[arg(long, help = "Target enabled state (true/false)")]
+    pub enabled: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct WorkshopFreezeArgs {
+    /// Steam Workshop item id or URL.
+    pub item: String,
+}
+
+#[derive(Args, Debug)]
+pub struct WorkshopUnfreezeArgs {
+    /// Steam Workshop item id or URL.
+    pub item: String,
+}
+
+#[derive(Args, Debug)]
+pub struct WorkshopExportArgs {
+    #[arg(long, value_enum, default_value_t = WorkshopExportFormat::Urls)]
+    pub format: WorkshopExportFormat,
+    #[arg(long, help = "Include disabled items")]
+    pub all: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct WorkshopResolveArgs {
+    /// Steam Workshop item id or URL.
+    pub item: String,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SteamHelperCommand {
+    /// Subscribe and download one Steam Workshop item through Steamworks.
+    Install(SteamHelperItemArgs),
+    /// Unsubscribe one Steam Workshop item through Steamworks.
+    Remove(SteamHelperItemArgs),
+    /// Inspect one Steam Workshop item through Steamworks.
+    Status(SteamHelperItemArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct SteamHelperItemArgs {
+    #[arg(long)]
+    pub app_id: u32,
+    #[arg(long)]
+    pub item_id: String,
+    #[arg(long, default_value_t = 300)]
+    pub timeout_seconds: u64,
 }
 
 #[derive(Args, Debug)]

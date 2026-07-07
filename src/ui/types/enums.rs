@@ -94,6 +94,8 @@ pub enum FoxyView {
     AppUpdate,
     VersionBrowser,
     SwiftyMigration,
+    GameSpaces,
+    GameSpaceSettings,
     None,
 }
 

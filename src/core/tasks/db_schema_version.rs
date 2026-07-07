@@ -28,7 +28,6 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::utils::app_paths;
 use crate::core::utils::format::sanitize_log_path;
 
 /// Current database schema generation understood by this binary.
@@ -36,11 +35,11 @@ use crate::core::utils::format::sanitize_log_path;
 /// Bump this by one **only** when a schema change requires an existing database
 /// to be wiped (not when a change is cleanly handled by a forward migration in
 /// `migrations/`). Bumping it makes older databases prompt the user to wipe on
-/// next launch. Keep it aligned with the breaking-change history in `plan.md`.
+/// next launch. Keep it aligned with the breaking-change history below.
 ///
-/// `22`: Turso cutover (plan.md §7 Phase 4). The persistence engine moved from
-/// SeaORM/SQLite to Turso with a folded bootstrap schema; existing databases
-/// (sidecar `21`) are prompted to wipe-and-rebuild on first launch.
+/// `22`: The persistence engine moved from SeaORM/SQLite to Turso with a folded
+/// bootstrap schema; existing databases (sidecar `21`) are prompted to
+/// wipe-and-rebuild on first launch.
 ///
 /// `23`: subfiles `(file_id, path)` uniqueness moved from an inline
 /// `CONSTRAINT … UNIQUE` to a standalone `idx_subfiles_file_id_path` unique index
@@ -138,9 +137,10 @@ fn legacy_database_present() -> bool {
     fs::metadata(&path).map(|m| m.len() > 0).unwrap_or(false)
 }
 
-/// Path to the schema-version sidecar (`db_meta.json`) in the data directory.
+/// Path to the schema-version sidecar (`db_meta.json`) beside the active game
+/// space's database.
 pub fn db_meta_path() -> PathBuf {
-    app_paths::foxy_data_dir().join("db_meta.json")
+    crate::core::game::spaces::active_game_space_dir().join("db_meta.json")
 }
 
 fn read_meta() -> Option<DbMeta> {

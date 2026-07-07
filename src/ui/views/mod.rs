@@ -2,6 +2,7 @@ pub mod about;
 pub mod app_update;
 pub mod changelog;
 pub(crate) mod galley_cache;
+pub mod game_spaces;
 pub mod help;
 pub mod main;
 pub mod repository;
