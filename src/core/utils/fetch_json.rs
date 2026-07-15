@@ -140,12 +140,14 @@ async fn fetch_json_single(
     // Remove BOM/unwanted chars
     let mut start = 0;
     while start < response.len() {
-        let b = response.as_bytes()[start];
+        let byte = response.as_bytes()[start];
 
-        if b == b'{' || b == b'[' || b.is_ascii_whitespace() {
+        // Break when we find a valid JSON starting character (either '{', '[' or whitespace)
+        if byte == b'{' || byte == b'[' || byte.is_ascii_whitespace() {
             break;
         }
 
+        // Move to the next byte if the current byte is part of a BOM or non-JSON character
         start += 1;
     }
     if start > 0 {
