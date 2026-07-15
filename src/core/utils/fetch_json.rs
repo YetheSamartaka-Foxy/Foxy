@@ -94,8 +94,8 @@ async fn fetch_json_single(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("identity")
         .to_owned();
-    let wire_bytes = resp.content_length();
-    let response = tokio::time::timeout(FETCH_JSON_TIMEOUT, resp.text())
+    let expected_bytes = resp.content_length();
+    let body = tokio::time::timeout(FETCH_JSON_TIMEOUT, resp.bytes())
         .await
         .map_err(|_| {
             format!(
@@ -104,7 +104,7 @@ async fn fetch_json_single(
             )
         })??;
     let download = download_start.elapsed();
-    let response_bytes = response.len();
+    let response_bytes = body.len();
 
     if response_bytes > FETCH_JSON_MAX_BODY_SIZE {
         return Err(format!(
@@ -114,41 +114,42 @@ async fn fetch_json_single(
         .into());
     }
 
-    // Validate received size matches Content-Length when the server declared it
-    // and the response was not transparently decompressed.
+    // Validate Content-Length against the actual bytes received.
     if content_encoding == "identity"
-        && let Some(expected) = wire_bytes
+        && let Some(expected) = expected_bytes
         && response_bytes != expected as usize
     {
         return Err(format!(
-            "JSON response from {} size mismatch: Content-Length={} but received {} bytes (possible truncation)",
+            "JSON response from {} size mismatch: Content-Length={} but received {} bytes",
             url, expected, response_bytes
         )
         .into());
     }
 
     debug!(
-        "Fetched response body for {} ({} bytes decompressed, wire={}, encoding={}, download={:.0?})",
+        "Fetched response body for {} ({} bytes, encoding={}, download={:.0?})",
         url,
         response_bytes,
-        wire_bytes.map_or("unknown".to_string(), |b| format!("{} bytes", b)),
         content_encoding,
         download
     );
+
+    // Decode UTF-8 after we've verified the transport.
+    let response = String::from_utf8(body.to_vec()).map_err(|e| {
+        format!("Response from {} was not valid UTF-8: {}", url, e)
+    })?;
 
     let parse_start = Instant::now();
 
     // Remove BOM/unwanted chars
     let mut start = 0;
     while start < response.len() {
-        let byte = response.as_bytes()[start];
+        let b = response.as_bytes()[start];
 
-        // Break when we find a valid JSON starting character (either '{', '[' or whitespace)
-        if byte == b'{' || byte == b'[' || byte.is_ascii_whitespace() {
+        if b == b'{' || b == b'[' || b.is_ascii_whitespace() {
             break;
         }
 
-        // Move to the next byte if the current byte is part of a BOM or non-JSON character
         start += 1;
     }
     if start > 0 {
@@ -158,11 +159,9 @@ async fn fetch_json_single(
         );
     }
 
-    let cleaned_response = &response[start..]
-        .replace("\r", "")
-        .replace("\n", "")
-        .trim()
-        .to_string();
+    let cleaned_response = response[start..]
+        .replace(['\r', '\n'], "");
+    let cleaned_response = cleaned_response.trim();
 
     let data: Value = tokio::task::spawn_blocking({
         let cleaned_response = cleaned_response.to_owned();
