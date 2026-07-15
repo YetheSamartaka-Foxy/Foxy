@@ -128,16 +128,12 @@ async fn fetch_json_single(
 
     debug!(
         "Fetched response body for {} ({} bytes, encoding={}, download={:.0?})",
-        url,
-        response_bytes,
-        content_encoding,
-        download
+        url, response_bytes, content_encoding, download
     );
 
     // Decode UTF-8 after we've verified the transport.
-    let response = String::from_utf8(body.to_vec()).map_err(|e| {
-        format!("Response from {} was not valid UTF-8: {}", url, e)
-    })?;
+    let response = String::from_utf8(body.to_vec())
+        .map_err(|e| format!("Response from {} was not valid UTF-8: {}", url, e))?;
 
     let parse_start = Instant::now();
 
@@ -159,8 +155,7 @@ async fn fetch_json_single(
         );
     }
 
-    let cleaned_response = response[start..]
-        .replace(['\r', '\n'], "");
+    let cleaned_response = response[start..].replace(['\r', '\n'], "");
     let cleaned_response = cleaned_response.trim();
 
     let data: Value = tokio::task::spawn_blocking({
