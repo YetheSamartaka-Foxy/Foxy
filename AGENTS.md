@@ -79,6 +79,27 @@ Keep this file as the compact root router. Put detailed conventions in `conventi
 
 ---
 
+## Autonomous subagent workflows
+
+Tool-neutral policy. Codex follows the current [Codex subagent guidance](https://learn.chatgpt.com/docs/agent-configuration/subagents.md); Claude Code applies the same rules through its `Agent` tool. Everything below holds regardless of which harness is running.
+
+- Use subagents for at least two independent, bounded workstreams when parallel work improves coverage or context quality. Good uses include research, code mapping, triage, review, and focused verification.
+- Keep sequential, destructive, or overlapping work in the main agent: schema and DB changes, dependency edits, `cargo fmt`, anything touching runtime `database.db`, logs, caches, or user config.
+- The main agent owns integration, cross-cutting edits, final verification, and the answer.
+- Prefer read-only exploration with a concrete scope, expected evidence, and no unrelated edits.
+- Delegate writes only across disjoint files, assign per-file ownership, preserve user changes, and review the combined diff before handoff.
+- Wait for required results and resolve contradictions from primary evidence (the code, `sql/turso_schema.sql`, actual command output), not from a subagent summary.
+- Subagents start without the main agent's context: hand each one the relevant `conventions/` files and nested `AGENTS.md` from Load when needed, plus the invariants its scope touches.
+- Run repo validation (`cargo fmt`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test`) once in the main agent after integration, not concurrently in several subagents.
+- Say in the final response when a conclusion rests on subagent findings you did not verify yourself.
+
+Harness mapping:
+- Codex: define and invoke subagents per the guidance linked above.
+- Claude Code: use the `Agent` tool. `Explore` for read-only fan-out search, `Plan` for design, `general-purpose` for multi-step work, plus any repo-local `.claude/agents/*.md` definitions. Continue an existing agent with `SendMessage` rather than respawning a cold one.
+- Some Claude Code sessions are configured to spawn subagents only on explicit user request. When that applies, do the work single-agent and note the constraint instead of skipping scope.
+
+---
+
 ## Communication
 - Answer in the fewest words that fully address the request. Lead with the answer; skip preamble, restating the question, and closing summaries.
 - Default to a few sentences or a short bullet list. Reserve headings and multi-section write-ups for genuinely large or multi-part tasks the user asked to see laid out.
