@@ -134,6 +134,7 @@ impl Foxy {
             self.start_fs_watcher();
         }
         self.queue_startup_rechecks();
+        self.start_startup_ts3_plugin_scan();
     }
 
     pub(in crate::ui::app) fn detect_arma3_profiles_now(&mut self) {
@@ -390,6 +391,8 @@ impl Foxy {
         self.ts3_plugin_scan_rx = None;
         self.ts3_plugin_scanning = false;
         self.ts3_running_cache = None;
+        self.ts3_plugin_scan_prompt_on_update = false;
+        self.ts3_plugin_scan_requeued = false;
         self.editor_launch_cooldown_until = None;
 
         // Backup task transients (the worker is finished before a switch is

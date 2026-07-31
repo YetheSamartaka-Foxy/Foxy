@@ -8,6 +8,17 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Instant;
 
+/// Last verified install state of one repository TS3 plugin.
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub struct Ts3PluginStatusRecord {
+    pub plugin_path: String,
+    pub addon_name: String,
+    /// BLAKE3 hash of the `.ts3_plugin` package the state was checked against.
+    pub package_hash: String,
+    pub is_installed: bool,
+    pub is_up_to_date: bool,
+}
+
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct SettingsViewState {
     pub debug_mode: bool,
@@ -141,6 +152,10 @@ pub struct SettingsViewState {
     /// Maps plugin file path to BLAKE3 hash of the last installed version.
     #[serde(default)]
     pub ts3_installed_plugin_hashes: HashMap<String, String>,
+    /// Result of the last verified TS3 plugin check, so the game space settings
+    /// tab can render a known state before the background recheck lands.
+    #[serde(default)]
+    pub ts3_plugin_statuses: Vec<Ts3PluginStatusRecord>,
     /// Whether the Swifty migration wizard has been offered to the user.
     #[serde(default)]
     pub swifty_migration_offered: bool,
@@ -297,6 +312,7 @@ impl Default for SettingsViewState {
             app_update_auto_check: default_app_update_auto_check(),
             app_update_check_interval_minutes: default_app_update_check_interval(),
             ts3_installed_plugin_hashes: HashMap::new(),
+            ts3_plugin_statuses: Vec::new(),
             swifty_migration_offered: false,
             scheduled_jobs: Vec::new(),
             additional_folders_filter: String::new(),

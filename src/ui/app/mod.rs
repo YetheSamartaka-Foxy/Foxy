@@ -286,11 +286,14 @@ pub struct Foxy {
     // TS3 plugin update prompt (shown after download when plugin was updated)
     pub ts3_plugin_update_prompt: Option<Ts3PluginUpdatePrompt>,
     // TS3 plugin background scan state
-    pub ts3_plugin_cache: Option<Vec<crate::core::ts3_plugin::Ts3PluginInfo>>,
-    pub ts3_plugin_scan_rx:
-        Option<StdReceiver<(Vec<crate::core::ts3_plugin::Ts3PluginInfo>, bool)>>,
+    pub ts3_plugin_cache: Option<Vec<crate::core::ts3_plugin::Ts3PluginStatus>>,
+    pub ts3_plugin_scan_rx: Option<StdReceiver<Ts3PluginScanResult>>,
     pub ts3_plugin_scanning: bool,
     pub ts3_running_cache: Option<bool>,
+    /// Whether the in-flight scan should raise the post-download update prompt.
+    pub ts3_plugin_scan_prompt_on_update: bool,
+    /// A scan requested while one was already running; starts once that lands.
+    pub ts3_plugin_scan_requeued: bool,
     /// Throttle marker for re-checking TeamSpeak- and Steam-running state while
     /// the join/launch preflight modal is open, so those warnings auto-clear
     /// once TS3 or Steam starts.

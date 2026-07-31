@@ -265,6 +265,16 @@ pub struct Ts3PluginUpdatePrompt {
     pub file_hash: String,
 }
 
+/// Payload delivered by the background TS3 plugin scan worker.
+#[derive(Debug)]
+pub struct Ts3PluginScanResult {
+    pub statuses: Vec<crate::core::ts3_plugin::Ts3PluginStatus>,
+    pub ts3_running: bool,
+    /// Mirrors the request flag so a prompt request cannot be lost when the
+    /// user starts an unrelated recheck while the scan is running.
+    pub prompt_on_update: bool,
+}
+
 #[derive(Debug)]
 pub struct DecodedImagePayload {
     pub size: [usize; 2],

@@ -16,16 +16,19 @@ pub struct Ts3PluginInfo {
     pub file_hash: String,
 }
 
-/// Diagnostic result for a best-effort lookup of installed TeamSpeak plugin files.
+/// A detected repository TS3 plugin together with its verified state in the
+/// TeamSpeak 3 client.
+#[derive(Debug, Clone)]
+pub struct Ts3PluginStatus {
+    pub info: Ts3PluginInfo,
+    pub is_installed: bool,
+    pub is_up_to_date: bool,
+}
+
+/// Verdict of a best-effort lookup of installed TeamSpeak plugin files. The
+/// per-file diagnostics behind it are logged by the lookup itself.
 #[derive(Debug, Clone)]
 pub struct Ts3InstalledPluginLookup {
-    pub search_name: String,
-    pub expected_files: Vec<String>,
-    pub checked_dirs: Vec<PathBuf>,
-    pub existing_dirs: Vec<PathBuf>,
-    pub matched_files: Vec<PathBuf>,
-    pub missing_files: Vec<String>,
-    pub hash_mismatched_files: Vec<PathBuf>,
     pub is_installed: bool,
     pub is_up_to_date: bool,
 }
@@ -94,14 +97,29 @@ pub fn scan_repository_for_ts3_plugins(repo_path: &str) -> Vec<Ts3PluginInfo> {
     results
 }
 
+/// Normalized key used to collapse repository paths that point at the same
+/// folder (case, separator, and trailing-slash variants).
+fn repository_path_key(path: &str) -> String {
+    path.replace('\\', "/").trim_end_matches('/').to_lowercase()
+}
+
 /// Scan all repository paths and collect TS3 plugin info.
 pub fn scan_all_repositories_for_ts3_plugins(repo_paths: &[String]) -> Vec<Ts3PluginInfo> {
+    // Repositories joined to a game space share one folder, so the same path
+    // usually arrives once per repository; crawling it each time is pure waste.
+    let mut seen_paths = std::collections::HashSet::new();
+    let unique_paths = repo_paths
+        .iter()
+        .filter(|path| seen_paths.insert(repository_path_key(path)))
+        .collect::<Vec<_>>();
+
     info!(
-        "Starting TS3 plugin scan across repositories: repository_count={}",
-        repo_paths.len()
+        "Starting TS3 plugin scan across repositories: repository_count={} unique_paths={}",
+        repo_paths.len(),
+        unique_paths.len()
     );
     let mut all = Vec::new();
-    for path in repo_paths {
+    for path in unique_paths {
         all.extend(scan_repository_for_ts3_plugins(path));
     }
     let before_dedup = all.len();
@@ -114,6 +132,24 @@ pub fn scan_all_repositories_for_ts3_plugins(repo_paths: &[String]) -> Vec<Ts3Pl
         all.len()
     );
     all
+}
+
+/// Scan the given repository paths and verify every detected plugin against the
+/// files installed in the TeamSpeak 3 client.
+///
+/// Both halves read and hash files, so callers must run this on a worker thread.
+pub fn resolve_ts3_plugin_statuses(repo_paths: &[String]) -> Vec<Ts3PluginStatus> {
+    scan_all_repositories_for_ts3_plugins(repo_paths)
+        .into_iter()
+        .map(|info| {
+            let lookup = lookup_installed_teamspeak_plugin(&info.plugin_path);
+            Ts3PluginStatus {
+                info,
+                is_installed: lookup.is_installed,
+                is_up_to_date: lookup.is_up_to_date,
+            }
+        })
+        .collect()
 }
 
 fn collect_ts3_plugins_recursive(
@@ -250,13 +286,6 @@ pub fn lookup_installed_teamspeak_plugin(package_path: &Path) -> Ts3InstalledPlu
             sanitize_log_path(package_path)
         );
         return Ts3InstalledPluginLookup {
-            search_name,
-            expected_files: expected_file_names,
-            checked_dirs,
-            existing_dirs,
-            matched_files,
-            missing_files,
-            hash_mismatched_files,
             is_installed: false,
             is_up_to_date: false,
         };
@@ -324,13 +353,6 @@ pub fn lookup_installed_teamspeak_plugin(package_path: &Path) -> Ts3InstalledPlu
     );
 
     Ts3InstalledPluginLookup {
-        search_name,
-        expected_files: expected_file_names,
-        checked_dirs,
-        existing_dirs,
-        matched_files,
-        missing_files,
-        hash_mismatched_files,
         is_installed,
         is_up_to_date,
     }
@@ -944,6 +966,39 @@ mod tests {
         // Pass same path twice - should dedup
         let results = scan_all_repositories_for_ts3_plugins(&[repo_path.clone(), repo_path]);
         assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn repository_path_key_collapses_separator_case_and_trailing_slash() {
+        assert_eq!(
+            repository_path_key("S:/Swifty/TFR_Repository"),
+            repository_path_key("s:\\swifty\\tfr_repository\\")
+        );
+        assert_ne!(
+            repository_path_key("S:/Swifty/TFR_Repository"),
+            repository_path_key("S:/Swifty/Other_Repository")
+        );
+    }
+
+    #[test]
+    fn resolve_statuses_reports_not_installed_when_teamspeak_lacks_payload() {
+        let tmp = TempDir::new().unwrap();
+        let addon = tmp.path().join("@radio").join("teamspeak");
+        fs::create_dir_all(&addon).unwrap();
+        let package = addon.join("foxy_test_plugin.ts3_plugin");
+        // A payload name that cannot exist in a real TeamSpeak plugins folder,
+        // so the verdict does not depend on what the test machine has installed.
+        write_test_ts3_package(
+            &package,
+            &[("plugins/foxy_test_unmatched_marker.txt", b"x".as_slice())],
+        );
+
+        let statuses = resolve_ts3_plugin_statuses(&[tmp.path().to_str().unwrap().to_string()]);
+
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].info.addon_name, "@radio");
+        assert!(!statuses[0].is_installed);
+        assert!(!statuses[0].is_up_to_date);
     }
 
     #[test]

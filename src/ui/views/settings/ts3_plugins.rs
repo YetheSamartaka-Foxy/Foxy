@@ -1,28 +1,66 @@
 use crate::core::ts3_plugin;
-use crate::core::utils::format::sanitize_log_path;
-use crate::ui::app::Foxy;
+use crate::core::utils::format::{sanitize_log_path, sanitize_log_path_str};
+use crate::ui::app::{Foxy, Ts3PluginScanResult, Ts3PluginUpdatePrompt};
 use crate::ui::i18n::tr;
+use crate::ui::types::Ts3PluginStatusRecord;
 use eframe::egui::{self, Button, Frame, Label, Margin, RichText, ScrollArea, Ui, Vec2};
 use log::{info, warn};
 
-impl Foxy {
-    /// Invalidate the TS3 plugin cache and cancel any in-flight scan.
-    pub fn invalidate_ts3_plugin_cache(&mut self) {
-        info!(
-            "Invalidating TS3 plugin cache: had_cache={} scan_in_flight={} had_ts3_running_cache={}",
-            self.ts3_plugin_cache.is_some(),
-            self.ts3_plugin_scanning,
-            self.ts3_running_cache.is_some()
-        );
-        self.ts3_plugin_cache = None;
-        self.ts3_plugin_scan_rx = None;
-        self.ts3_plugin_scanning = false;
-        self.ts3_running_cache = None;
-    }
+/// How a plugin is presented in the settings tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ts3PluginRowStatus {
+    UpToDate,
+    UpdateAvailable,
+    /// Opened for installation through Foxy, but TeamSpeak has not applied it yet.
+    InstallPending,
+    NotInstalled,
+}
 
-    /// Kick off a background thread that scans repositories for TS3 plugins
-    /// and checks whether TeamSpeak is running. Results arrive via channel.
-    fn start_ts3_plugin_scan(&mut self) {
+/// One rendered plugin entry, built either from the live scan or from the
+/// persisted state of the last verified check.
+#[derive(Debug, Clone)]
+struct Ts3PluginRow {
+    addon_name: String,
+    path_key: String,
+    plugin_path: std::path::PathBuf,
+    file_hash: String,
+    status: Ts3PluginRowStatus,
+    /// False when the row comes from persisted state rather than this session's scan.
+    verified_now: bool,
+}
+
+fn row_status(
+    is_installed: bool,
+    is_up_to_date: bool,
+    foxy_hash_matches: bool,
+) -> Ts3PluginRowStatus {
+    if is_up_to_date {
+        Ts3PluginRowStatus::UpToDate
+    } else if is_installed {
+        Ts3PluginRowStatus::UpdateAvailable
+    } else if foxy_hash_matches {
+        Ts3PluginRowStatus::InstallPending
+    } else {
+        Ts3PluginRowStatus::NotInstalled
+    }
+}
+
+impl Foxy {
+    /// Kick off a background thread that scans repositories for TS3 plugins,
+    /// verifies them against the TeamSpeak 3 client, and checks whether
+    /// TeamSpeak is running. Results arrive via channel and are polled every
+    /// frame, so no part of this runs on the UI thread.
+    pub(crate) fn start_ts3_plugin_scan(&mut self, reason: &str, prompt_on_update: bool) {
+        if self.ts3_plugin_scanning {
+            self.ts3_plugin_scan_prompt_on_update |= prompt_on_update;
+            self.ts3_plugin_scan_requeued = true;
+            info!(
+                "Deferred TS3 plugin scan because one is already running: reason={} prompt_on_update={}",
+                reason, prompt_on_update
+            );
+            return;
+        }
+
         let repo_paths: Vec<String> = self
             .repository_view_state
             .repositories
@@ -32,97 +70,236 @@ impl Foxy {
             .collect();
 
         info!(
-            "Starting background TS3 plugin settings scan: repository_count={} tracked_installed_plugins={}",
+            "Starting background TS3 plugin scan: reason={} repository_count={} tracked_installed_plugins={} persisted_statuses={} prompt_on_update={}",
+            reason,
             repo_paths.len(),
-            self.settings_view_state.ts3_installed_plugin_hashes.len()
+            self.settings_view_state.ts3_installed_plugin_hashes.len(),
+            self.settings_view_state.ts3_plugin_statuses.len(),
+            prompt_on_update
         );
         let (tx, rx) = std::sync::mpsc::channel();
         self.ts3_plugin_scan_rx = Some(rx);
         self.ts3_plugin_scanning = true;
+        self.ts3_plugin_scan_prompt_on_update = prompt_on_update;
+        self.ts3_plugin_scan_requeued = false;
 
         std::thread::spawn(move || {
-            let plugins = ts3_plugin::scan_all_repositories_for_ts3_plugins(&repo_paths);
+            let statuses = ts3_plugin::resolve_ts3_plugin_statuses(&repo_paths);
             let ts3_running = ts3_plugin::is_teamspeak_running();
-            let plugin_count = plugins.len();
-            if tx.send((plugins, ts3_running)).is_err() {
+            let plugin_count = statuses.len();
+            if tx
+                .send(Ts3PluginScanResult {
+                    statuses,
+                    ts3_running,
+                    prompt_on_update,
+                })
+                .is_err()
+            {
                 warn!(
-                    "Failed to deliver TS3 plugin settings scan result: plugin_count={} ts3_running={}",
+                    "Failed to deliver TS3 plugin scan result: plugin_count={} ts3_running={}",
                     plugin_count, ts3_running
                 );
             }
         });
     }
 
-    /// Poll the background scan channel. Returns true if results just arrived.
-    fn poll_ts3_plugin_scan(&mut self) -> bool {
-        if let Some(rx) = &self.ts3_plugin_scan_rx {
-            match rx.try_recv() {
-                Ok((plugins, ts3_running)) => {
-                    info!(
-                        "Received TS3 plugin settings scan result: plugin_count={} ts3_running={}",
-                        plugins.len(),
-                        ts3_running
-                    );
-                    for plugin in &plugins {
-                        let path_key = plugin.plugin_path.display().to_string();
-                        let installed_hash = self
-                            .settings_view_state
-                            .ts3_installed_plugin_hashes
-                            .get(&path_key);
-                        let ts3_lookup =
-                            ts3_plugin::lookup_installed_teamspeak_plugin(&plugin.plugin_path);
-                        info!(
-                            "Evaluated TS3 plugin install state from settings scan: addon={} path={} detected_hash={} foxy_stored_hash_present={} foxy_stored_hash_matches={} ts3_search_name={} ts3_expected_files={} ts3_candidate_plugin_dirs={} ts3_existing_plugin_dirs={} ts3_installed_matches={} ts3_missing_files={} ts3_hash_mismatches={} ts3_installed={} ts3_up_to_date={}",
-                            plugin.addon_name,
-                            sanitize_log_path(&plugin.plugin_path),
-                            plugin.file_hash,
-                            installed_hash.is_some(),
-                            installed_hash == Some(&plugin.file_hash),
-                            ts3_lookup.search_name,
-                            ts3_lookup.expected_files.len(),
-                            ts3_lookup.checked_dirs.len(),
-                            ts3_lookup.existing_dirs.len(),
-                            ts3_lookup.matched_files.len(),
-                            ts3_lookup.missing_files.len(),
-                            ts3_lookup.hash_mismatched_files.len(),
-                            ts3_lookup.is_installed,
-                            ts3_lookup.is_up_to_date
-                        );
-                        if installed_hash != Some(&plugin.file_hash) && ts3_lookup.is_up_to_date {
-                            self.mark_ts3_plugin_installed(&path_key, &plugin.file_hash);
-                        }
-                    }
-                    self.ts3_plugin_cache = Some(plugins);
-                    self.ts3_running_cache = Some(ts3_running);
-                    self.ts3_plugin_scan_rx = None;
-                    self.ts3_plugin_scanning = false;
-                    return true;
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => {}
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    warn!("TS3 plugin settings scan worker disconnected before sending results");
-                    // Worker died without sending - treat as empty result.
-                    self.ts3_plugin_cache = Some(Vec::new());
-                    self.ts3_running_cache = Some(false);
-                    self.ts3_plugin_scan_rx = None;
-                    self.ts3_plugin_scanning = false;
-                }
+    /// Verify the persisted TS3 plugin state once per launch, in the background,
+    /// so the game space settings tab opens on a fresh status instead of an
+    /// empty list. Only Arma 3 spaces expose the tab.
+    pub(crate) fn start_startup_ts3_plugin_scan(&mut self) {
+        let active = crate::core::game::spaces::active_game_space();
+        if active.game_id != crate::core::game::arma3::ARMA3_GAME_ID {
+            return;
+        }
+        if self.ts3_plugin_cache.is_some() || self.ts3_plugin_scanning {
+            return;
+        }
+        self.start_ts3_plugin_scan("startup verification", false);
+    }
+
+    /// Poll the background scan channel. Safe to call every frame from anywhere.
+    pub(crate) fn poll_ts3_plugin_scan(&mut self) {
+        let Some(rx) = &self.ts3_plugin_scan_rx else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(result) => {
+                info!(
+                    "Received TS3 plugin scan result: plugin_count={} ts3_running={} prompt_on_update={}",
+                    result.statuses.len(),
+                    result.ts3_running,
+                    result.prompt_on_update
+                );
+                self.apply_ts3_plugin_scan_result(result);
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                warn!("TS3 plugin scan worker disconnected before sending results");
+                // Worker died without sending - keep the persisted state and
+                // stop showing the tab as busy.
+                self.ts3_plugin_scan_rx = None;
+                self.ts3_plugin_scanning = false;
+                self.ts3_plugin_scan_prompt_on_update = false;
             }
         }
-        false
+    }
+
+    fn apply_ts3_plugin_scan_result(&mut self, result: Ts3PluginScanResult) {
+        let Ts3PluginScanResult {
+            statuses,
+            ts3_running,
+            prompt_on_update,
+        } = result;
+        let mut prompt: Option<Ts3PluginUpdatePrompt> = None;
+        let mut records = Vec::with_capacity(statuses.len());
+        let mut settings_changed = false;
+
+        for status in &statuses {
+            let plugin = &status.info;
+            let path_key = plugin.plugin_path.display().to_string();
+            let had_installed_hash = self
+                .settings_view_state
+                .ts3_installed_plugin_hashes
+                .contains_key(&path_key);
+            let foxy_hash_matches = self
+                .settings_view_state
+                .ts3_installed_plugin_hashes
+                .get(&path_key)
+                == Some(&plugin.file_hash);
+            info!(
+                "Evaluated TS3 plugin install state: addon={} path={} detected_hash={} foxy_stored_hash_present={} foxy_stored_hash_matches={} ts3_installed={} ts3_up_to_date={}",
+                plugin.addon_name,
+                sanitize_log_path(&plugin.plugin_path),
+                plugin.file_hash,
+                had_installed_hash,
+                foxy_hash_matches,
+                status.is_installed,
+                status.is_up_to_date
+            );
+
+            records.push(Ts3PluginStatusRecord {
+                plugin_path: path_key.clone(),
+                addon_name: plugin.addon_name.clone(),
+                package_hash: plugin.file_hash.clone(),
+                is_installed: status.is_installed,
+                is_up_to_date: status.is_up_to_date,
+            });
+
+            if !foxy_hash_matches && status.is_up_to_date {
+                self.settings_view_state
+                    .ts3_installed_plugin_hashes
+                    .insert(path_key.clone(), plugin.file_hash.clone());
+                settings_changed = true;
+                info!(
+                    "Recorded verified TS3 plugin install: path={} hash={}",
+                    sanitize_log_path_str(&path_key),
+                    plugin.file_hash
+                );
+            }
+
+            // Only prompt when the plugin was previously installed through the
+            // app or detected in TeamSpeak, and the local package differs from
+            // that installed copy.
+            if prompt_on_update
+                && prompt.is_none()
+                && (had_installed_hash || status.is_installed)
+                && !status.is_up_to_date
+            {
+                info!(
+                    "TS3 plugin update detected: addon={} path={} current_hash={}",
+                    plugin.addon_name,
+                    sanitize_log_path(&plugin.plugin_path),
+                    plugin.file_hash
+                );
+                prompt = Some(Ts3PluginUpdatePrompt {
+                    plugin_path: plugin.plugin_path.clone(),
+                    addon_name: plugin.addon_name.clone(),
+                    file_hash: plugin.file_hash.clone(),
+                });
+            }
+        }
+
+        if prompt.is_some() {
+            self.ts3_plugin_update_prompt = prompt;
+        }
+        if self.settings_view_state.ts3_plugin_statuses != records {
+            self.settings_view_state.ts3_plugin_statuses = records;
+            settings_changed = true;
+        }
+        if settings_changed {
+            self.save_settings();
+        }
+
+        self.ts3_plugin_cache = Some(statuses);
+        self.ts3_running_cache = Some(ts3_running);
+        self.ts3_plugin_scan_rx = None;
+        self.ts3_plugin_scanning = false;
+        self.ts3_plugin_scan_prompt_on_update = false;
+
+        if self.ts3_plugin_scan_requeued {
+            self.ts3_plugin_scan_requeued = false;
+            self.start_ts3_plugin_scan("requeued while a scan was running", false);
+        }
+    }
+
+    /// Build the rows to render, preferring this session's verified scan and
+    /// falling back to the persisted state of the last check.
+    fn ts3_plugin_rows(&self) -> Vec<Ts3PluginRow> {
+        let hashes = &self.settings_view_state.ts3_installed_plugin_hashes;
+        if let Some(statuses) = &self.ts3_plugin_cache {
+            return statuses
+                .iter()
+                .map(|status| {
+                    let path_key = status.info.plugin_path.display().to_string();
+                    let foxy_hash_matches = hashes.get(&path_key) == Some(&status.info.file_hash);
+                    Ts3PluginRow {
+                        addon_name: status.info.addon_name.clone(),
+                        path_key,
+                        plugin_path: status.info.plugin_path.clone(),
+                        file_hash: status.info.file_hash.clone(),
+                        status: row_status(
+                            status.is_installed,
+                            status.is_up_to_date,
+                            foxy_hash_matches,
+                        ),
+                        verified_now: true,
+                    }
+                })
+                .collect();
+        }
+
+        self.settings_view_state
+            .ts3_plugin_statuses
+            .iter()
+            .map(|record| {
+                let foxy_hash_matches =
+                    hashes.get(&record.plugin_path) == Some(&record.package_hash);
+                Ts3PluginRow {
+                    addon_name: record.addon_name.clone(),
+                    path_key: record.plugin_path.clone(),
+                    plugin_path: std::path::PathBuf::from(&record.plugin_path),
+                    file_hash: record.package_hash.clone(),
+                    status: row_status(
+                        record.is_installed,
+                        record.is_up_to_date,
+                        foxy_hash_matches,
+                    ),
+                    verified_now: false,
+                }
+            })
+            .collect()
     }
 
     pub(crate) fn render_ts3_plugins_settings(&mut self, ui: &mut Ui) {
         let horizontal_padding = 15.0;
 
-        // Kick off background scan if we have no cache and no scan in flight.
+        // Refresh once per tab entry, but never block on it: the rows below
+        // render from persisted state until the background result lands.
         if self.ts3_plugin_cache.is_none() && !self.ts3_plugin_scanning {
-            self.start_ts3_plugin_scan();
+            self.start_ts3_plugin_scan("game space settings TS3 tab opened", false);
         }
 
-        // Check for results from the background thread.
-        self.poll_ts3_plugin_scan();
-
+        let rows = self.ts3_plugin_rows();
         let ts3_running = self.ts3_running_cache.unwrap_or(false);
 
         ui.vertical(|ui| {
@@ -154,11 +331,35 @@ impl Foxy {
                 }
                 if recheck_btn.clicked() {
                     info!("TS3 plugin recheck requested from settings tab");
-                    self.invalidate_ts3_plugin_cache();
-                    self.start_ts3_plugin_scan();
+                    self.start_ts3_plugin_scan("manual recheck from settings tab", false);
                 }
                 ui.add_space(horizontal_padding);
             });
+
+            if self.ts3_plugin_scanning {
+                ui.horizontal(|ui| {
+                    ui.add_space(horizontal_padding);
+                    ui.add(egui::Spinner::new().size(12.0));
+                    ui.label(
+                        RichText::new(tr("Checking TS3 plugins in the background..."))
+                            .italics()
+                            .small()
+                            .color(self.color_text_dim()),
+                    );
+                });
+                // Request repaint so we pick up the result next frame.
+                ui.ctx().request_repaint();
+            } else if !rows.is_empty() && rows.iter().all(|row| !row.verified_now) {
+                ui.horizontal(|ui| {
+                    ui.add_space(horizontal_padding);
+                    ui.label(
+                        RichText::new(tr("Showing the last known state."))
+                            .italics()
+                            .small()
+                            .color(self.color_text_dim()),
+                    );
+                });
+            }
             ui.separator();
 
             if ts3_running {
@@ -176,52 +377,29 @@ impl Foxy {
                 ui.separator();
             }
 
-            // Show spinner while scanning
-            if self.ts3_plugin_scanning {
-                ui.vertical_centered(|ui| {
-                    ui.add_space(30.0);
-                    ui.add(egui::Spinner::new().size(24.0));
-                    ui.add_space(8.0);
-                    ui.label(
-                        RichText::new(tr("Scanning repositories for TS3 plugins..."))
+            if rows.is_empty() {
+                // Nothing known yet only means "scanning" on a first-ever run.
+                if !self.ts3_plugin_scanning {
+                    ui.horizontal(|ui| {
+                        ui.add_space(horizontal_padding);
+                        ui.label(
+                            RichText::new(tr(
+                                "No TS3 plugins found in your repositories.",
+                            ))
                             .color(self.color_text_dim()),
-                    );
-                    ui.add_space(30.0);
-                });
-                // Request repaint so we pick up the result next frame.
-                ui.ctx().request_repaint();
-                return;
-            }
-
-            let plugins = match &self.ts3_plugin_cache {
-                Some(p) => p.clone(),
-                None => return,
-            };
-
-            if plugins.is_empty() {
-                ui.horizontal(|ui| {
-                    ui.add_space(horizontal_padding);
-                    ui.label(
-                        RichText::new(tr(
-                            "No TS3 plugins found in your repositories.",
-                        ))
-                        .color(self.color_text_dim()),
-                    );
-                    ui.add_space(horizontal_padding);
-                });
+                        );
+                        ui.add_space(horizontal_padding);
+                    });
+                }
                 return;
             }
 
             ScrollArea::vertical().show(ui, |ui| {
                 let mut install_actions: Vec<(String, String, std::path::PathBuf)> = Vec::new();
 
-                for plugin in &plugins {
-                    let path_key = plugin.plugin_path.display().to_string();
-                    let installed_hash = self
-                        .settings_view_state
-                        .ts3_installed_plugin_hashes
-                        .get(&path_key);
-                    let is_up_to_date = installed_hash == Some(&plugin.file_hash);
+                for plugin in &rows {
+                    let path_key = plugin.path_key.clone();
+                    let is_up_to_date = plugin.status == Ts3PluginRowStatus::UpToDate;
 
                     ui.horizontal(|ui| {
                         ui.add_space(horizontal_padding);
@@ -263,24 +441,36 @@ impl Foxy {
                                 ui.add_space(4.0);
 
                                 ui.horizontal(|ui| {
-                                    if is_up_to_date {
-                                        ui.label(
-                                            RichText::new(format!(
-                                                "\u{2714} {}",
-                                                tr("Up to date")
-                                            ))
-                                            .color(self.color_success()),
-                                        );
-                                    } else {
-                                        let status_text = if installed_hash.is_some() {
-                                            tr("Update available")
-                                        } else {
-                                            tr("Not installed")
-                                        };
-                                        ui.label(
-                                            RichText::new(status_text)
+                                    match plugin.status {
+                                        Ts3PluginRowStatus::UpToDate => {
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "\u{2714} {}",
+                                                    tr("Up to date")
+                                                ))
+                                                .color(self.color_success()),
+                                            );
+                                        }
+                                        Ts3PluginRowStatus::UpdateAvailable => {
+                                            ui.label(
+                                                RichText::new(tr("Update available"))
+                                                    .color(self.color_warn()),
+                                            );
+                                        }
+                                        Ts3PluginRowStatus::InstallPending => {
+                                            ui.label(
+                                                RichText::new(tr(
+                                                    "Waiting for TeamSpeak to finish installing",
+                                                ))
                                                 .color(self.color_warn()),
-                                        );
+                                            );
+                                        }
+                                        Ts3PluginRowStatus::NotInstalled => {
+                                            ui.label(
+                                                RichText::new(tr("Not installed"))
+                                                    .color(self.color_warn()),
+                                            );
+                                        }
                                     }
 
                                     ui.with_layout(
@@ -328,8 +518,9 @@ impl Foxy {
                     ui.add_space(8.0);
                 }
 
-                // Open the plugin file but keep the cached list as-is.
-                // The status will refresh on the next Recheck or tab re-entry.
+                // TeamSpeak applies the package through its own dialog, so the
+                // verified state only changes after the user finishes there.
+                // Keep the list as-is; Recheck or the next tab entry confirms it.
                 for (path_key, hash, plugin_path) in install_actions {
                     match ts3_plugin::open_ts3_plugin(&plugin_path) {
                         Ok(()) => {
@@ -451,5 +642,35 @@ impl Foxy {
         });
 
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verified_teamspeak_state_wins_over_foxy_bookkeeping() {
+        // Installed and current in TeamSpeak, even when Foxy never recorded it
+        // (for example a plugin installed before Foxy, or on a fresh config).
+        assert_eq!(row_status(true, true, false), Ts3PluginRowStatus::UpToDate);
+        // Foxy thinks it installed the current package, but TeamSpeak has an
+        // older payload: the real state is what the user must act on.
+        assert_eq!(
+            row_status(true, false, true),
+            Ts3PluginRowStatus::UpdateAvailable
+        );
+    }
+
+    #[test]
+    fn foxy_hash_marks_install_as_pending_until_teamspeak_applies_it() {
+        assert_eq!(
+            row_status(false, false, true),
+            Ts3PluginRowStatus::InstallPending
+        );
+        assert_eq!(
+            row_status(false, false, false),
+            Ts3PluginRowStatus::NotInstalled
+        );
     }
 }

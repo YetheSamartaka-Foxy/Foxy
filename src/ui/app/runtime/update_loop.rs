@@ -233,6 +233,7 @@ impl Foxy {
                 self.start_fs_watcher();
             }
             self.queue_startup_rechecks();
+            self.start_startup_ts3_plugin_scan();
             self.maybe_auto_fill_app_update_url_from_metadata();
             if self.settings_view_state.app_update_auto_check && self.app_update_source_configured()
             {
@@ -269,6 +270,7 @@ impl Foxy {
         self.poll_repository_space_import_results(&ctx);
         self.poll_addon_hash_recalc_results();
         self.poll_cached_update_load_results();
+        self.poll_ts3_plugin_scan();
         self.maybe_dispatch_persistence_requests(false);
         self.process_startup_rechecks();
         self.maybe_log_startup_repository_layout();

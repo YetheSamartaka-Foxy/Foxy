@@ -28,6 +28,7 @@ pub const GAME_SPACE_SETTINGS_KEYS: &[&str] = &[
     "check_ts3_running_before_join",
     "check_steam_running_before_launch",
     "ts3_installed_plugin_hashes",
+    "ts3_plugin_statuses",
     "swifty_migration_offered",
     // Additional search folders point at game-specific addon sources, so each
     // game space keeps its own list.
