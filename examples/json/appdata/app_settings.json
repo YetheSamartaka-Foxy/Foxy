@@ -19,9 +19,6 @@
   "ui_renderer": "Auto",
   "locale": "system",
   "locale_preference_migrated": true,
-  "additional_folders": [],
-  "additional_folder_aliases": {},
-  "cleanup_folders": [],
   "font_sizes": {
     "main_view": {
       "window_control_icons": 20,
@@ -140,7 +137,6 @@
       "b": 50
     }
   },
-  "update_summary_notices": [],
   "app_update_mode": "GitHub",
   "app_update_url": "",
   "app_update_github_repo": "YetheSamartaka-Foxy/Foxy",

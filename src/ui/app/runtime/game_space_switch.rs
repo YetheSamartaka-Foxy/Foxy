@@ -13,15 +13,20 @@ use crate::ui::app::Foxy;
 use crate::ui::types::{FoxyView, RepositorySettingsTab, RepositoryViewState};
 
 impl Foxy {
-    /// True while background work that mutates or reads the active space
-    /// mid-operation is running; switching waits until it is finished so the
-    /// old space's database and files are never pulled out from under a task.
-    pub(crate) fn game_space_switch_blocked(&self) -> bool {
-        self.repository_sync_active()
+    /// Why a switch cannot start right now, or `None` when it can. Both the
+    /// disabled-button hover text and the rejection toast use this so the user
+    /// is always told the actual reason.
+    pub(crate) fn game_space_switch_block_reason(&self) -> Option<&'static str> {
+        // Debug mode swaps in shadow settings/repositories that belong to the
+        // current space; reloading another space underneath them would leave
+        // the shadows pointing at the wrong data.
+        if self.settings_view_state.debug_mode {
+            return Some("Leave debug mode before switching game spaces.");
+        }
+        let busy = self.repository_sync_active()
             || self.update_modal_open
             || !self.active_quick_scan_instance_keys.is_empty()
             || self.is_direct_download_running()
-            || self.settings_view_state.debug_mode
             || self
                 .addon_backup_worker
                 .as_ref()
@@ -30,7 +35,8 @@ impl Foxy {
             || self.addon_hash_recalc_in_flight
             || !self.pending_repository_db_wipes.is_empty()
             || !self.pending_addon_deletes.is_empty()
-            || self.scheduler_active_run.is_some()
+            || self.scheduler_active_run.is_some();
+        busy.then_some("Finish downloads and scans before switching game spaces.")
     }
 
     /// Begin a runtime switch. The target is only remembered here; the switch
@@ -41,10 +47,8 @@ impl Foxy {
         if self.pending_game_space_switch.is_some() {
             return;
         }
-        if self.game_space_switch_blocked() {
-            self.show_error_toast(
-                self.t("Finish downloads and scans before switching game spaces."),
-            );
+        if let Some(reason) = self.game_space_switch_block_reason() {
+            self.show_error_toast(self.t(reason));
             return;
         }
         info!("Game space switch requested: {}", entry.id);
@@ -68,6 +72,11 @@ impl Foxy {
     }
 
     fn finish_game_space_switch(&mut self, ctx: &egui::Context, entry: &GameSpaceEntry) {
+        // Release the outgoing space's database before retargeting. The handle
+        // slot would otherwise only swap on the next database access, leaving
+        // `database.db` open in a space the user can now remove.
+        crate::core::tasks::init_database::close_active_database_sync();
+
         let opened = match spaces::activate_game_space(&entry.id) {
             Ok(opened) => opened,
             Err(err) => {
@@ -281,14 +290,33 @@ impl Foxy {
         self.editor_mission_show_folders = false;
         self.editor_mission_terrain_filter.clear();
 
-        // Server queries and join preflight.
+        // Server queries and join preflight. Query threads from the old space
+        // are already detached; dropping their handles and draining whatever
+        // they already sent keeps their results out of the new space's status
+        // map (late arrivals key on an address this space does not list).
         self.server_statuses.clear();
         self.server_refresh_indicator_until.clear();
         self.pending_server_queries.clear();
+        self.pending_queries.clear();
+        while self.server_updates.try_recv().is_ok() {}
         self.join_preflight_cache.clear();
         self.pending_join_preflight = None;
         self.pending_join_preflight_query = None;
         self.pending_join_status_query = None;
+
+        // Scheduling drafts reference this space's repositories (scheduled jobs
+        // are part of the game-space settings half).
+        self.scheduling_editor = None;
+
+        // Direct-download inputs point at the previous space's game folders.
+        self.direct_download_url_input.clear();
+        self.direct_download_destination_input.clear();
+        self.direct_download_error = None;
+        self.direct_download_update_view = false;
+
+        // Watcher suppression belongs to the watcher that was just stopped.
+        self.fs_watch_suppressed_until_ms
+            .store(0, std::sync::atomic::Ordering::Relaxed);
 
         // Images and metadata fetches.
         self.pending_image_jobs.clear();
@@ -407,5 +435,274 @@ impl Foxy {
         self.stored_repositories = None;
         self.swifty_migration_state = Default::default();
         self.game_space_settings_view_state = Default::default();
+    }
+}
+
+/// `Foxy` fields that deliberately survive a game-space switch because they are
+/// app-global, not space-scoped: the window and renderer, theme and locale, the
+/// activity log, app updates, the backup manager, the tray, scheduling
+/// machinery that is not per-space, and every worker channel endpoint (dropping
+/// a sender would break the receiver for the rest of the session).
+///
+/// [`reset_space_scoped_state`] cannot be verified at runtime - `Foxy` needs a
+/// live `eframe::CreationContext` and has no `Default` - so the guard test below
+/// checks the source instead: every field must be either reset there or listed
+/// here. A new space-scoped field that nobody resets is exactly the silent
+/// cross-space data leak the `(remote_url, local_path)` identity rules exist to
+/// prevent, so forgetting one has to fail loudly somewhere.
+#[cfg(test)]
+const APP_GLOBAL_FOXY_FIELDS: &[&str] = &[
+    // Window, rendering, and view chrome.
+    "app_icon",
+    "app_icon_texture_bytes",
+    "default_repo_image",
+    "default_repo_image_texture_bytes",
+    "repaint_ctx",
+    "needs_repaint",
+    "startup_frame_rendered",
+    "startup_tasks_started",
+    "close_requested_at",
+    "current_view",
+    "last_view",
+    "main_view_state",
+    "current_help_tab",
+    "current_about_tab",
+    "fps_ema",
+    "last_applied_palette",
+    "cached_color32",
+    "last_font_image_size",
+    "last_saved_window_state",
+    "last_logged_display_metrics",
+    "tray_manager",
+    "hidden_to_tray",
+    "ui_toast",
+    "pending_renderer_fallback_notice",
+    // App-global settings, locale, and debug flags.
+    "settings_view_state",
+    "i18n",
+    "launch_debug_mode",
+    "show_debug_windows",
+    "previous_debug_mode",
+    "debug_modal_previews",
+    "agent_gui",
+    // Reloaded by the switch itself rather than blanked first.
+    "pending_db_schema_wipe",
+    "game_spaces_view_state",
+    "pending_game_space_switch",
+    // Activity log and diagnostics.
+    "activity_log_cache",
+    "activity_log_galleys",
+    "activity_log_generation",
+    "activity_log_last_poll_at",
+    "activity_log_filter_error",
+    "activity_log_filter_warn",
+    "activity_log_filter_info",
+    "activity_log_filter_debug",
+    "activity_log_filter_trace",
+    "activity_log_search",
+    "show_memory_diagnostics_window",
+    "memory_diagnostics_history",
+    "memory_diagnostics_pinned_baseline",
+    "memory_diagnostics_last_sample_at",
+    "memory_diagnostics_last_logged_stage_key",
+    "memory_diagnostics_process_map",
+    "memory_diagnostics_last_process_map_at",
+    // Backup manager (backups are app-global by plan section 19).
+    "backup_manager_records",
+    "backup_manager_records_version",
+    "backup_manager_loaded",
+    "backup_manager_filter",
+    "backup_manager_view_cache",
+    "backup_manager_notice",
+    "backup_manager_confirm_action",
+    "backup_inventory_refresh_requested",
+    "backup_inventory_refresh_in_progress",
+    "backup_inventory_request_id",
+    "backup_inventory_in_flight_request_id",
+    // Direct download: the transfer itself blocks a switch, and the remaining
+    // fields are app-global preferences rather than space state.
+    "show_direct_download_screen",
+    "direct_download_use_global_speed_limit",
+    "direct_download_override_speed_unlimited",
+    "direct_download_override_speed_limit_mbps",
+    "direct_download_session",
+    "direct_download_progress_rx",
+    "direct_download_worker",
+    // App self-update.
+    "app_update_status",
+    "app_update_event_rx",
+    "app_update_download_rx",
+    "app_update_changelog_rx",
+    "app_update_changelog_tx",
+    "app_update_last_check",
+    "app_update_changelogs",
+    "app_update_changelog_loading",
+    "app_update_changelogs_requested",
+    "pending_app_update_prompt",
+    "app_update_prompt_armed",
+    // Persistence queue: drained before the switch completes.
+    "persistence_request_tx",
+    "persistence_result_rx",
+    "settings_dirty",
+    "settings_revision",
+    "settings_last_mutated_at",
+    "settings_save_in_flight_revision",
+    "settings_completed_revision",
+    "repositories_dirty",
+    "repositories_revision",
+    "repositories_last_mutated_at",
+    "repositories_save_in_flight_revision",
+    "repositories_completed_revision",
+    // Long-lived worker channel endpoints. These outlive a switch by design;
+    // the state they feed is reset above.
+    "repository_settings_addon_preload_rx",
+    "repository_settings_addon_preload_tx",
+    "repository_addon_size_load_rx",
+    "repository_addon_size_load_tx",
+    "server_updates",
+    "updates_sender",
+    "join_preflight_worker",
+    "join_preflight_result_rx",
+    "join_preflight_result_tx",
+    "image_result_rx",
+    "image_result_tx",
+    "repo_metadata_result_rx",
+    "repo_metadata_result_tx",
+    "repository_space_import_result_rx",
+    "repository_space_import_result_tx",
+    "addon_hash_recalc_result_rx",
+    "addon_hash_recalc_result_tx",
+    "addon_delete_result_rx",
+    "addon_delete_result_tx",
+    "cached_update_load_result_rx",
+    "cached_update_load_result_tx",
+    "quick_scan_rx",
+    "quick_scan_tx",
+    "quick_scan_progress_rx",
+    "quick_scan_progress_tx",
+    "fs_watch_rx",
+    "fs_watch_tx",
+    "fs_watch_worker",
+    "fs_watch_stop",
+    "repository_db_wipe_rx",
+    "repository_db_wipe_tx",
+    "database_wipe_rx",
+    "database_wipe_tx",
+    "addon_backup_task_rx",
+    "addon_backup_task_tx",
+];
+
+#[cfg(test)]
+mod tests {
+    use super::APP_GLOBAL_FOXY_FIELDS;
+
+    const FOXY_STRUCT_SOURCE: &str = include_str!("../mod.rs");
+    const SWITCH_SOURCE: &str = include_str!("game_space_switch.rs");
+
+    /// Field names declared on `pub struct Foxy`.
+    fn foxy_fields() -> Vec<String> {
+        let body = FOXY_STRUCT_SOURCE
+            .split_once("pub struct Foxy {")
+            .expect("Foxy struct declaration")
+            .1
+            .split_once("\n}")
+            .expect("Foxy struct terminator")
+            .0;
+
+        body.lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                if line.starts_with("//") || line.starts_with("#[") {
+                    return None;
+                }
+                let (name, rest) = line.split_once(':')?;
+                // A wrapped type line such as `crate::ui::types::Foo,` also
+                // contains a colon; a real field is `name: Type`, never `::`.
+                if rest.starts_with(':') {
+                    return None;
+                }
+                let name = name.trim().rsplit(' ').next()?;
+                name.chars()
+                    .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+                    .then(|| name.to_string())
+            })
+            .filter(|name| !name.is_empty())
+            .collect()
+    }
+
+    /// Fields assigned or mutated through `self.<field>` inside a function.
+    fn fields_touched_by(source: &str, signature: &str) -> Vec<String> {
+        let body = source
+            .split_once(signature)
+            .unwrap_or_else(|| panic!("function {signature} exists"))
+            .1;
+        let mut touched = Vec::new();
+        let mut rest = body;
+        while let Some(index) = rest.find("self.") {
+            rest = &rest[index + "self.".len()..];
+            let name: String = rest
+                .chars()
+                .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+                .collect();
+            // `self.foo()` is a method call, not a field reset.
+            if !name.is_empty() && !rest[name.len()..].starts_with('(') {
+                touched.push(name);
+            }
+        }
+        touched
+    }
+
+    #[test]
+    fn every_foxy_field_is_either_space_scoped_and_reset_or_listed_app_global() {
+        let reset = fields_touched_by(SWITCH_SOURCE, "fn reset_space_scoped_state(&mut self) {");
+        // Cleared indirectly by the helpers the reset calls
+        // (`invalidate_addon_inventory_cache`, `clear_mod_diff_cache`, and the
+        // list-version bumps).
+        let helper_cleared = [
+            "cached_all_addons",
+            "addon_inventory_generation",
+            "addon_inventory_view_cache",
+            "repository_addons_list_cache",
+            "repository_optional_addons_list_cache",
+            "repository_external_addons_list_cache",
+            "repository_addon_size_bytes_by_repo_and_addon",
+            "repository_addon_size_load_pending",
+            "mod_diff_cache",
+            "repository_list_data_version",
+            "repository_spaces_version",
+            "repository_visual_folders_version",
+        ];
+
+        let unaccounted: Vec<String> = foxy_fields()
+            .into_iter()
+            .filter(|field| {
+                !reset.contains(field)
+                    && !helper_cleared.contains(&field.as_str())
+                    && !APP_GLOBAL_FOXY_FIELDS.contains(&field.as_str())
+            })
+            .collect();
+
+        assert!(
+            unaccounted.is_empty(),
+            "these Foxy fields are neither reset by reset_space_scoped_state nor listed in \
+             APP_GLOBAL_FOXY_FIELDS; a space-scoped field left out of the reset leaks the \
+             previous game space's data into the next one: {unaccounted:?}"
+        );
+    }
+
+    /// Guards the allowlist against naming fields that no longer exist, which
+    /// would silently stop covering a renamed field.
+    #[test]
+    fn app_global_allowlist_has_no_stale_entries() {
+        let fields = foxy_fields();
+        let stale: Vec<&&str> = APP_GLOBAL_FOXY_FIELDS
+            .iter()
+            .filter(|name| !fields.iter().any(|field| field == *name))
+            .collect();
+
+        assert!(
+            stale.is_empty(),
+            "APP_GLOBAL_FOXY_FIELDS names fields that Foxy no longer declares: {stale:?}"
+        );
     }
 }

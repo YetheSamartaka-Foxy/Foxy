@@ -82,12 +82,12 @@ impl Foxy {
         launch_label: &str,
     ) -> LaunchDispatchResult {
         let Some(command) = self.create_launch_command(effective, server) else {
-            if crate::core::game::registry().active().id()
-                != crate::core::game::arma3::ARMA3_GAME_ID
-            {
-                self.show_error_toast(
-                    self.t("Launching repositories is only supported in Arma 3 game spaces."),
-                );
+            let module = crate::core::game::registry().active();
+            if !module.capabilities().repository_launch {
+                self.show_error_toast(self.t_fmt(
+                    "Launching from a repository is not supported for {game}.",
+                    &[("game", module.display_name().to_string())],
+                ));
                 return LaunchDispatchResult::Failed;
             }
             let arma3_directory = self.settings_view_state.arma3_directory.trim();

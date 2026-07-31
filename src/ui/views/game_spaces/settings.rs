@@ -232,17 +232,29 @@ impl Foxy {
                         &[("game_id", space.game_id.clone())],
                     )
                 });
+                let capabilities = crate::core::game::registry()
+                    .get(&space.game_id)
+                    .map(|module| module.capabilities());
                 let mut tabs: Vec<(GameSpaceSettingsTab, &str)> =
                     vec![(GameSpaceSettingsTab::Game, game_tab_label.as_str())];
-                if space.game_id == crate::core::game::arma3::ARMA3_GAME_ID {
+                if capabilities.is_some_and(|caps| caps.profiles) {
                     tabs.push((GameSpaceSettingsTab::Profiles, "Profiles"));
                 }
                 tabs.push((
                     GameSpaceSettingsTab::SearchFolders,
                     "Additional search folders",
                 ));
-                if space.game_id == crate::core::game::arma3::ARMA3_GAME_ID {
+                if capabilities.is_some_and(|caps| caps.teamspeak3_plugins) {
                     tabs.push((GameSpaceSettingsTab::Ts3Plugin, "TS3 Plugin"));
+                }
+                // A tab the active module does not expose must not stay
+                // selected (and silently keep rendering) when the view is
+                // pointed at a different game space.
+                if !tabs
+                    .iter()
+                    .any(|(tab, _)| *tab == self.game_space_settings_view_state.current_tab)
+                {
+                    self.game_space_settings_view_state.current_tab = GameSpaceSettingsTab::Game;
                 }
                 let labels: Vec<&str> = tabs.iter().map(|(_, label)| *label).collect();
                 let selected = tabs

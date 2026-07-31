@@ -38,6 +38,11 @@ pub const GAME_SPACE_SETTINGS_KEYS: &[&str] = &[
     // repositories, so they must not bleed into other spaces on a switch.
     "update_summary_notices",
     "active_update_sessions",
+    // Scheduled jobs target `(remote_url, local_path)` repository instances,
+    // which only exist inside one game space; cleanup folders list that game's
+    // addon directories. Both are meaningless against another space.
+    "scheduled_jobs",
+    "cleanup_folders",
 ];
 
 fn is_game_space_key(key: &str) -> bool {
@@ -210,6 +215,37 @@ mod tests {
                 "update_summary_notices": [{"repository_url": "https://repo.example/main/"}],
             })
         );
+    }
+
+    /// The key list is matched against serde field names at runtime, so a
+    /// rename (or a typo) would silently reclassify a setting as app-global and
+    /// bleed it across game spaces. Nothing else catches that.
+    #[test]
+    fn every_game_space_key_exists_on_settings_view_state() {
+        let defaults = serde_json::to_value(crate::ui::types::SettingsViewState::default())
+            .expect("settings serialize");
+        let object = defaults
+            .as_object()
+            .expect("settings serialize to an object");
+
+        let unknown: Vec<&str> = GAME_SPACE_SETTINGS_KEYS
+            .iter()
+            .copied()
+            .filter(|key| !object.contains_key(*key))
+            .collect();
+
+        assert!(
+            unknown.is_empty(),
+            "GAME_SPACE_SETTINGS_KEYS names fields that SettingsViewState does not serialize: {unknown:?}"
+        );
+    }
+
+    #[test]
+    fn game_space_key_list_has_no_duplicates() {
+        let mut seen = std::collections::HashSet::new();
+        for key in GAME_SPACE_SETTINGS_KEYS {
+            assert!(seen.insert(*key), "duplicate game-space settings key {key}");
+        }
     }
 
     #[test]

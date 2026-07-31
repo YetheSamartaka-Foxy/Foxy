@@ -1,14 +1,20 @@
 {
+  "active_update_sessions": [],
+  "additional_folder_aliases": {},
+  "additional_folders": [],
   "apply_repo_json_client_parameters": true,
   "apply_repo_json_dlc_content": true,
-  "warn_editor_external_addons": true,
-  "enable_editor_mission_list": true,
-  "enable_server_list": true,
-  "check_server_addons_before_join": true,
-  "check_ts3_running_before_join": true,
-  "check_steam_running_before_launch": true,
   "arma3_directory": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Arma 3",
   "arma3_profiles_directory": "",
+  "check_server_addons_before_join": true,
+  "check_steam_running_before_launch": true,
+  "check_ts3_running_before_join": true,
+  "cleanup_folders": [],
+  "enable_editor_mission_list": true,
+  "enable_server_list": true,
+  "swifty_migration_offered": false,
   "teamspeak3_directory": "C:\\Program Files\\TeamSpeak 3 Client",
-  "swifty_migration_offered": false
+  "ts3_installed_plugin_hashes": {},
+  "update_summary_notices": [],
+  "warn_editor_external_addons": true
 }

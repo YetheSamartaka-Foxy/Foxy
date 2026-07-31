@@ -292,6 +292,10 @@ fn activate_entry(
 
 /// Expand `{game_dir}` and require an absolute result so a pack made on
 /// another machine can never scribble relative to the working directory.
+///
+/// `..` is rejected outright rather than resolved: the containment checks below
+/// compare path text, and a destination that walks out of a guarded root and
+/// back in would otherwise slip past them.
 pub fn resolve_destination(destination: &str, game_dir: &str) -> Result<PathBuf, String> {
     let destination = destination.trim();
     if destination.is_empty() {
@@ -308,6 +312,7 @@ pub fn resolve_destination(destination: &str, game_dir: &str) -> Result<PathBuf,
     } else {
         destination.to_string()
     };
+    reject_parent_traversal(&resolved)?;
     let path = PathBuf::from(&resolved);
     if !path.is_absolute() {
         return Err(format!("Destination {} is not an absolute path", resolved));
@@ -315,11 +320,21 @@ pub fn resolve_destination(destination: &str, game_dir: &str) -> Result<PathBuf,
     Ok(path)
 }
 
+/// Reject any `..` path component. Checked on the raw text (not on a
+/// canonicalized path) because the destination usually does not exist yet.
+fn reject_parent_traversal(path: &str) -> Result<(), String> {
+    if path.split(['/', '\\']).any(|component| component == "..") {
+        return Err("Destination must not contain a `..` path component".to_string());
+    }
+    Ok(())
+}
+
 fn validate_destination(space_dir: &Path, destination: &str) -> Result<(), String> {
     let destination = destination.trim();
     if destination.is_empty() {
         return Err("Destination must not be empty".to_string());
     }
+    reject_parent_traversal(destination)?;
     if !destination.contains(GAME_DIR_PLACEHOLDER) && !Path::new(destination).is_absolute() {
         return Err(format!(
             "Destination must be an absolute path or start with {}",
@@ -477,6 +492,66 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    /// `path_is_within` compares path text, so a destination that walks out of
+    /// a guarded root and back in would defeat both containment checks. `..` is
+    /// therefore refused at add time and again at activation time (imported
+    /// packs never went through add-time validation).
+    #[test]
+    fn parent_traversal_destinations_are_refused() {
+        let space = tempfile::tempdir().expect("space dir");
+        let work = tempfile::tempdir().expect("work dir");
+        let source = work.path().join("a.cfg");
+        std::fs::write(&source, "x").expect("source");
+
+        let escape = space
+            .path()
+            .join("..")
+            .join(space.path().file_name().expect("space name"))
+            .join("database.db")
+            .display()
+            .to_string();
+
+        assert!(add_entry(space.path(), "Escape", &source, &escape, true).is_err());
+        assert!(resolve_destination(&escape, "").is_err());
+        assert!(resolve_destination("{game_dir}/../../evil.cfg", "C:/Games/X").is_err());
+        // The same shape without `..` is still accepted.
+        assert!(resolve_destination("{game_dir}/userconfig/a.cfg", "C:/Games/X").is_ok());
+    }
+
+    #[test]
+    fn activation_refuses_a_traversal_destination_from_an_imported_entry() {
+        let space = tempfile::tempdir().expect("space dir");
+        let work = tempfile::tempdir().expect("work dir");
+        let source = work.path().join("a.cfg");
+        std::fs::write(&source, "payload").expect("source");
+        let entry = add_entry(
+            space.path(),
+            "Config",
+            &source,
+            &absolute_dest(work.path(), "ok.cfg"),
+            true,
+        )
+        .expect("add");
+
+        // Simulate an imported pack rewriting the destination after add-time
+        // validation already ran.
+        let mut store = load_store(space.path()).expect("store");
+        store.entries[0].destination = work
+            .path()
+            .join("..")
+            .join("escaped.cfg")
+            .display()
+            .to_string();
+        save_store(space.path(), &store).expect("save");
+
+        let summary = activate_entries(space.path(), "").expect("activate");
+
+        assert!(summary.activated.is_empty());
+        assert_eq!(summary.failed.len(), 1);
+        assert_eq!(summary.failed[0].0, entry.name);
+        assert!(summary.failed[0].1.contains(".."));
     }
 
     #[test]

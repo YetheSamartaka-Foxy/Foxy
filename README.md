@@ -19,6 +19,7 @@ It ships as a single binary with both a full desktop UI and a scriptable CLI, ru
 - **Arma 3 integrations** - Detect Steam and the Arma 3 installation automatically, manage Arma 3 profiles (detect, rename, clone, delete), recognize Steam Workshop addons, validate TeamSpeak 3 and Steam before launch, and support server quick-join flows with repo-provided launch parameters and DLC metadata.
 - **Daily workflow tools** - Repository filtering, addon file search, editor mission scanning, mission open/duplicate/delete actions, dependency cleanup, scheduled rechecks, automatic downloads, and optional post-job close or shutdown actions are available from the app.
 - **Clear update visibility** - Download screens show per-addon progress, update summaries, toast notifications, transfer history graphs, adaptive speed limits, and grouped download/disk/hash performance metrics.
+- **Game spaces** - Each supported game gets its own workspace with separate settings, repositories, stores, and database, switchable at runtime and remembered across launches. Arma 3 is the reference module; Total War: WARHAMMER III and Arma Reforger modules ship alongside it, with their mod management and launch currently driven from the CLI.
 - **Migration and direct-download workflows** - Guided Swifty migration preserves repositories and spaces, while direct-download mode can fetch repository, addon, or file URLs without a full database sync.
 - **One binary, two interfaces** - The same `Foxy` executable provides the desktop UI and a scriptable CLI with `--json`, `--dry-run`, `--yes`, `--quiet`, and `--no-progress` support for automation and accessible output.
 - **Cross-platform app delivery** - Native Windows and Linux builds include platform-appropriate installers plus decentralized in-app updates from self-hosted manifests or GitHub Releases, with early experimental macOS builds.
@@ -35,10 +36,11 @@ Current workspace status:
 
 These are planned directions for Foxy. They are not listed in any particular order, and priorities may change.
 
-- Arma Reforger support
+- Desktop UI for the Steam Workshop, Reforger addon, extra-file, and config-pack tools that are currently CLI-only
+- Game-space-level profiles that carry a config folder and extra-file selection, for games that do not use repositories
 - Authentication support
 - Server mode - reuse Foxy's launch and addon management systems to set up, update, and manage dedicated servers
-- Game spaces - support for more games than just Swifty, making Foxy more modular and versatile
+- Further game modules on top of the existing game-space framework
 
 ## Installation
 

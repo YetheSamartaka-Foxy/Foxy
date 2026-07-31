@@ -590,10 +590,16 @@ impl Foxy {
         repo: &Repository,
         server: Option<&RepositoryServer>,
     ) -> Option<std::process::Command> {
-        // Repository launch plans are Arma-shaped; never hand one to another
-        // game's module even if a non-Arma space somehow reaches this path.
-        let module = crate::core::game::registry().active();
-        if module.id() != crate::core::game::arma3::ARMA3_GAME_ID {
+        // Repository launch plans are Arma-shaped; never hand one to a module
+        // that does not declare the capability, and never to the read-only
+        // fallback module of a space whose game is not registered.
+        let Some(module) = crate::core::game::registry().active_module() else {
+            warn!(
+                "Repository launch is not supported: the active game space names an unknown game"
+            );
+            return None;
+        };
+        if !module.capabilities().repository_launch {
             warn!(
                 "Repository launch is not supported for the active game space (game {})",
                 module.id()

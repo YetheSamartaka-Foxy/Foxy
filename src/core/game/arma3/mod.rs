@@ -34,11 +34,13 @@ impl GameModule for Arma3Module {
     fn capabilities(&self) -> GameCapabilities {
         GameCapabilities {
             repository_sync: true,
+            repository_launch: true,
             steam_workshop: true,
             direct_download: true,
             extra_files: true,
             profiles: true,
             foxy_config_export: true,
+            teamspeak3_plugins: true,
         }
     }
 

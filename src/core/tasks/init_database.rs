@@ -509,6 +509,20 @@ pub fn wipe_database_sync() {
     }
 }
 
+/// Release the cached database handle from the UI thread.
+///
+/// A runtime game-space switch must not leave the previous space's
+/// `database.db` open: the slot only swaps on the next database access, so a
+/// space that is switched away from and then removed would hit `remove_dir_all`
+/// against a live handle and half-delete its workspace on Windows.
+pub fn close_active_database_sync() {
+    let Some(runtime) = crate::core::api::background_runtime() else {
+        log::warn!("No background runtime available to release the database handle");
+        return;
+    };
+    runtime.block_on(crate::core::tasks::db_turso::close_active_database());
+}
+
 /// Check for wipe marker and delete database files if present.
 /// Call this BEFORE init_database() to ensure files aren't locked.
 pub fn check_and_wipe_database() {

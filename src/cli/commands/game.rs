@@ -205,11 +205,20 @@ fn cmd_game_launch(cli: &CliArgs, args: GameLaunchArgs) -> Result<CommandSuccess
         return cmd_reforger_game_launch(cli, args);
     }
 
+    if module.capabilities().repository_launch {
+        return Err(CommandError::validation(
+            "game.launch",
+            format!(
+                "{} launches from a repository; use `foxy launch` instead",
+                module.display_name()
+            ),
+        ));
+    }
     Err(CommandError::validation(
         "game.launch",
         format!(
-            "Active game {} does not support standalone game launch; use repository launch where applicable",
-            module.id()
+            "Active game {} has no standalone launch path",
+            module.display_name()
         ),
     ))
 }

@@ -1,6 +1,6 @@
 use std::fs;
 
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 
 use crate::core::steam;
 use crate::ui::app::Foxy;
@@ -135,16 +135,17 @@ impl Foxy {
                 debug!("Steam directory is empty and auto-detection did not find an install");
             }
         }
-        // Detection only ever fills the active module's own install field so a
+        // Detection only ever fills the active module's own install field, so a
         // non-Arma space never gets its game path written into the Arma 3
-        // setting (or vice versa).
-        let active_module = crate::core::game::registry().active();
-        let is_arma3_space = active_module.id() == crate::core::game::arma3::ARMA3_GAME_ID;
+        // setting (or vice versa), and it never runs against the read-only
+        // fallback module of a space whose game is not registered.
+        let active_module = crate::core::game::registry().active_module();
+        let is_ts3_space =
+            active_module.is_some_and(|module| module.capabilities().teamspeak3_plugins);
         let active_install_setting_id = active_module
-            .settings_schema()
-            .install_dir_setting()
-            .map(|setting| setting.id);
+            .and_then(|module| module.settings_schema().install_dir_setting().map(|s| s.id));
         if can_persist_detected_directories
+            && let Some(active_module) = active_module
             && active_module
                 .install_dir_from_settings(&self.settings_view_state)
                 .trim()
@@ -184,7 +185,13 @@ impl Foxy {
                             );
                             detected_settings_changed = true;
                         }
-                        _ => {}
+                        other => {
+                            warn!(
+                                "Game module {} declares install setting {:?}, which has no settings binding; auto-detection was discarded",
+                                active_module.id(),
+                                other
+                            );
+                        }
                     }
                 }
             } else {
@@ -194,7 +201,7 @@ impl Foxy {
             }
         }
         if can_persist_detected_directories
-            && is_arma3_space
+            && is_ts3_space
             && self
                 .settings_view_state
                 .teamspeak3_directory

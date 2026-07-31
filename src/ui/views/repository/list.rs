@@ -308,6 +308,23 @@ impl Foxy {
             .show(ui, |ui| {
                 self.render_game_space_header(ui);
 
+                // Games without repository sync get no repository controls at
+                // all rather than buttons that lead nowhere.
+                if !crate::core::game::registry()
+                    .active()
+                    .capabilities()
+                    .repository_sync
+                {
+                    ui.label(
+                        RichText::new(self.t(
+                            "This game does not use Foxy repositories. Manage its mods from the game space tools.",
+                        ))
+                        .italics()
+                        .color(self.color_text_dim()),
+                    );
+                    return;
+                }
+
                 let add_repository_font_size = self
                     .settings_view_state
                     .font_sizes

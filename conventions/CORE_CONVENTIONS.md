@@ -4,6 +4,10 @@
 
 \- Persistence is the **Turso** engine (pure-Rust, async-native, SQLite-compatible). There is **no SeaORM/sqlx and no `entities/`** - all DB access goes through the seam in `src/core/db/` (`FoxyDb`, `DbTxn`, `OwnedDbTxn`, `DbRow`, `DbValue`, `params!`, `DbErr`). Get a handle with `context.db()`; read with `query_one`/`query_all` + `DbRow` getters; write with `execute`/`execute_retry`/`transaction`. Never reach for the raw `turso` API outside `db/` and `tasks/db_turso.rs`.
 
+\- The database is **per game space**. `db_turso::database_file_path()` resolves `database.db` from `spaces::active_game_space_dir()`, and the process-wide handle is a slot keyed by that path so a runtime space switch opens the target space's database. Anything cached per database (the shared background context, one-time maintenance passes) must be keyed the same way - never a bare `OnceLock`. See `conventions/GAME_SPACES_CONVENTIONS.md`.
+
+\- Game-space isolation is by directory, not by a `game_id` column. Do **not** add one to `repositories`; the `(remote_url, local_path)` identity rules stay exactly as they are.
+
 \- Keep DB logic under `src/core/`.
 
 \- Prefer small query helpers with clear inputs and outputs.

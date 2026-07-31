@@ -51,6 +51,10 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [Files]
 Source: "{#SourceDir}\Foxy.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\foxy.ico"; DestDir: "{app}"; Flags: ignoreversion
+; Steamworks redistributable for the Workshop helper. Foxy delay-loads it, so a
+; missing copy only disables Workshop operations, but it must ship for
+; subscribe/download/remove to work at all.
+Source: "{#SourceDir}\steam_api64.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
 Name: "{group}\Foxy"; Filename: "{app}\Foxy.exe"; IconFilename: "{app}\foxy.ico"; Tasks: startmenu; Comment: "Foxy - Arma 3 mod updater"

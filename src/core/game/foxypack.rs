@@ -16,6 +16,11 @@ use super::{GameModule, Profile, extra_files, reforger, workshop};
 
 pub const FOXY_PACK_SCHEMA_VERSION: u32 = 1;
 
+/// Ceiling on the total uncompressed payload an import will unpack. Packs carry
+/// only the user's own config and extra files, so anything past this is either a
+/// mistake or a decompression bomb aimed at the game space directory.
+pub const MAX_PACK_UNCOMPRESSED_BYTES: u64 = 512 * 1024 * 1024;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FoxyPackManifest {
     pub schema_version: u32,
@@ -106,6 +111,18 @@ pub struct ImportSummary {
     pub workshop_count: usize,
 }
 
+/// A filesystem location an import would write to or start syncing into. Packs
+/// are shared between users, so every path a pack chooses is surfaced before
+/// the import is confirmed rather than only counted.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PackWriteTarget {
+    /// `extra_file` or `repository`.
+    pub kind: String,
+    pub name: String,
+    /// Destination as written in the pack, `{game_dir}` still unexpanded.
+    pub path: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PackInspection {
     pub pack_path: String,
@@ -119,6 +136,11 @@ pub struct PackInspection {
     pub profile_count: usize,
     pub extra_file_count: usize,
     pub workshop_count: usize,
+    /// Every path the import would write to or sync into.
+    pub write_targets: Vec<PackWriteTarget>,
+    /// Uncompressed size of the pack's payloads, so an oversized pack is
+    /// visible before it is unpacked into the game space.
+    pub uncompressed_bytes: u64,
 }
 
 pub fn export_pack(
@@ -221,7 +243,41 @@ pub fn inspect_pack(input_path: &Path) -> Result<PackInspection, String> {
         profile_count: manifest.profiles.len(),
         extra_file_count: extra_files_file.entries.len(),
         workshop_count: workshop_file.len(),
+        write_targets: pack_write_targets(&extra_files_file, &repositories_file),
+        uncompressed_bytes: archive_uncompressed_bytes(&mut archive),
     })
+}
+
+fn pack_write_targets(
+    extra_files_file: &extra_files::ExtraFilesFile,
+    repositories_file: &PackRepositoriesFile,
+) -> Vec<PackWriteTarget> {
+    let mut targets: Vec<PackWriteTarget> = extra_files_file
+        .entries
+        .iter()
+        .map(|entry| PackWriteTarget {
+            kind: "extra_file".to_string(),
+            name: entry.name.clone(),
+            path: entry.destination.clone(),
+        })
+        .collect();
+    targets.extend(
+        repositories_file
+            .repositories
+            .iter()
+            .map(|entry| PackWriteTarget {
+                kind: "repository".to_string(),
+                name: entry.repository.name.clone(),
+                path: entry.repository.path.clone(),
+            }),
+    );
+    targets
+}
+
+fn archive_uncompressed_bytes(archive: &mut ZipArchive<fs::File>) -> u64 {
+    (0..archive.len())
+        .filter_map(|index| archive.by_index(index).ok().map(|file| file.size()))
+        .sum()
 }
 
 pub fn import_pack(
@@ -676,6 +732,7 @@ fn extract_extra_files_to_temp(
     temp_root: &Path,
 ) -> Result<(), String> {
     let mut found_ids = std::collections::HashSet::new();
+    let mut extracted_bytes: u64 = 0;
     for index in 0..archive.len() {
         let mut file = archive
             .by_index(index)
@@ -689,6 +746,13 @@ fn extract_extra_files_to_temp(
         }
         if !is_safe_child_path(relative) {
             return Err(format!("Unsafe extra-file path in pack: {}", name));
+        }
+        extracted_bytes = extracted_bytes.saturating_add(file.size());
+        if extracted_bytes > MAX_PACK_UNCOMPRESSED_BYTES {
+            return Err(format!(
+                "Pack payloads exceed the {} MiB import limit",
+                MAX_PACK_UNCOMPRESSED_BYTES / (1024 * 1024)
+            ));
         }
         found_ids.insert(entry_id.to_string());
         let target = temp_root.join(entry_id).join(relative);

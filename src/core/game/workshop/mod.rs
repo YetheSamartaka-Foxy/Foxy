@@ -810,6 +810,35 @@ pub fn run_steam_helper_remove(
     run_steam_helper_command("remove", app_id, item_id, timeout_secs)
 }
 
+/// File name of the Steamworks redistributable for this platform.
+pub const STEAMWORKS_LIBRARY_NAME: &str = if cfg!(target_os = "windows") {
+    "steam_api64.dll"
+} else if cfg!(target_os = "macos") {
+    "libsteam_api.dylib"
+} else {
+    "libsteam_api.so"
+};
+
+/// Refuse before spawning the helper when the Steamworks redistributable is not
+/// beside the executable.
+///
+/// The import is delay-loaded, so the helper process would otherwise die inside
+/// the loader (`0xC06D007E` on Windows) with no output for the parent to report,
+/// surfacing as a bare "download failure". A packaging mistake should say what is
+/// actually wrong.
+fn steamworks_library_available(exe: &Path) -> Result<(), String> {
+    let Some(dir) = exe.parent() else {
+        return Ok(());
+    };
+    if dir.join(STEAMWORKS_LIBRARY_NAME).is_file() {
+        return Ok(());
+    }
+    Err(format!(
+        "{} is missing next to the Foxy executable, so Steam Workshop downloads are unavailable in this install. Reinstall Foxy, or use --backend steamcmd or --backend none.",
+        STEAMWORKS_LIBRARY_NAME
+    ))
+}
+
 fn run_steam_helper_command(
     command: &str,
     app_id: u32,
@@ -820,6 +849,7 @@ fn run_steam_helper_command(
         .ok_or_else(|| format!("Invalid Steam Workshop item id {}", item_id))?;
     let exe =
         std::env::current_exe().map_err(|err| format!("Failed to find current exe: {}", err))?;
+    steamworks_library_available(&exe)?;
     let output = Command::new(&exe)
         .arg("--json")
         .arg("steam-helper")

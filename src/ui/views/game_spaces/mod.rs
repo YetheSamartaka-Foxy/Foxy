@@ -176,7 +176,8 @@ impl Foxy {
             .selected_index
             .min(entries.len().saturating_sub(1));
         self.game_spaces_view_state.selected_index = selected_index;
-        let switch_blocked = self.game_space_switch_blocked();
+        let switch_block_reason = self.game_space_switch_block_reason();
+        let switch_blocked = switch_block_reason.is_some();
 
         let mut open_requested: Option<GameSpaceEntry> = None;
         let mut remove_requested: Option<GameSpaceEntry> = None;
@@ -246,7 +247,9 @@ impl Foxy {
                                                     Button::new(tr("Open")),
                                                 )
                                                 .on_disabled_hover_text(tr(
-                                                    "Finish downloads and scans before switching game spaces.",
+                                                    switch_block_reason.unwrap_or(
+                                                        "Finish downloads and scans before switching game spaces.",
+                                                    ),
                                                 ));
                                             if open_button.hovered() {
                                                 ui.ctx().output_mut(

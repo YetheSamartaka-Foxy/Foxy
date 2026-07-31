@@ -23,38 +23,48 @@ pub struct GameDetectCtx<'a> {
     pub steam_directory: &'a str,
 }
 
+/// What a game module exposes. Every UI and CLI surface that can be absent for
+/// some game gates on a flag here rather than on the module id, so a game that
+/// lacks a feature never renders a dead control and adding a module never means
+/// editing a shared `id() == "arma3"` check.
 #[derive(Clone, Copy, Debug)]
 pub struct GameCapabilities {
+    /// File-sync repositories (URL + local path, tree hash, delta patch).
     pub repository_sync: bool,
+    /// Launching the game from a repository's addon selection. Distinct from
+    /// `repository_sync`: a game can sync repository file trees without the
+    /// Arma-shaped `-mod=` launch plan being meaningful for it.
+    pub repository_launch: bool,
     pub steam_workshop: bool,
     pub direct_download: bool,
     pub extra_files: bool,
     pub profiles: bool,
     pub foxy_config_export: bool,
+    /// TeamSpeak 3 plugin discovery/installation and the join-time TS3 gate.
+    pub teamspeak3_plugins: bool,
 }
 
 impl GameCapabilities {
+    fn flags(&self) -> [(&'static str, bool); 8] {
+        [
+            ("repository_sync", self.repository_sync),
+            ("repository_launch", self.repository_launch),
+            ("steam_workshop", self.steam_workshop),
+            ("direct_download", self.direct_download),
+            ("extra_files", self.extra_files),
+            ("profiles", self.profiles),
+            ("foxy_config_export", self.foxy_config_export),
+            ("teamspeak3_plugins", self.teamspeak3_plugins),
+        ]
+    }
+
     pub fn summary(&self) -> String {
-        let mut enabled = Vec::new();
-        if self.repository_sync {
-            enabled.push("repository_sync");
-        }
-        if self.steam_workshop {
-            enabled.push("steam_workshop");
-        }
-        if self.direct_download {
-            enabled.push("direct_download");
-        }
-        if self.extra_files {
-            enabled.push("extra_files");
-        }
-        if self.profiles {
-            enabled.push("profiles");
-        }
-        if self.foxy_config_export {
-            enabled.push("foxy_config_export");
-        }
-        enabled.join(", ")
+        self.flags()
+            .iter()
+            .filter(|(_, enabled)| *enabled)
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 

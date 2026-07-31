@@ -115,9 +115,24 @@ fn cmd_config_import(
     }
 
     if !cli.yes {
+        // Packs are shared between users and choose their own destinations, so
+        // the refusal names every path the import would write to rather than
+        // asking for a blind confirmation.
+        let targets = foxypack::inspect_pack(&args.input)
+            .map(|inspection| {
+                inspection
+                    .write_targets
+                    .iter()
+                    .map(|target| format!("\n  {} {} -> {}", target.kind, target.name, target.path))
+                    .collect::<String>()
+            })
+            .unwrap_or_default();
         return Err(CommandError::validation(
             "config.import",
-            "Importing a config pack modifies the active game space; pass --yes to confirm",
+            format!(
+                "Importing a config pack modifies the active game space and writes to these paths; pass --yes to confirm{}",
+                targets
+            ),
         ));
     }
 

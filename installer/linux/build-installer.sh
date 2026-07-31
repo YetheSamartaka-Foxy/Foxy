@@ -49,6 +49,19 @@ cp "$FOXY_BIN" "$TMPDIR/Foxy"
 chmod +x "$TMPDIR/Foxy"
 cp "$ICON_PNG" "$TMPDIR/foxy.png"
 
+# The binary has a DT_NEEDED on libsteam_api.so and an $ORIGIN rpath, so the
+# Steamworks library must be installed beside it or Foxy will not start. Take it
+# from next to the built binary, else from the cargo build directory.
+STEAM_LIB="$(dirname "$FOXY_BIN")/libsteam_api.so"
+if [ ! -f "$STEAM_LIB" ]; then
+    STEAM_LIB="$(find "$(dirname "$FOXY_BIN")/build" -name libsteam_api.so 2>/dev/null | head -n 1)"
+fi
+if [ ! -f "$STEAM_LIB" ]; then
+    echo "Error: libsteam_api.so not found next to $FOXY_BIN or under its build directory"
+    exit 1
+fi
+cp "$STEAM_LIB" "$TMPDIR/libsteam_api.so"
+
 if [ -f "$DESKTOP_TEMPLATE" ]; then
     cp "$DESKTOP_TEMPLATE" "$TMPDIR/foxy.desktop"
 fi

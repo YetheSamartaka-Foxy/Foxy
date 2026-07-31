@@ -1,4 +1,9 @@
 {
+  "active_update_sessions": [],
+  "additional_folder_aliases": {},
+  "additional_folders": [],
   "check_steam_running_before_launch": true,
-  "twwh3_directory": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Total War WARHAMMER III"
+  "cleanup_folders": [],
+  "twwh3_directory": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Total War WARHAMMER III",
+  "update_summary_notices": []
 }

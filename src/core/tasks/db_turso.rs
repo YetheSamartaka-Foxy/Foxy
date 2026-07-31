@@ -758,6 +758,21 @@ pub(crate) async fn init_turso_database_with_path() -> (PathBuf, Arc<Database>) 
     (path, db)
 }
 
+/// Drop the cached handle for whichever database is currently open, releasing
+/// the file so the previous game space's directory can be deleted. In-flight
+/// tasks that cloned the handle keep their database alive until they finish;
+/// the next [`init_turso_database`] reopens whatever the active space now
+/// resolves to.
+pub(crate) async fn close_active_database() {
+    let mut slot = DB_SLOT.lock().await;
+    if let Some((path, _)) = slot.take() {
+        info!(
+            "Released the database handle for {}",
+            sanitize_log_path(&path)
+        );
+    }
+}
+
 async fn open_and_prepare_database(path: &Path) -> Arc<Database> {
     let init_start = Instant::now();
     let path_str = path.to_string_lossy().to_string();

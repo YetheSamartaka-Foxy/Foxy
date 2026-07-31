@@ -43,12 +43,19 @@ impl GameModule for ReforgerModule {
 
     fn capabilities(&self) -> GameCapabilities {
         GameCapabilities {
+            // Reforger addons are plain file trees, so repository sync works;
+            // launching goes through `-addons`/`-addonsDir` from the managed
+            // GUID store, not through an Arma-shaped repository launch plan.
             repository_sync: true,
+            repository_launch: false,
             steam_workshop: false,
             direct_download: true,
             extra_files: true,
-            profiles: true,
+            // Profiles are still a repository-launch concept
+            // (`RepositoryProfile`); there is no game-space profile store yet.
+            profiles: false,
             foxy_config_export: true,
+            teamspeak3_plugins: false,
         }
     }
 

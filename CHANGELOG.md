@@ -1,4 +1,20 @@
-﻿# 1.1.0
+﻿# 1.2.0
+## Added
+- Game spaces: Foxy now manages more than one game. Each game space is a separate workspace with its own settings, repositories, repository spaces, mod stores, and database, switchable from the sidebar without restarting the app and reopened automatically on the next launch.
+- Total War: WARHAMMER III support, including install detection, Steam Workshop pack discovery, the `used_mods.txt` mods manifest, and campaign-save launch options.
+- Arma Reforger support, including install detection, managed Workshop addon folders by GUID, addon freezing, and `-addons`/`-addonsDir` launch generation.
+- Steam Workshop management for Steam-based games: add, import by id, URL or collection, enable/disable, remove with optional data cleanup, and version freezing that pins an item against Steam updates.
+- Managed extra files per game space, so config folders and other non-mod files can be stored in Foxy and applied to the game directory before launch.
+- Portable `.foxypack` config packs that export a game space's repositories, Workshop ids, profiles, and extra files, and import them on another machine. Packs reference mods by id and never carry mod payloads.
+- New CLI commands for the above: `foxy game list|use|create|remove|launch`, `foxy workshop ...`, `foxy config export|import`, and `foxy config extra-file ...`, all with the usual `--json`, `--dry-run`, and `--yes` support.
+- A per-game-space settings screen, reachable from the sidebar, that can also edit a game space that is not currently open.
+
+## Changed
+- Application settings are now split into app-global settings and per-game-space settings, and repositories, spaces, caches, and the database moved under `games/<game space>/`. Existing configuration is migrated automatically on first launch, and the previous files are kept as `.pre-gamespaces.bak` copies so the change can be rolled back.
+- Scheduled jobs, cleanup folders, additional search folders, and pending update state now belong to the game space they were created in rather than being shared by every game.
+- PBO parsing is now shared between the app and the repository generator, and `.pak` (PAC1) archives are parsed for per-entry delta sync and verification.
+
+# 1.1.0
 ## Added
 - Repository visual folders let repositories be grouped, colored, and collapsed in the repository list, independently of repository spaces, with drag-and-drop into folders, folder-level quick check / recheck / update actions, and an option to remove contained repositories when a folder is deleted.
 - Arma 3 profile management in Settings can detect, rename, clone, and safely delete profiles, with confirmation dialogs, protected default profiles, and backup-based deletion.

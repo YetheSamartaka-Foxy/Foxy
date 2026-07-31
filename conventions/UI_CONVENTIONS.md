@@ -2,6 +2,10 @@
 
 \- Keep UI code state-driven; store state in `Foxy` or view-specific structs.
 
+\- Every new `Foxy` field is either space-scoped (reset in `reset_space_scoped_state`) or app-global (listed in `APP_GLOBAL_FOXY_FIELDS` with a reason). A guard test fails on anything unaccounted, because a space-scoped field left out of the reset leaks the previous game space's data into the next one. See `conventions/GAME_SPACES_CONVENTIONS.md`.
+
+\- Gate game-varying UI on `GameCapabilities`, never on `module.id() == "arma3"`. A game that lacks a feature renders no control for it rather than a dead or disabled one.
+
 \- Use `render\_\*` or `ui\_\*` for drawing functions; `on\_\*` for event handlers.
 
 \- Avoid heavy work in `update`/draw; trigger work in background and update state when done.

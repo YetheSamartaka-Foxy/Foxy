@@ -38,11 +38,15 @@ const TWWH3_CONFIG: GenericRunScriptConfig = GenericRunScriptConfig {
     default_steam_install_dirs: &["Total War WARHAMMER III"],
     capabilities: GameCapabilities {
         repository_sync: false,
+        repository_launch: false,
         steam_workshop: true,
         direct_download: true,
         extra_files: true,
-        profiles: true,
+        // Profiles are still a repository-launch concept
+        // (`RepositoryProfile`); there is no game-space profile store yet.
+        profiles: false,
         foxy_config_export: true,
+        teamspeak3_plugins: false,
     },
     manifest: Some(TWWH3_MANIFEST),
     arg_templates: &["{manifest_name};"],

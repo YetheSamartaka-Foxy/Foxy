@@ -12,12 +12,22 @@ use std::path::{Path, PathBuf};
 
 pub fn cmd_launch(cli: &CliArgs, args: LaunchArgs) -> Result<CommandSuccess, CommandError> {
     let active = crate::core::game::spaces::active_game_space();
-    if active.game_id != crate::core::game::arma3::ARMA3_GAME_ID {
+    let Some(module) = crate::core::game::registry().active_module() else {
         return Err(CommandError::validation(
             "launch",
             format!(
-                "launch starts Arma 3 repositories, but the active game space {} is for game {}. Use `foxy game launch` for the active game.",
+                "Game space {} is for game {}, which this build does not support",
                 active.space_id, active.game_id
+            ),
+        ));
+    };
+    if !module.capabilities().repository_launch {
+        return Err(CommandError::validation(
+            "launch",
+            format!(
+                "launch starts a game from a repository, which {} does not support (active game space {}). Use `foxy game launch` for the active game.",
+                module.display_name(),
+                active.space_id
             ),
         ));
     }
