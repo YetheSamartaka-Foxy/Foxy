@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "Foxy"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "ansi_term",
  "anyhow",
@@ -2183,7 +2183,7 @@ version = "1.1.0"
 
 [[package]]
 name = "foxy-server-backend-cli"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "blake3",

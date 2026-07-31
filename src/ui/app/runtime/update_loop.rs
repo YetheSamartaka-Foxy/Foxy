@@ -7,6 +7,7 @@ use eframe::egui::{
 use log::{error, info, warn};
 
 use crate::core::api::SyncMode;
+use crate::ui::app::debug_modals::DebugModal;
 use crate::ui::app::{Foxy, FoxyView};
 use crate::ui::tray::{TrayEvent, TrayManager};
 
@@ -235,8 +236,12 @@ impl Foxy {
             self.queue_startup_rechecks();
             self.start_startup_ts3_plugin_scan();
             self.maybe_auto_fill_app_update_url_from_metadata();
-            if self.settings_view_state.app_update_auto_check && self.app_update_source_configured()
+            // A real check would overwrite the seeded preview status.
+            if !self.previewing_debug_modal(DebugModal::AppUpdate)
+                && self.settings_view_state.app_update_auto_check
+                && self.app_update_source_configured()
             {
+                self.app_update_prompt_armed = true;
                 self.start_update_check();
             }
         }
@@ -411,6 +416,7 @@ impl Foxy {
         self.render_ui_toast(&ctx);
         self.render_renderer_fallback_notice(&ctx);
         self.render_db_schema_wipe_prompt(&ctx);
+        self.render_app_update_prompt(&ctx);
         self.render_scheduled_post_action_overlay(&ctx);
 
         if !self.startup_frame_rendered {
@@ -511,7 +517,8 @@ impl Foxy {
         let Some(prompt) = self.pending_db_schema_wipe else {
             return;
         };
-        if crate::core::tasks::db_schema_version::is_current() {
+        let preview = self.previewing_debug_modal(DebugModal::DbSchemaWipe);
+        if !preview && crate::core::tasks::db_schema_version::is_current() {
             self.pending_db_schema_wipe = None;
             return;
         }
@@ -571,6 +578,14 @@ impl Foxy {
                 });
             });
 
+        if preview {
+            if wipe_clicked || dismiss_clicked {
+                info!("Debug modal preview: closing database wipe prompt without acting");
+                self.pending_db_schema_wipe = None;
+            }
+            return;
+        }
+
         if wipe_clicked {
             warn!(
                 "Database schema wipe confirmed (stored={} target={})",
@@ -601,6 +616,99 @@ impl Foxy {
                 prompt.target_version,
             );
             self.pending_db_schema_wipe = None;
+        }
+    }
+
+    /// Startup prompt shown when the launch update check found a newer Foxy
+    /// release. Dismissal is deliberately session-only, so the prompt returns on
+    /// every launch until the update is installed.
+    fn render_app_update_prompt(&mut self, ctx: &egui::Context) {
+        if !self.pending_app_update_prompt {
+            return;
+        }
+        let crate::core::tasks::app_update::UpdateCheckStatus::Available(info) =
+            &self.app_update_status
+        else {
+            self.pending_app_update_prompt = false;
+            return;
+        };
+        let current_version = info.current_version.clone();
+        let latest_version = info.manifest.latest.clone();
+
+        let mut update_clicked = false;
+        let mut later_clicked = false;
+
+        egui::Window::new(self.t("Foxy update available"))
+            .frame(
+                egui::Frame::window(&ctx.global_style())
+                    .fill(self.color_card_bg())
+                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
+                    .corner_radius(eframe::egui::CornerRadius::same(10)),
+            )
+            .title_bar(true)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .default_width(540.0)
+            .show(ctx, |ui| {
+                ui.label(self.t(
+                    "A newer version of Foxy is available. Updating keeps you compatible with repository servers and brings the latest fixes.",
+                ));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(self.t_fmt(
+                        "Installed version: v{version}",
+                        &[("version", current_version.clone())],
+                    ));
+                    ui.label("  ->  ");
+                    ui.label(
+                        egui::RichText::new(self.t_fmt(
+                            "New version: v{version}",
+                            &[("version", latest_version.clone())],
+                        ))
+                        .color(self.color_primary_accent()),
+                    );
+                });
+                ui.add_space(16.0);
+
+                ui.vertical_centered(|ui| {
+                    let update_btn = ui.button(self.t("View update"));
+                    if update_btn.hovered() {
+                        ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                    }
+                    if update_btn.clicked() {
+                        update_clicked = true;
+                    }
+
+                    ui.add_space(10.0);
+                    let later_btn = ui.button(self.t("Remind me later"));
+                    if later_btn.hovered() {
+                        ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                    }
+                    if later_btn.clicked() {
+                        later_clicked = true;
+                    }
+
+                    ui.add_space(6.0);
+                    ui.label(
+                        self.t("Foxy asks again on every launch until the update is installed."),
+                    );
+                });
+            });
+
+        if update_clicked {
+            info!(
+                "Opening app update view from launch update prompt (current={} latest={})",
+                current_version, latest_version
+            );
+            self.pending_app_update_prompt = false;
+            self.open_reference_view(FoxyView::AppUpdate);
+        } else if later_clicked {
+            info!(
+                "App update prompt postponed for this session (current={} latest={})",
+                current_version, latest_version
+            );
+            self.pending_app_update_prompt = false;
         }
     }
 

@@ -184,7 +184,7 @@ mod tests {
     #[test]
     fn changelog_version_serde_round_trip() {
         let changelog = ChangelogVersion {
-            version: "1.1.0".to_string(),
+            version: "1.2.0".to_string(),
             date: "2025-01-15".to_string(),
             sections: vec![
                 ChangelogSection {
@@ -199,7 +199,7 @@ mod tests {
         };
         let json = serde_json::to_string(&changelog).unwrap();
         let deserialized: ChangelogVersion = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.version, "1.1.0");
+        assert_eq!(deserialized.version, "1.2.0");
         assert_eq!(deserialized.date, "2025-01-15");
         assert_eq!(deserialized.sections.len(), 2);
         assert_eq!(deserialized.sections[0].items.len(), 2);

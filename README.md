@@ -113,6 +113,7 @@ Behavior:
 - Terminal no-arg launch prints CLI help in release builds
 - Debug builds open UI on no-arg launch for faster iteration
 - `foxy ui` (or `foxy ui --debug-mode`) explicitly launches UI from terminal
+- `foxy ui --debug-modal <app-update|db-schema-wipe>` opens a startup modal with placeholder data for inspection (repeatable); the modal's real actions stay disabled
 
 ### Global flags
 

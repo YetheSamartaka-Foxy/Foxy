@@ -150,6 +150,13 @@ pub struct UiArgs {
         help = "Loopback TCP port for --agent-gui (0 lets the OS choose)"
     )]
     pub agent_port: u16,
+    #[arg(
+        long = "debug-modal",
+        value_enum,
+        value_name = "MODAL",
+        help = "Force a startup modal open with placeholder data for inspection (repeatable). Its real actions stay disabled."
+    )]
+    pub debug_modals: Vec<crate::ui::app::debug_modals::DebugModal>,
 }
 
 #[derive(Subcommand, Debug)]

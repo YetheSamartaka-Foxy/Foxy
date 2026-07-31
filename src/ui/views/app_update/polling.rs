@@ -44,6 +44,9 @@ impl Foxy {
                     }
                     self.app_update_status = UpdateCheckStatus::Available(info);
                     self.app_update_last_check = Some(std::time::Instant::now());
+                    if std::mem::take(&mut self.app_update_prompt_armed) {
+                        self.pending_app_update_prompt = true;
+                    }
                     self.needs_repaint = true;
                 }
                 AppUpdateEvent::UpToDate(mut info) => {
@@ -54,11 +57,13 @@ impl Foxy {
                     }
                     self.app_update_status = UpdateCheckStatus::UpToDate(info);
                     self.app_update_last_check = Some(std::time::Instant::now());
+                    self.app_update_prompt_armed = false;
                     self.needs_repaint = true;
                 }
                 AppUpdateEvent::Error(msg) => {
                     log::warn!("Update check failed: {}", msg);
                     self.app_update_status = UpdateCheckStatus::Failed(msg);
+                    self.app_update_prompt_armed = false;
                     self.needs_repaint = true;
                 }
                 _ => {}

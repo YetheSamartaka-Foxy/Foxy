@@ -1,5 +1,6 @@
 use super::app::Foxy;
 use super::app::agent_driver::AgentGuiLaunchConfig;
+use super::app::debug_modals::DebugModal;
 use crate::core::utils::renderer_fallback::{
     renderer_fallback_notice_path, wgpu_crash_marker_path,
 };
@@ -19,7 +20,11 @@ const MAX_RESTORED_WINDOW_SIZE: [f32; 2] = [3840.0, 2160.0];
 /// off-screen, so we ignore it and let the OS position the window.
 const MAX_RESTORED_WINDOW_POSITION: f32 = 32000.0;
 
-pub(crate) fn main(debug_mode: bool, agent_gui: AgentGuiLaunchConfig) {
+pub(crate) fn main(
+    debug_mode: bool,
+    agent_gui: AgentGuiLaunchConfig,
+    debug_modals: Vec<DebugModal>,
+) {
     let icon = include_bytes!("icons/foxy_256.png");
     let image = match image::load_from_memory(icon) {
         Ok(img) => img.to_rgba8(),
@@ -37,7 +42,14 @@ pub(crate) fn main(debug_mode: bool, agent_gui: AgentGuiLaunchConfig) {
     if let Err(err) = eframe::run_native(
         "Foxy",
         options,
-        Box::new(move |cc| Ok(Box::new(Foxy::new(cc, debug_mode, agent_gui.clone())))),
+        Box::new(move |cc| {
+            Ok(Box::new(Foxy::new(
+                cc,
+                debug_mode,
+                agent_gui.clone(),
+                debug_modals.clone(),
+            )))
+        }),
     ) {
         log::error!("Failed to start Foxy UI: {}", err);
         eprintln!("FATAL: Failed to start Foxy UI: {}", err);

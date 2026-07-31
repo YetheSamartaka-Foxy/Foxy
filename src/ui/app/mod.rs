@@ -1,6 +1,7 @@
 pub mod agent_driver;
 pub mod agent_support;
 mod backup;
+pub mod debug_modals;
 mod diagnostics;
 mod downloads;
 mod init;
@@ -439,6 +440,16 @@ pub struct Foxy {
     pub app_update_changelogs: Vec<crate::core::tasks::app_update::ChangelogVersion>,
     pub app_update_changelog_loading: HashSet<String>,
     pub app_update_changelogs_requested: bool,
+    /// Set when the launch update check found a newer release, so the blocking
+    /// update prompt is shown. Never persisted: dismissal only lasts for the
+    /// session, so the prompt returns on every launch until Foxy is updated.
+    pub pending_app_update_prompt: bool,
+    /// Armed by the launch update check so only that check can raise the
+    /// prompt; a manual re-check from settings must not reopen it.
+    pub app_update_prompt_armed: bool,
+    /// Startup modals forced open by `ui --debug-modal` for inspection. Their
+    /// real side effects stay disabled while a preview is active.
+    pub debug_modal_previews: Vec<debug_modals::DebugModal>,
     // Swifty migration
     pub swifty_migration_state: crate::ui::views::swifty_migration::types::SwiftyMigrationState,
     // Game spaces

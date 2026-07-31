@@ -28,6 +28,7 @@ impl Foxy {
         cc: &eframe::CreationContext<'_>,
         launch_debug_mode: bool,
         agent_gui: AgentGuiLaunchConfig,
+        debug_modal_previews: Vec<crate::ui::app::debug_modals::DebugModal>,
     ) -> Self {
         info!("Initializing Foxy UI state");
         let mut visuals = Visuals::dark();
@@ -500,6 +501,9 @@ impl Foxy {
             app_update_changelogs: Vec::new(),
             app_update_changelog_loading: HashSet::new(),
             app_update_changelogs_requested: false,
+            pending_app_update_prompt: false,
+            app_update_prompt_armed: false,
+            debug_modal_previews,
             // Swifty migration
             swifty_migration_state:
                 crate::ui::views::swifty_migration::types::SwiftyMigrationState::default(),
@@ -517,6 +521,7 @@ impl Foxy {
         // returns Some(..) when an out-of-date database needs an explicit wipe.
         app.pending_db_schema_wipe =
             crate::core::tasks::db_schema_version::evaluate_and_bootstrap();
+        app.apply_debug_modal_previews();
         if app.settings_view_state.debug_mode && !app.launch_debug_mode {
             info!("Ignoring persisted debug mode; launch with `ui --debug-mode` to enable");
         }

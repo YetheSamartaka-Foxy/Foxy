@@ -270,7 +270,7 @@ fn main() {
     let no_args = raw_args.len() <= 1;
 
     if no_args && (cfg!(debug_assertions) || !launched_from_terminal) {
-        launch_ui(false, default_no_arg_agent_gui_config());
+        launch_ui(false, default_no_arg_agent_gui_config(), Vec::new());
         return;
     }
 
@@ -290,8 +290,9 @@ fn main() {
         cli::CliExecution::RunUi {
             debug_mode,
             agent_gui,
+            debug_modals,
         } => {
-            launch_ui(debug_mode, agent_gui);
+            launch_ui(debug_mode, agent_gui, debug_modals);
         }
         cli::CliExecution::Exit(code) => {
             std::process::exit(code);
@@ -313,7 +314,11 @@ fn default_no_arg_agent_gui_config() -> AgentGuiLaunchConfig {
     }
 }
 
-fn launch_ui(debug_mode: bool, agent_gui: AgentGuiLaunchConfig) {
+fn launch_ui(
+    debug_mode: bool,
+    agent_gui: AgentGuiLaunchConfig,
+    debug_modals: Vec<ui::app::debug_modals::DebugModal>,
+) {
     core::api::ensure_logger_with_terminal();
 
     // Agent GUI (driver/test) sessions must not mutate the user's desktop
@@ -353,5 +358,5 @@ fn launch_ui(debug_mode: bool, agent_gui: AgentGuiLaunchConfig) {
 
     core::game::spaces::ensure_game_spaces_layout();
     core::tasks::init_database::check_and_wipe_database();
-    ui::window::main(debug_mode, agent_gui);
+    ui::window::main(debug_mode, agent_gui, debug_modals);
 }

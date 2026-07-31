@@ -15,6 +15,7 @@ pub enum CliExecution {
     RunUi {
         debug_mode: bool,
         agent_gui: AgentGuiLaunchConfig,
+        debug_modals: Vec<crate::ui::app::debug_modals::DebugModal>,
     },
     Exit(i32),
 }
@@ -71,6 +72,7 @@ pub fn run_from_env() -> CliExecution {
                 enabled: args.agent_gui,
                 port: args.agent_port,
             },
+            debug_modals: args.debug_modals.clone(),
         };
     }
 
