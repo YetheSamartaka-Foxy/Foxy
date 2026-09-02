@@ -193,7 +193,7 @@ impl Foxy {
 
                 ui.horizontal(|ui| {
                     ui.add_space(horizontal_padding);
-                    let row_width = (ui.available_width() - horizontal_padding).max(0.0);
+                    let row_width = (ui.available_width() - 2.0 * horizontal_padding).max(0.0);
                     ui.allocate_ui_with_layout(
                         Vec2::new(row_width, ui.spacing().interact_size.y),
                         eframe::egui::Layout::top_down(eframe::egui::Align::Min),
@@ -213,6 +213,7 @@ impl Foxy {
                                     };
                                     Self::render_wrapped_settings_checkbox(
                                         ui,
+                                        true,
                                         field,
                                         tr(toggle.label),
                                         Some(tr(toggle.help)),

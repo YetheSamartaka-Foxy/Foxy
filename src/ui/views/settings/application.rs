@@ -15,30 +15,32 @@ impl Foxy {
             addons: false,
         };
 
-        ScrollArea::vertical().show(ui, |ui| {
-            ui.vertical(|ui| {
-                self.render_application_settings_general(
-                    ui,
-                    horizontal_padding,
-                    &mut path_change_flags.settings,
-                );
+        ScrollArea::both()
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                ui.vertical(|ui| {
+                    self.render_application_settings_general(
+                        ui,
+                        horizontal_padding,
+                        &mut path_change_flags.settings,
+                    );
 
-                self.render_application_settings_paths(
-                    ui,
-                    horizontal_padding,
-                    browse_button_width,
-                    &default_backup_path,
-                    &default_temp_path,
-                    &mut path_change_flags,
-                );
+                    self.render_application_settings_paths(
+                        ui,
+                        horizontal_padding,
+                        browse_button_width,
+                        &default_backup_path,
+                        &default_temp_path,
+                        &mut path_change_flags,
+                    );
 
-                self.render_application_settings_updates(
-                    ui,
-                    horizontal_padding,
-                    &mut path_change_flags.settings,
-                );
+                    self.render_application_settings_updates(
+                        ui,
+                        horizontal_padding,
+                        &mut path_change_flags.settings,
+                    );
+                });
             });
-        });
 
         self.render_application_settings_wipe_db_confirmation(ui);
         self.render_application_settings_reset_confirmation(ui);

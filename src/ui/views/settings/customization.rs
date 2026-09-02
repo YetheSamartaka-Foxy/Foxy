@@ -83,7 +83,7 @@ impl Foxy {
             let scroll_height = (_viewport_height - 48.0).max(120.0);
             let scroll_size = Vec2::new(ui.available_width(), scroll_height);
             ui.allocate_ui(scroll_size, |ui| {
-                ScrollArea::vertical()
+                ScrollArea::both()
                     .id_salt("customization_settings")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {

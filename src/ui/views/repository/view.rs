@@ -176,26 +176,52 @@ impl Foxy {
                                     - ui.spacing().item_spacing.x)
                                     .max(0.0);
 
-                                ui.scope(|ui| {
-                                    ui.set_max_width(heading_max_width);
-                                    ui.add(
-                                        egui::Label::new(
-                                            RichText::new(&repo.name)
-                                                .text_style(TextStyle::Heading),
-                                        )
-                                        .truncate(),
-                                    );
-                                    if !repo.profiles.is_empty() {
-                                        ui.add_space(10.0);
-                                        let default_profile_text = tr("Default");
-                                        let combo = egui::ComboBox::from_label("")
-                                            .selected_text(
-                                                repo.selected_profile
-                                                    .clone()
-                                                    .unwrap_or_else(|| {
-                                                        default_profile_text.clone()
-                                                    }),
+                                    ui.allocate_ui_with_layout(
+                                        Vec2::new(heading_max_width, ui.spacing().interact_size.y),
+                                        Layout::top_down(Align::Min),
+                                        |ui| {
+                                            ui.set_width(heading_max_width);
+                                            ui.horizontal_wrapped(|ui| {
+                                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                                        let name_slot = ui
+                                            .painter()
+                                            .layout_no_wrap(
+                                                repo.name.clone(),
+                                                TextStyle::Heading.resolve(ui.style()),
+                                                ui.visuals().text_color(),
                                             )
+                                            .size()
+                                            .x
+                                            .min(heading_max_width);
+                                        ui.allocate_ui_with_layout(
+                                            Vec2::new(name_slot, ui.spacing().interact_size.y),
+                                            Layout::left_to_right(Align::Center),
+                                            |ui| {
+                                                ui.set_max_width(name_slot);
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        RichText::new(&repo.name).text_style(TextStyle::Heading),
+                                                    )
+                                                    .truncate(),
+                                                );
+                                            },
+                                        );
+                                    if !repo.profiles.is_empty() {
+                                        let default_profile_text = tr("Default");
+                                        let profile_selected_text = repo
+                                            .selected_profile
+                                            .clone()
+                                            .unwrap_or_else(|| default_profile_text.clone());
+                                        let profile_slot =
+                                            combo_slot_width(ui, &profile_selected_text, heading_max_width);
+                                        ui.allocate_ui_with_layout(
+                                            Vec2::new(profile_slot, ui.spacing().interact_size.y),
+                                            Layout::left_to_right(Align::Center),
+                                            |ui| {
+                                                ui.set_max_width(profile_slot);
+                                        let combo = egui::ComboBox::from_label("")
+                                            .width(profile_slot)
+                                            .selected_text(profile_selected_text.clone())
                                             .show_ui(ui, |ui| {
                                                 let default_response = ui.selectable_label(
                                                     repo.selected_profile.is_none(),
@@ -234,24 +260,28 @@ impl Foxy {
                                                 Foxy::set_pointing_cursor_output(o)
                                             });
                                         }
+                                        });
                                     }
 
                                     // Arma 3 profile dropdown
                                     if !self.detected_arma3_profiles.is_empty() {
-                                        ui.add_space(10.0);
+                                        let a3_selected_text = format!(
+                                            "{}: {}",
+                                            tr("Arma 3 Profile"),
+                                            repo.arma3_profile.clone().unwrap_or_else(|| tr("Auto-detect"))
+                                        );
+                                        let a3_slot = combo_slot_width(ui, &a3_selected_text, heading_max_width);
+                                        ui.allocate_ui_with_layout(
+                                            Vec2::new(a3_slot, ui.spacing().interact_size.y),
+                                            Layout::left_to_right(Align::Center),
+                                            |ui| {
+                                                ui.set_max_width(a3_slot);
                                         let auto_label = tr("Auto-detect");
-                                        let selected_text = repo
-                                            .arma3_profile
-                                            .clone()
-                                            .unwrap_or_else(|| auto_label.clone());
                                         let a3combo = egui::ComboBox::from_id_salt(
                                             "arma3_profile_combo",
                                         )
-                                        .selected_text(format!(
-                                            "{}: {}",
-                                            tr("Arma 3 Profile"),
-                                            selected_text
-                                        ))
+                                        .width(a3_slot)
+                                        .selected_text(a3_selected_text.clone())
                                         .show_ui(ui, |ui| {
                                             let auto_response = ui.selectable_label(
                                                 repo.arma3_profile.is_none(),
@@ -314,8 +344,11 @@ impl Foxy {
                                                 Foxy::set_pointing_cursor_output(o)
                                             });
                                         }
+                                        });
                                     }
-                                });
+                                        });
+                                    },
+                                );
 
                                 ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
                                     let toolbar_icon_size = self
@@ -770,4 +803,19 @@ impl Foxy {
         self.render_add_repository_modal(ui.ctx());
         self.render_duplicate_repository_add_confirmation(ui.ctx());
     }
+}
+
+/// Outer width a [`egui::ComboBox`] needs for `text` without wrapping, clamped to
+/// `max_width`. Used to give the combo a wrap-aware slot in a wrapping row.
+fn combo_slot_width(ui: &Ui, text: &str, max_width: f32) -> f32 {
+    let galley = ui.painter().layout_no_wrap(
+        text.to_owned(),
+        TextStyle::Button.resolve(ui.style()),
+        ui.visuals().text_color(),
+    );
+    let natural = galley.size().x
+        + ui.spacing().icon_spacing
+        + ui.spacing().icon_width
+        + 2.0 * ui.spacing().button_padding.x;
+    natural.max(ui.spacing().combo_width).min(max_width)
 }

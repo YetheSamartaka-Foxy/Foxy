@@ -142,8 +142,16 @@ impl Foxy {
 pub(crate) fn render_wrapped_info_row(ui: &mut Ui, horizontal_padding: f32, text: RichText) {
     ui.horizontal(|ui| {
         ui.add_space(horizontal_padding);
-        let width = (ui.available_width() - horizontal_padding).max(0.0);
-        ui.add_sized(Vec2::new(width, 0.0), Label::new(text).wrap());
+        let width = (ui.available_width() - 2.0 * horizontal_padding).max(0.0);
+        ui.allocate_ui_with_layout(
+            Vec2::new(width, 0.0),
+            Layout::left_to_right(Align::Min),
+            |ui| {
+                ui.set_max_width(width);
+                ui.add(Label::new(text).wrap());
+            },
+        );
+        ui.add_space(horizontal_padding);
     });
 }
 

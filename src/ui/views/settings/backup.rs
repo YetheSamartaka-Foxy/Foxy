@@ -79,7 +79,7 @@ impl Foxy {
 
         let mut open_folder_path: Option<std::path::PathBuf> = None;
 
-        ScrollArea::vertical().show(ui, |ui| {
+        ScrollArea::both().auto_shrink([false, true]).show(ui, |ui| {
             ui.vertical(|ui| {
                 render_wrapped_info_row(
                     ui,
