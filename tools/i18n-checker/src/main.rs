@@ -4,6 +4,7 @@
 //!   cargo run --manifest-path tools/i18n-checker/Cargo.toml
 //!   cargo run --manifest-path tools/i18n-checker/Cargo.toml -- --strict
 //!   cargo run --manifest-path tools/i18n-checker/Cargo.toml -- --require-translated-key-file changed-keys.txt
+//!   cargo run --manifest-path tools/i18n-checker/Cargo.toml -- --audit-changed-since HEAD
 //!
 //! Or from inside the tool directory:
 //!   cd tools/i18n-checker && cargo run
@@ -12,25 +13,28 @@
 //!   - Missing keys (present in en.json but absent in locale; warning by default, error in --strict)
 //!   - Extra keys (present in locale but absent in en.json), excluding valid plural suffixes
 //!   - Duplicate keys in locale JSON files
+//!   - Placeholder mismatches against en.json
 //!   - JSON parse errors
 //!   - Optional exact-English fallback checks for explicitly listed keys
+//!   - Optional audit of locale values changed against a git baseline
 //!   - Summary with pass/fail per locale
 
+use i18n_checker::{
+    LocaleLoad, find_locales_dir, is_valid_plural_extra, load_locale_file, parse_locale_object,
+    placeholder_names, read_key_file, translation_files, truncate,
+};
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::{env, fs, process};
-
-/// Plural suffixes that are valid in non-English locales but not in en.json.
-/// These are CLDR plural categories used by the app's `plural_category` function.
-const VALID_PLURAL_SUFFIXES: &[&str] = &[".one", ".few", ".other"];
+use std::process::Command;
+use std::{env, process};
 
 fn main() {
     let config = parse_args();
-    let locales_dir = find_locales_dir();
+    let locales_dir = or_die(find_locales_dir());
 
     let en_path = locales_dir.join("en.json");
-    let en_load = load_locale_file(&en_path);
+    let en_load = or_die(load_locale_file(&en_path));
     if !en_load.duplicate_keys.is_empty() {
         eprintln!("Duplicate keys in {}:", en_path.display());
         for key in &en_load.duplicate_keys {
@@ -42,25 +46,11 @@ fn main() {
     let en_keys: BTreeSet<&str> = en_map.keys().map(|s| s.as_str()).collect();
     validate_required_translated_keys(&config.required_translated_keys, &en_keys);
 
-    let mut locale_files: Vec<PathBuf> = fs::read_dir(&locales_dir)
-        .unwrap_or_else(|e| {
-            eprintln!(
-                "Failed to read locales directory {}: {e}",
-                locales_dir.display()
-            );
-            process::exit(1);
-        })
-        .filter_map(|entry| entry.ok().map(|e| e.path()))
-        .filter(|p| {
-            p.extension().is_some_and(|ext| ext == "json")
-                && p.file_name().is_some_and(|name| name != "en.json")
-                && !p.file_name().unwrap().to_string_lossy().contains("_batch_")
-        })
-        .collect();
-    locale_files.sort();
+    let locale_files = or_die(translation_files(&locales_dir));
 
     let mut total_issues = 0usize;
     let mut total_fallbacks = 0usize;
+    let mut total_placeholder_warnings = 0usize;
     let mut files_with_issues = 0usize;
 
     println!();
@@ -73,8 +63,12 @@ fn main() {
 
     for path in &locale_files {
         let filename = path.file_name().unwrap().to_string_lossy();
-        let locale_load = load_locale_file(path);
-        let locale_map = locale_load.map;
+        let locale_load = or_die(load_locale_file(path));
+        let LocaleLoad {
+            map: locale_map,
+            duplicate_keys,
+            ..
+        } = locale_load;
         let locale_keys: BTreeSet<&str> = locale_map.keys().map(|s| s.as_str()).collect();
 
         let missing: Vec<&str> = en_keys.difference(&locale_keys).copied().collect();
@@ -99,6 +93,26 @@ fn main() {
             .map(|(k, _)| k.as_str())
             .collect();
 
+        // Placeholder parity is scanned for every shared key, but only blocks
+        // for the keys the caller is actually working on. Locale files carry
+        // pre-existing mismatches that must not fail unrelated runs.
+        let mut blocking_placeholders: Vec<String> = Vec::new();
+        let mut warned_placeholders: Vec<String> = Vec::new();
+        for (key, value) in &locale_map {
+            let Some(english) = en_map.get(key.as_str()) else {
+                continue;
+            };
+            let Some(report) = placeholder_report(key, english, value) else {
+                continue;
+            };
+            if config.is_placeholder_blocking(key) {
+                blocking_placeholders.push(report);
+            } else {
+                warned_placeholders.push(report);
+            }
+        }
+        total_placeholder_warnings += warned_placeholders.len();
+
         let untranslated_required: Vec<&str> = config
             .required_translated_keys
             .iter()
@@ -111,7 +125,8 @@ fn main() {
 
         let issue_count = extra.len()
             + empty_values.len()
-            + locale_load.duplicate_keys.len()
+            + duplicate_keys.len()
+            + blocking_placeholders.len()
             + untranslated_required.len()
             + if config.strict_missing {
                 missing.len()
@@ -132,16 +147,20 @@ fn main() {
                     println!("    [?] FALLBACK: {}", truncate(key, 100));
                 }
             }
+            for report in &warned_placeholders {
+                println!("    [?] PLACEHOLDER: {report}");
+            }
         } else {
             files_with_issues += 1;
             total_issues += issue_count;
             println!(
-                "  {filename:<20} ISSUES ({} keys, {} missing, {} unexpected extra, {} empty, {} duplicate, {} untranslated required)",
+                "  {filename:<20} ISSUES ({} keys, {} missing, {} unexpected extra, {} empty, {} duplicate, {} placeholder, {} untranslated required)",
                 locale_keys.len(),
                 missing.len(),
                 extra.len(),
                 empty_values.len(),
-                locale_load.duplicate_keys.len(),
+                duplicate_keys.len(),
+                blocking_placeholders.len(),
                 untranslated_required.len()
             );
             for key in &missing {
@@ -158,8 +177,14 @@ fn main() {
             for key in &empty_values {
                 println!("    [!] EMPTY:   {}", truncate(key, 100));
             }
-            for key in &locale_load.duplicate_keys {
+            for key in &duplicate_keys {
                 println!("    [!] DUPLICATE: {}", truncate(key, 100));
+            }
+            for report in &blocking_placeholders {
+                println!("    [!] PLACEHOLDER: {report}");
+            }
+            for report in &warned_placeholders {
+                println!("    [?] PLACEHOLDER: {report}");
             }
             for key in &untranslated_required {
                 println!("    [!] ENGLISH: {}", truncate(key, 100));
@@ -181,14 +206,148 @@ fn main() {
         }
     } else {
         println!("{files_with_issues} file(s) with {total_issues} issue(s) found.");
+    }
+    if total_placeholder_warnings > 0 {
+        println!(
+            "{total_placeholder_warnings} non-blocking placeholder mismatch(es) outside the requested key set. Pass --strict-placeholders to fail on them."
+        );
+    }
+
+    let mut audit_issues = 0usize;
+    if let Some(baseline) = &config.audit_changed_since {
+        audit_issues = audit_changed_pairs(
+            &locales_dir,
+            &locale_files,
+            &en_map,
+            baseline,
+            &config.audit_allowed_english_keys,
+        );
+    }
+
+    if total_issues > 0 || audit_issues > 0 {
         process::exit(1);
     }
+}
+
+fn placeholder_report(key: &str, english: &Value, translated: &Value) -> Option<String> {
+    let expected = placeholder_names(english);
+    let actual = placeholder_names(translated);
+    if expected == actual {
+        return None;
+    }
+    Some(format!(
+        "{}: expected {:?}, got {:?}",
+        truncate(key, 100),
+        expected.iter().collect::<Vec<_>>(),
+        actual.iter().collect::<Vec<_>>()
+    ))
+}
+
+/// Validates only the locale/key pairs whose value differs from a git baseline.
+/// Unlike `--require-translated-key-file` this does not expect every locale for
+/// a key to change, which is the shape of exact-English fallback cleanup.
+fn audit_changed_pairs(
+    locales_dir: &Path,
+    locale_files: &[PathBuf],
+    en_map: &serde_json::Map<String, Value>,
+    baseline: &str,
+    allowed_english_keys: &BTreeSet<String>,
+) -> usize {
+    let repo_root = locales_dir.join("../../..");
+    let mut errors: Vec<String> = Vec::new();
+    let mut changed_files = 0usize;
+    let mut changed_pairs = 0usize;
+    let mut changed_keys = BTreeSet::<String>::new();
+
+    for path in locale_files {
+        let filename = path.file_name().unwrap().to_string_lossy();
+        let rel_path = format!("src/ui/locales/{filename}");
+        let Some(baseline_map) = git_show_object(&repo_root, baseline, &rel_path) else {
+            continue;
+        };
+        let locale_map = or_die(load_locale_file(path)).map;
+
+        let mut local_changes = 0usize;
+        for (key, value) in &locale_map {
+            match baseline_map.get(key) {
+                Some(old) if old == value => continue,
+                None => continue,
+                Some(_) => {}
+            }
+
+            local_changes += 1;
+            changed_pairs += 1;
+            changed_keys.insert(key.clone());
+
+            let english = en_map.get(key).cloned().unwrap_or(Value::Null);
+            if let Some(report) = placeholder_report(key, &english, value) {
+                errors.push(format!("{filename}: placeholder mismatch for {report}"));
+            }
+            if !allowed_english_keys.contains(key) && en_map.get(key) == Some(value) {
+                errors.push(format!(
+                    "{filename}: changed value still equals en.json for {}",
+                    truncate(key, 100)
+                ));
+            }
+        }
+
+        if local_changes > 0 {
+            changed_files += 1;
+        }
+    }
+
+    println!("{}", "=".repeat(72));
+    println!(
+        "Audited {changed_pairs} changed locale value(s) across {changed_files} file(s), {} unique key(s), baseline {baseline}.",
+        changed_keys.len()
+    );
+    if errors.is_empty() {
+        println!("Changed locale pair audit passed.");
+        return 0;
+    }
+
+    println!("Changed locale pair audit failed:");
+    for error in &errors {
+        println!("  - {error}");
+    }
+    errors.len()
+}
+
+fn git_show_object(
+    repo_root: &Path,
+    baseline: &str,
+    rel_path: &str,
+) -> Option<serde_json::Map<String, Value>> {
+    let output = Command::new("git")
+        .arg("show")
+        .arg(format!("{baseline}:{rel_path}"))
+        .current_dir(repo_root)
+        .output()
+        .unwrap_or_else(|e| {
+            eprintln!("Failed to run git: {e}");
+            process::exit(1);
+        });
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8(output.stdout).ok()?;
+    let raw = raw.trim_start_matches('\u{feff}');
+    parse_locale_object(raw, &format!("{baseline}:{rel_path}")).ok()
 }
 
 #[derive(Debug, Default)]
 struct Config {
     strict_missing: bool,
     required_translated_keys: BTreeSet<String>,
+    audit_changed_since: Option<String>,
+    audit_allowed_english_keys: BTreeSet<String>,
+    strict_placeholders: bool,
+}
+
+impl Config {
+    fn is_placeholder_blocking(&self, key: &str) -> bool {
+        self.strict_placeholders || self.required_translated_keys.contains(key)
+    }
 }
 
 fn parse_args() -> Config {
@@ -198,6 +357,7 @@ fn parse_args() -> Config {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--strict" => config.strict_missing = true,
+            "--strict-placeholders" => config.strict_placeholders = true,
             "--require-translated-key" => {
                 let Some(key) = args.next() else {
                     eprintln!("--require-translated-key requires a key argument");
@@ -210,8 +370,24 @@ fn parse_args() -> Config {
                     eprintln!("--require-translated-key-file requires a path argument");
                     process::exit(1);
                 };
-                for key in read_required_translated_key_file(Path::new(&path)) {
+                for key in or_die(read_key_file(Path::new(&path))) {
                     config.required_translated_keys.insert(key);
+                }
+            }
+            "--audit-changed-since" => {
+                let Some(baseline) = args.next() else {
+                    eprintln!("--audit-changed-since requires a git ref argument");
+                    process::exit(1);
+                };
+                config.audit_changed_since = Some(baseline);
+            }
+            "--audit-allow-english-key-file" => {
+                let Some(path) = args.next() else {
+                    eprintln!("--audit-allow-english-key-file requires a path argument");
+                    process::exit(1);
+                };
+                for key in or_die(read_key_file(Path::new(&path))) {
+                    config.audit_allowed_english_keys.insert(key);
                 }
             }
             "--help" | "-h" => {
@@ -235,24 +411,25 @@ fn print_help() {
     println!("Options:");
     println!("  --strict");
     println!("      Treat missing locale keys as errors instead of fallbacks.");
+    println!("  --strict-placeholders");
+    println!("      Treat every placeholder mismatch as an error, not only the requested keys.");
     println!("  --require-translated-key <key>");
     println!("      Fail when a non-English locale keeps the English value for this key.");
     println!("  --require-translated-key-file <path>");
     println!("      Read required translated keys from a UTF-8 text file, one key per line.");
     println!("      Use \\n in the file for newline characters inside a JSON key.");
-}
-
-fn read_required_translated_key_file(path: &Path) -> Vec<String> {
-    let raw = fs::read_to_string(path).unwrap_or_else(|e| {
-        eprintln!("Failed to read required key file {}: {e}", path.display());
-        process::exit(1);
-    });
-
-    raw.lines()
-        .map(|line| line.trim().trim_start_matches('\u{feff}'))
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(|line| line.replace("\\n", "\n"))
-        .collect()
+    println!("  --audit-changed-since <git-ref>");
+    println!("      Also audit only the locale values that differ from the given git baseline,");
+    println!("      reporting placeholder mismatches and changed values that still equal en.json.");
+    println!("  --audit-allow-english-key-file <path>");
+    println!("      Keys allowed to stay exactly English during --audit-changed-since.");
+    println!();
+    println!("Placeholder parity is scanned for every shared key. It only fails the run for keys");
+    println!("named by --require-translated-key/-file, unless --strict-placeholders is passed.");
+    println!("To apply a translation batch, use the locale-apply binary in this package:");
+    println!(
+        "  cargo run --manifest-path tools/i18n-checker/Cargo.toml --bin locale-apply -- --help"
+    );
 }
 
 fn validate_required_translated_keys(required: &BTreeSet<String>, en_keys: &BTreeSet<&str>) {
@@ -271,157 +448,25 @@ fn validate_required_translated_keys(required: &BTreeSet<String>, en_keys: &BTre
     }
 }
 
-fn find_locales_dir() -> PathBuf {
-    // Try common locations relative to CWD or the tool directory.
-    let candidates = [
-        PathBuf::from("src/ui/locales"),
-        PathBuf::from("../../src/ui/locales"),
-    ];
-    for candidate in &candidates {
-        if candidate.is_dir() {
-            return candidate.clone();
-        }
-    }
-    // Fall back: check CARGO_MANIFEST_DIR (set during `cargo run`).
-    if let Ok(manifest_dir) = env::var("CARGO_MANIFEST_DIR") {
-        let from_manifest = Path::new(&manifest_dir).join("../../src/ui/locales");
-        if from_manifest.is_dir() {
-            return from_manifest;
-        }
-    }
-    eprintln!("Could not find src/ui/locales directory. Run from the repository root:");
-    eprintln!("  cargo run --manifest-path tools/i18n-checker/Cargo.toml");
-    process::exit(1);
-}
-
-#[derive(Debug)]
-struct LocaleLoad {
-    map: serde_json::Map<String, Value>,
-    duplicate_keys: Vec<String>,
-}
-
-fn load_locale_file(path: &Path) -> LocaleLoad {
-    let raw = fs::read_to_string(path).unwrap_or_else(|e| {
-        eprintln!("Failed to read {}: {e}", path.display());
+fn or_die<T>(result: Result<T, String>) -> T {
+    result.unwrap_or_else(|error| {
+        eprintln!("{error}");
         process::exit(1);
-    });
-    let raw = raw.trim_start_matches('\u{feff}'); // strip BOM
-    let value: Value = serde_json::from_str(raw).unwrap_or_else(|e| {
-        eprintln!("Invalid JSON in {}: {e}", path.display());
-        process::exit(1);
-    });
-    let map = match value {
-        Value::Object(map) => map,
-        _ => {
-            eprintln!("{} is not a JSON object", path.display());
-            process::exit(1);
-        }
-    };
-
-    LocaleLoad {
-        map,
-        duplicate_keys: find_duplicate_top_level_keys(raw),
-    }
-}
-
-fn find_duplicate_top_level_keys(raw: &str) -> Vec<String> {
-    let mut depth = 0usize;
-    let mut in_string = false;
-    let mut escaped = false;
-    let mut string_start = None;
-    let mut keys = BTreeMap::<String, usize>::new();
-    let mut duplicates = BTreeSet::<String>::new();
-
-    for (idx, ch) in raw.char_indices() {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                in_string = false;
-                if depth == 1 && is_key_string(raw, idx + ch.len_utf8()) {
-                    let start = string_start.unwrap_or(idx);
-                    let literal = &raw[start..idx + ch.len_utf8()];
-                    if let Ok(key) = serde_json::from_str::<String>(literal) {
-                        let count = keys.entry(key.clone()).or_insert(0);
-                        *count += 1;
-                        if *count == 2 {
-                            duplicates.insert(key);
-                        }
-                    }
-                }
-            }
-            continue;
-        }
-
-        match ch {
-            '"' => {
-                in_string = true;
-                string_start = Some(idx);
-            }
-            '{' => depth += 1,
-            '}' => depth = depth.saturating_sub(1),
-            _ => {}
-        }
-    }
-
-    duplicates.into_iter().collect()
-}
-
-fn is_key_string(raw: &str, offset: usize) -> bool {
-    raw[offset..]
-        .chars()
-        .find(|ch| !ch.is_whitespace())
-        .is_some_and(|ch| ch == ':')
-}
-
-/// Returns true if an "extra" key is actually a valid plural form whose base key exists in en.json.
-fn is_valid_plural_extra(key: &str, en_keys: &BTreeSet<&str>) -> bool {
-    for suffix in VALID_PLURAL_SUFFIXES {
-        if let Some(base) = key.strip_suffix(suffix)
-            && en_keys.contains(base)
-        {
-            return true;
-        }
-    }
-    false
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max])
-    }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
-    fn duplicate_top_level_keys_are_detected() {
-        let raw = r#"{
-            "One": "First",
-            "Nested": { "One": "Allowed" },
-            "One": "Second",
-            "Line\nKey": "First",
-            "Line\nKey": "Second"
-        }"#;
-
-        let duplicates = find_duplicate_top_level_keys(raw);
-
-        assert_eq!(duplicates, vec!["Line\nKey".to_string(), "One".to_string()]);
-    }
-
-    #[test]
-    fn nested_duplicate_keys_are_ignored() {
-        let raw = r#"{
-            "One": { "Nested": "First", "Nested": "Second" },
-            "Two": "Value"
-        }"#;
-
-        assert!(find_duplicate_top_level_keys(raw).is_empty());
+    fn placeholder_report_flags_only_mismatches() {
+        assert!(
+            placeholder_report("k", &json!("{count} of {name}"), &json!("{name}: {count}"))
+                .is_none()
+        );
+        assert!(placeholder_report("k", &json!("{count}"), &json!("{cantidad}")).is_some());
+        assert!(placeholder_report("k", &json!("{game} dir"), &json!("Arma 3 dir")).is_some());
     }
 }

@@ -6,7 +6,8 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.96"
 publish = false
-description = "Dev helper: checks locale JSON files for missing/extra keys against en.json"
+description = "Dev helpers: locale JSON validation and targeted translation batch application"
+default-run = "i18n-checker"
 
 [dependencies]
 serde_json = "1.0"

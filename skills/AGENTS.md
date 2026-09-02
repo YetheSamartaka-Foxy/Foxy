@@ -13,7 +13,7 @@ Skills in this directory are shareable agent workflows maintained with the repo.
 
 - Keep skill scripts runnable from the repository root.
 - Keep command examples repo-relative, not user-specific absolute paths.
-- For repeated locale insertion/update work, prefer a checked helper script under `skills/foxy-locale-translator/scripts/` over one-off generated patch blocks.
+- For repeated locale insertion/update work, prefer the `locale-apply` binary in `tools/i18n-checker/` over one-off generated patch blocks. Skills in this repo call compiled Rust helpers, not scripting-language helpers.
 - For locale skills or examples, avoid PowerShell text-write patterns that can corrupt non-ASCII text into literal `?`; require UTF-8-safe edits plus a post-edit scan for `?` in changed translated values.
 - When localization conventions change, update both `conventions/i18n_CONVENTIONS.md` and `skills/foxy-locale-translator/SKILL.md` in the same change.
 - When the GUI driver workflow changes, update `skills/foxy-gui-driver/SKILL.md` first, then keep `.claude/skills/foxy-gui-driver/SKILL.md` as a small pointer to that canonical file.

@@ -28,8 +28,8 @@ Claude Code can also invoke the GUI driver directly as `/foxy-gui-driver` becaus
 ## Maintaining Skills
 
 - Keep commands repo-relative so the skill works for every contributor.
-- Keep helper scripts under the skill's `scripts/` directory and validate them from the repo root.
-- Do not store local caches, generated `__pycache__`, or temporary translation batches here.
+- Keep helper tooling as compiled Rust under `tools/`, invoked from the skill with `cargo run --manifest-path`, rather than as scripts checked into the skill directory. Contributors then need only the Rust toolchain.
+- Do not store local caches or temporary translation batches here.
 - Keep `.claude/skills/foxy-gui-driver/SKILL.md` short and pointed at `skills/foxy-gui-driver/SKILL.md`; avoid duplicating the full workflow in both places.
 - When a workflow changes, update the matching convention document and root `AGENTS.md` router in the same change.
 

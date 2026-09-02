@@ -18,7 +18,7 @@ target-language judgment for natural UI wording.
 6. Decide whether the requested localization job is full key coverage or exact-English fallback cleanup:
    - For new/changed keys that must be translated in every locale, keep a changed-key file with the exact `en.json` keys, one key per line. Write `\n` in that file when the JSON key contains a newline escape.
    - For fallback cleanup where only some locales still equal English, validate changed locale/key pairs against the git baseline instead of requiring every locale for the key to differ from English.
-7. For multi-locale batches, prepare a UTF-8 JSON translation map and apply it with `scripts/apply_translation_batch.py` instead of hand-building a large patch. This avoids brittle context matching when existing locale files contain mojibake or other old encoding damage.
+7. For multi-locale batches, prepare a UTF-8 JSON translation map and apply it with the `locale-apply` binary in `tools/i18n-checker/` instead of hand-building a large patch. This avoids brittle context matching when existing locale files contain mojibake or other old encoding damage.
 8. Avoid regex-only edits for serialized JSON keys containing escapes. Prefer parser-based edits, then write back only changed values or do exact line replacement against the serialized key text.
 9. Preserve existing formatting and line endings where possible. Full JSON reserialization can create large noisy diffs; if a parser rewrite is useful for computing values, reconstruct edits onto the original file text before finalizing.
 10. Do not trust PowerShell console rendering for non-ASCII text; it may show `?` or mojibake while the file is valid UTF-8. Validate by parsing JSON and running the checker. Use escaped output (`unicode_escape`) when inspecting non-ASCII values in PowerShell.
@@ -59,16 +59,10 @@ For a batch of new or changed keys, write translations to a temporary UTF-8 JSON
 Then apply it from the repository root:
 
 ```powershell
-py -3 skills\foxy-locale-translator\scripts\apply_translation_batch.py --repo . --translations translations.json --keys-out changed-keys.txt
+cargo run --manifest-path tools/i18n-checker/Cargo.toml --bin locale-apply -- --repo . --translations translations.json --keys-out changed-keys.txt
 ```
 
 Use `--after-key "Existing en.json key"` when adding missing keys and the nearest previous `en.json` key is not already present in the target locale. Use `--allow-question-mark` only after manually confirming every literal `?` in changed values is intentional.
-
-Before running the full checker, audit the changed-key file:
-
-```powershell
-py -3 skills\foxy-locale-translator\scripts\audit_changed_keys.py --repo . --keys changed-keys.txt
-```
 
 Always run:
 
@@ -79,18 +73,20 @@ cargo run --manifest-path tools/i18n-checker/Cargo.toml -- --strict
 For a specific translated batch, also run:
 
 ```powershell
-py -3 skills\foxy-locale-translator\scripts\validate_changed_keys.py --repo . --keys changed-keys.txt
+cargo run --manifest-path tools/i18n-checker/Cargo.toml -- --strict --require-translated-key-file changed-keys.txt
 ```
 
-The helper script calls Foxy's checker with `--require-translated-key-file`, which fails when any listed key still has the exact English value in a non-English locale. This targeted check avoids false positives from legitimate unchanged values such as product names and placeholders.
+`--require-translated-key-file` fails when any listed key still has the exact English value in a non-English locale, and makes placeholder mismatches on those keys blocking. This targeted check avoids false positives from legitimate unchanged values such as product names and placeholders. Mismatches on keys outside the file are printed as `[?] PLACEHOLDER` warnings; `--strict-placeholders` promotes them to errors.
 
 For translated batches containing non-ASCII text, also scan the listed keys for literal `?` values before handoff; investigate every hit unless the question mark is intentionally part of the translation.
 
 For exact-English fallback cleanup, where a key may already be correctly translated in some locales and legitimately unchanged in others, validate only pairs changed in the working tree:
 
 ```powershell
-py -3 skills\foxy-locale-translator\scripts\audit_changed_locale_pairs.py --repo . --baseline HEAD
+cargo run --manifest-path tools/i18n-checker/Cargo.toml -- --audit-changed-since HEAD
 ```
+
+Pass `--audit-allow-english-key-file <path>` to exempt keys that are legitimately identical to English.
 
 This catches placeholder mismatches and changed values that still equal `en.json` without requiring every locale for the same key to change.
 

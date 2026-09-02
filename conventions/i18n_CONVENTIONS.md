@@ -38,7 +38,7 @@ Recommended process:
 5. For fallback cleanup, validate only the locale/key pairs changed in the working tree:
 
    ```powershell
-   py -3 skills\foxy-locale-translator\scripts\audit_changed_locale_pairs.py --repo . --baseline HEAD
+   cargo run --manifest-path tools/i18n-checker/Cargo.toml -- --audit-changed-since HEAD
    ```
 
 6. Run the global checker:
@@ -53,10 +53,10 @@ By default, add or change new UI text only in `src/ui/locales/en.json`. Do not f
 
 When translating a specific batch of newly added or changed `en.json` keys, write those exact keys to a temporary UTF-8 text file, one key per line. Use `\n` in the file when a JSON key contains a newline escape.
 
-For multi-locale batches, prefer the repo skill helper instead of hand-editing every locale file:
+For multi-locale batches, prefer the `locale-apply` helper binary instead of hand-editing every locale file:
 
 ```powershell
-py -3 skills\foxy-locale-translator\scripts\apply_translation_batch.py --repo . --translations translations.json --keys-out changed-keys.txt
+cargo run --manifest-path tools/i18n-checker/Cargo.toml --bin locale-apply -- --repo . --translations translations.json --keys-out changed-keys.txt
 ```
 
 The `translations.json` file must be UTF-8 and shaped as `{ "locale": { "English key from en.json": "translated value" } }`. The helper preserves existing formatting, inserts missing keys near their `en.json` order, checks placeholders, and rejects literal `?` in changed values unless `--allow-question-mark` is passed after manual review.
@@ -64,9 +64,10 @@ The `translations.json` file must be UTF-8 and shaped as `{ "locale": { "English
 Then run:
 
 ```powershell
-py -3 skills\foxy-locale-translator\scripts\audit_changed_keys.py --repo . --keys changed-keys.txt
 cargo run --manifest-path tools/i18n-checker/Cargo.toml -- --strict --require-translated-key-file changed-keys.txt
 ```
+
+That single run covers both the placeholder audit and the coverage check: placeholder parity is scanned for every shared key, and it fails the run for the keys named by `--require-translated-key-file`. Placeholder mismatches on other keys are reported as `[?] PLACEHOLDER` warnings; use `--strict-placeholders` to fail on those too.
 
 Use `--require-translated-key-file` only when every non-English locale for each listed key is expected to be translated away from the exact English value.
 
@@ -84,7 +85,7 @@ Each batch prompt must include:
 
 - Target language code and name.
 - Exact key or line range from `en.json`.
-- Output as JSON shaped for `skills/foxy-locale-translator/scripts/apply_translation_batch.py`: `{ "locale": { "English key": "translated value" } }`.
+- Output as JSON shaped for the `locale-apply` binary: `{ "locale": { "English key": "translated value" } }`.
 - Instruction to preserve all `{placeholder}` tokens exactly.
 - Instruction to keep technical terms unchanged: Arma 3, Steam, GitHub, BLAKE3, MD5, Foxy, Swifty, TeamSpeak 3, TS3, WGPU, Glow.
 - Instruction to keep command-line switches, filenames, units, protocol names, and code identifiers exact unless intentionally localized: `-profiles`, `mission.sqm`, `Mb/s`, `egui`.
@@ -126,8 +127,8 @@ When adding a new language:
   cargo run --manifest-path tools/i18n-checker/Cargo.toml -- --strict
   ```
 
-- For changed-key batches, also run `audit_changed_keys.py`.
-- For exact-English fallback cleanup, also run `audit_changed_locale_pairs.py`.
+- For changed-key batches, pass `--require-translated-key-file changed-keys.txt`.
+- For exact-English fallback cleanup, pass `--audit-changed-since HEAD`.
 - Run `git diff --check` before final handoff.
 - For docs-only convention changes, no Rust build or test run is required.
 
