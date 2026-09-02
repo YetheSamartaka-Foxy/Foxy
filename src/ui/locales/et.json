@@ -1291,5 +1291,18 @@
     "The entered profile name is not valid.": "Sisestatud profiilinimi ei kehti.",
     "Profile files were not found on disk.": "Profiilifaile kettalt ei leitud.",
     "This profile location cannot be modified safely.": "Seda profiili asukohta ei saa ohutult muuta.",
-    "Profile operation failed: {error}": "Profiili toiming ebaõnnestus: {error}"
+    "Profile operation failed: {error}": "Profiili toiming ebaõnnestus: {error}",
+    "A drive Foxy writes to is nearly full. Downloads and database writes can fail part-way through. Free up space before syncing.": "Ketas, kuhu Foxy kirjutab, on peaaegu täis. Allalaadimised ja andmebaasi kirjutused võivad poole pealt ebaõnnestuda. Vabasta enne sünkroonimist ruumi.",
+    "Foxy is already running": "Foxy juba töötab",
+    "Another Foxy process is already using this game space's database. Only one Foxy can use a game space at a time, so this window cannot continue.": "Teine Foxy protsess kasutab juba selle mänguruumi andmebaasi. Korraga saab mänguruumi kasutada ainult üks Foxy, seega see aken ei saa jätkata.",
+    "The database is held by process {pid}.": "Andmebaasi hoiab protsess {pid}.",
+    "Switch to the Foxy window that is already open, or close it and start Foxy again.": "Mine juba avatud Foxy aknale või sulge see ja käivita Foxy uuesti.",
+    "Close this window": "Sulge see aken",
+    "Database update required": "Andmebaasi uuendamine on vajalik",
+    "This version of Foxy uses a newer database format than the data stored on this computer. The local database must be wiped and rebuilt before it can be used reliably.": "See Foxy versioon kasutab uuemat andmebaasivormingut kui selles arvutis salvestatud andmed. Kohalik andmebaas tuleb kustutada ja uuesti üles ehitada, enne kui seda saab usaldusväärselt kasutada.",
+    "The database stored on this computer was built by an older version of Foxy and this version cannot read it. Until it is rebuilt, Foxy cannot detect or download mod updates - repositories will keep showing as up to date even when they are not.": "Selles arvutis salvestatud andmebaas on loodud Foxy vanema versiooniga ja see versioon ei suuda seda lugeda. Kuni seda pole uuesti üles ehitatud, ei suuda Foxy modide uuendusi tuvastada ega alla laadida - hoidlad näivad endiselt ajakohased, kuigi nad seda ei ole.",
+    "Wiping clears cached repository data only - your downloaded mods and files on disk are not touched. Foxy rebuilds the cache automatically the next time it checks each repository.": "Kustutamine eemaldab ainult vahemällu salvestatud hoidlaandmed - allalaaditud modid ja kettal olevad failid jäävad puutumata. Foxy ehitab vahemälu automaatselt uuesti üles, kui järgmine kord iga hoidlat kontrollib.",
+    "Wipe database and continue": "Kustuta andmebaas ja jätka",
+    "Finish the current sync before wiping the database.": "Lõpeta käimasolev sünkroonimine enne andmebaasi kustutamist.",
+    "Continue without wiping (at my own risk)": "Jätka kustutamata (omal vastutusel)"
 }

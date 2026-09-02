@@ -192,6 +192,8 @@ impl Foxy {
             show_wipe_repo_db_confirmation: false,
             pending_renderer_fallback_notice: false,
             pending_db_schema_wipe: None,
+            db_lock_conflict: None,
+            pending_low_space_notice: false,
             current_view: FoxyView::RepositoryList,
             last_view: FoxyView::None,
             main_view_state: MainViewState {
@@ -516,6 +518,10 @@ impl Foxy {
         app.load_settings();
         app.pending_renderer_fallback_notice =
             crate::core::utils::renderer_fallback::renderer_fallback_notice_path().exists();
+        // Claim the database before anything can open it. Turso has no
+        // multi-process access, so a second window sharing one game space
+        // corrupts it silently rather than failing.
+        app.db_lock_conflict = app.claim_active_space_database();
         // Compare the local database schema generation against this binary's.
         // Bootstraps a sidecar for fresh/legacy databases (no prompt) and only
         // returns Some(..) when an out-of-date database needs an explicit wipe.
@@ -566,7 +572,9 @@ impl Foxy {
         app.load_repository_spaces();
         app.reconcile_repository_space_paths();
         app.load_repository_visual_folders();
-        api::log_startup_system_diagnostics(&app.startup_storage_paths());
+        let storage_paths = app.startup_storage_paths();
+        api::log_startup_system_diagnostics(&storage_paths);
+        app.pending_low_space_notice = !api::low_space_warning_lines(&storage_paths).is_empty();
         info!(
             "Startup state loaded: repositories={} repository_spaces={} debug_mode={}",
             app.repository_view_state.repositories.len(),

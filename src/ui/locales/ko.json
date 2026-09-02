@@ -1291,5 +1291,18 @@
     "The entered profile name is not valid.": "입력한 프로필 이름이 유효하지 않습니다.",
     "Profile files were not found on disk.": "디스크에서 프로필 파일을 찾을 수 없습니다.",
     "This profile location cannot be modified safely.": "이 프로필 위치는 안전하게 수정할 수 없습니다.",
-    "Profile operation failed: {error}": "프로필 작업 실패: {error}"
+    "Profile operation failed: {error}": "프로필 작업 실패: {error}",
+    "A drive Foxy writes to is nearly full. Downloads and database writes can fail part-way through. Free up space before syncing.": "Foxy가 기록하는 드라이브의 공간이 거의 없습니다. 다운로드와 데이터베이스 쓰기가 중간에 실패할 수 있습니다. 동기화하기 전에 공간을 확보하세요.",
+    "Foxy is already running": "Foxy가 이미 실행 중입니다",
+    "Another Foxy process is already using this game space's database. Only one Foxy can use a game space at a time, so this window cannot continue.": "다른 Foxy 프로세스가 이 게임 스페이스의 데이터베이스를 이미 사용하고 있습니다. 한 번에 하나의 Foxy만 게임 스페이스를 사용할 수 있으므로 이 창은 계속할 수 없습니다.",
+    "The database is held by process {pid}.": "데이터베이스를 프로세스 {pid}이(가) 점유하고 있습니다.",
+    "Switch to the Foxy window that is already open, or close it and start Foxy again.": "이미 열려 있는 Foxy 창으로 전환하거나, 그 창을 닫고 Foxy를 다시 시작하세요.",
+    "Close this window": "이 창 닫기",
+    "Database update required": "데이터베이스 업데이트 필요",
+    "This version of Foxy uses a newer database format than the data stored on this computer. The local database must be wiped and rebuilt before it can be used reliably.": "이 버전의 Foxy는 이 컴퓨터에 저장된 데이터보다 새로운 데이터베이스 형식을 사용합니다. 로컬 데이터베이스를 지우고 다시 만들어야 안정적으로 사용할 수 있습니다.",
+    "The database stored on this computer was built by an older version of Foxy and this version cannot read it. Until it is rebuilt, Foxy cannot detect or download mod updates - repositories will keep showing as up to date even when they are not.": "이 컴퓨터에 저장된 데이터베이스는 이전 버전의 Foxy가 만든 것이라 이 버전에서는 읽을 수 없습니다. 다시 만들기 전까지 Foxy는 모드 업데이트를 감지하거나 다운로드할 수 없으며, 저장소는 최신이 아니어도 계속 최신으로 표시됩니다.",
+    "Wiping clears cached repository data only - your downloaded mods and files on disk are not touched. Foxy rebuilds the cache automatically the next time it checks each repository.": "지우기는 캐시된 저장소 데이터만 삭제합니다 - 다운로드한 모드와 디스크의 파일은 그대로 유지됩니다. Foxy는 다음에 각 저장소를 확인할 때 캐시를 자동으로 다시 만듭니다.",
+    "Wipe database and continue": "데이터베이스 지우고 계속",
+    "Finish the current sync before wiping the database.": "데이터베이스를 지우기 전에 진행 중인 동기화를 완료하세요.",
+    "Continue without wiping (at my own risk)": "지우지 않고 계속 (위험 감수)"
 }

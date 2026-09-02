@@ -2,6 +2,8 @@ pub mod app_update;
 pub mod calculate_hashes;
 pub mod create_context;
 pub mod create_web_client;
+pub mod db_process_lock;
+pub mod db_schema_check;
 pub mod db_schema_version;
 pub mod delta_patch;
 pub mod download_files;

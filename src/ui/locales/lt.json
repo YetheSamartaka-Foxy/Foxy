@@ -1291,5 +1291,18 @@
     "The entered profile name is not valid.": "Įvestas profilio pavadinimas neteisingas.",
     "Profile files were not found on disk.": "Profilio failai diske nerasta.",
     "This profile location cannot be modified safely.": "Šios profilio vietos negalima saugiai keisti.",
-    "Profile operation failed: {error}": "Profilio operacija nepavyko: {error}"
+    "Profile operation failed: {error}": "Profilio operacija nepavyko: {error}",
+    "A drive Foxy writes to is nearly full. Downloads and database writes can fail part-way through. Free up space before syncing.": "Diskas, į kurį Foxy rašo, beveik pilnas. Atsisiuntimai ir įrašymai į duomenų bazę gali nutrūkti įpusėję. Prieš sinchronizuodami atlaisvinkite vietos.",
+    "Foxy is already running": "Foxy jau veikia",
+    "Another Foxy process is already using this game space's database. Only one Foxy can use a game space at a time, so this window cannot continue.": "Kitas Foxy procesas jau naudoja šios žaidimo erdvės duomenų bazę. Vienu metu žaidimo erdvę gali naudoti tik vienas Foxy, todėl šis langas negali tęsti.",
+    "The database is held by process {pid}.": "Duomenų bazę užėmė procesas {pid}.",
+    "Switch to the Foxy window that is already open, or close it and start Foxy again.": "Perjunkite į jau atidarytą Foxy langą arba jį uždarykite ir paleiskite Foxy iš naujo.",
+    "Close this window": "Uždaryti šį langą",
+    "Database update required": "Reikia atnaujinti duomenų bazę",
+    "This version of Foxy uses a newer database format than the data stored on this computer. The local database must be wiped and rebuilt before it can be used reliably.": "Ši Foxy versija naudoja naujesnį duomenų bazės formatą nei šiame kompiuteryje saugomi duomenys. Vietinę duomenų bazę reikia išvalyti ir sukurti iš naujo, kad ja būtų galima patikimai naudotis.",
+    "The database stored on this computer was built by an older version of Foxy and this version cannot read it. Until it is rebuilt, Foxy cannot detect or download mod updates - repositories will keep showing as up to date even when they are not.": "Šiame kompiuteryje saugoma duomenų bazė sukurta senesne Foxy versija ir ši versija jos nuskaityti negali. Kol ji nebus sukurta iš naujo, Foxy neaptiks ir neatsisiųs modų atnaujinimų - saugyklos ir toliau bus rodomos kaip atnaujintos, net jei tokios nėra.",
+    "Wiping clears cached repository data only - your downloaded mods and files on disk are not touched. Foxy rebuilds the cache automatically the next time it checks each repository.": "Išvalymas pašalina tik podėlyje saugomus saugyklų duomenis - atsisiųsti modai ir failai diske nepaliečiami. Foxy podėlį automatiškai atkurs kitą kartą tikrindamas kiekvieną saugyklą.",
+    "Wipe database and continue": "Išvalyti duomenų bazę ir tęsti",
+    "Finish the current sync before wiping the database.": "Prieš išvalydami duomenų bazę užbaikite vykstančią sinchronizaciją.",
+    "Continue without wiping (at my own risk)": "Tęsti neišvalius (savo rizika)"
 }

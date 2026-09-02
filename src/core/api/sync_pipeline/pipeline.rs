@@ -1077,12 +1077,20 @@ async fn run_repository_pipeline(
             hash_algorithm_preference,
         )
         .await;
-        if let Some(metadata) = &repo_metadata {
-            emit_progress!(ProgressEvent::RepositoryFoxyMode {
-                is_foxy: metadata.foxy_mode.is_foxy(),
-                app_update_url: metadata.app_update_url.clone(),
-            });
-        }
+        let Some(metadata) = &repo_metadata else {
+            let message = format!(
+                "Could not load remote repository metadata for {}; the integrity recheck cannot verify against the remote",
+                sanitize_log_url(&normalized_repo_url)
+            );
+            error!("{}", message);
+            summary.log_table("failed-remote-metadata");
+            emit_progress!(ProgressEvent::Failed(message));
+            return;
+        };
+        emit_progress!(ProgressEvent::RepositoryFoxyMode {
+            is_foxy: metadata.foxy_mode.is_foxy(),
+            app_update_url: metadata.app_update_url.clone(),
+        });
         summary.push(StageEntry::new(
             "remote_metadata_fetch",
             integrity_stage.elapsed(),
@@ -1454,7 +1462,21 @@ async fn run_repository_pipeline(
         info!("Recheck finished in {:.2?}", recheck_elapsed);
         summary.push(StageEntry::new("remote_repository", stage.elapsed()));
         stage = std::time::Instant::now();
-        repo_metadata
+        // Every `None` here is a real failure (manifest fetch, manifest parse,
+        // repository upsert, unset local path), never a benign no-op. Continuing
+        // would run the rest of the pipeline against a repository that has no
+        // rows, find nothing to update, and report the sync as clean.
+        let Some(repo_metadata) = repo_metadata else {
+            let message = format!(
+                "Could not load remote repository metadata for {}; the sync cannot tell whether updates are pending",
+                sanitize_log_url(&normalized_repo_url)
+            );
+            error!("{}", message);
+            summary.log_table("failed-remote-metadata");
+            emit_progress!(ProgressEvent::Failed(message));
+            return;
+        };
+        Some(repo_metadata)
     };
 
     if let Some(metadata) = &repo_metadata {

@@ -1291,5 +1291,18 @@
     "The entered profile name is not valid.": "入力されたプロファイル名は無効です。",
     "Profile files were not found on disk.": "プロファイル ファイルがディスク上に見つかりませんでした。",
     "This profile location cannot be modified safely.": "このプロファイルの場所は安全に変更できません。",
-    "Profile operation failed: {error}": "プロファイル操作が失敗しました: {error}"
+    "Profile operation failed: {error}": "プロファイル操作が失敗しました: {error}",
+    "A drive Foxy writes to is nearly full. Downloads and database writes can fail part-way through. Free up space before syncing.": "Foxy が書き込むドライブの空き容量がほとんどありません。ダウンロードやデータベースへの書き込みが途中で失敗する可能性があります。同期する前に空き容量を確保してください。",
+    "Foxy is already running": "Foxy はすでに実行中です",
+    "Another Foxy process is already using this game space's database. Only one Foxy can use a game space at a time, so this window cannot continue.": "別の Foxy プロセスがこのゲームスペースのデータベースをすでに使用しています。1 つのゲームスペースを同時に使用できる Foxy は 1 つだけのため、このウィンドウは続行できません。",
+    "The database is held by process {pid}.": "データベースはプロセス {pid} が使用しています。",
+    "Switch to the Foxy window that is already open, or close it and start Foxy again.": "すでに開いている Foxy のウィンドウに切り替えるか、そのウィンドウを閉じてから Foxy を起動し直してください。",
+    "Close this window": "このウィンドウを閉じる",
+    "Database update required": "データベースの更新が必要です",
+    "This version of Foxy uses a newer database format than the data stored on this computer. The local database must be wiped and rebuilt before it can be used reliably.": "このバージョンの Foxy は、このコンピューターに保存されているデータより新しいデータベース形式を使用します。ローカルデータベースを消去して再構築しないと、確実に使用できません。",
+    "The database stored on this computer was built by an older version of Foxy and this version cannot read it. Until it is rebuilt, Foxy cannot detect or download mod updates - repositories will keep showing as up to date even when they are not.": "このコンピューターに保存されているデータベースは古いバージョンの Foxy が作成したもので、このバージョンでは読み取れません。再構築するまで、Foxy は Mod の更新を検出もダウンロードもできず、リポジトリは最新でなくても最新と表示され続けます。",
+    "Wiping clears cached repository data only - your downloaded mods and files on disk are not touched. Foxy rebuilds the cache automatically the next time it checks each repository.": "消去されるのはキャッシュされたリポジトリのデータだけです - ダウンロード済みの Mod やディスク上のファイルには影響しません。Foxy は次に各リポジトリを確認するときに自動でキャッシュを再構築します。",
+    "Wipe database and continue": "データベースを消去して続行",
+    "Finish the current sync before wiping the database.": "データベースを消去する前に、実行中の同期を完了してください。",
+    "Continue without wiping (at my own risk)": "消去せずに続行する（自己責任）"
 }

@@ -1291,5 +1291,18 @@
     "The entered profile name is not valid.": "ชื่อโปรไฟล์ที่ป้อนไม่ถูกต้อง",
     "Profile files were not found on disk.": "ไม่พบไฟล์โปรไฟล์บนดิสก์",
     "This profile location cannot be modified safely.": "ตำแหน่งโปรไฟล์นี้ไม่สามารถแก้ไขได้อย่างปลอดภัย",
-    "Profile operation failed: {error}": "การดำเนินการโปรไฟล์ล้มเหลว: {error}"
+    "Profile operation failed: {error}": "การดำเนินการโปรไฟล์ล้มเหลว: {error}",
+    "A drive Foxy writes to is nearly full. Downloads and database writes can fail part-way through. Free up space before syncing.": "ไดรฟ์ที่ Foxy เขียนข้อมูลใกล้เต็มแล้ว การดาวน์โหลดและการเขียนฐานข้อมูลอาจล้มเหลวกลางคัน โปรดเพิ่มพื้นที่ว่างก่อนซิงค์",
+    "Foxy is already running": "Foxy กำลังทำงานอยู่แล้ว",
+    "Another Foxy process is already using this game space's database. Only one Foxy can use a game space at a time, so this window cannot continue.": "มีโปรเซส Foxy อื่นใช้ฐานข้อมูลของพื้นที่เกมนี้อยู่แล้ว พื้นที่เกมหนึ่งใช้งานได้ครั้งละหนึ่ง Foxy เท่านั้น หน้าต่างนี้จึงไม่สามารถดำเนินการต่อได้",
+    "The database is held by process {pid}.": "ฐานข้อมูลถูกใช้งานโดยโปรเซส {pid}",
+    "Switch to the Foxy window that is already open, or close it and start Foxy again.": "สลับไปยังหน้าต่าง Foxy ที่เปิดอยู่แล้ว หรือปิดหน้าต่างนั้นแล้วเปิด Foxy ใหม่",
+    "Close this window": "ปิดหน้าต่างนี้",
+    "Database update required": "ต้องอัปเดตฐานข้อมูล",
+    "This version of Foxy uses a newer database format than the data stored on this computer. The local database must be wiped and rebuilt before it can be used reliably.": "Foxy รุ่นนี้ใช้รูปแบบฐานข้อมูลที่ใหม่กว่าข้อมูลที่เก็บไว้ในคอมพิวเตอร์เครื่องนี้ ต้องล้างและสร้างฐานข้อมูลในเครื่องขึ้นใหม่ก่อนจึงจะใช้งานได้อย่างน่าเชื่อถือ",
+    "The database stored on this computer was built by an older version of Foxy and this version cannot read it. Until it is rebuilt, Foxy cannot detect or download mod updates - repositories will keep showing as up to date even when they are not.": "ฐานข้อมูลที่เก็บไว้ในคอมพิวเตอร์เครื่องนี้สร้างโดย Foxy รุ่นเก่ากว่า และรุ่นนี้อ่านไม่ได้ จนกว่าจะสร้างขึ้นใหม่ Foxy จะไม่สามารถตรวจพบหรือดาวน์โหลดการอัปเดตม็อดได้ - ที่เก็บข้อมูลจะยังแสดงว่าเป็นเวอร์ชันล่าสุดแม้ว่าจะไม่ใช่ก็ตาม",
+    "Wiping clears cached repository data only - your downloaded mods and files on disk are not touched. Foxy rebuilds the cache automatically the next time it checks each repository.": "การล้างจะลบเฉพาะข้อมูลที่เก็บข้อมูลในแคชเท่านั้น - ม็อดที่ดาวน์โหลดไว้และไฟล์บนดิสก์จะไม่ถูกแตะต้อง Foxy จะสร้างแคชขึ้นใหม่โดยอัตโนมัติในการตรวจสอบที่เก็บข้อมูลแต่ละแห่งครั้งถัดไป",
+    "Wipe database and continue": "ล้างฐานข้อมูลแล้วดำเนินการต่อ",
+    "Finish the current sync before wiping the database.": "โปรดทำการซิงค์ปัจจุบันให้เสร็จก่อนล้างฐานข้อมูล",
+    "Continue without wiping (at my own risk)": "ดำเนินการต่อโดยไม่ล้าง (ยอมรับความเสี่ยงเอง)"
 }

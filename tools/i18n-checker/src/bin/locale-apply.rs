@@ -130,9 +130,19 @@ fn main() {
                 ));
                 continue;
             };
+            // An anchor without a trailing comma is the object's last entry, so
+            // it needs one and the inserted line becomes the new last entry.
+            let anchor_line = &lines[anchor_index];
+            let anchor_text = anchor_line.trim_end_matches(['\r', '\n']);
+            let anchor_has_comma = anchor_text.ends_with(',');
+            if !anchor_has_comma {
+                let ending = &anchor_line[anchor_text.len()..];
+                let ending = if ending.is_empty() { newline } else { ending };
+                lines[anchor_index] = format!("{anchor_text},{ending}");
+            }
             lines.insert(
                 anchor_index + 1,
-                locale_entry_line(key, translated, newline, true),
+                locale_entry_line(key, translated, newline, anchor_has_comma),
             );
             changed_here += 1;
             record_changed(&mut changed_keys, key);

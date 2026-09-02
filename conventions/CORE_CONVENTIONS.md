@@ -8,6 +8,10 @@
 
 \- Game-space isolation is by directory, not by a `game_id` column. Do **not** add one to `repositories`; the `(remote_url, local_path)` identity rules stay exactly as they are.
 
+\- **One process per game space database.** Turso has no multi-process access - two processes on one file is undefined behavior, not concurrent-writer WAL. `tasks/db_process_lock.rs` holds an advisory whole-file lock on `database.lock` for the life of the process; the GUI claims it in `Foxy::new` (and again on a space switch), the CLI claims it in `cli::run_from_env` for every command that opens the database, and `open_and_prepare_database` claims it as a backstop. A contended claim retries for 5s (the installer's `/CLOSEAPPLICATIONS` handoff) and then refuses: the GUI shows a close-only prompt, the CLI exits `DATABASE_BUSY`. Commands that deliberately run beside a live GUI (`agent-gui`, `steam-helper`, `server`, `version`, `ui`) are exempt in `command_uses_database`.
+
+\- **The sidecar is not the schema.** `db_schema_version.rs` records the intended generation, but the bootstrap is applied with `CREATE TABLE IF NOT EXISTS`, so it no-ops on an older database and leaves the old tables. `tasks/db_schema_check.rs` probes the live database on every open: column coverage parsed from `sql/turso_schema.sql`, plus a parse-only `prepare()` of `REPOSITORY_UPSERT_SQL` / `PENDING_UPDATE_UPSERT_SQL` (the only way to catch a missing composite UNIQUE behind an `ON CONFLICT`). An incompatible verdict re-raises the wipe prompt as non-dismissible. Keep those upsert constants shared between the production write and the probe so they cannot drift.
+
 \- Keep DB logic under `src/core/`.
 
 \- Prefer small query helpers with clear inputs and outputs.

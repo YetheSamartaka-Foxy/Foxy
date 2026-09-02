@@ -33,7 +33,7 @@ use crate::core::utils::format::sanitize_log_path;
 /// The folded bootstrap schema (migrations 01..21 in final state). Applied once
 /// to a fresh database; the auto-wipe gate (`db_schema_version.rs`) guarantees a
 /// clean rebuild on the breaking Turso upgrade so no incremental replay is needed.
-const TURSO_BOOTSTRAP_SCHEMA: &str = include_str!("../../../sql/turso_schema.sql");
+pub(crate) const TURSO_BOOTSTRAP_SCHEMA: &str = include_str!("../../../sql/turso_schema.sql");
 
 /// Canonical `subfiles` table DDL, kept token-identical to `sql/turso_schema.sql`.
 pub(crate) const SUBFILES_CREATE_TABLE: &str = "CREATE TABLE IF NOT EXISTS subfiles (\
@@ -771,12 +771,39 @@ pub(crate) async fn close_active_database() {
             sanitize_log_path(&path)
         );
     }
+    // The lock file lives in the space directory this call exists to free, so
+    // the claim has to go with the handle.
+    crate::core::tasks::db_process_lock::release();
 }
 
 async fn open_and_prepare_database(path: &Path) -> Arc<Database> {
     let init_start = Instant::now();
     let path_str = path.to_string_lossy().to_string();
     info!("Ensuring Turso database {}", sanitize_log_path(path));
+
+    // Backstop for the entry-point claims in the GUI startup and CLI dispatch.
+    // Turso has no multi-process access, so opening a database this process does
+    // not own is a correctness bug wherever it happens; make it loud rather than
+    // let it corrupt quietly.
+    if !crate::core::tasks::db_process_lock::holds(path) {
+        match crate::core::tasks::db_process_lock::acquire(path) {
+            crate::core::tasks::db_process_lock::LockOutcome::Acquired => {}
+            crate::core::tasks::db_process_lock::LockOutcome::Busy { holder_pid } => {
+                log::error!(
+                    "Refusing to open database {}: another Foxy process{} owns it",
+                    sanitize_log_path(path),
+                    holder_pid
+                        .map(|pid| format!(" (PID {pid})"))
+                        .unwrap_or_default()
+                );
+                panic!("database is owned by another Foxy process");
+            }
+            crate::core::tasks::db_process_lock::LockOutcome::Unavailable(reason) => warn!(
+                "STARTUP: could not verify exclusive database access ({}); continuing",
+                reason
+            ),
+        }
+    }
 
     sweep_stale_db_artifacts(path);
 
@@ -829,6 +856,11 @@ async fn open_and_prepare_database(path: &Path) -> Arc<Database> {
         }
         Err(e) => warn!("STARTUP: could not read Turso journal_mode: {}", e),
     }
+
+    // The bootstrap above is `CREATE ... IF NOT EXISTS`, so it silently no-ops on
+    // a database an older Foxy built. Confirm the live schema can actually run
+    // this build's statements before the app starts syncing against it.
+    crate::core::tasks::db_schema_check::probe_database(path, &db).await;
 
     info!(
         "STARTUP: Turso database initialized in {:.2}s",

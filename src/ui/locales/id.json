@@ -1291,5 +1291,18 @@
     "The entered profile name is not valid.": "Nama profil yang dimasukkan tidak valid.",
     "Profile files were not found on disk.": "File profil tidak ditemukan pada disk.",
     "This profile location cannot be modified safely.": "Lokasi profil ini tidak dapat diubah dengan aman.",
-    "Profile operation failed: {error}": "Operasi profil gagal: {error}"
+    "Profile operation failed: {error}": "Operasi profil gagal: {error}",
+    "A drive Foxy writes to is nearly full. Downloads and database writes can fail part-way through. Free up space before syncing.": "Drive tempat Foxy menulis hampir penuh. Unduhan dan penulisan basis data bisa gagal di tengah jalan. Kosongkan ruang sebelum menyinkronkan.",
+    "Foxy is already running": "Foxy sudah berjalan",
+    "Another Foxy process is already using this game space's database. Only one Foxy can use a game space at a time, so this window cannot continue.": "Proses Foxy lain sudah menggunakan basis data ruang game ini. Hanya satu Foxy yang dapat menggunakan sebuah ruang game dalam satu waktu, sehingga jendela ini tidak dapat melanjutkan.",
+    "The database is held by process {pid}.": "Basis data sedang dipakai oleh proses {pid}.",
+    "Switch to the Foxy window that is already open, or close it and start Foxy again.": "Beralihlah ke jendela Foxy yang sudah terbuka, atau tutup jendela itu lalu jalankan Foxy lagi.",
+    "Close this window": "Tutup jendela ini",
+    "Database update required": "Pembaruan basis data diperlukan",
+    "This version of Foxy uses a newer database format than the data stored on this computer. The local database must be wiped and rebuilt before it can be used reliably.": "Versi Foxy ini menggunakan format basis data yang lebih baru daripada data yang tersimpan di komputer ini. Basis data lokal harus dihapus dan dibangun ulang sebelum dapat digunakan dengan andal.",
+    "The database stored on this computer was built by an older version of Foxy and this version cannot read it. Until it is rebuilt, Foxy cannot detect or download mod updates - repositories will keep showing as up to date even when they are not.": "Basis data yang tersimpan di komputer ini dibuat oleh versi Foxy yang lebih lama dan versi ini tidak dapat membacanya. Sampai dibangun ulang, Foxy tidak dapat mendeteksi atau mengunduh pembaruan mod - repositori akan terus tampak mutakhir meskipun sebenarnya tidak.",
+    "Wiping clears cached repository data only - your downloaded mods and files on disk are not touched. Foxy rebuilds the cache automatically the next time it checks each repository.": "Penghapusan hanya membersihkan data repositori dalam cache - mod yang sudah diunduh dan berkas di disk tidak tersentuh. Foxy membangun ulang cache secara otomatis saat berikutnya memeriksa setiap repositori.",
+    "Wipe database and continue": "Hapus basis data dan lanjutkan",
+    "Finish the current sync before wiping the database.": "Selesaikan sinkronisasi yang sedang berjalan sebelum menghapus basis data.",
+    "Continue without wiping (at my own risk)": "Lanjutkan tanpa menghapus (dengan risiko saya sendiri)"
 }

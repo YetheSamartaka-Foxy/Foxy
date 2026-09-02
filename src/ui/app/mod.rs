@@ -126,6 +126,15 @@ pub struct Foxy {
     /// ships and the user must be prompted to wipe-and-continue (or dismiss and
     /// keep the old data at their own risk). Driven by `db_schema_version`.
     pub pending_db_schema_wipe: Option<crate::core::tasks::db_schema_version::DbSchemaWipePrompt>,
+    /// Set when another Foxy process already owns this game space's database.
+    /// Turso has no multi-process access, so this window must not touch the data
+    /// at all: the prompt it raises only offers closing Foxy. Carries the owning
+    /// PID when the lock's owner sidecar could be read.
+    pub db_lock_conflict: Option<Option<u32>>,
+    /// Set when a drive Foxy writes its own state through is below the free-space
+    /// floor. Raised once per launch as a toast; a drive that fills mid-sync
+    /// leaves partially written state rather than failing cleanly.
+    pub pending_low_space_notice: bool,
     /// Unified selection: either a server or an editor mission in the repository view.
     pub repository_selection: Option<RepositorySelection>,
     /// Cached list of detected Arma 3 profiles.

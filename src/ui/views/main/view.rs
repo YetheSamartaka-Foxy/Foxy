@@ -70,6 +70,7 @@ impl Foxy {
             || self.show_wipe_repo_db_confirmation
             || self.pending_renderer_fallback_notice
             || self.pending_db_schema_wipe.is_some()
+            || self.db_lock_conflict.is_some()
             || self.pending_app_update_prompt
             || self.show_add_profile_window
             || self.show_rename_profile_window

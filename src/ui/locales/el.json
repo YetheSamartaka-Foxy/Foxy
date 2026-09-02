@@ -1291,5 +1291,18 @@
     "The entered profile name is not valid.": "Το όνομα του προφίλ που εισάγατε δεν είναι έγκυρο.",
     "Profile files were not found on disk.": "Τα αρχεία προφίλ δεν βρέθηκαν στο δίσκο.",
     "This profile location cannot be modified safely.": "Αυτή η τοποθεσία προφίλ δεν μπορεί να τροποποιηθεί με ασφάλεια.",
-    "Profile operation failed: {error}": "Η λειτουργία προφίλ απέτυχε: {error}"
+    "Profile operation failed: {error}": "Η λειτουργία προφίλ απέτυχε: {error}",
+    "A drive Foxy writes to is nearly full. Downloads and database writes can fail part-way through. Free up space before syncing.": "Ένας δίσκος στον οποίο γράφει το Foxy είναι σχεδόν γεμάτος. Οι λήψεις και οι εγγραφές στη βάση δεδομένων μπορεί να αποτύχουν στα μισά. Ελευθερώστε χώρο πριν από τον συγχρονισμό.",
+    "Foxy is already running": "Το Foxy εκτελείται ήδη",
+    "Another Foxy process is already using this game space's database. Only one Foxy can use a game space at a time, so this window cannot continue.": "Μια άλλη διεργασία Foxy χρησιμοποιεί ήδη τη βάση δεδομένων αυτού του χώρου παιχνιδιού. Μόνο ένα Foxy μπορεί να χρησιμοποιεί έναν χώρο παιχνιδιού κάθε φορά, οπότε αυτό το παράθυρο δεν μπορεί να συνεχίσει.",
+    "The database is held by process {pid}.": "Η βάση δεδομένων κατέχεται από τη διεργασία {pid}.",
+    "Switch to the Foxy window that is already open, or close it and start Foxy again.": "Μεταβείτε στο παράθυρο του Foxy που είναι ήδη ανοιχτό ή κλείστε το και ξεκινήστε ξανά το Foxy.",
+    "Close this window": "Κλείσιμο αυτού του παραθύρου",
+    "Database update required": "Απαιτείται ενημέρωση της βάσης δεδομένων",
+    "This version of Foxy uses a newer database format than the data stored on this computer. The local database must be wiped and rebuilt before it can be used reliably.": "Αυτή η έκδοση του Foxy χρησιμοποιεί νεότερη μορφή βάσης δεδομένων από τα δεδομένα που είναι αποθηκευμένα σε αυτόν τον υπολογιστή. Η τοπική βάση δεδομένων πρέπει να διαγραφεί και να δημιουργηθεί ξανά προτού μπορέσει να χρησιμοποιηθεί αξιόπιστα.",
+    "The database stored on this computer was built by an older version of Foxy and this version cannot read it. Until it is rebuilt, Foxy cannot detect or download mod updates - repositories will keep showing as up to date even when they are not.": "Η βάση δεδομένων που είναι αποθηκευμένη σε αυτόν τον υπολογιστή δημιουργήθηκε από παλαιότερη έκδοση του Foxy και αυτή η έκδοση δεν μπορεί να τη διαβάσει. Μέχρι να δημιουργηθεί ξανά, το Foxy δεν μπορεί να εντοπίσει ούτε να κατεβάσει ενημερώσεις mod - τα αποθετήρια θα συνεχίσουν να εμφανίζονται ως ενημερωμένα ακόμη και όταν δεν είναι.",
+    "Wiping clears cached repository data only - your downloaded mods and files on disk are not touched. Foxy rebuilds the cache automatically the next time it checks each repository.": "Η διαγραφή αφαιρεί μόνο τα προσωρινά αποθηκευμένα δεδομένα αποθετηρίων - τα mod που έχετε κατεβάσει και τα αρχεία στον δίσκο δεν θίγονται. Το Foxy δημιουργεί ξανά την προσωρινή μνήμη αυτόματα την επόμενη φορά που θα ελέγξει κάθε αποθετήριο.",
+    "Wipe database and continue": "Διαγραφή βάσης δεδομένων και συνέχεια",
+    "Finish the current sync before wiping the database.": "Ολοκληρώστε τον τρέχοντα συγχρονισμό πριν διαγράψετε τη βάση δεδομένων.",
+    "Continue without wiping (at my own risk)": "Συνέχεια χωρίς διαγραφή (με δική μου ευθύνη)"
 }

@@ -806,6 +806,19 @@ impl Foxy {
             "repository_spaces_json={}\n",
             Self::format_optional_bytes(file_size(database_dir.join("repository_spaces.json")))
         ));
+        manifest.push_str(&format!(
+            "exclusive_lock={}
+",
+            crate::core::tasks::db_process_lock::diagnostics_state()
+        ));
+        let schema_problems = crate::core::tasks::db_schema_check::live_schema_problems();
+        manifest.push_str(&format!(
+            "schema_compatible={}\n",
+            schema_problems.is_empty()
+        ));
+        for problem in &schema_problems {
+            manifest.push_str(&format!("schema_problem={problem}\n"));
+        }
 
         manifest.push_str("\n[app_state]\n");
         manifest.push_str(&format!(

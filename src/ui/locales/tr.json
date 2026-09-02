@@ -1291,5 +1291,18 @@
     "The entered profile name is not valid.": "Girilen profil adı geçerli değil.",
     "Profile files were not found on disk.": "Profil dosyaları diskte bulunamadı.",
     "This profile location cannot be modified safely.": "Bu profil konumu güvenli bir şekilde değiştirilemez.",
-    "Profile operation failed: {error}": "Profil işlemi başarısız oldu: {error}"
+    "Profile operation failed: {error}": "Profil işlemi başarısız oldu: {error}",
+    "A drive Foxy writes to is nearly full. Downloads and database writes can fail part-way through. Free up space before syncing.": "Foxy'nin yazdığı bir sürücü neredeyse dolu. İndirmeler ve veritabanı yazma işlemleri yarıda başarısız olabilir. Eşitlemeden önce yer açın.",
+    "Foxy is already running": "Foxy zaten çalışıyor",
+    "Another Foxy process is already using this game space's database. Only one Foxy can use a game space at a time, so this window cannot continue.": "Bu oyun alanının veritabanını başka bir Foxy işlemi kullanıyor. Bir oyun alanını aynı anda yalnızca bir Foxy kullanabilir, bu nedenle bu pencere devam edemez.",
+    "The database is held by process {pid}.": "Veritabanı {pid} işlemi tarafından tutuluyor.",
+    "Switch to the Foxy window that is already open, or close it and start Foxy again.": "Zaten açık olan Foxy penceresine geçin ya da onu kapatıp Foxy'yi yeniden başlatın.",
+    "Close this window": "Bu pencereyi kapat",
+    "Database update required": "Veritabanı güncellemesi gerekli",
+    "This version of Foxy uses a newer database format than the data stored on this computer. The local database must be wiped and rebuilt before it can be used reliably.": "Foxy'nin bu sürümü, bu bilgisayarda saklanan verilerden daha yeni bir veritabanı biçimi kullanıyor. Yerel veritabanı güvenilir şekilde kullanılabilmesi için silinip yeniden oluşturulmalıdır.",
+    "The database stored on this computer was built by an older version of Foxy and this version cannot read it. Until it is rebuilt, Foxy cannot detect or download mod updates - repositories will keep showing as up to date even when they are not.": "Bu bilgisayarda saklanan veritabanı Foxy'nin daha eski bir sürümü tarafından oluşturulmuş ve bu sürüm onu okuyamıyor. Yeniden oluşturulana kadar Foxy mod güncellemelerini algılayamaz veya indiremez - depolar güncel olmadıkları hâlde güncel görünmeye devam eder.",
+    "Wiping clears cached repository data only - your downloaded mods and files on disk are not touched. Foxy rebuilds the cache automatically the next time it checks each repository.": "Silme işlemi yalnızca önbelleğe alınmış depo verilerini kaldırır - indirdiğiniz modlara ve diskteki dosyalara dokunulmaz. Foxy, her depoyu bir sonraki denetiminde önbelleği otomatik olarak yeniden oluşturur.",
+    "Wipe database and continue": "Veritabanını sil ve devam et",
+    "Finish the current sync before wiping the database.": "Veritabanını silmeden önce geçerli eşitlemeyi tamamlayın.",
+    "Continue without wiping (at my own risk)": "Silmeden devam et (sorumluluğu bana ait)"
 }

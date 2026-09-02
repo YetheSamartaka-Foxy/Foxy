@@ -413,8 +413,16 @@ impl Foxy {
             }
         });
 
+        if self.pending_low_space_notice {
+            self.pending_low_space_notice = false;
+            self.show_error_toast(self.t(
+                "A drive Foxy writes to is nearly full. Downloads and database writes can fail part-way through. Free up space before syncing.",
+            ));
+        }
+
         self.render_ui_toast(&ctx);
         self.render_renderer_fallback_notice(&ctx);
+        self.render_db_lock_conflict_prompt(&ctx);
         self.render_db_schema_wipe_prompt(&ctx);
         self.render_app_update_prompt(&ctx);
         self.render_scheduled_post_action_overlay(&ctx);
@@ -510,15 +518,100 @@ impl Foxy {
             });
     }
 
+    /// Claim this game space's database for the process, returning the owning
+    /// PID slot when another Foxy already holds it.
+    pub(crate) fn claim_active_space_database(&self) -> Option<Option<u32>> {
+        match crate::core::tasks::db_process_lock::acquire_for_active_space() {
+            crate::core::tasks::db_process_lock::LockOutcome::Acquired => None,
+            crate::core::tasks::db_process_lock::LockOutcome::Busy { holder_pid } => {
+                Some(holder_pid)
+            }
+            crate::core::tasks::db_process_lock::LockOutcome::Unavailable(reason) => {
+                warn!(
+                    "Could not verify exclusive database access ({}); continuing",
+                    reason
+                );
+                None
+            }
+        }
+    }
+
+    /// Terminal prompt shown when another Foxy process owns this game space's
+    /// database. There is no safe "continue anyway": Turso does not support two
+    /// processes on one file, so the only action is to close this window.
+    fn render_db_lock_conflict_prompt(&mut self, ctx: &egui::Context) {
+        let Some(holder_pid) = self.db_lock_conflict else {
+            return;
+        };
+        let mut close_clicked = false;
+
+        egui::Window::new(self.t("Foxy is already running"))
+            .frame(
+                egui::Frame::window(&ctx.global_style())
+                    .fill(self.color_card_bg())
+                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
+                    .corner_radius(eframe::egui::CornerRadius::same(10)),
+            )
+            .title_bar(true)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .default_width(520.0)
+            .show(ctx, |ui| {
+                ui.label(self.t(
+                    "Another Foxy process is already using this game space's database. Only one Foxy can use a game space at a time, so this window cannot continue.",
+                ));
+                if let Some(pid) = holder_pid {
+                    ui.add_space(4.0);
+                    ui.label(self.t_fmt(
+                        "The database is held by process {pid}.",
+                        &[("pid", pid.to_string())],
+                    ));
+                }
+                ui.add_space(8.0);
+                ui.label(self.t(
+                    "Switch to the Foxy window that is already open, or close it and start Foxy again.",
+                ));
+                ui.add_space(16.0);
+
+                ui.vertical_centered(|ui| {
+                    let close_btn = ui.button(self.t("Close this window"));
+                    if close_btn.hovered() {
+                        ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                    }
+                    if close_btn.clicked() {
+                        close_clicked = true;
+                    }
+                });
+            });
+
+        if close_clicked {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
     /// Blocking startup prompt shown when the local database schema is older
     /// than the schema this binary ships. Offers a primary "wipe and continue"
     /// action and a secondary "keep my data at my own risk" dismissal.
     fn render_db_schema_wipe_prompt(&mut self, ctx: &egui::Context) {
+        let preview = self.previewing_debug_modal(DebugModal::DbSchemaWipe);
+        // The database is opened lazily, well after the startup sidecar check, so
+        // the live-schema verdict only becomes available here. Escalate to a
+        // non-dismissible prompt once it does: a database this build cannot query
+        // makes every sync a silent no-op that still reports success.
+        if !preview
+            && let Some(blocking) =
+                crate::core::tasks::db_schema_version::blocking_prompt_if_live_schema_incompatible()
+            && self
+                .pending_db_schema_wipe
+                .is_none_or(|pending| !pending.blocking)
+        {
+            self.pending_db_schema_wipe = Some(blocking);
+        }
         let Some(prompt) = self.pending_db_schema_wipe else {
             return;
         };
-        let preview = self.previewing_debug_modal(DebugModal::DbSchemaWipe);
-        if !preview && crate::core::tasks::db_schema_version::is_current() {
+        if !preview && !prompt.blocking && crate::core::tasks::db_schema_version::is_current() {
             self.pending_db_schema_wipe = None;
             return;
         }
@@ -542,9 +635,15 @@ impl Foxy {
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .default_width(540.0)
             .show(ctx, |ui| {
-                ui.label(self.t(
-                    "This version of Foxy uses a newer database format than the data stored on this computer. The local database must be wiped and rebuilt before it can be used reliably.",
-                ));
+                if prompt.blocking {
+                    ui.label(self.t(
+                        "The database stored on this computer was built by an older version of Foxy and this version cannot read it. Until it is rebuilt, Foxy cannot detect or download mod updates - repositories will keep showing as up to date even when they are not.",
+                    ));
+                } else {
+                    ui.label(self.t(
+                        "This version of Foxy uses a newer database format than the data stored on this computer. The local database must be wiped and rebuilt before it can be used reliably.",
+                    ));
+                }
                 ui.add_space(8.0);
                 ui.label(self.t(
                     "Wiping clears cached repository data only - your downloaded mods and files on disk are not touched. Foxy rebuilds the cache automatically the next time it checks each repository.",
@@ -567,13 +666,16 @@ impl Foxy {
                         ui.label(self.t("Finish the current sync before wiping the database."));
                     }
 
-                    ui.add_space(10.0);
-                    let dismiss_btn = ui.button(self.t("Continue without wiping (at my own risk)"));
-                    if dismiss_btn.hovered() {
-                        ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
-                    }
-                    if dismiss_btn.clicked() {
-                        dismiss_clicked = true;
+                    if !prompt.blocking {
+                        ui.add_space(10.0);
+                        let dismiss_btn =
+                            ui.button(self.t("Continue without wiping (at my own risk)"));
+                        if dismiss_btn.hovered() {
+                            ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                        }
+                        if dismiss_btn.clicked() {
+                            dismiss_clicked = true;
+                        }
                     }
                 });
             });

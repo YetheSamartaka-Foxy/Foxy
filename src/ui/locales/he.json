@@ -1291,5 +1291,18 @@
     "The entered profile name is not valid.": "שם הפרופיל שהוזן אינו חוקי.",
     "Profile files were not found on disk.": "קובצי פרופיל לא נמצאו בדיסק.",
     "This profile location cannot be modified safely.": "לא ניתן לשנות את מיקום הפרופיל הזה בבטחה.",
-    "Profile operation failed: {error}": "פעולת הפרופיל נכשלה: {error}"
+    "Profile operation failed: {error}": "פעולת הפרופיל נכשלה: {error}",
+    "A drive Foxy writes to is nearly full. Downloads and database writes can fail part-way through. Free up space before syncing.": "כונן ש-Foxy כותב אליו כמעט מלא. הורדות וכתיבות למסד הנתונים עלולות להיכשל באמצע. פנה מקום לפני הסנכרון.",
+    "Foxy is already running": "Foxy כבר פועל",
+    "Another Foxy process is already using this game space's database. Only one Foxy can use a game space at a time, so this window cannot continue.": "תהליך Foxy אחר כבר משתמש במסד הנתונים של מרחב המשחק הזה. רק Foxy אחד יכול להשתמש במרחב משחק בכל רגע, ולכן החלון הזה אינו יכול להמשיך.",
+    "The database is held by process {pid}.": "מסד הנתונים מוחזק על ידי תהליך {pid}.",
+    "Switch to the Foxy window that is already open, or close it and start Foxy again.": "עבור לחלון Foxy שכבר פתוח, או סגור אותו והפעל את Foxy מחדש.",
+    "Close this window": "סגור את החלון הזה",
+    "Database update required": "נדרש עדכון של מסד הנתונים",
+    "This version of Foxy uses a newer database format than the data stored on this computer. The local database must be wiped and rebuilt before it can be used reliably.": "גרסה זו של Foxy משתמשת בתבנית מסד נתונים חדשה יותר מהנתונים השמורים במחשב הזה. יש למחוק את מסד הנתונים המקומי ולבנות אותו מחדש לפני שאפשר יהיה להשתמש בו באופן אמין.",
+    "The database stored on this computer was built by an older version of Foxy and this version cannot read it. Until it is rebuilt, Foxy cannot detect or download mod updates - repositories will keep showing as up to date even when they are not.": "מסד הנתונים השמור במחשב הזה נבנה בגרסה ישנה יותר של Foxy וגרסה זו אינה יכולה לקרוא אותו. עד לבנייתו מחדש, Foxy אינו יכול לזהות או להוריד עדכוני מודים - מאגרים ימשיכו להיראות מעודכנים גם כשהם אינם.",
+    "Wiping clears cached repository data only - your downloaded mods and files on disk are not touched. Foxy rebuilds the cache automatically the next time it checks each repository.": "המחיקה מסירה רק נתוני מאגרים שנשמרו במטמון - המודים שהורדת והקבצים בדיסק אינם נפגעים. Foxy בונה את המטמון מחדש אוטומטית בפעם הבאה שהוא בודק כל מאגר.",
+    "Wipe database and continue": "מחק את מסד הנתונים והמשך",
+    "Finish the current sync before wiping the database.": "סיים את הסנכרון הנוכחי לפני מחיקת מסד הנתונים.",
+    "Continue without wiping (at my own risk)": "המשך בלי למחוק (על אחריותי)"
 }

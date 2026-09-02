@@ -572,8 +572,12 @@ pub fn check_and_wipe_database() {
 /// on the live Turso handle. Works while the app is running because it reuses
 /// the existing engine handle.
 pub async fn wipe_database_live() -> Result<(), String> {
-    let db = crate::core::tasks::db_turso::init_turso_database().await;
+    let (path, db) = crate::core::tasks::db_turso::init_turso_database_with_path().await;
     crate::core::tasks::db_turso::wipe_and_rebuild_live(&db)
         .await
-        .map_err(|e| format!("Failed to wipe Turso database: {e}"))
+        .map_err(|e| format!("Failed to wipe Turso database: {e}"))?;
+    // The tables were dropped and recreated from the bootstrap schema, so any
+    // incompatibility recorded for this file is now stale.
+    crate::core::tasks::db_schema_check::probe_database(&path, &db).await;
+    Ok(())
 }

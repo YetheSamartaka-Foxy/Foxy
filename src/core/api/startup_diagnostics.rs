@@ -20,10 +20,66 @@ impl StartupStoragePath {
     }
 }
 
+/// Free-space floor for the drives Foxy writes its own state through.
+///
+/// A heuristic, and deliberately generous: Foxy stages multi-gigabyte addon
+/// downloads and backups through these paths while the database and its WAL grow
+/// on the same volume. A drive that runs out mid-sync does not fail cleanly -
+/// writes start erroring part-way through, which lands the local state in the
+/// same silently-wrong shape a stale schema does.
+pub const CRITICAL_FREE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+
+/// Roles whose drive backs Foxy's own writes rather than the game install.
+const SPACE_CRITICAL_ROLES: &[&str] = &[
+    "database",
+    "app_data",
+    "game_space",
+    "logs",
+    "temp",
+    "backups",
+];
+
+/// Whether `role` sits on a drive too full for Foxy to work through safely.
+pub fn role_space_is_critical(role: &str, available: u64) -> bool {
+    SPACE_CRITICAL_ROLES.contains(&role) && available < CRITICAL_FREE_BYTES
+}
+
 pub fn log_startup_system_diagnostics(storage_paths: &[StartupStoragePath]) {
     for line in startup_system_diagnostics_lines(storage_paths) {
         info!("{line}");
     }
+    for line in low_space_warning_lines(storage_paths) {
+        log::warn!("{line}");
+    }
+}
+
+/// One `low_space:` line per role whose drive is below [`CRITICAL_FREE_BYTES`].
+/// Empty when every Foxy-owned path has headroom.
+pub fn low_space_warning_lines(storage_paths: &[StartupStoragePath]) -> Vec<String> {
+    let disks = Disks::new_with_refreshed_list();
+    let mut lines = Vec::new();
+    let mut seen = BTreeSet::new();
+    for storage_path in storage_paths {
+        let path = normalized_path(&storage_path.path);
+        let Some(disk) = disk_for_path(&path, &disks) else {
+            continue;
+        };
+        let available = disk.available_space();
+        if !role_space_is_critical(&storage_path.role, available) {
+            continue;
+        }
+        if !seen.insert(disk.mount_point().to_path_buf()) {
+            continue;
+        }
+        lines.push(format!(
+            "low_space: role={} drive=\"{}\" available={} minimum={} - Foxy writes its database, temporary copies and backups here; downloads and database writes can fail part-way through",
+            storage_path.role,
+            sanitize_log_path(disk.mount_point()),
+            format_bytes(available),
+            format_bytes(CRITICAL_FREE_BYTES)
+        ));
+    }
+    lines
 }
 
 pub fn startup_system_diagnostics_lines(storage_paths: &[StartupStoragePath]) -> Vec<String> {
@@ -760,6 +816,31 @@ mod tests {
         assert_eq!(format_duration_secs(59), "59s");
         assert_eq!(format_duration_secs(3661), "1h 1m 1s");
         assert_eq!(format_duration_secs(90_061), "1d 1h 1m 1s");
+    }
+
+    #[test]
+    fn low_space_applies_only_to_foxy_owned_roles() {
+        let tight = CRITICAL_FREE_BYTES - 1;
+        assert!(role_space_is_critical("database", tight));
+        assert!(role_space_is_critical("temp", tight));
+        assert!(role_space_is_critical("backups", tight));
+        // The game install can legitimately sit on a nearly full drive; Foxy
+        // does not write its own state there.
+        assert!(!role_space_is_critical("arma3", tight));
+        assert!(!role_space_is_critical("repository", tight));
+        assert!(!role_space_is_critical("steam", tight));
+    }
+
+    #[test]
+    fn low_space_threshold_is_a_floor_not_a_ratio() {
+        // The August 2026 field report: 5.6 GiB free on a 930 GiB system drive
+        // holding the database, logs, temp and backups.
+        assert!(role_space_is_critical("database", 5 * 1024 * 1024 * 1024));
+        assert!(!role_space_is_critical("database", CRITICAL_FREE_BYTES));
+        assert!(!role_space_is_critical(
+            "database",
+            200 * 1024 * 1024 * 1024
+        ));
     }
 
     #[test]

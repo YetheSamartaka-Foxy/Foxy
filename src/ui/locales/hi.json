@@ -1291,5 +1291,18 @@
     "The entered profile name is not valid.": "दर्ज किया गया प्रोफ़ाइल नाम मान्य नहीं है.",
     "Profile files were not found on disk.": "प्रोफ़ाइल फ़ाइलें डिस्क पर नहीं मिलीं.",
     "This profile location cannot be modified safely.": "इस प्रोफ़ाइल स्थान को सुरक्षित रूप से संशोधित नहीं किया जा सकता.",
-    "Profile operation failed: {error}": "प्रोफ़ाइल कार्रवाई विफल: {error}"
+    "Profile operation failed: {error}": "प्रोफ़ाइल कार्रवाई विफल: {error}",
+    "A drive Foxy writes to is nearly full. Downloads and database writes can fail part-way through. Free up space before syncing.": "जिस ड्राइव पर Foxy लिखता है वह लगभग भर चुकी है। डाउनलोड और डेटाबेस लेखन बीच में ही विफल हो सकते हैं। सिंक करने से पहले जगह खाली करें।",
+    "Foxy is already running": "Foxy पहले से चल रहा है",
+    "Another Foxy process is already using this game space's database. Only one Foxy can use a game space at a time, so this window cannot continue.": "इस गेम स्पेस के डेटाबेस का उपयोग पहले से ही कोई अन्य Foxy प्रक्रिया कर रही है। एक समय में केवल एक Foxy ही किसी गेम स्पेस का उपयोग कर सकता है, इसलिए यह विंडो आगे नहीं बढ़ सकती।",
+    "The database is held by process {pid}.": "डेटाबेस प्रक्रिया {pid} के पास है।",
+    "Switch to the Foxy window that is already open, or close it and start Foxy again.": "पहले से खुली Foxy विंडो पर जाएँ, या उसे बंद करके Foxy फिर से शुरू करें।",
+    "Close this window": "यह विंडो बंद करें",
+    "Database update required": "डेटाबेस अपडेट आवश्यक",
+    "This version of Foxy uses a newer database format than the data stored on this computer. The local database must be wiped and rebuilt before it can be used reliably.": "Foxy का यह संस्करण इस कंप्यूटर पर संग्रहीत डेटा की तुलना में नए डेटाबेस प्रारूप का उपयोग करता है। विश्वसनीय रूप से उपयोग करने से पहले स्थानीय डेटाबेस को मिटाकर फिर से बनाना होगा।",
+    "The database stored on this computer was built by an older version of Foxy and this version cannot read it. Until it is rebuilt, Foxy cannot detect or download mod updates - repositories will keep showing as up to date even when they are not.": "इस कंप्यूटर पर संग्रहीत डेटाबेस Foxy के पुराने संस्करण द्वारा बनाया गया था और यह संस्करण उसे पढ़ नहीं सकता। जब तक इसे दोबारा नहीं बनाया जाता, Foxy मॉड अपडेट का पता नहीं लगा सकता और न ही उन्हें डाउनलोड कर सकता है - रिपॉज़िटरी अद्यतित न होने पर भी अद्यतित दिखती रहेंगी।",
+    "Wiping clears cached repository data only - your downloaded mods and files on disk are not touched. Foxy rebuilds the cache automatically the next time it checks each repository.": "मिटाने से केवल कैश किया गया रिपॉज़िटरी डेटा हटता है - आपके डाउनलोड किए गए मॉड और डिस्क पर मौजूद फ़ाइलें अछूती रहती हैं। Foxy अगली बार प्रत्येक रिपॉज़िटरी की जाँच करते समय कैश स्वतः फिर से बना लेता है।",
+    "Wipe database and continue": "डेटाबेस मिटाएँ और जारी रखें",
+    "Finish the current sync before wiping the database.": "डेटाबेस मिटाने से पहले चल रहा सिंक पूरा करें।",
+    "Continue without wiping (at my own risk)": "मिटाए बिना जारी रखें (अपने जोखिम पर)"
 }

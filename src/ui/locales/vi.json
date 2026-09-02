@@ -1291,5 +1291,18 @@
     "The entered profile name is not valid.": "Tên hồ sơ đã nhập không hợp lệ.",
     "Profile files were not found on disk.": "Không tìm thấy tập tin hồ sơ trên đĩa.",
     "This profile location cannot be modified safely.": "Vị trí hồ sơ này không thể được sửa đổi một cách an toàn.",
-    "Profile operation failed: {error}": "Thao tác hồ sơ không thành công: {error}"
+    "Profile operation failed: {error}": "Thao tác hồ sơ không thành công: {error}",
+    "A drive Foxy writes to is nearly full. Downloads and database writes can fail part-way through. Free up space before syncing.": "Một ổ đĩa mà Foxy ghi vào sắp đầy. Việc tải xuống và ghi vào cơ sở dữ liệu có thể thất bại giữa chừng. Hãy giải phóng dung lượng trước khi đồng bộ.",
+    "Foxy is already running": "Foxy đang chạy rồi",
+    "Another Foxy process is already using this game space's database. Only one Foxy can use a game space at a time, so this window cannot continue.": "Một tiến trình Foxy khác đang sử dụng cơ sở dữ liệu của không gian trò chơi này. Mỗi lần chỉ một Foxy có thể dùng một không gian trò chơi, nên cửa sổ này không thể tiếp tục.",
+    "The database is held by process {pid}.": "Cơ sở dữ liệu đang bị tiến trình {pid} giữ.",
+    "Switch to the Foxy window that is already open, or close it and start Foxy again.": "Hãy chuyển sang cửa sổ Foxy đang mở, hoặc đóng nó lại và khởi động Foxy lần nữa.",
+    "Close this window": "Đóng cửa sổ này",
+    "Database update required": "Cần cập nhật cơ sở dữ liệu",
+    "This version of Foxy uses a newer database format than the data stored on this computer. The local database must be wiped and rebuilt before it can be used reliably.": "Phiên bản Foxy này dùng định dạng cơ sở dữ liệu mới hơn dữ liệu được lưu trên máy tính này. Cơ sở dữ liệu cục bộ phải được xóa và dựng lại trước khi có thể dùng một cách đáng tin cậy.",
+    "The database stored on this computer was built by an older version of Foxy and this version cannot read it. Until it is rebuilt, Foxy cannot detect or download mod updates - repositories will keep showing as up to date even when they are not.": "Cơ sở dữ liệu lưu trên máy tính này được tạo bởi một phiên bản Foxy cũ hơn và phiên bản hiện tại không đọc được. Cho đến khi được dựng lại, Foxy không thể phát hiện hay tải xuống bản cập nhật mod - các kho sẽ vẫn hiển thị là đã cập nhật ngay cả khi không phải vậy.",
+    "Wiping clears cached repository data only - your downloaded mods and files on disk are not touched. Foxy rebuilds the cache automatically the next time it checks each repository.": "Việc xóa chỉ loại bỏ dữ liệu kho trong bộ nhớ đệm - các mod đã tải và tệp trên đĩa không bị ảnh hưởng. Foxy sẽ tự động dựng lại bộ nhớ đệm trong lần kiểm tra kho tiếp theo.",
+    "Wipe database and continue": "Xóa cơ sở dữ liệu và tiếp tục",
+    "Finish the current sync before wiping the database.": "Hãy hoàn tất quá trình đồng bộ hiện tại trước khi xóa cơ sở dữ liệu.",
+    "Continue without wiping (at my own risk)": "Tiếp tục mà không xóa (tôi tự chịu rủi ro)"
 }

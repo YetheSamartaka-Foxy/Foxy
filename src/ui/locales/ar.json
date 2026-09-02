@@ -1291,5 +1291,18 @@
     "The entered profile name is not valid.": "اسم ملف التعريف الذي تم إدخاله غير صالح.",
     "Profile files were not found on disk.": "لم يتم العثور على ملفات التعريف على القرص.",
     "This profile location cannot be modified safely.": "لا يمكن تعديل موقع الملف الشخصي هذا بأمان.",
-    "Profile operation failed: {error}": "فشلت عملية الملف الشخصي: {error}"
+    "Profile operation failed: {error}": "فشلت عملية الملف الشخصي: {error}",
+    "A drive Foxy writes to is nearly full. Downloads and database writes can fail part-way through. Free up space before syncing.": "أحد الأقراص التي يكتب إليها Foxy ممتلئ تقريبًا. قد تفشل عمليات التنزيل والكتابة في قاعدة البيانات في منتصفها. حرّر مساحة قبل المزامنة.",
+    "Foxy is already running": "Foxy قيد التشغيل بالفعل",
+    "Another Foxy process is already using this game space's database. Only one Foxy can use a game space at a time, so this window cannot continue.": "هناك عملية Foxy أخرى تستخدم بالفعل قاعدة بيانات مساحة اللعبة هذه. لا يمكن إلا لنسخة واحدة من Foxy استخدام مساحة اللعبة في الوقت نفسه، لذا لا يمكن لهذه النافذة المتابعة.",
+    "The database is held by process {pid}.": "قاعدة البيانات محجوزة بواسطة العملية {pid}.",
+    "Switch to the Foxy window that is already open, or close it and start Foxy again.": "انتقل إلى نافذة Foxy المفتوحة بالفعل، أو أغلقها وشغّل Foxy من جديد.",
+    "Close this window": "إغلاق هذه النافذة",
+    "Database update required": "مطلوب تحديث قاعدة البيانات",
+    "This version of Foxy uses a newer database format than the data stored on this computer. The local database must be wiped and rebuilt before it can be used reliably.": "يستخدم هذا الإصدار من Foxy تنسيق قاعدة بيانات أحدث من البيانات المخزّنة على هذا الكمبيوتر. يجب مسح قاعدة البيانات المحلية وإعادة بنائها قبل أن يمكن استخدامها بشكل موثوق.",
+    "The database stored on this computer was built by an older version of Foxy and this version cannot read it. Until it is rebuilt, Foxy cannot detect or download mod updates - repositories will keep showing as up to date even when they are not.": "أُنشئت قاعدة البيانات المخزّنة على هذا الكمبيوتر بإصدار أقدم من Foxy ولا يستطيع هذا الإصدار قراءتها. وإلى أن يُعاد بناؤها، لا يستطيع Foxy اكتشاف تحديثات التعديلات أو تنزيلها - وستظل المستودعات تظهر كأنها محدَّثة حتى لو لم تكن كذلك.",
+    "Wiping clears cached repository data only - your downloaded mods and files on disk are not touched. Foxy rebuilds the cache automatically the next time it checks each repository.": "المسح يزيل بيانات المستودعات المخزّنة مؤقتًا فقط - أما التعديلات التي نزّلتها والملفات الموجودة على القرص فلا تُمس. يعيد Foxy بناء ذاكرة التخزين المؤقت تلقائيًا في المرة التالية التي يفحص فيها كل مستودع.",
+    "Wipe database and continue": "مسح قاعدة البيانات والمتابعة",
+    "Finish the current sync before wiping the database.": "أنهِ المزامنة الحالية قبل مسح قاعدة البيانات.",
+    "Continue without wiping (at my own risk)": "المتابعة دون مسح (على مسؤوليتي الخاصة)"
 }

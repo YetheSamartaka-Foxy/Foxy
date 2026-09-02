@@ -1291,5 +1291,18 @@
     "The entered profile name is not valid.": "Zadaný názov profilu je neplatný.",
     "Profile files were not found on disk.": "Súbory profilu sa na disku nenašli.",
     "This profile location cannot be modified safely.": "Toto umiestnenie profilu nemožno bezpečne zmeniť.",
-    "Profile operation failed: {error}": "Operácia profilu zlyhala: {error}"
+    "Profile operation failed: {error}": "Operácia profilu zlyhala: {error}",
+    "A drive Foxy writes to is nearly full. Downloads and database writes can fail part-way through. Free up space before syncing.": "Disk, na ktorý Foxy zapisuje, je takmer plný. Sťahovanie aj zápisy do databázy môžu zlyhať v polovici. Pred synchronizáciou uvoľnite miesto.",
+    "Foxy is already running": "Foxy už beží",
+    "Another Foxy process is already using this game space's database. Only one Foxy can use a game space at a time, so this window cannot continue.": "Databázu tohto herného priestoru už používa iný proces Foxy. Herný priestor môže používať vždy len jeden Foxy, takže toto okno nemôže pokračovať.",
+    "The database is held by process {pid}.": "Databázu drží proces {pid}.",
+    "Switch to the Foxy window that is already open, or close it and start Foxy again.": "Prepnite sa do už otvoreného okna Foxy alebo ho zatvorte a spustite Foxy znova.",
+    "Close this window": "Zavrieť toto okno",
+    "Database update required": "Vyžaduje sa aktualizácia databázy",
+    "This version of Foxy uses a newer database format than the data stored on this computer. The local database must be wiped and rebuilt before it can be used reliably.": "Táto verzia Foxy používa novší formát databázy, než sú údaje uložené v tomto počítači. Lokálna databáza musí byť vymazaná a znovu vytvorená, aby sa dala spoľahlivo používať.",
+    "The database stored on this computer was built by an older version of Foxy and this version cannot read it. Until it is rebuilt, Foxy cannot detect or download mod updates - repositories will keep showing as up to date even when they are not.": "Databáza uložená v tomto počítači bola vytvorená staršou verziou Foxy a táto verzia ju nedokáže prečítať. Kým nebude znovu vytvorená, Foxy nedokáže zistiť ani stiahnuť aktualizácie módov - repozitáre sa budú naďalej zobrazovať ako aktuálne, aj keď aktuálne nie sú.",
+    "Wiping clears cached repository data only - your downloaded mods and files on disk are not touched. Foxy rebuilds the cache automatically the next time it checks each repository.": "Vymazanie odstráni iba údaje repozitárov v medzipamäti - stiahnuté módy a súbory na disku zostanú nedotknuté. Foxy medzipamäť automaticky obnoví pri ďalšej kontrole každého repozitára.",
+    "Wipe database and continue": "Vymazať databázu a pokračovať",
+    "Finish the current sync before wiping the database.": "Pred vymazaním databázy dokončite prebiehajúcu synchronizáciu.",
+    "Continue without wiping (at my own risk)": "Pokračovať bez vymazania (na vlastné riziko)"
 }

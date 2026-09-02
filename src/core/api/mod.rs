@@ -60,7 +60,7 @@ pub use quick_scan::{
 };
 pub use startup_diagnostics::{
     StartupStoragePath, all_storage_devices_lines, log_startup_system_diagnostics,
-    startup_system_diagnostics_lines,
+    low_space_warning_lines, startup_system_diagnostics_lines,
 };
 pub use sync_pipeline::spawn_repository_sync;
 pub use types::{

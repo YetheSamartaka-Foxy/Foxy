@@ -1291,5 +1291,18 @@
     "The entered profile name is not valid.": "A megadott profilnév érvénytelen.",
     "Profile files were not found on disk.": "A profilfájlok nem találhatók a lemezen.",
     "This profile location cannot be modified safely.": "Ez a profilhely nem módosítható biztonságosan.",
-    "Profile operation failed: {error}": "A profilművelet sikertelen: {error}"
+    "Profile operation failed: {error}": "A profilművelet sikertelen: {error}",
+    "A drive Foxy writes to is nearly full. Downloads and database writes can fail part-way through. Free up space before syncing.": "Egy meghajtó, amelyre a Foxy ír, majdnem tele van. A letöltések és az adatbázisírások félbeszakadhatnak. Szabadíts fel helyet a szinkronizálás előtt.",
+    "Foxy is already running": "A Foxy már fut",
+    "Another Foxy process is already using this game space's database. Only one Foxy can use a game space at a time, so this window cannot continue.": "Ennek a játéktérnek az adatbázisát már használja egy másik Foxy folyamat. Egyszerre csak egy Foxy használhat egy játékteret, ezért ez az ablak nem folytathatja.",
+    "The database is held by process {pid}.": "Az adatbázist a(z) {pid} folyamat tartja fogva.",
+    "Switch to the Foxy window that is already open, or close it and start Foxy again.": "Válts át a már megnyitott Foxy ablakra, vagy zárd be, és indítsd újra a Foxyt.",
+    "Close this window": "Ablak bezárása",
+    "Database update required": "Adatbázis-frissítés szükséges",
+    "This version of Foxy uses a newer database format than the data stored on this computer. The local database must be wiped and rebuilt before it can be used reliably.": "A Foxy ezen verziója újabb adatbázisformátumot használ, mint az ezen a számítógépen tárolt adatok. A helyi adatbázist törölni és újraépíteni kell, mielőtt megbízhatóan használható lenne.",
+    "The database stored on this computer was built by an older version of Foxy and this version cannot read it. Until it is rebuilt, Foxy cannot detect or download mod updates - repositories will keep showing as up to date even when they are not.": "Az ezen a számítógépen tárolt adatbázist a Foxy egy régebbi verziója hozta létre, és ez a verzió nem tudja olvasni. Amíg nem épül újra, a Foxy nem tudja észlelni és letölteni a modfrissítéseket - a tárolók továbbra is naprakészként jelennek meg, még ha nem is azok.",
+    "Wiping clears cached repository data only - your downloaded mods and files on disk are not touched. Foxy rebuilds the cache automatically the next time it checks each repository.": "A törlés csak a gyorsítótárazott tárolóadatokat távolítja el - a letöltött modok és a lemezen lévő fájlok érintetlenek maradnak. A Foxy a gyorsítótárat automatikusan újraépíti, amikor legközelebb ellenőrzi az egyes tárolókat.",
+    "Wipe database and continue": "Adatbázis törlése és folytatás",
+    "Finish the current sync before wiping the database.": "Fejezd be a folyamatban lévő szinkronizálást az adatbázis törlése előtt.",
+    "Continue without wiping (at my own risk)": "Folytatás törlés nélkül (saját felelősségre)"
 }

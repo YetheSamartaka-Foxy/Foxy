@@ -1291,5 +1291,18 @@
     "The entered profile name is not valid.": "Il nome del profilo inserito non è valido.",
     "Profile files were not found on disk.": "I file del profilo non sono stati trovati sul disco.",
     "This profile location cannot be modified safely.": "Questa posizione del profilo non può essere modificata in modo sicuro.",
-    "Profile operation failed: {error}": "Operazione sul profilo non riuscita: {error}"
+    "Profile operation failed: {error}": "Operazione sul profilo non riuscita: {error}",
+    "A drive Foxy writes to is nearly full. Downloads and database writes can fail part-way through. Free up space before syncing.": "Un disco su cui Foxy scrive è quasi pieno. I download e le scritture sul database possono fallire a metà. Libera spazio prima di sincronizzare.",
+    "Foxy is already running": "Foxy è già in esecuzione",
+    "Another Foxy process is already using this game space's database. Only one Foxy can use a game space at a time, so this window cannot continue.": "Un altro processo Foxy sta già usando il database di questo spazio di gioco. Solo un Foxy alla volta può usare uno spazio di gioco, quindi questa finestra non può continuare.",
+    "The database is held by process {pid}.": "Il database è occupato dal processo {pid}.",
+    "Switch to the Foxy window that is already open, or close it and start Foxy again.": "Passa alla finestra di Foxy già aperta, oppure chiudila e riavvia Foxy.",
+    "Close this window": "Chiudi questa finestra",
+    "Database update required": "Aggiornamento del database necessario",
+    "This version of Foxy uses a newer database format than the data stored on this computer. The local database must be wiped and rebuilt before it can be used reliably.": "Questa versione di Foxy usa un formato di database più recente rispetto ai dati salvati su questo computer. Il database locale deve essere cancellato e ricostruito prima di poter essere usato in modo affidabile.",
+    "The database stored on this computer was built by an older version of Foxy and this version cannot read it. Until it is rebuilt, Foxy cannot detect or download mod updates - repositories will keep showing as up to date even when they are not.": "Il database salvato su questo computer è stato creato da una versione precedente di Foxy e questa versione non è in grado di leggerlo. Finché non viene ricostruito, Foxy non può rilevare né scaricare gli aggiornamenti delle mod - i repository continueranno a risultare aggiornati anche quando non lo sono.",
+    "Wiping clears cached repository data only - your downloaded mods and files on disk are not touched. Foxy rebuilds the cache automatically the next time it checks each repository.": "La cancellazione elimina solo i dati dei repository nella cache - le mod scaricate e i file sul disco non vengono toccati. Foxy ricostruisce la cache automaticamente al successivo controllo di ogni repository.",
+    "Wipe database and continue": "Cancella il database e continua",
+    "Finish the current sync before wiping the database.": "Completa la sincronizzazione in corso prima di cancellare il database.",
+    "Continue without wiping (at my own risk)": "Continua senza cancellare (a mio rischio)"
 }

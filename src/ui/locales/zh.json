@@ -1291,5 +1291,18 @@
     "The entered profile name is not valid.": "输入的个人资料名称无效。",
     "Profile files were not found on disk.": "在磁盘上找不到配置文件。",
     "This profile location cannot be modified safely.": "无法安全地修改此配置文件位置。",
-    "Profile operation failed: {error}": "配置文件操作失败：{error}"
+    "Profile operation failed: {error}": "配置文件操作失败：{error}",
+    "A drive Foxy writes to is nearly full. Downloads and database writes can fail part-way through. Free up space before syncing.": "Foxy 写入的某个驱动器空间即将用尽。下载和数据库写入可能中途失败。请在同步前释放空间。",
+    "Foxy is already running": "Foxy 已在运行",
+    "Another Foxy process is already using this game space's database. Only one Foxy can use a game space at a time, so this window cannot continue.": "另一个 Foxy 进程正在使用此游戏空间的数据库。同一时间只能有一个 Foxy 使用同一个游戏空间，因此此窗口无法继续。",
+    "The database is held by process {pid}.": "数据库由进程 {pid} 占用。",
+    "Switch to the Foxy window that is already open, or close it and start Foxy again.": "请切换到已打开的 Foxy 窗口，或将其关闭后重新启动 Foxy。",
+    "Close this window": "关闭此窗口",
+    "Database update required": "需要更新数据库",
+    "This version of Foxy uses a newer database format than the data stored on this computer. The local database must be wiped and rebuilt before it can be used reliably.": "此版本的 Foxy 使用的数据库格式比本机存储的数据更新。必须先清除并重建本地数据库，才能可靠地使用它。",
+    "The database stored on this computer was built by an older version of Foxy and this version cannot read it. Until it is rebuilt, Foxy cannot detect or download mod updates - repositories will keep showing as up to date even when they are not.": "本机存储的数据库由较旧版本的 Foxy 创建，此版本无法读取。在重建之前，Foxy 无法检测或下载模组更新 - 仓库即使不是最新的，也会一直显示为最新。",
+    "Wiping clears cached repository data only - your downloaded mods and files on disk are not touched. Foxy rebuilds the cache automatically the next time it checks each repository.": "清除只会删除缓存的仓库数据 - 已下载的模组和磁盘上的文件不会受到影响。Foxy 会在下次检查每个仓库时自动重建缓存。",
+    "Wipe database and continue": "清除数据库并继续",
+    "Finish the current sync before wiping the database.": "请先完成当前同步，再清除数据库。",
+    "Continue without wiping (at my own risk)": "不清除并继续（风险自负）"
 }

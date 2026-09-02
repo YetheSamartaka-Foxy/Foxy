@@ -187,6 +187,7 @@ impl Foxy {
             || self.is_direct_download_running()
             || !self.pending_repository_db_wipes.is_empty()
             || self.pending_db_schema_wipe.is_some()
+            || self.db_lock_conflict.is_some()
     }
 
     fn find_due_scheduled_job(&self, now: DateTime<Local>) -> Option<(usize, DueState)> {

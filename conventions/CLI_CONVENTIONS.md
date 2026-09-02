@@ -9,6 +9,7 @@
 - Preserve automation guarantees in CLI output and behavior.
 - `--json` output should remain machine-readable and stable.
 - Destructive actions should require `--yes`.
+- Exit codes are stable: `0` success, `2` validation, `3` not found, `4` operation failed, `5` partial success, `6` database busy. `6` means another Foxy process owns the game space database (Turso has no multi-process access); it is distinct from `4` so scripts can retry once the GUI is closed rather than treating it as a real failure.
 - Support `--dry-run` where feasible.
 - CLI must operate on the same config/data root as UI (app-global `app_settings.json`/`games.json`/`window_state.json`, plus per-game-space `game_settings.json`/`repositories.json`/`repository_spaces.json`/`database.db` under `games/<space_id>/`) and honor `--config-dir`.
 - Per-game-space files resolve from the active game space in `games.json`. `foxy game list|use|create|remove` manages game spaces; `game use` takes effect immediately for subsequent CLI commands and on the next UI start. `game remove` is destructive and requires `--yes`.

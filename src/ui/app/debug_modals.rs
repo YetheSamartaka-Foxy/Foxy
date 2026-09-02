@@ -57,6 +57,7 @@ impl DebugModal {
                     Some(crate::core::tasks::db_schema_version::DbSchemaWipePrompt {
                         stored_version: target.saturating_sub(1),
                         target_version: target,
+                        blocking: false,
                     });
             }
         }

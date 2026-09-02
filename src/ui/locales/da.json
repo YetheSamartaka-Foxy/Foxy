@@ -1291,5 +1291,18 @@
     "The entered profile name is not valid.": "Det indtastede profilnavn er ikke gyldigt.",
     "Profile files were not found on disk.": "Profilfiler blev ikke fundet på disken.",
     "This profile location cannot be modified safely.": "Denne profilplacering kan ikke ændres sikkert.",
-    "Profile operation failed: {error}": "Profilhandling mislykkedes: {error}"
+    "Profile operation failed: {error}": "Profilhandling mislykkedes: {error}",
+    "A drive Foxy writes to is nearly full. Downloads and database writes can fail part-way through. Free up space before syncing.": "Et drev, som Foxy skriver til, er næsten fuldt. Downloads og databaseskrivninger kan mislykkes undervejs. Frigør plads, før du synkroniserer.",
+    "Foxy is already running": "Foxy kører allerede",
+    "Another Foxy process is already using this game space's database. Only one Foxy can use a game space at a time, so this window cannot continue.": "En anden Foxy-proces bruger allerede databasen for dette spilrum. Kun én Foxy kan bruge et spilrum ad gangen, så dette vindue kan ikke fortsætte.",
+    "The database is held by process {pid}.": "Databasen er optaget af processen {pid}.",
+    "Switch to the Foxy window that is already open, or close it and start Foxy again.": "Skift til det Foxy-vindue, der allerede er åbent, eller luk det og start Foxy igen.",
+    "Close this window": "Luk dette vindue",
+    "Database update required": "Databaseopdatering påkrævet",
+    "This version of Foxy uses a newer database format than the data stored on this computer. The local database must be wiped and rebuilt before it can be used reliably.": "Denne version af Foxy bruger et nyere databaseformat end de data, der er gemt på denne computer. Den lokale database skal ryddes og bygges op igen, før den kan bruges pålideligt.",
+    "The database stored on this computer was built by an older version of Foxy and this version cannot read it. Until it is rebuilt, Foxy cannot detect or download mod updates - repositories will keep showing as up to date even when they are not.": "Databasen på denne computer blev oprettet af en ældre version af Foxy, og denne version kan ikke læse den. Indtil den er bygget op igen, kan Foxy ikke registrere eller downloade modopdateringer - arkiver vil fortsat blive vist som opdaterede, selv når de ikke er det.",
+    "Wiping clears cached repository data only - your downloaded mods and files on disk are not touched. Foxy rebuilds the cache automatically the next time it checks each repository.": "Rydning fjerner kun cachelagrede arkivdata - dine downloadede mods og filer på disken røres ikke. Foxy genopbygger cachen automatisk, næste gang hvert arkiv kontrolleres.",
+    "Wipe database and continue": "Ryd databasen og fortsæt",
+    "Finish the current sync before wiping the database.": "Afslut den igangværende synkronisering, før du rydder databasen.",
+    "Continue without wiping (at my own risk)": "Fortsæt uden at rydde (på eget ansvar)"
 }

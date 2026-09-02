@@ -9,6 +9,17 @@ use std::sync::Arc;
 pub(crate) const REPOSITORY_COLUMNS: &str = "id, name, remote_url, local_path, image, local_checksum, remote_checksum, \
      local_content_hash, foxy_mode";
 
+/// Upsert keyed on the `(remote_url, local_path)` repository identity. Shared
+/// with the startup schema probe (`db_schema_check`), which prepares it against
+/// the live database: an older schema without the composite UNIQUE fails to
+/// parse the `ON CONFLICT` target, which is exactly what the probe must catch.
+pub(crate) const REPOSITORY_UPSERT_SQL: &str = "INSERT INTO repositories \
+     (name, remote_url, image, local_path, remote_checksum, local_checksum, local_content_hash, foxy_mode) \
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+     ON CONFLICT (remote_url, local_path) DO UPDATE SET \
+     name = excluded.name, image = excluded.image, \
+     remote_checksum = excluded.remote_checksum, foxy_mode = excluded.foxy_mode";
+
 /// Build a [`FoxyRepository`] from a seam [`DbRow`].
 pub(crate) fn repository_from_row(row: &DbRow) -> Result<FoxyRepository, DbErr> {
     Ok(FoxyRepository {
@@ -106,12 +117,7 @@ pub(crate) async fn upsert_repository_entry(
     let db = context.db();
     db.execute_retry(
         "upsert repository entry",
-        "INSERT INTO repositories \
-         (name, remote_url, image, local_path, remote_checksum, local_checksum, local_content_hash, foxy_mode) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
-         ON CONFLICT (remote_url, local_path) DO UPDATE SET \
-         name = excluded.name, image = excluded.image, \
-         remote_checksum = excluded.remote_checksum, foxy_mode = excluded.foxy_mode",
+        REPOSITORY_UPSERT_SQL,
         params![
             name,
             repository_url,

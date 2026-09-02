@@ -1291,5 +1291,18 @@
     "The entered profile name is not valid.": "Ang inilagay na pangalan ng profile ay hindi wasto.",
     "Profile files were not found on disk.": "Ang mga file ng profile ay hindi nakita sa disk.",
     "This profile location cannot be modified safely.": "Ang lokasyon ng profile na ito ay hindi maaaring mabago nang ligtas.",
-    "Profile operation failed: {error}": "Nabigo ang pagpapatakbo ng profile: {error}"
+    "Profile operation failed: {error}": "Nabigo ang pagpapatakbo ng profile: {error}",
+    "A drive Foxy writes to is nearly full. Downloads and database writes can fail part-way through. Free up space before syncing.": "Halos puno na ang isang drive na sinusulatan ng Foxy. Maaaring mabigo ang mga pag-download at pagsulat sa database bago matapos. Magbakante ng espasyo bago mag-sync.",
+    "Foxy is already running": "Tumatakbo na ang Foxy",
+    "Another Foxy process is already using this game space's database. Only one Foxy can use a game space at a time, so this window cannot continue.": "May ibang proseso ng Foxy na gumagamit na ng database ng game space na ito. Iisang Foxy lang ang puwedeng gumamit ng isang game space sa isang pagkakataon, kaya hindi makakapagpatuloy ang window na ito.",
+    "The database is held by process {pid}.": "Hawak ang database ng prosesong {pid}.",
+    "Switch to the Foxy window that is already open, or close it and start Foxy again.": "Lumipat sa Foxy window na bukas na, o isara ito at buksan muli ang Foxy.",
+    "Close this window": "Isara ang window na ito",
+    "Database update required": "Kailangan ng pag-update ng database",
+    "This version of Foxy uses a newer database format than the data stored on this computer. The local database must be wiped and rebuilt before it can be used reliably.": "Mas bago ang format ng database na ginagamit ng bersyong ito ng Foxy kaysa sa data na nakaimbak sa computer na ito. Kailangang burahin at muling itayo ang lokal na database bago ito magamit nang maaasahan.",
+    "The database stored on this computer was built by an older version of Foxy and this version cannot read it. Until it is rebuilt, Foxy cannot detect or download mod updates - repositories will keep showing as up to date even when they are not.": "Ang database na nakaimbak sa computer na ito ay ginawa ng mas lumang bersyon ng Foxy at hindi ito mabasa ng bersyong ito. Hangga't hindi ito naitatayong muli, hindi matutukoy o mada-download ng Foxy ang mga update ng mod - patuloy na lalabas na napapanahon ang mga repositoryo kahit hindi.",
+    "Wiping clears cached repository data only - your downloaded mods and files on disk are not touched. Foxy rebuilds the cache automatically the next time it checks each repository.": "Ang pagbura ay nag-aalis lamang ng naka-cache na datos ng repositoryo - hindi ginagalaw ang mga na-download mong mod at mga file sa disk. Awtomatikong muling itatayo ng Foxy ang cache sa susunod na pagsusuri sa bawat repositoryo.",
+    "Wipe database and continue": "Burahin ang database at magpatuloy",
+    "Finish the current sync before wiping the database.": "Tapusin ang kasalukuyang pag-sync bago burahin ang database.",
+    "Continue without wiping (at my own risk)": "Magpatuloy nang hindi binubura (sa sarili kong pananagutan)"
 }

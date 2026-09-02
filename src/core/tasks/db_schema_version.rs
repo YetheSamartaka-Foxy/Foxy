@@ -82,6 +82,11 @@ pub struct DbMeta {
 pub struct DbSchemaWipePrompt {
     pub stored_version: u32,
     pub target_version: u32,
+    /// The live database was probed and cannot run this build's statements, so
+    /// "continue without wiping" is not a real option: every sync would persist
+    /// nothing and still report success. The UI drops the dismiss action for a
+    /// blocking prompt.
+    pub blocking: bool,
 }
 
 /// Outcome of comparing the stored sidecar against the compiled schema version.
@@ -223,9 +228,30 @@ pub fn evaluate_and_bootstrap() -> Option<DbSchemaWipePrompt> {
             Some(DbSchemaWipePrompt {
                 stored_version: stored,
                 target_version: target,
+                blocking: false,
             })
         }
     }
+}
+
+/// Re-raise the wipe prompt as non-dismissible when the *live* database was
+/// probed and found unable to run this build's statements.
+///
+/// The sidecar decision alone is not enough: the bootstrap schema is applied
+/// with `CREATE ... IF NOT EXISTS`, so a user who dismissed the prompt keeps a
+/// database whose repository upsert and pending-update writes fail to parse.
+/// Every sync then finds zero mods and still reports success, which is how field
+/// installs sat for weeks silently skipping updates. Once the probe has spoken,
+/// dismissal is no longer offered.
+pub fn blocking_prompt_if_live_schema_incompatible() -> Option<DbSchemaWipePrompt> {
+    if !crate::core::tasks::db_schema_check::live_schema_incompatible() {
+        return None;
+    }
+    Some(DbSchemaWipePrompt {
+        stored_version: read_meta().map(|meta| meta.schema_version).unwrap_or(0),
+        target_version: DB_SCHEMA_VERSION,
+        blocking: true,
+    })
 }
 
 /// CLI-side, read-only schema gate. Performs the same fresh/legacy sidecar

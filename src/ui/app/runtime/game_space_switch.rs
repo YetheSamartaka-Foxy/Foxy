@@ -121,6 +121,7 @@ impl Foxy {
         self.sanitize_settings_debug_artifacts();
         self.sync_debug_runtime_state();
         self.i18n.set_language(&self.settings_view_state.locale);
+        self.db_lock_conflict = self.claim_active_space_database();
         self.pending_db_schema_wipe =
             crate::core::tasks::db_schema_version::evaluate_and_bootstrap();
         self.load_repositories();
@@ -487,6 +488,8 @@ const APP_GLOBAL_FOXY_FIELDS: &[&str] = &[
     "agent_gui",
     // Reloaded by the switch itself rather than blanked first.
     "pending_db_schema_wipe",
+    "db_lock_conflict",
+    "pending_low_space_notice",
     "game_spaces_view_state",
     "pending_game_space_switch",
     // Activity log and diagnostics.
