@@ -109,23 +109,25 @@ pub fn cmd_launch(cli: &CliArgs, args: LaunchArgs) -> Result<CommandSuccess, Com
         }
     };
 
-    let mut cmd = std::process::Command::new(&launch_spec.executable);
-    cmd.args(&launch_spec.args);
-    cmd.current_dir(&launch_spec.cwd);
-    let child = cmd
-        .spawn()
-        .map_err(|e| CommandError::operation("launch", format!("Failed to launch: {}", e)))?;
+    let args: Vec<std::ffi::OsString> = launch_spec
+        .args
+        .iter()
+        .map(std::ffi::OsString::from)
+        .collect();
+    let pid = crate::core::utils::deelevate::spawn_unelevated(
+        launch_spec.executable.as_os_str(),
+        &args,
+        Some(launch_spec.cwd.as_ref()),
+    )
+    .map_err(|e| CommandError::operation("launch", format!("Failed to launch: {}", e)))?;
 
     let message = match steam_status {
-        "started" => format!(
-            "Steam started and launch command started (pid={})",
-            child.id()
-        ),
+        "started" => format!("Steam started and launch command started (pid={})", pid),
         "not_configured_fallback" => format!(
             "Launch command started without Steam pre-check (pid={})",
-            child.id()
+            pid
         ),
-        _ => format!("Launch command started (pid={})", child.id()),
+        _ => format!("Launch command started (pid={})", pid),
     };
 
     Ok(CommandSuccess {
@@ -144,7 +146,7 @@ pub fn cmd_launch(cli: &CliArgs, args: LaunchArgs) -> Result<CommandSuccess, Com
                 "skipped_disabled": extra_file_activation.skipped_disabled
             },
             "execute": true,
-            "pid": child.id()
+            "pid": pid
         }),
         exit_code: exit_codes::SUCCESS,
     })

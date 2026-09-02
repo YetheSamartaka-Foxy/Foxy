@@ -426,15 +426,15 @@ fn execute_game_launch(
         }
     };
 
-    let child = command
-        .clone()
-        .into_process_command()
-        .spawn()
-        .map_err(|err| {
-            CommandError::operation("game.launch", format!("Failed to launch: {}", err))
-        })?;
+    let args: Vec<std::ffi::OsString> = command.args.iter().map(std::ffi::OsString::from).collect();
+    let pid = crate::core::utils::deelevate::spawn_unelevated(
+        command.program.as_os_str(),
+        &args,
+        command.cwd.as_deref(),
+    )
+    .map_err(|err| CommandError::operation("game.launch", format!("Failed to launch: {}", err)))?;
     Ok(ExecutedGameLaunch {
-        pid: child.id(),
+        pid,
         steam_status,
         extra_files,
     })

@@ -110,6 +110,24 @@ impl Foxy {
                 );
                 return;
             }
+            // Probed only for downloads, and only at start: a repository folder
+            // the account cannot write to used to fail file by file deep inside
+            // the transfer, with nothing but a log line to show for it.
+            if mode == SyncMode::Download {
+                let local_path = sanitize_user_path(&repo.path);
+                if !crate::core::utils::fs_safety::destination_is_writable(Path::new(&local_path)) {
+                    warn!(
+                        "Sync request ignored for repository {}: the local path is not writable",
+                        repo.name
+                    );
+                    let message = self.t_fmt(
+                        "Foxy cannot write to {path}. Choose a folder outside Program Files, or grant your account write access to it.",
+                        &[("path", local_path)],
+                    );
+                    self.show_error_toast(message);
+                    return;
+                }
+            }
             let recent_local_path_reset = self
                 .repo_db_reset_pending_recheck
                 .contains(&normalized_repo_url);

@@ -20,7 +20,7 @@ AppVersion={#AppVersion}
 AppVerName=Foxy {#AppVersion}
 AppPublisher=Foxy Contributors
 AppPublisherURL=https://github.com/YetheSamartaka-Foxy/Foxy
-DefaultDirName={commonpf32}\Foxy
+DefaultDirName={autopf}\Foxy
 DefaultGroupName=Foxy
 UninstallDisplayIcon={app}\foxy.ico
 UninstallDisplayName=Foxy
@@ -30,7 +30,7 @@ Compression=lzma2/ultra64
 SolidCompression=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-PrivilegesRequired=admin
+PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 SetupIconFile=..\..\foxy.ico
 WizardStyle=modern
@@ -62,12 +62,13 @@ Name: "{group}\Uninstall Foxy"; Filename: "{uninstallexe}"; Tasks: startmenu
 Name: "{autodesktop}\Foxy"; Filename: "{app}\Foxy.exe"; IconFilename: "{app}\foxy.ico"; Tasks: desktopicon; Comment: "Foxy - Arma 3 mod updater"
 
 [Registry]
-; Always run Foxy as administrator. This re-applies the "Run as administrator"
-; compatibility flag on every install/update so the setting survives updates
-; (it would otherwise be lost when the installer recreates shortcuts). The flag
-; is keyed on the exe path, so it applies however Foxy is launched (shortcut,
-; Start Menu, or directly). Written machine-wide to match the per-machine install.
-Root: HKLM; Subkey: "SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers"; ValueType: string; ValueName: "{app}\Foxy.exe"; ValueData: "~ RUNASADMIN"; Flags: uninsdeletevalue
+; Foxy must not run elevated: a game (and Steam) started from an elevated Foxy
+; inherits the admin token, which breaks Discord/TeamSpeak hotkeys and OBS
+; capture for the game window. Earlier installers set the "Run as
+; administrator" AppCompat layer here, so remove any leftover value for this
+; exe path. The HKLM copy can only be removed when setup itself is elevated.
+Root: HKLM; Subkey: "SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers"; ValueType: none; ValueName: "{app}\Foxy.exe"; Flags: deletevalue; Check: IsAdminInstallMode
+Root: HKCU; Subkey: "SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers"; ValueType: none; ValueName: "{app}\Foxy.exe"; Flags: deletevalue
 
 [Run]
 Filename: "{app}\Foxy.exe"; Description: "Launch Foxy"; Flags: nowait postinstall skipifsilent

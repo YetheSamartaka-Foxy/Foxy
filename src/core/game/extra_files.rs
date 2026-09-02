@@ -274,20 +274,39 @@ fn activate_entry(
     if !source.exists() {
         return Err("Stored payload is missing; re-add the entry".to_string());
     }
-    match entry.kind {
-        ExtraFileKind::File => {
-            if let Some(parent) = destination.parent() {
-                fs::create_dir_all(parent).map_err(|err| {
-                    format!("Failed to create {}: {}", sanitize_log_path(parent), err)
-                })?;
-            }
-            copy_recursively(&source, &destination, 0)?;
-        }
-        ExtraFileKind::Folder => {
-            copy_recursively(&source, &destination, 0)?;
-        }
-    }
+    let destination_dir = match entry.kind {
+        ExtraFileKind::File => destination.parent().unwrap_or(&destination).to_path_buf(),
+        ExtraFileKind::Folder => destination.clone(),
+    };
+    let result = match entry.kind {
+        ExtraFileKind::File => fs::create_dir_all(&destination_dir)
+            .map_err(|err| {
+                format!(
+                    "Failed to create {}: {}",
+                    sanitize_log_path(&destination_dir),
+                    err
+                )
+            })
+            .and_then(|()| copy_recursively(&source, &destination, 0)),
+        ExtraFileKind::Folder => copy_recursively(&source, &destination, 0),
+    };
+    result.map_err(|err| explain_unwritable_destination(&destination_dir, err))?;
     Ok(destination.display().to_string())
+}
+
+/// Turn a raw OS write failure into something the user can act on when the
+/// cause is that the destination simply is not writable by this account. Only
+/// probed on the failure path so a normal launch does no extra filesystem work.
+fn explain_unwritable_destination(destination_dir: &Path, err: String) -> String {
+    if crate::core::utils::fs_safety::destination_is_writable(destination_dir) {
+        return err;
+    }
+    format!(
+        "{} is not writable by your account, so the file was not applied. Move the game out of a \
+         protected folder, or grant your account write access to it. ({})",
+        sanitize_log_path(destination_dir),
+        err
+    )
 }
 
 /// Expand `{game_dir}` and require an absolute result so a pack made on

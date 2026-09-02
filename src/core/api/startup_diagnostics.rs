@@ -286,52 +286,12 @@ fn power_summary_line() -> String {
 }
 
 // ── #6 elevation / privilege level ──────────────────────────────────────────
-#[cfg(target_os = "windows")]
 fn privilege_summary_line() -> String {
-    match is_process_elevated() {
+    match crate::core::utils::deelevate::is_process_elevated() {
         Some(true) => "elevation: elevated=yes".to_string(),
         Some(false) => "elevation: elevated=no".to_string(),
         None => "elevation: elevated=<unknown>".to_string(),
     }
-}
-
-#[cfg(target_os = "windows")]
-fn is_process_elevated() -> Option<bool> {
-    use winapi::shared::minwindef::DWORD;
-    use winapi::um::handleapi::CloseHandle;
-    use winapi::um::processthreadsapi::{GetCurrentProcess, OpenProcessToken};
-    use winapi::um::securitybaseapi::GetTokenInformation;
-    use winapi::um::winnt::{TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
-
-    unsafe {
-        let mut token = std::ptr::null_mut();
-        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
-            return None;
-        }
-
-        let mut elevation: TOKEN_ELEVATION = std::mem::zeroed();
-        let mut returned: DWORD = 0;
-        let size = std::mem::size_of::<TOKEN_ELEVATION>() as DWORD;
-        let ok = GetTokenInformation(
-            token,
-            TokenElevation,
-            &mut elevation as *mut _ as *mut _,
-            size,
-            &mut returned,
-        );
-        CloseHandle(token);
-
-        if ok == 0 {
-            None
-        } else {
-            Some(elevation.TokenIsElevated != 0)
-        }
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn privilege_summary_line() -> String {
-    "elevation: unavailable on this platform".to_string()
 }
 
 // ── #5 display scaling / DPI ────────────────────────────────────────────────

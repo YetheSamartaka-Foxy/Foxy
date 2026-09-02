@@ -1372,5 +1372,8 @@
     "Finish the current sync before wiping the database.": "Finish the current sync before wiping the database.",
     "Continue without wiping (at my own risk)": "Continue without wiping (at my own risk)",
     "Could not load game space settings: {error}": "Could not load game space settings: {error}",
-    "Could not save game space settings: {error}": "Could not save game space settings: {error}"
+    "Could not save game space settings: {error}": "Could not save game space settings: {error}",
+    "Could not apply extra file {name}: {error}": "Could not apply extra file {name}: {error}",
+    "Could not apply extra files before launch: {error}": "Could not apply extra files before launch: {error}",
+    "Foxy cannot write to {path}. Choose a folder outside Program Files, or grant your account write access to it.": "Foxy cannot write to {path}. Choose a folder outside Program Files, or grant your account write access to it."
 }

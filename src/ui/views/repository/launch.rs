@@ -26,15 +26,25 @@ impl Foxy {
             .to_string();
         match crate::core::game::extra_files::activate_for_launch(&space_dir, &game_dir) {
             Ok(summary) => {
-                if !summary.failed.is_empty() {
+                if let Some((name, reason)) = summary.failed.first() {
                     warn!(
                         "Extra-file activation had {} failure(s) before launch",
                         summary.failed.len()
                     );
+                    let message = self.t_fmt(
+                        "Could not apply extra file {name}: {error}",
+                        &[("name", name.clone()), ("error", reason.clone())],
+                    );
+                    self.show_error_toast(message);
                 }
             }
             Err(err) => {
                 warn!("Extra-file activation failed before launch: {}", err);
+                let message = self.t_fmt(
+                    "Could not apply extra files before launch: {error}",
+                    &[("error", err.clone())],
+                );
+                self.show_error_toast(message);
             }
         }
     }
@@ -133,12 +143,8 @@ impl Foxy {
 
         if steam::is_steam_running() {
             return match spawn_launch_process(&executable, &args, cwd.as_deref()) {
-                Ok(child) => {
-                    info!(
-                        "Launched Arma 3 for repository {} (pid={})",
-                        repo_name,
-                        child.id()
-                    );
+                Ok(pid) => {
+                    info!("Launched Arma 3 for repository {} (pid={})", repo_name, pid);
                     LaunchDispatchResult::Launched
                 }
                 Err(err) => {
@@ -193,11 +199,10 @@ impl Foxy {
                 &args_for_thread,
                 cwd_for_thread.as_deref(),
             ) {
-                Ok(child) => {
+                Ok(pid) => {
                     info!(
                         "Launched Arma 3 for repository {} (pid={})",
-                        repo_name_owned,
-                        child.id()
+                        repo_name_owned, pid
                     );
                 }
                 Err(err) => {
@@ -905,8 +910,8 @@ impl Foxy {
 
         if steam::is_steam_running() {
             match spawn_launch_process(&executable, &args, cwd.as_deref()) {
-                Ok(child) => {
-                    info!("Launched Eden Editor (pid={})", child.id());
+                Ok(pid) => {
+                    info!("Launched Eden Editor (pid={})", pid);
                     self.handle_post_launch_window_behavior(ctx, "editor launch completed");
                 }
                 Err(err) => {
@@ -923,10 +928,9 @@ impl Foxy {
         std::thread::spawn(
             move || match steam::ensure_steam_running(&steam_directory) {
                 Ok(_) => match spawn_launch_process(&executable, &args, cwd.as_deref()) {
-                    Ok(child) => info!(
+                    Ok(pid) => info!(
                         "Launched Eden Editor after Steam startup (pid={}) for repository {}",
-                        child.id(),
-                        repo_name_owned
+                        pid, repo_name_owned
                     ),
                     Err(err) => warn!("Failed to launch Eden Editor: {}", err),
                 },

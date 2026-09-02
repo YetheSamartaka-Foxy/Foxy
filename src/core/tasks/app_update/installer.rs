@@ -237,12 +237,25 @@ pub fn launch_installer(path: &Path, silent: bool) -> Result<()> {
 
     #[cfg(target_os = "windows")]
     {
-        let mut cmd = std::process::Command::new(path);
+        let mut args: Vec<&str> = Vec::new();
         if silent {
-            cmd.args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/CLOSEAPPLICATIONS"]);
+            args.extend(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/CLOSEAPPLICATIONS"]);
         }
-        cmd.spawn()
-            .with_context(|| format!("Failed to launch installer: {}", path.display()))?;
+
+        // A per-user install updates in place, but an older install under
+        // Program Files cannot be overwritten by an unelevated Foxy. Setup
+        // would ask for elevation itself, yet a declined prompt reaches us as a
+        // successful spawn: the update would just never happen, with nothing to
+        // show the user. Requesting it here turns a refusal into an error.
+        if windows_install_dir_needs_elevation() {
+            log::info!("Installer needs elevation to replace the current install; requesting it");
+            windows_launch_elevated(path, &args)?;
+        } else {
+            std::process::Command::new(path)
+                .args(&args)
+                .spawn()
+                .with_context(|| format!("Failed to launch installer: {}", path.display()))?;
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -309,6 +322,70 @@ pub fn launch_installer(path: &Path, silent: bool) -> Result<()> {
     std::process::exit(0);
 }
 
+/// Whether replacing the running Foxy requires elevation this process lacks.
+#[cfg(target_os = "windows")]
+fn windows_install_dir_needs_elevation() -> bool {
+    if crate::core::utils::deelevate::is_process_elevated() == Some(true) {
+        return false;
+    }
+    let Some(install_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+    else {
+        return false;
+    };
+    !crate::core::utils::fs_safety::directory_is_writable(&install_dir)
+}
+
+/// Run the installer through `ShellExecuteW` with the `runas` verb so Windows
+/// shows the UAC prompt while the installer still receives its silent flags.
+#[cfg(target_os = "windows")]
+fn windows_launch_elevated(path: &Path, args: &[&str]) -> Result<()> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use winapi::um::shellapi::ShellExecuteW;
+    use winapi::um::winuser::SW_SHOWNORMAL;
+
+    fn wide(value: impl AsRef<OsStr>) -> Vec<u16> {
+        value
+            .as_ref()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+
+    let verb = wide("runas");
+    let file = wide(path);
+    let parameters = wide(args.join(" "));
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            file.as_ptr(),
+            parameters.as_ptr(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+
+    // ShellExecuteW reports success as a pseudo-HINSTANCE above 32.
+    const SE_ERR_ACCESSDENIED: usize = 5;
+    let code = result as usize;
+    if code > 32 {
+        return Ok(());
+    }
+    if code == SE_ERR_ACCESSDENIED {
+        anyhow::bail!(
+            "The update needs administrator approval because Foxy is installed in a protected \
+             folder. Approve the prompt, or reinstall Foxy somewhere under your user folder."
+        );
+    }
+    anyhow::bail!(
+        "Failed to launch installer with administrator rights (code {})",
+        code
+    );
+}
+
 #[cfg(target_os = "linux")]
 fn current_linux_install_prefix() -> Option<PathBuf> {
     if let Some(prefix) = std::env::var_os("FOXY_INSTALL_PREFIX")
@@ -350,19 +427,7 @@ fn linux_prefix_has_installer_marker(prefix: &Path) -> bool {
 
 #[cfg(target_os = "linux")]
 fn linux_prefix_is_writable(prefix: &Path) -> bool {
-    let probe = prefix.join(".foxy_write_test");
-    match std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&probe)
-    {
-        Ok(_) => {
-            let _ = std::fs::remove_file(probe);
-            true
-        }
-        Err(_) => false,
-    }
+    crate::core::utils::fs_safety::directory_is_writable(prefix)
 }
 
 #[cfg(target_os = "linux")]

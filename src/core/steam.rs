@@ -44,10 +44,7 @@ pub fn ensure_steam_running(steam_directory: &str) -> Result<SteamEnsureResult, 
         return Ok(SteamEnsureResult::SkippedMissingDirectory);
     };
 
-    Command::new(&steam_launch.program)
-        .args(&steam_launch.args)
-        .spawn()
-        .map_err(|err| format!("Failed to start Steam: {}", err))?;
+    spawn_steam(&steam_launch)?;
 
     let start = Instant::now();
     while start.elapsed() < STEAM_START_TIMEOUT {
@@ -75,17 +72,20 @@ pub fn launch_steam(steam_directory: &str) -> Result<(), String> {
         );
     };
 
-    let mut command = Command::new(&steam_launch.program);
-    command.args(&steam_launch.args);
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
-    }
-    command
-        .spawn()
-        .map_err(|err| format!("Failed to start Steam: {}", err))?;
-    Ok(())
+    spawn_steam(&steam_launch)
+}
+
+/// Start Steam without this process's elevation, so the game Steam launches
+/// does not end up with an admin token it would inherit from Foxy.
+fn spawn_steam(steam_launch: &SteamLaunchCommand) -> Result<(), String> {
+    let args: Vec<std::ffi::OsString> = steam_launch
+        .args
+        .iter()
+        .map(std::ffi::OsString::from)
+        .collect();
+    crate::core::utils::deelevate::spawn_unelevated(steam_launch.program.as_os_str(), &args, None)
+        .map(|_| ())
+        .map_err(|err| format!("Failed to start Steam: {}", err))
 }
 
 #[allow(dead_code)]
