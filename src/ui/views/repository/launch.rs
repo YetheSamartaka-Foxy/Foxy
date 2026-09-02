@@ -90,10 +90,14 @@ impl Foxy {
                 ));
                 return LaunchDispatchResult::Failed;
             }
-            let arma3_directory = self.settings_view_state.arma3_directory.trim();
+            let game = module.display_name().to_string();
+            let install_dir = module
+                .install_dir_from_settings(&self.settings_view_state)
+                .trim()
+                .to_string();
             #[cfg(target_os = "linux")]
             {
-                let _ = arma3_directory;
+                let _ = install_dir;
                 self.show_error_toast(
                     self.t(
                         "Could not find the Steam client. Set the Steam directory in Settings or start it manually.",
@@ -102,23 +106,21 @@ impl Foxy {
             }
             #[cfg(not(target_os = "linux"))]
             {
-                if arma3_directory.is_empty() {
-                    self.show_error_toast(
-                        self.t(
-                            "Arma 3 directory is not configured. Set it in Game space settings.",
-                        ),
-                    );
-                } else if !std::path::Path::new(arma3_directory).exists() {
-                    self.show_error_toast(self.t(
-                        "Arma 3 directory does not exist. Check the path in Game space settings.",
+                if install_dir.is_empty() {
+                    self.show_error_toast(self.t_fmt(
+                        "{game} directory is not configured. Set it in Game space settings.",
+                        &[("game", game)],
                     ));
-                } else if !crate::core::game::registry()
-                    .active()
-                    .validate_install_dir(std::path::Path::new(arma3_directory))
-                {
-                    self.show_error_toast(
-                        self.t("Arma 3 executable not found at the configured path."),
-                    );
+                } else if !std::path::Path::new(&install_dir).exists() {
+                    self.show_error_toast(self.t_fmt(
+                        "{game} directory does not exist. Check the path in Game space settings.",
+                        &[("game", game)],
+                    ));
+                } else if !module.validate_install_dir(std::path::Path::new(&install_dir)) {
+                    self.show_error_toast(self.t_fmt(
+                        "{game} executable not found at the configured path.",
+                        &[("game", game)],
+                    ));
                 }
             }
             return LaunchDispatchResult::Failed;

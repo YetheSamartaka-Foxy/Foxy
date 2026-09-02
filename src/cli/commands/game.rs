@@ -786,7 +786,11 @@ fn single_reforger_guid(action: &str, input: &str) -> Result<String, CommandErro
     }
 }
 
-fn launch_error_to_command_error(game_name: &str, err: LaunchError) -> CommandError {
+pub(super) fn launch_error_to_command_error_for(
+    action: &str,
+    game_name: &str,
+    err: LaunchError,
+) -> CommandError {
     let message = match err {
         LaunchError::InstallDirNotConfigured => {
             format!("{} directory is not set in settings", game_name)
@@ -804,6 +808,13 @@ fn launch_error_to_command_error(game_name: &str, err: LaunchError) -> CommandEr
             "Could not find the launch command for this platform".to_string()
         }
         LaunchError::LaunchPreparationFailed => "Failed to prepare launch files".to_string(),
+        LaunchError::RepositoryLaunchUnsupported => {
+            format!("{} cannot launch from a repository", game_name)
+        }
     };
-    CommandError::validation("game.launch", message)
+    CommandError::validation(action, message)
+}
+
+fn launch_error_to_command_error(game_name: &str, err: LaunchError) -> CommandError {
+    launch_error_to_command_error_for("game.launch", game_name, err)
 }

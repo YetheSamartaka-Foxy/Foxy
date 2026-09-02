@@ -1029,8 +1029,20 @@ impl Foxy {
                 repo.optional_addons =
                     merge_remote_addon_list(optional_addons, &repo.optional_addons);
             }
+            // A repository can mark an addon client-side, but the marking only
+            // means something for a game whose servers tolerate addons they do
+            // not run. Dropping it here keeps every downstream exemption off for
+            // the other games instead of trusting a flag they cannot honor.
             self.repository_view_state.repositories[repo_index].remote_client_side_addons =
-                remote_client_side_addons;
+                if crate::core::game::registry()
+                    .active()
+                    .capabilities()
+                    .client_side_addons
+                {
+                    remote_client_side_addons
+                } else {
+                    Vec::new()
+                };
 
             if let Some(servers) = json["servers"].as_array() {
                 let mut parsed_servers = Vec::new();

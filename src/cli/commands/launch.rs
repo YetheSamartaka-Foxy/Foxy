@@ -1,14 +1,12 @@
+use super::game::launch_error_to_command_error_for;
 use super::{AppState, CommandError, CommandSuccess, effective_repository, find_repository_index};
 use crate::cli::args::{CliArgs, LaunchArgs};
 use crate::cli::exit_codes;
+use crate::core::game::{GameLaunchCtx, GameModule, LaunchCommand};
 use crate::core::steam::{SteamEnsureResult, ensure_steam_running};
-use crate::core::utils::fs_safety::resolve_child_dir_case_insensitive;
-use crate::ui::types::{
-    Repository, RepositoryServer, SettingsViewState, push_arma3_profile_launch_args,
-    selected_creator_dlc_codes, split_additional_launch_params,
-};
+use crate::ui::types::{Repository, RepositoryServer, SettingsViewState};
 use serde_json::json;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub fn cmd_launch(cli: &CliArgs, args: LaunchArgs) -> Result<CommandSuccess, CommandError> {
     let active = crate::core::game::spaces::active_game_space();
@@ -53,7 +51,12 @@ pub fn cmd_launch(cli: &CliArgs, args: LaunchArgs) -> Result<CommandSuccess, Com
         None
     };
 
-    let launch_spec = build_launch_spec(&state.settings, &effective, selected_server.as_ref())?;
+    let launch_spec = build_launch_spec(
+        module,
+        &state.settings,
+        &effective,
+        selected_server.as_ref(),
+    )?;
 
     if cli.dry_run || !args.execute {
         return Ok(CommandSuccess {
@@ -76,7 +79,8 @@ pub fn cmd_launch(cli: &CliArgs, args: LaunchArgs) -> Result<CommandSuccess, Com
         return Err(CommandError::validation(
             "launch",
             format!(
-                "Arma executable not found: {}",
+                "{} executable not found: {}",
+                module.display_name(),
                 launch_spec.executable.display()
             ),
         ));
@@ -84,7 +88,7 @@ pub fn cmd_launch(cli: &CliArgs, args: LaunchArgs) -> Result<CommandSuccess, Com
 
     let extra_file_activation = crate::core::game::extra_files::activate_for_launch(
         &crate::core::game::spaces::active_game_space_dir(),
-        &state.settings.arma3_directory,
+        module.install_dir_from_settings(&state.settings),
     )
     .map_err(|err| {
         CommandError::operation(
@@ -154,158 +158,50 @@ struct LaunchSpec {
     requires_existing_executable: bool,
 }
 
+/// Build the launch command through the active game module so the CLI and the
+/// GUI share one plan per game instead of a second Arma-shaped copy here.
 fn build_launch_spec(
+    module: &dyn GameModule,
     settings: &SettingsViewState,
     repo: &Repository,
     server: Option<&RepositoryServer>,
 ) -> Result<LaunchSpec, CommandError> {
-    let custom_profiles_dir = settings.arma3_profiles_directory.trim();
-    let custom_profiles_dir = if custom_profiles_dir.is_empty() {
-        None
-    } else {
-        Some(Path::new(custom_profiles_dir))
+    let install_dir = module
+        .install_dir_from_settings(settings)
+        .trim()
+        .to_string();
+    let to_error = |err| launch_error_to_command_error_for("launch", module.display_name(), err);
+    let plan = module
+        .build_repository_launch_plan(settings, repo, server)
+        .map_err(to_error)?;
+    let ctx = GameLaunchCtx {
+        install_dir: &install_dir,
+        steam_directory: &settings.steam_directory,
     };
-    let detected_profiles = crate::core::arma3_profiles::detect_all_profiles(custom_profiles_dir);
-    build_launch_spec_with_profiles(settings, repo, server, &detected_profiles)
-}
-
-fn build_launch_spec_with_profiles(
-    settings: &SettingsViewState,
-    repo: &Repository,
-    server: Option<&RepositoryServer>,
-    detected_profiles: &[crate::core::arma3_profiles::Arma3Profile],
-) -> Result<LaunchSpec, CommandError> {
-    let arma3_directory = settings.arma3_directory.trim();
-    #[cfg(target_os = "windows")]
-    if arma3_directory.is_empty() {
-        return Err(CommandError::validation(
-            "launch",
-            "Arma 3 directory is not set in settings",
-        ));
-    }
-
-    let cwd = launch_working_directory(arma3_directory)?;
-    let mut args = Vec::new();
-
-    push_arma3_profile_launch_args(settings, repo, detected_profiles, &mut args);
-
-    if repo.skip_intro {
-        args.push("-skipIntro".to_string());
-    }
-    if repo.no_splash {
-        args.push("-noSplash".to_string());
-    }
-    if repo.world_empty {
-        args.push("-world=empty".to_string());
-    }
-    if repo.load_mission_to_memory {
-        args.push("-loadMissionToMemory".to_string());
-    }
-    if repo.enable_ht {
-        args.push("-enableHT".to_string());
-    }
-    if repo.huge_pages {
-        args.push("-hugePages".to_string());
-    }
-    if repo.no_logs {
-        args.push("-noLogs".to_string());
-    }
-
-    if !repo.additional_params.trim().is_empty() {
-        args.extend(split_additional_launch_params(&repo.additional_params));
-    }
-
-    let creator_dlc_codes = selected_creator_dlc_codes(repo);
-    let enabled_addons: Vec<String> = repo
-        .addons
-        .iter()
-        .map(|(addon, enabled)| (addon, *enabled))
-        .chain(
-            repo.optional_addons
-                .iter()
-                .map(|(addon, enabled)| (addon, *enabled)),
-        )
-        .chain(
-            repo.external_addons
-                .iter()
-                .map(|(addon, enabled, _)| (addon, *enabled)),
-        )
-        .filter_map(|(addon, enabled)| if enabled { Some(addon.clone()) } else { None })
-        .collect();
-
-    if !creator_dlc_codes.is_empty() || !enabled_addons.is_empty() {
-        let mut resolved_addons = Vec::new();
-        let repo_path = repo.path.trim();
-
-        for creator_dlc_code in creator_dlc_codes {
-            resolved_addons.push(creator_dlc_code.to_string());
-        }
-
-        for addon in &enabled_addons {
-            if let Some(addon_path) =
-                resolve_child_dir_case_insensitive(Path::new(repo_path), addon)
-            {
-                resolved_addons.push(addon_path.to_string_lossy().to_string());
-            } else if let Some(arma3_addon_path) =
-                resolve_child_dir_case_insensitive(Path::new(arma3_directory), addon)
-            {
-                resolved_addons.push(arma3_addon_path.to_string_lossy().to_string());
-            }
-        }
-
-        for (addon, enabled, path) in &repo.external_addons {
-            if *enabled {
-                let trimmed_path = path.trim();
-                if let Some(external_path) =
-                    resolve_child_dir_case_insensitive(Path::new(trimmed_path), addon)
-                {
-                    resolved_addons.push(external_path.to_string_lossy().to_string());
-                } else {
-                    resolved_addons.push(trimmed_path.to_string());
-                }
-            }
-        }
-
-        if !resolved_addons.is_empty() {
-            args.push(format!("-mod={}", resolved_addons.join(";")));
-        }
-    }
-
-    if let Some(server) = server {
-        args.push(format!("-connect={}", server.address));
-        args.push(format!("-port={}", server.port));
-        if !server.password.trim().is_empty() {
-            args.push(format!("-password={}", server.password));
-        }
-    }
-
-    let launch = crate::core::steam::arma3_launch_command(&cwd, &settings.steam_directory)
-        .ok_or_else(|| {
-            CommandError::validation(
-                "launch",
-                "Could not find the Steam launch command for this platform",
-            )
-        })?;
-    let requires_existing_executable = cfg!(target_os = "windows");
+    let command: LaunchCommand = module.build_launch(&plan, &ctx).map_err(to_error)?;
+    let cwd = match command.cwd {
+        Some(cwd) => cwd,
+        None => launch_working_directory(&install_dir)?,
+    };
 
     Ok(LaunchSpec {
-        executable: launch.program,
-        args: launch.args.into_iter().chain(args).collect(),
+        executable: command.program,
+        args: command.args,
         cwd,
-        requires_existing_executable,
+        requires_existing_executable: cfg!(target_os = "windows"),
     })
 }
 
-fn launch_working_directory(arma3_directory: &str) -> Result<PathBuf, CommandError> {
+fn launch_working_directory(install_dir: &str) -> Result<PathBuf, CommandError> {
     #[cfg(target_os = "windows")]
     {
-        Ok(PathBuf::from(arma3_directory))
+        Ok(PathBuf::from(install_dir))
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        if !arma3_directory.trim().is_empty() {
-            let configured = PathBuf::from(arma3_directory);
+        if !install_dir.trim().is_empty() {
+            let configured = PathBuf::from(install_dir);
             if configured.is_dir() {
                 return Ok(configured);
             }
@@ -323,14 +219,21 @@ fn launch_working_directory(arma3_directory: &str) -> Result<PathBuf, CommandErr
 #[cfg(test)]
 mod tests {
     use super::super::effective_repository;
-    use super::{build_launch_spec, build_launch_spec_with_profiles};
+    use super::build_launch_spec;
+    use crate::core::game::arma3::Arma3Module;
     use crate::ui::types::{Repository, RepositoryProfile, SettingsViewState};
-    use std::path::PathBuf;
+
+    fn valid_arma3_install() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("arma3_x64.exe"), "").expect("exe marker");
+        dir
+    }
 
     #[test]
     fn build_launch_spec_puts_creator_dlc_into_mod_argument() {
+        let install = valid_arma3_install();
         let settings = SettingsViewState {
-            arma3_directory: "C:\\Arma3".to_string(),
+            arma3_directory: install.path().to_string_lossy().to_string(),
             ..SettingsViewState::default()
         };
         let repo = Repository {
@@ -338,8 +241,8 @@ mod tests {
             ..Repository::default()
         };
 
-        let launch_spec =
-            build_launch_spec(&settings, &repo, None).expect("launch spec should build");
+        let launch_spec = build_launch_spec(&Arma3Module, &settings, &repo, None)
+            .expect("launch spec should build");
 
         assert!(launch_spec.args.iter().any(|arg| arg == "-mod=gm"));
         assert!(!launch_spec.args.iter().any(|arg| arg == "-gm"));
@@ -347,27 +250,21 @@ mod tests {
 
     #[test]
     fn build_launch_spec_includes_basic_flags_and_preserves_quoted_additional_params() {
+        let install = valid_arma3_install();
         let settings = SettingsViewState {
-            arma3_directory: "C:\\Arma3".to_string(),
+            arma3_directory: install.path().to_string_lossy().to_string(),
             arma3_profiles_directory: "D:\\Arma Profiles".to_string(),
             ..SettingsViewState::default()
         };
         let repo = Repository {
-            arma3_profile: Some("Jane Doe".to_string()),
             skip_intro: true,
             no_logs: true,
             additional_params: r#""-profiles=C:\Arma 3 Profiles" -window"#.to_string(),
             ..Repository::default()
         };
-        let detected_profiles = vec![crate::core::arma3_profiles::Arma3Profile {
-            name: "Jane Doe".to_string(),
-            path: PathBuf::from("D:\\Arma Profiles\\Users\\Jane%20Doe"),
-            is_default: false,
-        }];
 
-        let launch_spec =
-            build_launch_spec_with_profiles(&settings, &repo, None, &detected_profiles)
-                .expect("launch spec should build");
+        let launch_spec = build_launch_spec(&Arma3Module, &settings, &repo, None)
+            .expect("launch spec should build");
 
         assert!(launch_spec.args.iter().any(|arg| arg == "-skipIntro"));
         assert!(launch_spec.args.iter().any(|arg| arg == "-noLogs"));
@@ -377,7 +274,6 @@ mod tests {
                 .iter()
                 .any(|arg| arg == "-profiles=D:\\Arma Profiles")
         );
-        assert!(launch_spec.args.iter().any(|arg| arg == "-name=Jane Doe"));
         assert!(
             launch_spec
                 .args

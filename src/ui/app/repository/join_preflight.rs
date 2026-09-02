@@ -131,6 +131,10 @@ impl Foxy {
             configured_repositories,
             &requirement_by_name,
             display_names,
+            crate::core::game::registry()
+                .active()
+                .capabilities()
+                .client_side_addons,
         );
         let unavailable_enabled = collect_unavailable_enabled_external_addons(
             effective,
@@ -745,19 +749,27 @@ fn collect_disabled_local_candidates(
     candidates
 }
 
+/// `client_side_addons` is the active game's capability: when a server activates
+/// exactly its own addon set on join, no local marking can excuse an addon the
+/// server did not report, so every such addon stays an extra.
 fn collect_extra_enabled_addons(
     effective: &Repository,
     configured_repositories: &[Repository],
     requirements: &HashMap<String, &ServerAddonRequirement>,
     display_names: &AddonDisplayNameSnapshot,
+    client_side_addons: bool,
 ) -> Vec<JoinPreflightAddonSuggestion> {
     let mut extras = Vec::new();
-    let optional_client_side = effective
-        .optional_addon_client_side
-        .iter()
-        .chain(effective.remote_client_side_addons.iter())
-        .map(|name| normalize_addon_name(name))
-        .collect::<HashSet<_>>();
+    let optional_client_side = if client_side_addons {
+        effective
+            .optional_addon_client_side
+            .iter()
+            .chain(effective.remote_client_side_addons.iter())
+            .map(|name| normalize_addon_name(name))
+            .collect::<HashSet<_>>()
+    } else {
+        HashSet::new()
+    };
     collect_extra_enabled_addon_candidates(
         &effective.optional_addons,
         addon_display_names_for_repo(display_names, effective),
@@ -766,20 +778,25 @@ fn collect_extra_enabled_addons(
         &optional_client_side,
         &mut extras,
     );
-    let external_client_side = effective
-        .external_addon_client_side
-        .iter()
-        .map(|path| normalize_client_side_path_key(path))
-        .collect::<HashSet<_>>();
+    let external_client_side = if client_side_addons {
+        effective
+            .external_addon_client_side
+            .iter()
+            .map(|path| normalize_client_side_path_key(path))
+            .collect::<HashSet<_>>()
+    } else {
+        HashSet::new()
+    };
     for (addon_name, enabled, path) in &effective.external_addons {
         if *enabled
             && external_addon_path_available(addon_name, path)
             && !external_client_side.contains(&normalize_client_side_path_key(path))
-            && !external_addon_is_repo_defined_client_side(
-                addon_name,
-                path,
-                configured_repositories,
-            )
+            && !(client_side_addons
+                && external_addon_is_repo_defined_client_side(
+                    addon_name,
+                    path,
+                    configured_repositories,
+                ))
             && !external_addon_matches_any_requirement(
                 addon_name,
                 path,
@@ -2574,6 +2591,45 @@ mod tests {
         );
 
         assert!(state.is_none());
+    }
+
+    #[test]
+    fn extra_enabled_addons_ignore_client_side_marks_when_the_game_has_no_such_concept() {
+        let repo = Repository {
+            optional_addons: vec![("@soundmod".to_string(), true)],
+            optional_addon_client_side: vec!["@soundmod".to_string()],
+            remote_client_side_addons: vec!["@soundmod".to_string()],
+            ..Repository::default()
+        };
+        let required = requirement("@cba_a3");
+        let requirements = requirement_match_keys_for_requirement(&required)
+            .into_iter()
+            .map(|key| (key, &required))
+            .collect::<HashMap<_, _>>();
+
+        let exempt = collect_extra_enabled_addons(
+            &repo,
+            &[],
+            &requirements,
+            &AddonDisplayNameSnapshot::new(),
+            true,
+        );
+        assert!(exempt.is_empty());
+
+        let extras = collect_extra_enabled_addons(
+            &repo,
+            &[],
+            &requirements,
+            &AddonDisplayNameSnapshot::new(),
+            false,
+        );
+        assert_eq!(
+            extras
+                .iter()
+                .map(|extra| extra.addon_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["@soundmod"]
+        );
     }
 
     #[test]

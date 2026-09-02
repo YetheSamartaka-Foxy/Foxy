@@ -234,13 +234,24 @@ impl Foxy {
         matches
     }
 
+    /// Whether the active game has a client-side addon concept at all. Arma 3
+    /// servers report their addon list and tolerate extra client-only mods;
+    /// Reforger activates exactly the server's mod set on join, so no surface
+    /// may offer or honor a client-side marking there.
+    pub(crate) fn client_side_addons_supported() -> bool {
+        crate::core::game::registry()
+            .active()
+            .capabilities()
+            .client_side_addons
+    }
+
     pub(crate) fn addon_is_repo_defined_client_side(
         &self,
         addon_name: &str,
         absolute_path: &str,
     ) -> bool {
         let addon_name = addon_name.trim();
-        if addon_name.is_empty() {
+        if addon_name.is_empty() || !Self::client_side_addons_supported() {
             return false;
         }
 
@@ -590,9 +601,9 @@ impl Foxy {
         repo: &Repository,
         server: Option<&RepositoryServer>,
     ) -> Option<std::process::Command> {
-        // Repository launch plans are Arma-shaped; never hand one to a module
-        // that does not declare the capability, and never to the read-only
-        // fallback module of a space whose game is not registered.
+        // Never build a launch for a module that does not declare the
+        // capability, and never for the read-only fallback module of a space
+        // whose game is not registered.
         let Some(module) = crate::core::game::registry().active_module() else {
             warn!(
                 "Repository launch is not supported: the active game space names an unknown game"
@@ -606,11 +617,11 @@ impl Foxy {
             );
             return None;
         }
-        let plan =
-            crate::core::game::arma3::build_launch_plan(&self.settings_view_state, repo, server)
-                .ok()?;
+        let plan = module
+            .build_repository_launch_plan(&self.settings_view_state, repo, server)
+            .ok()?;
         let ctx = crate::core::game::GameLaunchCtx {
-            install_dir: &self.settings_view_state.arma3_directory,
+            install_dir: module.install_dir_from_settings(&self.settings_view_state),
             steam_directory: &self.settings_view_state.steam_directory,
         };
         let command = module.build_launch(&plan, &ctx).ok()?;

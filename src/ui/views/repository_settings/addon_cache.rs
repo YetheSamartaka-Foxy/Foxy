@@ -380,20 +380,24 @@ impl Foxy {
                 .map(|favorites| favorites.iter().map(|name| name.to_lowercase()).collect())
                 .unwrap_or_default(),
         };
+        // Client-side markings only mean something for a game whose servers
+        // tolerate addons they do not run; for the others the row shows no
+        // client-side state at all.
+        let client_side_supported = Self::client_side_addons_supported();
         let optional_client_side_names: HashSet<String> = match kind {
-            RepositoryAddonListKind::Addons => HashSet::new(),
-            RepositoryAddonListKind::OptionalAddons => self
+            RepositoryAddonListKind::OptionalAddons if client_side_supported => self
                 .current_repository_optional_addon_client_side_cached(repo_index)
                 .map(|client_side| client_side.iter().map(|name| name.to_lowercase()).collect())
                 .unwrap_or_default(),
+            _ => HashSet::new(),
         };
         let forced_client_side_names: HashSet<String> = match kind {
-            RepositoryAddonListKind::Addons => HashSet::new(),
-            RepositoryAddonListKind::OptionalAddons => repo
+            RepositoryAddonListKind::OptionalAddons if client_side_supported => repo
                 .remote_client_side_addons
                 .iter()
                 .map(|name| name.to_lowercase())
                 .collect(),
+            _ => HashSet::new(),
         };
         let repo_path_normalized = normalize_local_path_for_compare(&repo.path).to_lowercase();
         let needs_rebuild = {
@@ -1019,6 +1023,9 @@ impl Foxy {
         &self,
         repo_index: usize,
     ) -> HashSet<String> {
+        if !Self::client_side_addons_supported() {
+            return HashSet::new();
+        }
         self.current_repository_external_addon_client_side_cached(repo_index)
             .map(|paths| {
                 paths

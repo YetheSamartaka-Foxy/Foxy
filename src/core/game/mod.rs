@@ -16,7 +16,7 @@ pub use launch::{
 pub use profile::Profile;
 pub use registry::registry;
 
-use crate::ui::types::{RepositoryProfile, SettingsViewState};
+use crate::ui::types::{Repository, RepositoryProfile, RepositoryServer, SettingsViewState};
 use std::path::{Path, PathBuf};
 
 pub struct GameDetectCtx<'a> {
@@ -36,6 +36,11 @@ pub struct GameCapabilities {
     /// Arma-shaped `-mod=` launch plan being meaningful for it.
     pub repository_launch: bool,
     pub steam_workshop: bool,
+    /// Addons a player may load without the server having them. Arma 3 servers
+    /// report their addon list and tolerate extra client-only mods; Reforger
+    /// activates exactly the server's mod set on join, so there is nothing for a
+    /// client-side marking to mean and no surface should offer it.
+    pub client_side_addons: bool,
     pub direct_download: bool,
     pub extra_files: bool,
     pub profiles: bool,
@@ -45,11 +50,12 @@ pub struct GameCapabilities {
 }
 
 impl GameCapabilities {
-    fn flags(&self) -> [(&'static str, bool); 8] {
+    fn flags(&self) -> [(&'static str, bool); 9] {
         [
             ("repository_sync", self.repository_sync),
             ("repository_launch", self.repository_launch),
             ("steam_workshop", self.steam_workshop),
+            ("client_side_addons", self.client_side_addons),
             ("direct_download", self.direct_download),
             ("extra_files", self.extra_files),
             ("profiles", self.profiles),
@@ -105,6 +111,18 @@ pub trait GameModule: Send + Sync {
         ctx: &GameLaunchCtx,
     ) -> Result<LaunchCommand, LaunchError>;
     fn settings_schema(&self) -> GameSettingsSchema;
+
+    /// Turn a repository's enabled addon selection into a launch plan for this
+    /// game. Only meaningful for a module that declares `repository_launch`;
+    /// the default refuses so a module never inherits another game's plan shape.
+    fn build_repository_launch_plan(
+        &self,
+        _settings: &SettingsViewState,
+        _repo: &Repository,
+        _server: Option<&RepositoryServer>,
+    ) -> Result<LaunchPlan, LaunchError> {
+        Err(LaunchError::RepositoryLaunchUnsupported)
+    }
 
     fn install_dir_from_settings<'a>(&self, _settings: &'a SettingsViewState) -> &'a str {
         ""

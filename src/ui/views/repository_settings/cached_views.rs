@@ -318,6 +318,7 @@ impl Foxy {
         favorite: bool,
         client_side: bool,
         forced_client_side: bool,
+        client_side_supported: bool,
         addon_directory_path: Option<String>,
         remote_size_bytes: u64,
         backup_configured: bool,
@@ -345,10 +346,12 @@ impl Foxy {
             ),
         );
         let inner_rect = card_rect.shrink(ADDON_ROW_INNER_MARGIN);
-        let action_width = if kind == RepositoryAddonListKind::OptionalAddons {
-            OPTIONAL_ADDON_ACTION_WIDTH
-        } else {
-            ADDON_ACTION_WIDTH
+        let optional_row = kind == RepositoryAddonListKind::OptionalAddons;
+        let show_client_side_button = optional_row && client_side_supported;
+        let action_width = match (optional_row, show_client_side_button) {
+            (true, true) => OPTIONAL_ADDON_ACTION_WIDTH,
+            (true, false) => OPTIONAL_ADDON_ACTION_WIDTH - ADDON_ICON_BUTTON_SIZE,
+            (false, _) => ADDON_ACTION_WIDTH,
         };
         let text_rect = egui::Rect::from_min_max(
             inner_rect.min,
@@ -362,16 +365,17 @@ impl Foxy {
             egui::pos2(inner_rect.right() - ADDON_ICON_BUTTON_SIZE, button_top),
             Vec2::splat(ADDON_ICON_BUTTON_SIZE),
         );
-        let client_side_button_rect =
-            (kind == RepositoryAddonListKind::OptionalAddons).then(|| {
-                egui::Rect::from_min_size(
-                    egui::pos2(checkbox_rect.left() - ADDON_ICON_BUTTON_SIZE, button_top),
-                    Vec2::splat(ADDON_ICON_BUTTON_SIZE),
-                )
-            });
-        let favorite_button_rect = client_side_button_rect.map(|client_rect| {
+        let client_side_button_rect = show_client_side_button.then(|| {
             egui::Rect::from_min_size(
-                egui::pos2(client_rect.left() - ADDON_ICON_BUTTON_SIZE, button_top),
+                egui::pos2(checkbox_rect.left() - ADDON_ICON_BUTTON_SIZE, button_top),
+                Vec2::splat(ADDON_ICON_BUTTON_SIZE),
+            )
+        });
+        // Without a client-side button the favorite star takes its slot.
+        let favorite_anchor_left = client_side_button_rect.unwrap_or(checkbox_rect).left();
+        let favorite_button_rect = optional_row.then(|| {
+            egui::Rect::from_min_size(
+                egui::pos2(favorite_anchor_left - ADDON_ICON_BUTTON_SIZE, button_top),
                 Vec2::splat(ADDON_ICON_BUTTON_SIZE),
             )
         });
@@ -662,6 +666,7 @@ impl Foxy {
             RepositoryAddonListKind::OptionalAddons => "optional addons",
         };
         let backup_configured = self.configured_backup_directory().is_some();
+        let client_side_supported = Self::client_side_addons_supported();
         let horizontal_padding = 15.0;
         let addon_path_font = self
             .settings_view_state
@@ -784,9 +789,14 @@ impl Foxy {
                 if kind == RepositoryAddonListKind::OptionalAddons {
                     controls_width +=
                         super::filter_controls_checkbox_width(ui, &tr("Favorites only"))
-                            + super::filter_controls_checkbox_width(ui, &tr("Client-side only"))
-                            + 16.0 * 2.0
-                            + item_spacing * 4.0;
+                            + 16.0
+                            + item_spacing * 2.0;
+                    if client_side_supported {
+                        controls_width +=
+                            super::filter_controls_checkbox_width(ui, &tr("Client-side only"))
+                                + 16.0
+                                + item_spacing * 2.0;
+                    }
                 }
                 controls_width +=
                     super::filter_controls_checkbox_width(ui, &tr("Search addon files"))
@@ -867,16 +877,18 @@ impl Foxy {
                         ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                     }
 
-                    ui.add_space(16.0);
-                    let client_side_only_checkbox = ui.checkbox(
-                        &mut self.addon_client_side_only_filter,
-                        tr("Client-side only"),
-                    );
-                    if client_side_only_checkbox.changed() {
-                        ui_state_changed = true;
-                    }
-                    if client_side_only_checkbox.hovered() {
-                        ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                    if client_side_supported {
+                        ui.add_space(16.0);
+                        let client_side_only_checkbox = ui.checkbox(
+                            &mut self.addon_client_side_only_filter,
+                            tr("Client-side only"),
+                        );
+                        if client_side_only_checkbox.changed() {
+                            ui_state_changed = true;
+                        }
+                        if client_side_only_checkbox.hovered() {
+                            ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                        }
                     }
                 }
             });
@@ -889,6 +901,7 @@ impl Foxy {
                 addon_state_filter,
                 self.addon_favorites_only_filter && kind == RepositoryAddonListKind::OptionalAddons,
                 self.addon_client_side_only_filter
+                    && client_side_supported
                     && kind == RepositoryAddonListKind::OptionalAddons,
                 *search_files,
             );
@@ -1041,6 +1054,7 @@ impl Foxy {
                                         favorite,
                                         client_side,
                                         forced_client_side,
+                                        client_side_supported,
                                         addon_directory_path,
                                         remote_size_bytes,
                                         backup_configured,

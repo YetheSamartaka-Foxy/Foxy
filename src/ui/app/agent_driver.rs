@@ -2931,6 +2931,9 @@ impl Foxy {
                 }
             }
             RepositorySettingsTab::OptionalAddons => {
+                // Report the marking the UI honors, not the stored list: a game
+                // without the capability has no client-side addons at all.
+                let client_side_supported = Self::client_side_addons_supported();
                 for (name, enabled) in &repo.optional_addons {
                     if !keep(name, *enabled) {
                         continue;
@@ -2940,12 +2943,14 @@ impl Foxy {
                         "enabled": enabled,
                         "kind": "optional",
                         "favorite": repo.optional_addon_favorites.iter().any(|f| f == name),
-                        "client_side": repo.optional_addon_client_side.iter().any(|c| c == name),
+                        "client_side": client_side_supported
+                            && repo.optional_addon_client_side.iter().any(|c| c == name),
                         "size_bytes": self.repository_addon_remote_size_bytes(&repo.address, name),
                     }));
                 }
             }
             RepositorySettingsTab::ExternalAddons => {
+                let client_side_supported = Self::client_side_addons_supported();
                 for (name, enabled, source) in &repo.external_addons {
                     if !keep(name, *enabled) {
                         continue;
@@ -2956,7 +2961,8 @@ impl Foxy {
                         "kind": "external",
                         "source": source,
                         "favorite": repo.external_addon_favorites.iter().any(|f| f == name),
-                        "client_side": repo.external_addon_client_side.iter().any(|c| c == name),
+                        "client_side": client_side_supported
+                            && repo.external_addon_client_side.iter().any(|c| c == name),
                         "size_bytes": self.repository_addon_remote_size_bytes(&repo.address, name),
                     }));
                 }

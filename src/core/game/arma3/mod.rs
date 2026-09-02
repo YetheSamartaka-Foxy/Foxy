@@ -36,6 +36,7 @@ impl GameModule for Arma3Module {
             repository_sync: true,
             repository_launch: true,
             steam_workshop: true,
+            client_side_addons: true,
             direct_download: true,
             extra_files: true,
             profiles: true,
@@ -97,6 +98,15 @@ impl GameModule for Arma3Module {
             args,
             cwd,
         })
+    }
+
+    fn build_repository_launch_plan(
+        &self,
+        settings: &SettingsViewState,
+        repo: &Repository,
+        server: Option<&RepositoryServer>,
+    ) -> Result<LaunchPlan, LaunchError> {
+        build_launch_plan(settings, repo, server)
     }
 
     fn repository_profile_to_profile(

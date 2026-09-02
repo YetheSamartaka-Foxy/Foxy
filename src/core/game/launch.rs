@@ -58,4 +58,5 @@ pub enum LaunchError {
     InstallDirInvalid,
     LauncherUnavailable,
     LaunchPreparationFailed,
+    RepositoryLaunchUnsupported,
 }

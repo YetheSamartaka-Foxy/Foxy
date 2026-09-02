@@ -40,6 +40,7 @@ const TWWH3_CONFIG: GenericRunScriptConfig = GenericRunScriptConfig {
         repository_sync: false,
         repository_launch: false,
         steam_workshop: true,
+        client_side_addons: false,
         direct_download: true,
         extra_files: true,
         // Profiles are still a repository-launch concept

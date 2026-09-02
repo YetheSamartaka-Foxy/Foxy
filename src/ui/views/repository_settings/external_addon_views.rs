@@ -731,16 +731,22 @@ impl Foxy {
             ),
             Vec2::splat(EXTERNAL_ADDON_ICON_BUTTON_SIZE),
         );
-        let client_side_button_rect = egui::Rect::from_min_size(
-            egui::pos2(
-                checkbox_rect.left() - EXTERNAL_ADDON_ICON_BUTTON_SIZE,
-                button_top,
-            ),
-            Vec2::splat(EXTERNAL_ADDON_ICON_BUTTON_SIZE),
-        );
+        // A game whose servers activate their own addon set has no client-side
+        // concept, so that button is not drawn and the star takes its slot.
+        let client_side_supported = Self::client_side_addons_supported();
+        let client_side_button_rect = client_side_supported.then(|| {
+            egui::Rect::from_min_size(
+                egui::pos2(
+                    checkbox_rect.left() - EXTERNAL_ADDON_ICON_BUTTON_SIZE,
+                    button_top,
+                ),
+                Vec2::splat(EXTERNAL_ADDON_ICON_BUTTON_SIZE),
+            )
+        });
         let favorite_button_rect = egui::Rect::from_min_size(
             egui::pos2(
-                client_side_button_rect.left() - EXTERNAL_ADDON_ICON_BUTTON_SIZE,
+                client_side_button_rect.unwrap_or(checkbox_rect).left()
+                    - EXTERNAL_ADDON_ICON_BUTTON_SIZE,
                 button_top,
             ),
             Vec2::splat(EXTERNAL_ADDON_ICON_BUTTON_SIZE),
@@ -954,50 +960,54 @@ impl Foxy {
             self.persist_repository_external_addon_favorite_state_cached(repo_index);
         }
 
-        let client_side_text_color = if forced_client_side || client_side || is_enabled {
-            row_style.color_text_normal
-        } else {
-            row_style.color_text_gray
-        };
-        let client_side_button = paint_external_addon_icon_cell(
-            ui,
-            client_side_button_rect,
-            ("repository_external_addon_client_side", entry_index),
-            "C",
-            row_style.name_font_id.clone(),
-            ExternalAddonIconCellStyle {
-                fill: if client_side && !forced_client_side {
-                    self.color_primary_accent()
-                } else if forced_client_side {
-                    self.color_widget_bg_active()
-                } else {
-                    self.color_main_bg()
+        let mut client_side_clicked = false;
+        if let Some(client_side_button_rect) = client_side_button_rect {
+            let client_side_text_color = if forced_client_side || client_side || is_enabled {
+                row_style.color_text_normal
+            } else {
+                row_style.color_text_gray
+            };
+            let client_side_button = paint_external_addon_icon_cell(
+                ui,
+                client_side_button_rect,
+                ("repository_external_addon_client_side", entry_index),
+                "C",
+                row_style.name_font_id.clone(),
+                ExternalAddonIconCellStyle {
+                    fill: if client_side && !forced_client_side {
+                        self.color_primary_accent()
+                    } else if forced_client_side {
+                        self.color_widget_bg_active()
+                    } else {
+                        self.color_main_bg()
+                    },
+                    stroke: if client_side || forced_client_side {
+                        self.color_primary_accent()
+                    } else {
+                        row_style.color_text_gray
+                    },
+                    text_color: client_side_text_color,
                 },
-                stroke: if client_side || forced_client_side {
-                    self.color_primary_accent()
-                } else {
-                    row_style.color_text_gray
-                },
-                text_color: client_side_text_color,
-            },
-        );
-        if client_side_button.hovered() && !forced_client_side {
-            ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
-        }
-        let client_side_button = client_side_button.on_hover_text(if forced_client_side {
-            tooltips.forced_client_side.as_str()
-        } else if client_side {
-            tooltips.remove_client_side.as_str()
-        } else {
-            tooltips.mark_client_side.as_str()
-        });
-        let client_side_clicked = client_side_button.clicked();
-        if !forced_client_side
-            && client_side_clicked
-            && self.set_repository_external_addon_row_client_side_cached(entry_index, !client_side)
-            && let Some(repo_index) = self.repository_external_addons_list_cache.repo_index
-        {
-            self.persist_repository_external_addon_client_side_state_cached(repo_index);
+            );
+            if client_side_button.hovered() && !forced_client_side {
+                ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+            }
+            let client_side_button = client_side_button.on_hover_text(if forced_client_side {
+                tooltips.forced_client_side.as_str()
+            } else if client_side {
+                tooltips.remove_client_side.as_str()
+            } else {
+                tooltips.mark_client_side.as_str()
+            });
+            client_side_clicked = client_side_button.clicked();
+            if !forced_client_side
+                && client_side_clicked
+                && self
+                    .set_repository_external_addon_row_client_side_cached(entry_index, !client_side)
+                && let Some(repo_index) = self.repository_external_addons_list_cache.repo_index
+            {
+                self.persist_repository_external_addon_client_side_state_cached(repo_index);
+            }
         }
 
         let mut row_enabled = is_enabled;
@@ -1209,6 +1219,12 @@ impl Foxy {
                 };
                 let group_gap = 16.0;
                 let item_spacing = ui.spacing().item_spacing.x;
+                let client_side_supported = Self::client_side_addons_supported();
+                let client_side_filter_width = if client_side_supported {
+                    super::filter_controls_checkbox_width(ui, &tr("Client-side only")) + group_gap
+                } else {
+                    0.0
+                };
                 let controls_width = super::filter_controls_checkbox_width(
                     ui,
                     &tr("Include Steam Addons"),
@@ -1217,7 +1233,7 @@ impl Foxy {
                     + super::filter_controls_checkbox_width(ui, &tr("Group by origin"))
                     + super::filter_controls_checkbox_width(ui, &tr("Search addon files"))
                     + super::filter_controls_checkbox_width(ui, &tr("Favorites only"))
-                    + super::filter_controls_checkbox_width(ui, &tr("Client-side only"))
+                    + client_side_filter_width
                     + super::filter_controls_text_width(ui, &tr("State:"))
                     + super::filter_controls_combo_width(ui, &state_selected)
                     // The explicit add_space() gaps (seven 16 px group gaps and the
@@ -1225,7 +1241,7 @@ impl Foxy {
                     // between each of the ~18 items in this region. Counting them
                     // in full keeps the filter from being sized too wide, which
                     // would otherwise shove the trailing controls off the edge.
-                    + group_gap * 7.0
+                    + group_gap * 6.0
                     + 12.0
                     + item_spacing * 18.0;
 
@@ -1320,17 +1336,19 @@ impl Foxy {
                 }
                 ui.add_space(16.0);
 
-                let client_side_only_checkbox = ui.checkbox(
-                    &mut self.addon_client_side_only_filter,
-                    tr("Client-side only"),
-                );
-                if client_side_only_checkbox.changed() {
-                    ui_state_changed = true;
+                if client_side_supported {
+                    let client_side_only_checkbox = ui.checkbox(
+                        &mut self.addon_client_side_only_filter,
+                        tr("Client-side only"),
+                    );
+                    if client_side_only_checkbox.changed() {
+                        ui_state_changed = true;
+                    }
+                    if client_side_only_checkbox.hovered() {
+                        ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                    }
+                    ui.add_space(16.0);
                 }
-                if client_side_only_checkbox.hovered() {
-                    ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
-                }
-                ui.add_space(16.0);
 
                 ui.label(tr("State:"));
                 ui.add_space(6.0);
@@ -1382,7 +1400,7 @@ impl Foxy {
                 origin_filter,
                 addon_state_filter,
                 self.addon_favorites_only_filter,
-                self.addon_client_side_only_filter,
+                self.addon_client_side_only_filter && Self::client_side_addons_supported(),
                 *search_files,
             );
 

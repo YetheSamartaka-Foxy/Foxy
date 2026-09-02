@@ -80,8 +80,20 @@ write `module.id() == "arma3"`.
 
 - `repository_sync` gates the repository sidebar and repository management.
 - `repository_launch` gates launching a game from a repository's addon selection.
-  It is separate from `repository_sync`: Reforger syncs repository file trees but
-  launches from its GUID store.
+  It is separate from `repository_sync`: a game can sync repository file trees
+  without a launch plan being meaningful for it (Total War: WARHAMMER III syncs
+  but launches from its Workshop store). A module that sets it implements
+  `GameModule::build_repository_launch_plan`; both the GUI Launch button and
+  `foxy launch` go through that method, so no caller builds an Arma-shaped plan
+  for another game. Reforger sets it and turns each enabled repository folder
+  into an `-addons` mod id plus an `-addonsDir` root; its `reforger_addons.json`
+  GUID store stays a separate launch path behind `foxy game launch`.
+- `client_side_addons` gates the client-side addon marking (the row button, the
+  Client-side only filter, the repository `clientSide` manifest flag, and the
+  join-preflight exemption for addons the server did not report). Arma 3 servers
+  report their addon list and tolerate extra client-only mods; a Reforger server
+  activates exactly its own mod set on join, so the marking has nothing to mean
+  there and no surface offers it.
 - `steam_workshop`, `direct_download`, `extra_files`, `profiles`,
   `foxy_config_export`, `teamspeak3_plugins` gate their own surfaces.
 

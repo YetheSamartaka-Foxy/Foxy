@@ -8,8 +8,12 @@ use serde::{Deserialize, Serialize};
 use crate::core::steam;
 use crate::core::utils::addon_backup;
 use crate::core::utils::format::sanitize_log_path;
-use crate::core::utils::fs_safety::{atomic_write, is_safe_child_path};
-use crate::ui::types::SettingsViewState;
+use crate::core::utils::fs_safety::{
+    atomic_write, is_safe_child_path, resolve_child_dir_case_insensitive,
+};
+use crate::ui::types::{
+    Repository, RepositoryServer, SettingsViewState, split_additional_launch_params,
+};
 
 use super::{
     DirectorySetting, GameCapabilities, GameDetectCtx, GameLaunchCtx, GameModule,
@@ -43,12 +47,14 @@ impl GameModule for ReforgerModule {
 
     fn capabilities(&self) -> GameCapabilities {
         GameCapabilities {
-            // Reforger addons are plain file trees, so repository sync works;
-            // launching goes through `-addons`/`-addonsDir` from the managed
-            // GUID store, not through an Arma-shaped repository launch plan.
+            // Reforger addons are plain file trees, so both a synced repository
+            // and the managed GUID store can feed the same launch shape:
+            // `-addons` mod ids plus `-addonsDir` roots.
             repository_sync: true,
-            repository_launch: false,
+            repository_launch: true,
             steam_workshop: false,
+            // The server activates exactly its own mod set on join.
+            client_side_addons: false,
             direct_download: true,
             extra_files: true,
             // Profiles are still a repository-launch concept
@@ -129,7 +135,7 @@ impl GameModule for ReforgerModule {
                 id: REFORGER_INSTALL_DIR_SETTING_ID,
                 label: "Arma Reforger Directory",
                 help: Some(
-                    "Foxy passes Reforger Workshop GUIDs with -addons and managed addon roots with -addonsDir.",
+                    "Foxy launches Reforger with -addons mod ids and -addonsDir roots taken from the repository's enabled addons.",
                 ),
                 auto_detect: true,
                 is_install_dir: true,
@@ -140,6 +146,15 @@ impl GameModule for ReforgerModule {
                 help: "Before launching, warn if Steam is not running and offer to launch it.",
             }],
         }
+    }
+
+    fn build_repository_launch_plan(
+        &self,
+        settings: &SettingsViewState,
+        repo: &Repository,
+        server: Option<&RepositoryServer>,
+    ) -> Result<LaunchPlan, LaunchError> {
+        build_repository_launch_plan(settings, repo, server)
     }
 
     fn install_dir_from_settings<'a>(&self, settings: &'a SettingsViewState) -> &'a str {
@@ -287,24 +302,23 @@ pub fn frozen_addons_root(space_dir: &Path) -> PathBuf {
         .join(FROZEN_DIR)
 }
 
-pub fn default_user_addons_dir() -> Option<PathBuf> {
-    if cfg!(target_os = "windows") {
-        std::env::var_os("USERPROFILE").map(|home| {
-            PathBuf::from(home)
-                .join("Documents")
-                .join("My Games")
-                .join("ArmaReforger")
-                .join("addons")
-        })
+/// Addon roots the game itself scans without `-addonsDir`. Reforger downloads
+/// Workshop addons into `<profile>/addons`; older installs kept them one level
+/// up, so both are probed and the first existing folder wins.
+pub fn default_user_addons_dirs() -> Vec<PathBuf> {
+    let home = if cfg!(target_os = "windows") {
+        std::env::var_os("USERPROFILE")
     } else {
-        std::env::var_os("HOME").map(|home| {
-            PathBuf::from(home)
-                .join("Documents")
-                .join("My Games")
-                .join("ArmaReforger")
-                .join("addons")
-        })
-    }
+        std::env::var_os("HOME")
+    };
+    let Some(home) = home else {
+        return Vec::new();
+    };
+    let root = PathBuf::from(home)
+        .join("Documents")
+        .join("My Games")
+        .join("ArmaReforger");
+    vec![root.join("profile").join("addons"), root.join("addons")]
 }
 
 pub fn load_store(space_dir: &Path) -> Result<ReforgerAddonsFile, String> {
@@ -657,6 +671,193 @@ pub fn build_workshop_launch_plan(
     })
 }
 
+/// Build a launch plan from a synced repository's enabled addon selection.
+///
+/// Reforger loads mods by the id in their `.gproj` and finds them through the
+/// roots passed with `-addonsDir`, so a repository folder is launchable as-is:
+/// every enabled subfolder contributes its mod id and its parent root. There is
+/// no documented client-side join parameter, so a selected server never reaches
+/// the command line; the player joins from the in-game server browser with the
+/// repository's mods already loaded.
+pub fn build_repository_launch_plan(
+    _settings: &SettingsViewState,
+    repo: &Repository,
+    _server: Option<&RepositoryServer>,
+) -> Result<LaunchPlan, LaunchError> {
+    let mut launch_args = Vec::new();
+    if repo.no_splash {
+        launch_args.push("-noSplash".to_string());
+    }
+    if !repo.additional_params.trim().is_empty() {
+        launch_args.extend(split_additional_launch_params(&repo.additional_params));
+    }
+    Ok(LaunchPlan {
+        launch_args,
+        mods: resolve_repository_mods(repo),
+        server: None,
+    })
+}
+
+fn resolve_repository_mods(repo: &Repository) -> Vec<ResolvedMod> {
+    let repo_path = PathBuf::from(repo.path.trim());
+    let mut mods = Vec::new();
+    let mut seen = HashSet::new();
+
+    for (addon, enabled) in repo.addons.iter().chain(repo.optional_addons.iter()) {
+        if !*enabled {
+            continue;
+        }
+        match resolve_child_dir_case_insensitive(&repo_path, addon) {
+            Some(dir) => push_repository_mod(&mut mods, &mut seen, addon, &dir),
+            None => log::error!(
+                "Arma Reforger addon folder not found in repository: {}",
+                addon
+            ),
+        }
+    }
+
+    for (addon, enabled, path) in &repo.external_addons {
+        if !*enabled {
+            continue;
+        }
+        match resolve_external_addon_dir(addon, path) {
+            Some(dir) => push_repository_mod(&mut mods, &mut seen, addon, &dir),
+            None => log::error!(
+                "External Arma Reforger addon folder not found: addon={}",
+                addon
+            ),
+        }
+    }
+
+    mods
+}
+
+fn resolve_external_addon_dir(addon: &str, path: &str) -> Option<PathBuf> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let base = Path::new(trimmed);
+    if let Some(nested) = resolve_child_dir_case_insensitive(base, addon) {
+        return Some(nested);
+    }
+    let matches_addon = base
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case(addon.trim()));
+    (base.is_dir() && matches_addon).then(|| base.to_path_buf())
+}
+
+fn push_repository_mod(
+    mods: &mut Vec<ResolvedMod>,
+    seen: &mut HashSet<String>,
+    addon: &str,
+    dir: &Path,
+) {
+    let Some(mod_id) = resolve_addon_mod_id(dir) else {
+        log::error!(
+            "Arma Reforger addon {} has no usable mod id at {}",
+            addon,
+            sanitize_log_path(dir)
+        );
+        return;
+    };
+    if !seen.insert(mod_id.to_ascii_uppercase()) {
+        return;
+    }
+    mods.push(ResolvedMod {
+        id: mod_id,
+        path: Some(dir.display().to_string()),
+    });
+}
+
+/// The value the game accepts in `-addons` for an addon folder. The wiki order
+/// is GUID, then project id, then the folder name as a fallback; `ServerData.json`
+/// fills in for Workshop copies that ship without a `.gproj`.
+pub fn resolve_addon_mod_id(dir: &Path) -> Option<String> {
+    let gproj = read_gproj_ids(dir);
+    if let Some(gproj) = &gproj
+        && let Some(guid) = gproj.guid.clone()
+    {
+        return Some(guid);
+    }
+    if let Some(id) = read_server_data_id(dir) {
+        return Some(id);
+    }
+    if let Some(gproj) = &gproj
+        && let Some(project_id) = gproj.project_id.clone()
+    {
+        return Some(project_id);
+    }
+    let folder = dir.file_name().and_then(|name| name.to_str())?.trim();
+    if folder.is_empty() {
+        return None;
+    }
+    Some(normalize_reforger_guid(folder).unwrap_or_else(|| folder.to_string()))
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct GprojIds {
+    guid: Option<String>,
+    project_id: Option<String>,
+}
+
+/// Read `GUID`/`ID` out of the addon's `.gproj`. The file is an Enfusion config
+/// block, but both ids are single quoted values on their own line, so a line
+/// scan avoids pulling in a parser for two fields.
+fn read_gproj_ids(dir: &Path) -> Option<GprojIds> {
+    let path = find_gproj_file(dir)?;
+    let raw = fs::read_to_string(&path).ok()?;
+    let mut ids = GprojIds::default();
+    for line in raw.lines() {
+        let line = line.trim();
+        if let Some(value) = quoted_value_after_key(line, "GUID") {
+            ids.guid = normalize_reforger_guid(&value).or(Some(value));
+        } else if let Some(value) = quoted_value_after_key(line, "ID") {
+            ids.project_id = Some(value);
+        }
+    }
+    (ids.guid.is_some() || ids.project_id.is_some()).then_some(ids)
+}
+
+fn find_gproj_file(dir: &Path) -> Option<PathBuf> {
+    let preferred = dir.join("addon.gproj");
+    if preferred.is_file() {
+        return Some(preferred);
+    }
+    let mut candidates: Vec<PathBuf> = fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("gproj"))
+        })
+        .collect();
+    candidates.sort();
+    candidates.into_iter().next()
+}
+
+fn quoted_value_after_key(line: &str, key: &str) -> Option<String> {
+    let rest = line.strip_prefix(key)?;
+    let rest = rest.trim_start();
+    if !rest.starts_with('"') {
+        return None;
+    }
+    let value = rest[1..].split('"').next()?.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn read_server_data_id(dir: &Path) -> Option<String> {
+    let raw = fs::read_to_string(dir.join("ServerData.json")).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let id = value.get("id").and_then(serde_json::Value::as_str)?.trim();
+    (!id.is_empty()).then(|| normalize_reforger_guid(id).unwrap_or_else(|| id.to_string()))
+}
+
 pub fn launch_addons_dirs(mods: &[ResolvedMod]) -> Vec<String> {
     let mut dirs = Vec::new();
     let mut seen = HashSet::new();
@@ -849,8 +1050,10 @@ fn resolve_live_path(entry: &ReforgerAddonEntry) -> Option<PathBuf> {
 }
 
 fn default_addon_path_for_guid(guid: &str) -> Option<PathBuf> {
-    let path = default_user_addons_dir()?.join(guid);
-    path.is_dir().then_some(path)
+    default_user_addons_dirs()
+        .into_iter()
+        .map(|root| root.join(guid))
+        .find(|path| path.is_dir())
 }
 
 #[derive(Clone, Debug)]
@@ -1119,6 +1322,113 @@ mod tests {
             ]
         );
         assert_eq!(command.cwd, Some(install.path().to_path_buf()));
+    }
+
+    fn write_gproj_addon(root: &Path, folder: &str, guid: &str, project_id: &str) -> PathBuf {
+        let addon = root.join(folder);
+        fs::create_dir_all(&addon).expect("addon dir");
+        fs::write(
+            addon.join("addon.gproj"),
+            format!(
+                "GameProject {{\n ID \"{}\"\n GUID \"{}\"\n TITLE \"Test\"\n Dependencies {{\n  \"58D0FB3206B6F859\"\n }}\n}}\n",
+                project_id, guid
+            ),
+        )
+        .expect("gproj");
+        addon
+    }
+
+    #[test]
+    fn reforger_declares_no_client_side_addon_concept() {
+        let caps = ReforgerModule.capabilities();
+
+        assert!(caps.repository_launch);
+        // A Reforger server activates exactly its own mod set on join, so an
+        // addon can never be "client-side" the way an Arma 3 one can.
+        assert!(!caps.client_side_addons);
+        assert!(
+            crate::core::game::arma3::Arma3Module
+                .capabilities()
+                .client_side_addons
+        );
+    }
+
+    #[test]
+    fn addon_mod_id_prefers_the_gproj_guid_over_the_folder_name() {
+        let root = tempfile::tempdir().expect("root");
+        let addon = write_gproj_addon(root.path(), "MyMod", "6156f2f771d5d73d", "MyProject");
+
+        assert_eq!(
+            resolve_addon_mod_id(&addon).as_deref(),
+            Some("6156F2F771D5D73D")
+        );
+    }
+
+    #[test]
+    fn addon_mod_id_falls_back_to_server_data_then_folder_name() {
+        let root = tempfile::tempdir().expect("root");
+        let workshop = write_addon(root.path(), "596ABCDEF0123456", "Capture");
+        assert_eq!(
+            resolve_addon_mod_id(&workshop).as_deref(),
+            Some("596ABCDEF0123456")
+        );
+
+        let bare = root.path().join("@LooseFolder");
+        fs::create_dir_all(&bare).expect("bare dir");
+        assert_eq!(resolve_addon_mod_id(&bare).as_deref(), Some("@LooseFolder"));
+    }
+
+    #[test]
+    fn repository_launch_plan_resolves_enabled_addons_to_mod_ids() {
+        let repo_root = tempfile::tempdir().expect("repo");
+        write_gproj_addon(repo_root.path(), "Enabled", "6156F2F771D5D73D", "Enabled");
+        write_gproj_addon(repo_root.path(), "Optional", "5A658E3BEE1D4AE2", "Optional");
+        write_gproj_addon(repo_root.path(), "Disabled", "88037E46AD234C72", "Disabled");
+        let repo = Repository {
+            path: repo_root.path().display().to_string(),
+            addons: vec![
+                ("Enabled".to_string(), true),
+                ("Disabled".to_string(), false),
+            ],
+            optional_addons: vec![("Optional".to_string(), true)],
+            no_splash: true,
+            additional_params: "-maxFPS 120".to_string(),
+            ..Repository::default()
+        };
+        let server = RepositoryServer {
+            name: "Main".to_string(),
+            address: "203.0.113.10".to_string(),
+            port: "2001".to_string(),
+            password: String::new(),
+            battle_eye: false,
+        };
+
+        let plan =
+            build_repository_launch_plan(&SettingsViewState::default(), &repo, Some(&server))
+                .expect("plan");
+
+        assert_eq!(
+            plan.launch_args,
+            vec![
+                "-noSplash".to_string(),
+                "-maxFPS".to_string(),
+                "120".to_string()
+            ]
+        );
+        assert_eq!(
+            plan.mods
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["6156F2F771D5D73D", "5A658E3BEE1D4AE2"]
+        );
+        assert_eq!(
+            launch_addons_dirs(&plan.mods),
+            vec![repo_root.path().display().to_string()]
+        );
+        // Reforger has no documented client-side join parameter; the player
+        // connects from the in-game server browser.
+        assert!(plan.server.is_none());
     }
 
     #[test]
