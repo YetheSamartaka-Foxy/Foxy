@@ -140,6 +140,7 @@ impl GameModule for ReforgerModule {
                 auto_detect: true,
                 is_install_dir: true,
             }],
+            texts: Vec::new(),
             toggles: vec![ToggleSetting {
                 id: "check_steam_running_before_launch",
                 label: "Check Steam is running before launching",
@@ -1305,6 +1306,7 @@ mod tests {
         let ctx = GameLaunchCtx {
             install_dir: &install_dir,
             steam_directory: "",
+            settings: None,
         };
 
         let command = ReforgerModule.build_launch(&plan, &ctx).expect("launch");

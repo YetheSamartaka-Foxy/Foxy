@@ -6,7 +6,8 @@ use crate::cli::args::{
 };
 use crate::cli::exit_codes;
 use crate::core::game::{
-    GameLaunchCtx, GameModule, LaunchCommand, LaunchError, reforger, spaces, twwh3,
+    GameLaunchCtx, GameModule, LaunchCommand, LaunchError, LaunchPlan, generic_game, reforger,
+    spaces, twwh3,
 };
 use crate::core::steam::{SteamEnsureResult, ensure_steam_running};
 use serde_json::{Value, json};
@@ -204,6 +205,9 @@ fn cmd_game_launch(cli: &CliArgs, args: GameLaunchArgs) -> Result<CommandSuccess
     if module.id() == reforger::REFORGER_GAME_ID {
         return cmd_reforger_game_launch(cli, args);
     }
+    if module.id() == generic_game::GENERIC_GAME_ID {
+        return cmd_generic_game_launch(cli, args);
+    }
 
     if module.capabilities().repository_launch {
         return Err(CommandError::validation(
@@ -221,6 +225,112 @@ fn cmd_game_launch(cli: &CliArgs, args: GameLaunchArgs) -> Result<CommandSuccess
             module.display_name()
         ),
     ))
+}
+
+fn cmd_generic_game_launch(
+    cli: &CliArgs,
+    args: GameLaunchArgs,
+) -> Result<CommandSuccess, CommandError> {
+    let module = crate::core::game::registry().active();
+    let state = AppState::load()?;
+    let config = generic_game::config_from_settings(&state.settings);
+    let install_dir = module.install_dir_from_settings(&state.settings);
+    let space_dir = spaces::active_game_space_dir();
+
+    let launch_plan = match config.steam_app_id {
+        Some(app_id) => generic_game::build_workshop_launch_plan(
+            &space_dir,
+            app_id,
+            &state.settings.steam_directory,
+            args.include_disabled,
+            Vec::new(),
+        )
+        .map_err(|err| CommandError::operation("game.launch", err))?,
+        None => generic_game::GenericWorkshopLaunchPlan {
+            plan: LaunchPlan {
+                launch_args: Vec::new(),
+                mods: Vec::new(),
+                server: None,
+            },
+            issues: Vec::new(),
+        },
+    };
+
+    if args.execute && !cli.dry_run && !launch_plan.issues.is_empty() {
+        return Err(CommandError::validation(
+            "game.launch",
+            format!(
+                "Cannot launch with {} unresolved Workshop item(s)",
+                launch_plan.issues.len()
+            ),
+        ));
+    }
+
+    let ctx = GameLaunchCtx {
+        install_dir,
+        steam_directory: &state.settings.steam_directory,
+        settings: Some(&state.settings),
+    };
+    let built = generic_game::build_generic_launch(
+        &launch_plan.plan,
+        &ctx,
+        &config,
+        args.execute && !cli.dry_run,
+    )
+    .map_err(|err| launch_error_to_command_error(module.display_name(), err))?;
+
+    let manifest_json = built.manifest.as_ref().map(|manifest| {
+        json!({
+            "file_name": manifest.file_name,
+            "path": manifest.path.display().to_string(),
+            "content": manifest.content,
+            "written": manifest.written,
+        })
+    });
+
+    if cli.dry_run || !args.execute {
+        return Ok(CommandSuccess {
+            action: "game.launch".to_string(),
+            message: "Launch command generated".to_string(),
+            data: json!({
+                "game_id": module.id(),
+                "game_space_id": spaces::active_game_space().space_id,
+                "executable": built.command.program.display().to_string(),
+                "args": built.command.args,
+                "cwd": built.command.cwd.as_ref().map(|path| path.display().to_string()),
+                "manifest": manifest_json,
+                "config": config,
+                "issues": launch_plan.issues,
+                "execute": false,
+                "dry_run": cli.dry_run,
+            }),
+            exit_code: exit_codes::SUCCESS,
+        });
+    }
+
+    let executed = execute_game_launch(
+        &built.command,
+        &space_dir,
+        install_dir,
+        &state.settings.steam_directory,
+    )?;
+
+    Ok(CommandSuccess {
+        action: "game.launch".to_string(),
+        message: format!("Launch command started (pid={})", executed.pid),
+        data: json!({
+            "game_id": module.id(),
+            "game_space_id": spaces::active_game_space().space_id,
+            "executable": built.command.program.display().to_string(),
+            "args": built.command.args,
+            "cwd": built.command.cwd.as_ref().map(|path| path.display().to_string()),
+            "manifest": manifest_json,
+            "issues": launch_plan.issues,
+            "pid": executed.pid,
+            "execute": true,
+        }),
+        exit_code: exit_codes::SUCCESS,
+    })
 }
 
 fn cmd_twwh3_game_launch(
@@ -252,6 +362,7 @@ fn cmd_twwh3_game_launch(
     let ctx = GameLaunchCtx {
         install_dir,
         steam_directory: &state.settings.steam_directory,
+        settings: Some(&state.settings),
     };
     let built = twwh3::TotalWarWarhammer3Module
         .build_launch_with_manifest_mode(&launch_plan.plan, &ctx, args.execute && !cli.dry_run)
@@ -341,6 +452,7 @@ fn cmd_reforger_game_launch(
     let ctx = GameLaunchCtx {
         install_dir,
         steam_directory: &state.settings.steam_directory,
+        settings: Some(&state.settings),
     };
     let built = reforger::ReforgerModule
         .build_launch(&launch_plan.plan, &ctx)
@@ -810,6 +922,9 @@ pub(super) fn launch_error_to_command_error_for(
         LaunchError::LaunchPreparationFailed => "Failed to prepare launch files".to_string(),
         LaunchError::RepositoryLaunchUnsupported => {
             format!("{} cannot launch from a repository", game_name)
+        }
+        LaunchError::GameNotConfigured => {
+            format!("{} is missing required launch settings", game_name)
         }
     };
     CommandError::validation(action, message)

@@ -10,3 +10,4 @@ pub mod repository_settings;
 pub mod settings;
 pub mod swifty_migration;
 pub mod update;
+pub mod workshop;

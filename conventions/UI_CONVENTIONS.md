@@ -13,6 +13,7 @@
 \- Large views are organized as directory modules (`mod.rs` + sub-files). When adding substantial new UI to an existing view, add a new subfile in that view's directory rather than growing `mod.rs`. Keep individual `.rs` files under \~800 lines.
 
 \- New screens belong in `src/ui/views/` with a focused module.
+\- The Steam Workshop store of the active game space is the `Steam Workshop` tab of the game-space settings view (`src/ui/views/workshop/`), shown when the target space declares `steam_workshop`. A non-active space renders an explanation instead, because the store resolves through `active_game_space_dir()`. The tab reloads from disk whenever it is entered (`WorkshopViewState::loaded`), and every action that downloads, unsubscribes, or copies mod folders goes through `WorkshopTask` on a worker thread; only the small `workshop.json` writes (enable, load order) run inline.
 
 \- Reuse shared UI helpers in `src/ui/app/ui\_helpers/` (via `Foxy` methods) before writing inline layout code. Key helpers include `render\_adaptive\_tab\_bar` (responsive tab bars), `modal\_icon\_button\_size`, `toolbar\_icon\_button\_size`, `adaptive\_button\_height`, and `ui\_state\_checkbox`.
 

@@ -5719,6 +5719,8 @@ pub fn parse_agent_gui_game_space_settings_tab(
             Some(GameSpaceSettingsTab::SearchFolders)
         }
         "ts3-plugin" | "ts3-plugins" | "ts3" | "teamspeak" => Some(GameSpaceSettingsTab::Ts3Plugin),
+        "profiles" | "profile" => Some(GameSpaceSettingsTab::Profiles),
+        "steam-workshop" | "workshop" => Some(GameSpaceSettingsTab::SteamWorkshop),
         _ => None,
     }
 }

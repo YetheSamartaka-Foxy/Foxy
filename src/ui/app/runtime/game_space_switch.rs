@@ -209,6 +209,9 @@ impl Foxy {
     /// startup default. App-global state (window, theme, locale, activity
     /// log, app updates, backups, tray) is deliberately left alone.
     fn reset_space_scoped_state(&mut self) {
+        // Steam Workshop store of the outgoing space.
+        self.workshop_view_state = crate::ui::views::workshop::WorkshopViewState::default();
+
         // Repository list, spaces, and folders.
         self.repository_view_state = RepositoryViewState::default();
         self.repository_list_cache = Default::default();
@@ -492,6 +495,9 @@ const APP_GLOBAL_FOXY_FIELDS: &[&str] = &[
     "pending_low_space_notice",
     "game_spaces_view_state",
     "pending_game_space_switch",
+    // Worker channel endpoints; the view state they feed is reset above.
+    "workshop_task_rx",
+    "workshop_task_worker",
     // Activity log and diagnostics.
     "activity_log_cache",
     "activity_log_galleys",

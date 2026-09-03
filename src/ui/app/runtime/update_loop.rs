@@ -269,6 +269,7 @@ impl Foxy {
             }
         }
         self.poll_direct_download_progress();
+        self.poll_workshop_task();
         self.poll_app_update_events();
         self.poll_image_results(&ctx);
         self.poll_repo_metadata_results(&ctx);

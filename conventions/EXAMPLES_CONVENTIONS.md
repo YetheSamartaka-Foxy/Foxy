@@ -6,7 +6,9 @@
   - `examples/json/appdata/games/arma3/` (`game_settings.json`, `repositories.json`, `repository_spaces.json`, `repository_visual_folders.json`, `extra_files.json`, `workshop.json`)
   - `examples/json/appdata/games/twwh3/` (`game_settings.json`, `repositories.json`, `repository_spaces.json`, `extra_files.json`, `workshop.json`)
   - `examples/json/appdata/games/reforger/` (`game_settings.json`, `repositories.json`, `repository_spaces.json`, `extra_files.json`, `workshop.json`, `reforger_addons.json`)
+  - `examples/json/appdata/games/generic/` (`game_settings.json`, `repositories.json`, `repository_spaces.json`, `extra_files.json`, `workshop.json`)
   - `examples/json/remote_repositories/` (`repository_space.json`, `repo.json`)
+  - `examples/json/foxyshare_manifest.json` (the `share.json` inside a `.foxyshare` bundle)
 - Runtime reads/writes app-global files (`app_settings.json`, `games.json`, `window_state.json`) in the Foxy config dir (default `%APPDATA%\\Foxy` on Windows) and per-game-space files (`game_settings.json`, `repositories.json`, `repository_spaces.json`, `repository_visual_folders.json`, `extra_files.json`, `workshop.json`, `reforger_addons.json`, `database.db`) in `games/<space_id>/` under it; keep those examples schema-accurate.
 - A legacy flat `settings.json`/`repositories.json` layout is migrated on startup into the split layout above (see `plan-progress/phase-1.md`).
 - Keep `examples/` aligned with real runtime formats used by `%APPDATA%\\Foxy` files and remote `repository_space.json` / `repo.json` manifests.

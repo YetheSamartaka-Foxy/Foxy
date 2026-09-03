@@ -179,6 +179,7 @@ fn build_launch_spec(
     let ctx = GameLaunchCtx {
         install_dir: &install_dir,
         steam_directory: &settings.steam_directory,
+        settings: Some(settings),
     };
     let command: LaunchCommand = module.build_launch(&plan, &ctx).map_err(to_error)?;
     let cwd = match command.cwd {

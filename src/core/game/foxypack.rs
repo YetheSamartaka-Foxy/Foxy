@@ -76,6 +76,8 @@ pub struct WorkshopEntry {
     #[serde(default)]
     pub frozen: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_order: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size_bytes: Option<u64>,
@@ -413,6 +415,7 @@ fn build_workshop_file(
                 url: None,
                 enabled: entry.enabled,
                 frozen: entry.frozen,
+                load_order: None,
                 version: entry.version.clone(),
                 size_bytes: entry.size_bytes,
                 time_updated: None,
@@ -432,6 +435,7 @@ fn build_workshop_file(
             url: Some(entry.url.clone()),
             enabled: entry.enabled,
             frozen: entry.frozen,
+            load_order: entry.load_order,
             version: entry.version.clone(),
             size_bytes: entry.size_bytes,
             time_updated: entry.time_updated,
@@ -498,6 +502,7 @@ fn import_workshop_entries(
                 .unwrap_or_else(|| workshop::workshop_url(&entry.item_id)),
             enabled: entry.enabled,
             frozen: entry.frozen,
+            load_order: entry.load_order,
             version: entry.version,
             installed_path: None,
             frozen_path: None,

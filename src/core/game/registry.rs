@@ -2,6 +2,7 @@ use std::sync::OnceLock;
 
 use super::GameModule;
 use super::arma3::Arma3Module;
+use super::generic_game::GenericGameModule;
 use super::reforger::ReforgerModule;
 use super::spaces;
 use super::twwh3::TotalWarWarhammer3Module;
@@ -16,6 +17,7 @@ impl GameRegistry {
             Box::new(Arma3Module),
             Box::new(TotalWarWarhammer3Module),
             Box::new(ReforgerModule),
+            Box::new(GenericGameModule),
         ];
         for module in &modules {
             log::info!(

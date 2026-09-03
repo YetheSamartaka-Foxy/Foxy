@@ -180,6 +180,7 @@ impl GameModule for GenericRunScriptModule {
                 auto_detect: self.config.steam_app_id.is_some(),
                 is_install_dir: true,
             }],
+            texts: Vec::new(),
             toggles: vec![ToggleSetting {
                 id: "check_steam_running_before_launch",
                 label: "Check Steam is running before launching",

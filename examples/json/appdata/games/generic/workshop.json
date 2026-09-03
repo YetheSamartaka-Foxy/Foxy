@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "entries": [
+    {
+      "source": "steam",
+      "app_id": 480,
+      "item_id": "111111111",
+      "title": "Example Workshop Mod",
+      "url": "https://steamcommunity.com/sharedfiles/filedetails/?id=111111111",
+      "enabled": true,
+      "frozen": false,
+      "load_order": 1,
+      "version": "1700000000",
+      "time_updated": 1700000000,
+      "added_at": 1700000000,
+      "updated_at": 1700000000
+    }
+  ]
+}

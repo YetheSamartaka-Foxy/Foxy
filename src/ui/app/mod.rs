@@ -468,4 +468,12 @@ pub struct Foxy {
     /// Runtime game-space switch waiting for pending saves to drain before it
     /// swaps the active space and reloads.
     pub pending_game_space_switch: Option<crate::core::game::spaces::GameSpaceEntry>,
+    // Steam Workshop
+    pub workshop_view_state: crate::ui::views::workshop::WorkshopViewState,
+    /// Result channel of the Workshop worker. Workshop actions download through
+    /// the Steam helper subprocess or copy whole mod folders, so none of them
+    /// may run on the frame loop.
+    pub workshop_task_rx:
+        Option<std::sync::mpsc::Receiver<crate::ui::views::workshop::tasks::WorkshopTaskOutcome>>,
+    pub workshop_task_worker: Option<std::thread::JoinHandle<()>>,
 }

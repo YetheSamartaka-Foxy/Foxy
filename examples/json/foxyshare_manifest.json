@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "kind": "foxy-workshop-share",
+  "game_id": "twwh3",
+  "app_id": 1142710,
+  "created_at": 1700000000,
+  "note": "Campaign night mod set",
+  "share_code": "2790007728;1|2793731221;2",
+  "state_checksum": {
+    "checksum": "9A3F1C08",
+    "full": "9a3f1c0855d2f1b3c47f0e9a1d6b28e4f0a7c3195d8e2b64a90f1c73d5e86b42",
+    "game_id": "twwh3",
+    "app_id": 1142710,
+    "game_build_id": "17123456",
+    "mods": [
+      {
+        "item_id": "2790007728",
+        "title": "Example Warhammer Mod",
+        "version": "1f0c2b4a6d8e",
+        "frozen": true,
+        "load_order": 1
+      },
+      {
+        "item_id": "2793731221",
+        "title": "Another Warhammer Mod",
+        "version": "1700000000",
+        "frozen": false,
+        "load_order": 2
+      }
+    ]
+  },
+  "items": [
+    {
+      "item_id": "2790007728",
+      "title": "Example Warhammer Mod",
+      "url": "https://steamcommunity.com/sharedfiles/filedetails/?id=2790007728",
+      "enabled": true,
+      "load_order": 1,
+      "version": "1f0c2b4a6d8e",
+      "time_updated": 1700000000,
+      "payload": true
+    },
+    {
+      "item_id": "2793731221",
+      "title": "Another Warhammer Mod",
+      "url": "https://steamcommunity.com/sharedfiles/filedetails/?id=2793731221",
+      "enabled": true,
+      "load_order": 2,
+      "time_updated": 1700000000,
+      "payload": false
+    }
+  ]
+}

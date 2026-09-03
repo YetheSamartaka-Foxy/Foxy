@@ -514,6 +514,10 @@ impl Foxy {
             game_space_settings_view_state:
                 crate::ui::views::game_spaces::settings::GameSpaceSettingsViewState::default(),
             pending_game_space_switch: None,
+            // Steam Workshop
+            workshop_view_state: crate::ui::views::workshop::WorkshopViewState::default(),
+            workshop_task_rx: None,
+            workshop_task_worker: None,
         };
         app.load_settings();
         app.pending_renderer_fallback_notice =
@@ -717,6 +721,11 @@ impl Foxy {
             &mut paths,
             "reforger",
             self.settings_view_state.reforger_directory.trim(),
+        );
+        push_configured_path(
+            &mut paths,
+            "generic",
+            self.settings_view_state.generic_directory.trim(),
         );
         push_configured_path(
             &mut paths,

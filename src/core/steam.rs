@@ -471,6 +471,31 @@ fn read_steam_libraryfolders(steam_root: &Path) -> Vec<PathBuf> {
     folders
 }
 
+/// The installed Steam build id of an app, read from its `appmanifest_*.acf`.
+/// Two players on the same game patch report the same value, which is what
+/// makes it comparable in a shared state checksum.
+pub fn steam_app_build_id(steam_directory: &str, app_id: u32) -> Option<String> {
+    for library_root in steam_library_roots(steam_directory) {
+        let Some(steamapps) = find_child_dir_case_insensitive(&library_root, "steamapps") else {
+            continue;
+        };
+        let manifest = steamapps.join(format!("appmanifest_{}.acf", app_id));
+        let Ok(contents) = fs::read_to_string(manifest) else {
+            continue;
+        };
+        let tokens = vdf_tokens(&contents);
+        if let Some(build_id) = tokens
+            .windows(2)
+            .find(|pair| pair[0].eq_ignore_ascii_case("buildid"))
+            .map(|pair| pair[1].trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            return Some(build_id);
+        }
+    }
+    None
+}
+
 fn steam_app_dir_from_manifest(library_root: &Path, app_id: u32) -> Option<PathBuf> {
     let steamapps = find_child_dir_case_insensitive(library_root, "steamapps")?;
     let app_id_text = app_id.to_string();

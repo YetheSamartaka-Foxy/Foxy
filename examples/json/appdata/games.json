@@ -19,6 +19,12 @@
       "game_id": "reforger",
       "display_name": "Arma Reforger",
       "created_at": 0
+    },
+    {
+      "id": "generic",
+      "game_id": "generic",
+      "display_name": "Generic game",
+      "created_at": 0
     }
   ]
 }

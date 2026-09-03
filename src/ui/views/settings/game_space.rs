@@ -16,8 +16,19 @@ fn directory_field_mut<'a>(
         "arma3_directory" => Some(&mut settings.arma3_directory),
         "twwh3_directory" => Some(&mut settings.twwh3_directory),
         "reforger_directory" => Some(&mut settings.reforger_directory),
+        "generic_directory" => Some(&mut settings.generic_directory),
         "teamspeak3_directory" => Some(&mut settings.teamspeak3_directory),
         "arma3_profiles_directory" => Some(&mut settings.arma3_profiles_directory),
+        _ => None,
+    }
+}
+
+fn text_field_mut<'a>(settings: &'a mut SettingsViewState, id: &str) -> Option<&'a mut String> {
+    match id {
+        "generic_executable" => Some(&mut settings.generic_executable),
+        "generic_steam_app_id" => Some(&mut settings.generic_steam_app_id),
+        "generic_launch_template" => Some(&mut settings.generic_launch_template),
+        "generic_mods_manifest" => Some(&mut settings.generic_mods_manifest),
         _ => None,
     }
 }
@@ -91,6 +102,16 @@ fn directory_binding(id: &str) -> DirectoryBinding {
             detect_hover: "Automatically detect the Arma Reforger installation directory using Steam library metadata.",
             detect_error: "Could not auto-detect Arma Reforger directory.",
         },
+        "generic_directory" => DirectoryBinding {
+            onedrive_check: true,
+            invalidates_addons: false,
+            refreshes_profiles: false,
+            validate_error: Some(
+                "The selected folder could not be read. Make sure it is the folder that contains the game executable.",
+            ),
+            detect_hover: "",
+            detect_error: "",
+        },
         "arma3_profiles_directory" => DirectoryBinding {
             onedrive_check: true,
             invalidates_addons: false,
@@ -112,7 +133,7 @@ fn directory_binding(id: &str) -> DirectoryBinding {
 
 fn validate_directory(module: &dyn GameModule, id: &str, folder: &std::path::Path) -> bool {
     match id {
-        "arma3_directory" | "twwh3_directory" | "reforger_directory" => {
+        "arma3_directory" | "twwh3_directory" | "reforger_directory" | "generic_directory" => {
             module.validate_install_dir(folder)
         }
         "teamspeak3_directory" => {
@@ -186,6 +207,16 @@ impl Foxy {
                         directory,
                         horizontal_padding,
                         browse_button_width,
+                        &mut change_flags,
+                    );
+                    ui.separator();
+                }
+
+                for text in &schema.texts {
+                    self.render_game_space_text_setting(
+                        ui,
+                        text,
+                        horizontal_padding,
                         &mut change_flags,
                     );
                     ui.separator();
@@ -311,6 +342,54 @@ impl Foxy {
             if !ui.ctx().egui_wants_keyboard_input() {
                 self.show_success_toast(self.t("Settings saved"));
             }
+        }
+    }
+
+    fn render_game_space_text_setting(
+        &mut self,
+        ui: &mut Ui,
+        setting: &crate::core::game::TextSetting,
+        horizontal_padding: f32,
+        change_flags: &mut GameSettingsChangeFlags,
+    ) {
+        if text_field_mut(self.edited_game_space_settings_mut(), setting.id).is_none() {
+            warn!(
+                "Game settings schema text field {} has no binding; skipping",
+                setting.id
+            );
+            return;
+        }
+        ui.horizontal(|ui| {
+            ui.add_space(horizontal_padding);
+            ui.label(tr(setting.label));
+            ui.add_space(horizontal_padding);
+        });
+        ui.horizontal(|ui| {
+            ui.add_space(horizontal_padding);
+            let width = (ui.available_width() - 2.0 * horizontal_padding).max(0.0);
+            let field = text_field_mut(self.edited_game_space_settings_mut(), setting.id)
+                .expect("binding checked above");
+            let response = ui.add(
+                TextEdit::singleline(field)
+                    .hint_text(setting.placeholder)
+                    .desired_width(width),
+            );
+            if response.changed() {
+                change_flags.settings = true;
+            }
+            if response.hovered() {
+                ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+            }
+            ui.add_space(horizontal_padding);
+        });
+        if let Some(help) = setting.help {
+            render_wrapped_info_row(
+                ui,
+                horizontal_padding,
+                RichText::new(tr(help))
+                    .italics()
+                    .color(self.color_text_dim()),
+            );
         }
     }
 

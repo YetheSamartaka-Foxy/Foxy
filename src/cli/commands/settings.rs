@@ -109,6 +109,26 @@ fn cmd_settings_set(
         state.settings.reforger_directory = sanitize_user_path(&v.display().to_string());
         changed = true;
     }
+    if let Some(v) = args.generic_dir {
+        state.settings.generic_directory = sanitize_user_path(&v.display().to_string());
+        changed = true;
+    }
+    if let Some(v) = args.generic_executable {
+        state.settings.generic_executable = v.trim().to_string();
+        changed = true;
+    }
+    if let Some(v) = args.generic_steam_app_id {
+        state.settings.generic_steam_app_id = if v == 0 { String::new() } else { v.to_string() };
+        changed = true;
+    }
+    if let Some(v) = args.generic_launch_args {
+        state.settings.generic_launch_template = v.trim().to_string();
+        changed = true;
+    }
+    if let Some(v) = args.generic_mods_manifest {
+        state.settings.generic_mods_manifest = v.trim().to_string();
+        changed = true;
+    }
     if let Some(v) = args.arma3_profiles_dir {
         state.settings.arma3_profiles_directory = sanitize_user_path(&v.display().to_string());
         changed = true;

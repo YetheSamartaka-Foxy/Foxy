@@ -1,3 +1,8 @@
+pub mod bundle;
+pub mod checksum;
+pub mod pin;
+pub mod share;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -59,6 +64,8 @@ pub struct SteamWorkshopItem {
     pub enabled: bool,
     #[serde(default)]
     pub frozen: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_order: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -269,6 +276,7 @@ pub fn upsert_item(
                 url: workshop_url(&item_id),
                 enabled,
                 frozen: false,
+                load_order: None,
                 version: metadata
                     .and_then(|meta| meta.time_updated)
                     .map(|value| value.to_string()),
@@ -291,6 +299,25 @@ pub fn upsert_imported_item(
     space_dir: &Path,
     item: SteamWorkshopItem,
 ) -> Result<UpsertResult, String> {
+    // Packs never carry frozen payloads, so an imported entry cannot claim a
+    // frozen copy it does not have.
+    upsert_stored_item(space_dir, item, false)
+}
+
+/// Import an entry from a share bundle, which may legitimately arrive frozen
+/// because the bundle restored its snapshot into this space first.
+pub fn upsert_bundle_item(
+    space_dir: &Path,
+    item: SteamWorkshopItem,
+) -> Result<UpsertResult, String> {
+    upsert_stored_item(space_dir, item, true)
+}
+
+fn upsert_stored_item(
+    space_dir: &Path,
+    item: SteamWorkshopItem,
+    allow_frozen: bool,
+) -> Result<UpsertResult, String> {
     let item_id = normalize_workshop_id(&item.item_id)
         .ok_or_else(|| format!("Invalid Steam Workshop item id {}", item.item_id))?;
     let mut store = load_store(space_dir)?;
@@ -300,10 +327,10 @@ pub fn upsert_imported_item(
     imported.source = STEAM_SOURCE.to_string();
     imported.item_id = item_id;
     imported.url = workshop_url(&imported.item_id);
-    // Packs never carry frozen payloads, so an imported entry cannot claim a
-    // frozen copy it does not have.
-    imported.frozen = false;
-    imported.frozen_path = None;
+    if !allow_frozen {
+        imported.frozen = false;
+        imported.frozen_path = None;
+    }
     if imported.added_at == 0 {
         imported.added_at = now;
     }
@@ -318,6 +345,34 @@ pub fn upsert_imported_item(
         item: imported,
         added,
     })
+}
+
+/// Sort key for the order Foxy hands mods to the game: explicit load order
+/// first, then by id so an unordered store stays stable.
+pub fn launch_order_key(item: &SteamWorkshopItem) -> (u32, u64) {
+    (
+        item.load_order.unwrap_or(u32::MAX),
+        numeric_id_key(&item.item_id),
+    )
+}
+
+pub fn set_item_load_order(
+    space_dir: &Path,
+    app_id: u32,
+    item_id: &str,
+    load_order: Option<u32>,
+) -> Result<SteamWorkshopItem, String> {
+    let item_id = normalize_workshop_id(item_id)
+        .ok_or_else(|| format!("Invalid Steam Workshop item id {}", item_id))?;
+    let mut store = load_store(space_dir)?;
+    let entry = store
+        .entry_mut(app_id, &item_id)
+        .ok_or_else(|| format!("Steam Workshop item {} is not managed", item_id))?;
+    entry.load_order = load_order;
+    entry.updated_at = unix_timestamp_now();
+    let entry = entry.clone();
+    save_store(space_dir, &store)?;
+    Ok(entry)
 }
 
 pub fn set_item_enabled(
@@ -618,7 +673,7 @@ pub fn normalize_workshop_id(value: &str) -> Option<String> {
 pub fn parse_workshop_item_ids(input: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
-    for token in input.split(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ';')) {
+    for token in input.split(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ';' | '|')) {
         let token = token.trim();
         if token.is_empty() {
             continue;
@@ -1365,6 +1420,7 @@ mod tests {
             url: String::new(),
             enabled: true,
             frozen: true,
+            load_order: None,
             version: None,
             installed_path: None,
             frozen_path: Some("C:\\somewhere\\frozen".to_string()),

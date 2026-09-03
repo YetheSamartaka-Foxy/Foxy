@@ -623,6 +623,7 @@ impl Foxy {
         let ctx = crate::core::game::GameLaunchCtx {
             install_dir: module.install_dir_from_settings(&self.settings_view_state),
             steam_directory: &self.settings_view_state.steam_directory,
+            settings: Some(&self.settings_view_state),
         };
         let command = module.build_launch(&plan, &ctx).ok()?;
         Some(command.into_process_command())

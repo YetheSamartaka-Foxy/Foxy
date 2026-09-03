@@ -14,7 +14,10 @@ file is the working contract.
 ## Vocabulary
 
 - **Game**: a supported title, keyed by a stable `game_id` (`arma3`, `twwh3`,
-  `reforger`).
+  `reforger`, `generic`). `generic` is the user-configured module: the player
+  supplies the executable, optional Steam app id, argument template, and mods
+  manifest name through its game settings, so one module covers any Steam
+  Workshop game Foxy has no dedicated module for.
 - **Game module**: the Rust implementation of one game's behavior (detection,
   launch, settings schema, capabilities). Implements `GameModule`, registered in
   the static `GameRegistry`.
@@ -102,6 +105,16 @@ reach; a flag that describes an unbuilt feature is worse than a missing one.
 A game that lacks a feature renders no control for it, rather than a disabled or
 dead one (`conventions/ACCESSIBILITY_CONVENTIONS.md`).
 
+A module whose Steam app id is not known at compile time (the `generic` module)
+overrides `steam_app_id_from_settings` instead of `steam_app_id`. Anything that
+resolves a Workshop store must call the settings-aware method, or a
+user-configured game silently gets no Workshop support.
+
+`GameSettingsSchema` carries `directories`, `texts`, and `toggles`. A `TextSetting`
+is free text the module cannot describe statically; every entry needs a binding in
+`src/ui/views/settings/game_space.rs` (`text_field_mut`) and a key in
+`GAME_SPACE_SETTINGS_KEYS`, or the field is skipped with a warning.
+
 `GameRegistry::active_module()` returns `None` for a space naming an unregistered
 game. Anything that *acts* (auto-detection, launch, writes) must use it and refuse
 on `None`. `GameRegistry::active()` falls back to the default module with a
@@ -135,6 +148,37 @@ Consequences for new code:
 
 ---
 
+## Sharing a Workshop selection
+
+`workshop.json` entries carry an optional `load_order`; `workshop::launch_order_key`
+is the single sort used by every launch plan, share code, checksum, and bundle, so
+those four never disagree about order.
+
+- **Share code** (`workshop/share.rs`): the pipe-separated list players paste to
+  each other, `<id>[@version][;load_order]|...`, with `local:<percent-encoded name>`
+  entries for mods that are not on the Workshop. The plain form is the WH3 Mod
+  Manager format; `@version` is a Foxy extension other tools cannot read, so it is
+  opt-in on export. Importing a version pin records the request but never writes it
+  onto the local entry, because Steam only serves the latest build and a fake pin
+  would make two different states report one checksum.
+- **Bundle** (`workshop/bundle.rs`): a `.foxyshare` zip holding `share.json` plus
+  the frozen snapshot of every pinned item under `frozen/<item_id>/`. This is what
+  actually carries pinned versions. Bundles are shared between users, so treat one
+  as untrusted input: paths are validated with `is_safe_child_path`, payloads must
+  belong to an item the manifest lists, and the total is capped by
+  `MAX_BUNDLE_UNCOMPRESSED_BYTES`.
+- **Pins** (`workshop/pin.rs`): freezing copies a mod's live Steam folder into the
+  space's snapshot store and records the folder's metadata hash. Drift is detected
+  by re-hashing the live folder with the same function and comparing, so a Workshop
+  update is visible without re-reading mod files. `PinState` is what every surface
+  reports; `freeze_all` is the bulk path.
+- **State checksum** (`workshop/checksum.rs`): a Paradox-style short code over the
+  game's Steam build id, the ordered enabled mod set with each mod's version, and
+  the launch arguments. Two players compare codes to see whether they are running
+  the same thing; `diff_state_checksums` says what differs when they are not.
+
+---
+
 ## Managed extra files and `.foxypack`
 
 Packs are shared between users, so treat an imported pack as untrusted input.
@@ -161,9 +205,11 @@ Packs are shared between users, so treat an imported pack as untrusted input.
 2. Register it in `GameRegistry::new`.
 3. Set capability flags to what the module actually delivers today.
 4. Add its install-dir setting to `SettingsViewState`, to
-   `GAME_SPACE_SETTINGS_KEYS`, and to the auto-detection binding in
+   `GAME_SPACE_SETTINGS_KEYS`, to the directory binding in
+   `src/ui/views/settings/game_space.rs`, and to the auto-detection binding in
    `src/ui/app/persistence/settings.rs` (the unmatched arm warns rather than
-   silently discarding detection).
+   silently discarding detection). Do the same for any `TextSetting` the module
+   declares.
 5. Add an example game space under `examples/json/appdata/games/<id>/`.
 6. Add English strings to `src/ui/locales/en.json` only; translation fan-out is a
    separate task (`conventions/i18n_CONVENTIONS.md`).

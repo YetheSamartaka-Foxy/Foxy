@@ -1117,6 +1117,28 @@ pub struct SettingsSetArgs {
     pub twwh3_dir: Option<PathBuf>,
     #[arg(long, help = "Set Arma Reforger installation directory")]
     pub reforger_dir: Option<PathBuf>,
+    #[arg(long, help = "Set the generic game space installation directory")]
+    pub generic_dir: Option<PathBuf>,
+    #[arg(
+        long,
+        help = "Set the generic game executable, relative to its directory or absolute"
+    )]
+    pub generic_executable: Option<String>,
+    #[arg(
+        long,
+        help = "Set the generic game Steam app id; 0 clears it and launches the executable directly"
+    )]
+    pub generic_steam_app_id: Option<u32>,
+    #[arg(
+        long,
+        help = "Set the generic game launch argument template (tokens: {mods}, {mods_sep=;}, {mod_ids}, {manifest_name}, {extra})"
+    )]
+    pub generic_launch_args: Option<String>,
+    #[arg(
+        long,
+        help = "Set the generic game mods manifest file name written into its directory"
+    )]
+    pub generic_mods_manifest: Option<String>,
     #[arg(long, help = "Set Arma 3 profiles directory passed as -profiles")]
     pub arma3_profiles_dir: Option<PathBuf>,
     #[arg(long, help = "Set Steam installation directory")]
@@ -1557,14 +1579,37 @@ pub enum WorkshopCommand {
     Remove(WorkshopRemoveArgs),
     /// Enable or disable one managed Steam Workshop item.
     Set(WorkshopSetArgs),
-    /// Freeze one installed Workshop item into Foxy's managed snapshot store.
+    /// Freeze installed Workshop items into Foxy's managed snapshot store.
     Freeze(WorkshopFreezeArgs),
+    /// Report which managed items are pinned, in sync, or drifted from Steam.
+    Pins(WorkshopPinsArgs),
     /// Resume launching from Steam's live Workshop folder.
     Unfreeze(WorkshopUnfreezeArgs),
     /// Export managed Workshop ids or URLs.
     Export(WorkshopExportArgs),
+    /// Print the pipe-separated share code for the managed Workshop items.
+    Share(WorkshopShareArgs),
+    /// Set or clear the launch order position of one managed item.
+    Order(WorkshopOrderArgs),
+    /// Print the shareable state checksum of the active game space.
+    Checksum(WorkshopChecksumArgs),
+    /// Export or import a .foxyshare bundle of the managed Workshop items.
+    Bundle {
+        #[command(subcommand)]
+        command: WorkshopBundleCommand,
+    },
     /// Resolve the path Foxy will launch for one Workshop item.
     Resolve(WorkshopResolveArgs),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum WorkshopBundleCommand {
+    /// Write a .foxyshare bundle for the managed Workshop items.
+    Export(WorkshopBundleExportArgs),
+    /// Read a .foxyshare bundle without changing anything.
+    Inspect(WorkshopBundleInspectArgs),
+    /// Import a .foxyshare bundle into the active game space.
+    Import(WorkshopBundleImportArgs),
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -1588,6 +1633,11 @@ pub struct WorkshopAddArgs {
     pub name: Option<String>,
     #[arg(long, help = "Add the item disabled")]
     pub disabled: bool,
+    #[arg(
+        long,
+        help = "Freeze the item after downloading so its version is pinned"
+    )]
+    pub freeze: bool,
     #[command(flatten)]
     pub download: WorkshopDownloadArgs,
 }
@@ -1605,6 +1655,11 @@ pub struct WorkshopImportArgs {
     pub collection: bool,
     #[arg(long, help = "Import entries disabled")]
     pub disabled: bool,
+    #[arg(
+        long,
+        help = "Freeze each item after downloading so its version is pinned"
+    )]
+    pub freeze: bool,
     #[command(flatten)]
     pub download: WorkshopDownloadArgs,
 }
@@ -1660,8 +1715,20 @@ pub struct WorkshopSetArgs {
 
 #[derive(Args, Debug)]
 pub struct WorkshopFreezeArgs {
-    /// Steam Workshop item id or URL.
-    pub item: String,
+    /// Steam Workshop item id or URL. Omit it with --all.
+    pub item: Option<String>,
+    #[arg(long, help = "Freeze every managed item of the active game")]
+    pub all: bool,
+    #[arg(long, help = "Re-freeze items that are already pinned")]
+    pub refresh: bool,
+    #[arg(long, help = "With --all, include disabled items")]
+    pub include_disabled: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct WorkshopPinsArgs {
+    #[arg(long, help = "List only items whose pin has drifted from Steam")]
+    pub drifted_only: bool,
 }
 
 #[derive(Args, Debug)]
@@ -1676,6 +1743,72 @@ pub struct WorkshopExportArgs {
     pub format: WorkshopExportFormat,
     #[arg(long, help = "Include disabled items")]
     pub all: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct WorkshopShareArgs {
+    #[arg(long, help = "Include disabled items")]
+    pub all: bool,
+    #[arg(long, help = "Append ;<position> load order to every entry")]
+    pub load_order: bool,
+    #[arg(
+        long,
+        help = "Append @<version> pins; Foxy reads these, other mod managers do not"
+    )]
+    pub versions: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct WorkshopOrderArgs {
+    /// Steam Workshop item id or URL.
+    pub item: String,
+    #[arg(long, help = "Launch order position; lower loads first")]
+    pub position: Option<u32>,
+    #[arg(long, help = "Clear the stored position")]
+    pub clear: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct WorkshopChecksumArgs {
+    #[arg(
+        long,
+        value_name = "FILE",
+        help = "Compare against a checksum JSON file written by another player"
+    )]
+    pub compare: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+pub struct WorkshopBundleExportArgs {
+    /// Destination .foxyshare file.
+    pub output: PathBuf,
+    #[arg(long, help = "Include disabled items")]
+    pub all: bool,
+    #[arg(long, help = "List frozen items without copying their files")]
+    pub no_payloads: bool,
+    #[arg(long, help = "Note stored in the bundle manifest")]
+    pub note: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct WorkshopBundleInspectArgs {
+    /// Bundle to read.
+    pub input: PathBuf,
+}
+
+#[derive(Args, Debug)]
+pub struct WorkshopBundleImportArgs {
+    /// Bundle to import.
+    pub input: PathBuf,
+    #[arg(long, help = "Record entries without restoring frozen payloads")]
+    pub skip_payloads: bool,
+    #[arg(
+        long,
+        help = "Freeze items the bundle did not carry files for, after downloading them"
+    )]
+    pub freeze: bool,
+    #[command(flatten)]
+    pub download: WorkshopDownloadArgs,
 }
 
 #[derive(Args, Debug)]

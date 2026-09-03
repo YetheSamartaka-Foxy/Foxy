@@ -31,6 +31,9 @@ pub struct LaunchPlan {
 pub struct GameLaunchCtx<'a> {
     pub install_dir: &'a str,
     pub steam_directory: &'a str,
+    /// Present when the caller has the live settings. A user-configured game
+    /// reads its executable, app id, and argument template from here.
+    pub settings: Option<&'a crate::ui::types::SettingsViewState>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -59,4 +62,5 @@ pub enum LaunchError {
     LauncherUnavailable,
     LaunchPreparationFailed,
     RepositoryLaunchUnsupported,
+    GameNotConfigured,
 }

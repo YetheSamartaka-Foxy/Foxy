@@ -13,6 +13,7 @@ pub enum GameSpaceSettingsTab {
     #[default]
     Game,
     Profiles,
+    SteamWorkshop,
     SearchFolders,
     Ts3Plugin,
 }
@@ -52,6 +53,7 @@ impl Foxy {
         state.is_active_space = is_active;
         state.snapshot = snapshot;
         state.current_tab = GameSpaceSettingsTab::Game;
+        self.workshop_view_state.loaded = false;
         if self.current_view != FoxyView::GameSpaceSettings {
             self.last_view = self.current_view;
             self.current_view = FoxyView::GameSpaceSettings;
@@ -240,6 +242,9 @@ impl Foxy {
                 if capabilities.is_some_and(|caps| caps.profiles) {
                     tabs.push((GameSpaceSettingsTab::Profiles, "Profiles"));
                 }
+                if capabilities.is_some_and(|caps| caps.steam_workshop) {
+                    tabs.push((GameSpaceSettingsTab::SteamWorkshop, "Steam Workshop"));
+                }
                 tabs.push((
                     GameSpaceSettingsTab::SearchFolders,
                     "Additional search folders",
@@ -264,6 +269,9 @@ impl Foxy {
                 if let Some(index) = self.render_adaptive_tab_bar(ui, &labels, selected) {
                     self.game_space_settings_view_state.current_tab = tabs[index].0;
                     info!("Switched game space settings tab to {}", labels[index]);
+                    if tabs[index].0 == GameSpaceSettingsTab::SteamWorkshop {
+                        self.workshop_view_state.loaded = false;
+                    }
                 }
 
                 ui.separator();
@@ -314,6 +322,9 @@ impl Foxy {
                             GameSpaceSettingsTab::Profiles => {
                                 self.render_game_space_profile_settings(ui);
                             }
+                            GameSpaceSettingsTab::SteamWorkshop => {
+                                self.render_workshop_tab(ui, is_active);
+                            }
                             GameSpaceSettingsTab::SearchFolders => {
                                 self.render_additional_search_folders(ui);
                             }
@@ -336,6 +347,11 @@ impl Foxy {
                     });
                 if is_active {
                     self.render_arma3_profile_action_modal(ui);
+                    if self.game_space_settings_view_state.current_tab
+                        == GameSpaceSettingsTab::SteamWorkshop
+                    {
+                        self.render_workshop_modals(ui);
+                    }
                 }
                 ui.painter().rect_stroke(
                     frame_rect,

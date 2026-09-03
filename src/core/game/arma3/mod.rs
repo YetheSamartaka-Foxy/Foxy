@@ -178,6 +178,7 @@ impl GameModule for Arma3Module {
                     is_install_dir: false,
                 },
             ],
+            texts: Vec::new(),
             toggles: vec![
                 ToggleSetting {
                     id: "apply_repo_json_client_parameters",
@@ -640,6 +641,7 @@ mod tests {
         let ctx = GameLaunchCtx {
             install_dir: &settings.arma3_directory,
             steam_directory: &settings.steam_directory,
+            settings: Some(&settings),
         };
         let command = Arma3Module
             .build_launch(&plan, &ctx)

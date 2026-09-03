@@ -2,6 +2,7 @@ pub mod arma3;
 pub mod extra_files;
 pub mod foxypack;
 pub mod generic;
+pub mod generic_game;
 mod launch;
 pub mod profile;
 pub mod reforger;
@@ -76,6 +77,7 @@ impl GameCapabilities {
 
 pub struct GameSettingsSchema {
     pub directories: Vec<DirectorySetting>,
+    pub texts: Vec<TextSetting>,
     pub toggles: Vec<ToggleSetting>,
 }
 
@@ -97,6 +99,16 @@ pub struct ToggleSetting {
     pub id: &'static str,
     pub label: &'static str,
     pub help: &'static str,
+}
+
+/// A free-text game setting. Used by games Foxy cannot describe statically,
+/// where the player supplies the executable name, Steam app id, or launch
+/// argument template themselves.
+pub struct TextSetting {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub help: Option<&'static str>,
+    pub placeholder: &'static str,
 }
 
 pub trait GameModule: Send + Sync {
@@ -130,6 +142,13 @@ pub trait GameModule: Send + Sync {
 
     fn steam_app_id(&self) -> Option<u32> {
         None
+    }
+
+    /// The Steam app id to use for this space's Workshop store. Games whose id
+    /// is fixed at compile time inherit `steam_app_id`; a user-configured game
+    /// reads it from its own settings.
+    fn steam_app_id_from_settings(&self, _settings: &SettingsViewState) -> Option<u32> {
+        self.steam_app_id()
     }
 
     fn repository_profile_to_profile(

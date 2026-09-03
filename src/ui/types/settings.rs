@@ -68,6 +68,16 @@ pub struct SettingsViewState {
     #[serde(default)]
     pub reforger_directory: String,
     #[serde(default)]
+    pub generic_directory: String,
+    #[serde(default)]
+    pub generic_executable: String,
+    #[serde(default)]
+    pub generic_steam_app_id: String,
+    #[serde(default)]
+    pub generic_launch_template: String,
+    #[serde(default)]
+    pub generic_mods_manifest: String,
+    #[serde(default)]
     pub arma3_profiles_directory: String,
     #[serde(default)]
     pub steam_directory: String,
@@ -278,6 +288,11 @@ impl Default for SettingsViewState {
             arma3_directory: String::new(),
             twwh3_directory: String::new(),
             reforger_directory: String::new(),
+            generic_directory: String::new(),
+            generic_executable: String::new(),
+            generic_steam_app_id: String::new(),
+            generic_launch_template: String::new(),
+            generic_mods_manifest: String::new(),
             arma3_profiles_directory: String::new(),
             steam_directory: String::new(),
             teamspeak3_directory: String::new(),

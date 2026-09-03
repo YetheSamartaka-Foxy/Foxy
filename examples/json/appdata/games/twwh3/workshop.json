@@ -1,4 +1,20 @@
 {
   "schema_version": 1,
-  "entries": []
+  "entries": [
+    {
+      "source": "steam",
+      "app_id": 1142710,
+      "item_id": "2790007728",
+      "title": "Example Warhammer Mod",
+      "url": "https://steamcommunity.com/sharedfiles/filedetails/?id=2790007728",
+      "enabled": true,
+      "frozen": true,
+      "load_order": 1,
+      "version": "1f0c2b4a6d8e",
+      "frozen_path": "C:\\Users\\Example\\AppData\\Roaming\\Foxy\\games\\twwh3\\workshop\\frozen\\2790007728",
+      "time_updated": 1700000000,
+      "added_at": 1700000000,
+      "updated_at": 1700000000
+    }
+  ]
 }
