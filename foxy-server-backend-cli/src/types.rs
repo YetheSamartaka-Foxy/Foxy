@@ -118,6 +118,19 @@ pub struct DlcContent {
 pub const DLC_CODES: [&str; 7] = ["csla", "ef", "gm", "rf", "spe", "vn", "ws"];
 
 impl DlcContent {
+    pub fn is_enabled(&self, code: &str) -> bool {
+        match code {
+            "csla" => self.csla,
+            "ef" => self.ef,
+            "gm" => self.gm,
+            "rf" => self.rf,
+            "spe" => self.spe,
+            "vn" => self.vn,
+            "ws" => self.ws,
+            _ => false,
+        }
+    }
+
     fn flag_mut(&mut self, code: &str) -> Option<&mut bool> {
         match code {
             "csla" => Some(&mut self.csla),

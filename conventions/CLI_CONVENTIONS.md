@@ -22,3 +22,4 @@
 ## Server Backend CLI
 
 - For `foxy-server-backend-cli create`, preserve `appUpdateUrl` passthrough from config (`config.json`) to generated `repo.json`; if both config and `--app-update-url` are set, CLI flag wins.
+- `foxy-server-backend-cli create` ends by printing the server `-mod=` line on its own line so wrapper scripts can grep it. Order is Creator DLC codes from `dlcContent` first, then enabled required mods; disabled and client-side mods are never emitted, `--mod-line-prefix` sets the server-side folder prefix, and `--mod-line-include-optional` adds the optional mods.

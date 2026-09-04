@@ -206,6 +206,19 @@ foxy-server-backend-cli create config.json ./output --mode hybrid
 foxy-server-backend-cli create config.json ./output --app-update-url https://example.com/foxy-app-updater.json
 ```
 
+`create` finishes by printing the server `-mod=` line for the generated repository,
+so a wrapper script can feed it straight into a server parameters file:
+
+```bash
+foxy-server-backend-cli create config.json ./output --mod-line-prefix mods
+# Server mod line:
+# -mod=ws;mods/@cba_a3;mods/@ace;
+```
+
+Creator DLC codes from `dlcContent` come first, then the enabled required mods.
+Client-side mods are always excluded; add `--mod-line-include-optional` to append
+the optional mods as well.
+
 App update manifest flow:
 ```bash
 foxy-server-backend-cli setup-app-updater \

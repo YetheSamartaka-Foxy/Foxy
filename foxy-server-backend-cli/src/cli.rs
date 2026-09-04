@@ -44,6 +44,12 @@ pub enum Command {
         /// Generation mode: foxy (BLAKE3, default), swifty (MD5, legacy), hybrid (both)
         #[arg(long, value_enum, default_value_t = GenerationMode::Foxy)]
         mode: GenerationMode,
+        /// Path prefix for each mod folder in the printed -mod= line (e.g. "mods")
+        #[arg(long, default_value = "")]
+        mod_line_prefix: String,
+        /// Include optional mods in the printed -mod= line
+        #[arg(long)]
+        mod_line_include_optional: bool,
     },
     /// Generate a blank repository config file
     New {

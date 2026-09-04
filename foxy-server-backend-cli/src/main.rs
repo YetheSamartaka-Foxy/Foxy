@@ -3,6 +3,7 @@ mod cli;
 mod config;
 mod discover;
 mod hash;
+mod mod_line;
 mod srf;
 mod types;
 mod update_manifest;
@@ -27,6 +28,8 @@ fn main() -> Result<()> {
             app_update_url,
             threads,
             mode,
+            mod_line_prefix,
+            mod_line_include_optional,
         } => cmd_create(
             &config,
             &output,
@@ -34,6 +37,10 @@ fn main() -> Result<()> {
             threads,
             mode,
             cli.no_progress,
+            mod_line::ModLineOptions {
+                prefix: &mod_line_prefix,
+                include_optional: mod_line_include_optional,
+            },
         ),
         cli::Command::New { output } => cmd_new(&output),
         cli::Command::SetupAppUpdater {
@@ -76,6 +83,7 @@ fn cmd_create(
     threads: usize,
     mode: GenerationMode,
     no_progress: bool,
+    mod_line_options: mod_line::ModLineOptions<'_>,
 ) -> Result<()> {
     let started = Instant::now();
 
@@ -220,6 +228,17 @@ fn cmd_create(
     if use_swifty {
         println!("  Artifacts:  mod.srf (per mod), repo.json");
     }
+
+    println!();
+    println!("Server mod line:");
+    println!(
+        "{}",
+        mod_line::build_mod_line(
+            config.dlc_content.as_ref(),
+            &processed_mods,
+            mod_line_options,
+        )
+    );
 
     Ok(())
 }
