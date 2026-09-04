@@ -14,7 +14,8 @@ use crate::core::tasks::purge_repository::{
 use crate::ui::app::Foxy;
 use crate::ui::types::{
     Repository, RepositoryServer, apply_repo_client_parameters,
-    apply_repo_dlc_content_from_repo_json, sanitize_repository_paths, sanitize_user_path,
+    apply_repo_dlc_content_from_repo_json, repo_json_dlc_content_value, sanitize_repository_paths,
+    sanitize_user_path,
 };
 use reqwest::blocking::get;
 use serde_json::{Value, json};
@@ -424,7 +425,7 @@ fn populate_repo_from_remote_metadata(
     {
         apply_repo_client_parameters(repo, value);
     }
-    if apply_dlc_content && let Some(value) = json.get("dlcContent") {
+    if apply_dlc_content && let Some(value) = repo_json_dlc_content_value(&json) {
         apply_repo_dlc_content_from_repo_json(repo, value);
     }
 

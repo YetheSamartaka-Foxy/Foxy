@@ -83,6 +83,18 @@ pub fn apply_repo_client_parameters(repo: &mut Repository, params: &str) {
     repo.additional_params = additional.join(" ");
 }
 
+/// Locate the DLC list in a `repo.json`. Foxy publishes `dlcContent`; Swifty
+/// repositories carry the same information as `requiredDLCs` (casing varies
+/// between Swifty versions).
+pub fn repo_json_dlc_content_value(json: &Value) -> Option<&Value> {
+    if let Some(value) = json.get("dlcContent") {
+        return Some(value);
+    }
+    json.as_object()?
+        .iter()
+        .find_map(|(key, value)| key.eq_ignore_ascii_case("requiredDLCs").then_some(value))
+}
+
 pub fn apply_repo_dlc_content_from_repo_json(repo: &mut Repository, value: &Value) {
     let (mut csla, mut ef, mut gm, mut rf, mut spe, mut vn, mut ws) =
         (false, false, false, false, false, false, false);

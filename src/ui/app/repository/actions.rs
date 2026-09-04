@@ -16,6 +16,7 @@ use crate::ui::i18n::tr;
 use crate::ui::types::{
     Repository, RepositoryServer, RepositorySpace, RepositorySpaceEntry,
     apply_repo_client_parameters, apply_repo_dlc_content_from_repo_json, merge_remote_addon_list,
+    repo_json_dlc_content_value,
 };
 
 /// Shared HTTP client for repository-metadata fetches. A bounded timeout keeps
@@ -1097,7 +1098,7 @@ impl Foxy {
                     client_parameters,
                 );
             }
-            if apply_dlc_content && let Some(dlc_content) = json.get("dlcContent") {
+            if apply_dlc_content && let Some(dlc_content) = repo_json_dlc_content_value(&json) {
                 apply_repo_dlc_content_from_repo_json(
                     &mut self.repository_view_state.repositories[repo_index],
                     dlc_content,

@@ -2,8 +2,8 @@ use super::{
     AppUpdateMode, DownloadSummary, DownloadTelemetrySample, Repository, RepositoryProfile,
     SettingsViewState, additional_folder_alias_key, apply_repo_client_parameters,
     apply_repo_dlc_content_from_repo_json, merge_remote_addon_list, normalize_loaded_repository,
-    push_arma3_profile_launch_args, sanitize_external_addons, sanitize_settings_paths,
-    selected_creator_dlc_codes, split_additional_launch_params,
+    push_arma3_profile_launch_args, repo_json_dlc_content_value, sanitize_external_addons,
+    sanitize_settings_paths, selected_creator_dlc_codes, split_additional_launch_params,
 };
 use crate::core::arma3_profiles::Arma3Profile;
 use serde_json::json;
@@ -788,4 +788,45 @@ fn apply_repo_client_parameters_case_insensitive() {
     apply_repo_client_parameters(&mut repo, "-SKIPINTRO -NOSPLASH");
     assert!(repo.skip_intro);
     assert!(repo.no_splash);
+}
+
+// ── repo_json_dlc_content_value ────────────────────────────────────
+
+#[test]
+fn repo_json_dlc_content_value_prefers_dlc_content() {
+    let json = json!({"dlcContent": {"gm": true}, "requiredDLCs": ["ws"]});
+    assert_eq!(
+        repo_json_dlc_content_value(&json),
+        Some(&json!({"gm": true}))
+    );
+}
+
+#[test]
+fn repo_json_dlc_content_value_falls_back_to_swifty_required_dlcs() {
+    let json = json!({"requiredDLCs": ["ws"]});
+    assert_eq!(repo_json_dlc_content_value(&json), Some(&json!(["ws"])));
+}
+
+#[test]
+fn repo_json_dlc_content_value_matches_swifty_key_case_insensitively() {
+    let json = json!({"requiredDLCS": ["gm", "ws"]});
+    assert_eq!(
+        repo_json_dlc_content_value(&json),
+        Some(&json!(["gm", "ws"]))
+    );
+}
+
+#[test]
+fn repo_json_dlc_content_value_absent_returns_none() {
+    let json = json!({"repoName": "Main"});
+    assert!(repo_json_dlc_content_value(&json).is_none());
+}
+
+#[test]
+fn swifty_required_dlcs_enable_creator_dlc_flags() {
+    let json = json!({"requiredDLCS": ["ws"]});
+    let mut repo = Repository::default();
+    apply_repo_dlc_content_from_repo_json(&mut repo, repo_json_dlc_content_value(&json).unwrap());
+    assert!(repo.ws);
+    assert!(!repo.gm);
 }
