@@ -156,6 +156,15 @@ pub fn generate_template_config(output: &Path) -> Result<()> {
         "iconImagePath": "icon.png",
         "repoImagePath": "repo.png",
         "clientParameters": "",
+        "dlcContent": {
+            "csla": false,
+            "ef": false,
+            "gm": false,
+            "rf": false,
+            "spe": false,
+            "vn": false,
+            "ws": false
+        },
         "repoBasicAuthentication": {
             "username": "",
             "password": ""

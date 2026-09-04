@@ -221,6 +221,7 @@ pub fn write_repo_json(
         repo_basic_authentication: config.repo_basic_authentication.clone(),
         version: config.version.clone(),
         servers: config.servers.clone(),
+        dlc_content: config.dlc_content,
     };
 
     let json = serde_json::to_string(&repo).context("Failed to serialize repo.json")?;
@@ -385,6 +386,7 @@ mod tests {
                 password: "pw".to_string(),
                 battle_eye: false,
             }],
+            dlc_content: None,
         };
 
         let json = serde_json::to_string(&repo).expect("repo serialization should work");
@@ -423,6 +425,7 @@ mod tests {
             repo_basic_authentication: crate::types::RepoBasicAuthentication::default(),
             version: "3.2.0.0".to_string(),
             servers: vec![],
+            dlc_content: None,
         };
 
         let json = serde_json::to_string(&repo).expect("repo serialization should work");

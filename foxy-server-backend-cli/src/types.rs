@@ -97,6 +97,85 @@ pub struct RepoConfig {
     pub version: String,
     #[serde(default)]
     pub servers: Vec<ServerEntry>,
+    #[serde(rename = "dlcContent", default)]
+    pub dlc_content: Option<DlcContent>,
+}
+
+/// Arma 3 DLC suggestions published in `repo.json` as `dlcContent`. Config
+/// authors may write either the object form (`{"gm": true}`) or a list of
+/// codes (`["gm", "spe"]`); both normalize to the object form on output.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct DlcContent {
+    pub csla: bool,
+    pub ef: bool,
+    pub gm: bool,
+    pub rf: bool,
+    pub spe: bool,
+    pub vn: bool,
+    pub ws: bool,
+}
+
+pub const DLC_CODES: [&str; 7] = ["csla", "ef", "gm", "rf", "spe", "vn", "ws"];
+
+impl DlcContent {
+    fn flag_mut(&mut self, code: &str) -> Option<&mut bool> {
+        match code {
+            "csla" => Some(&mut self.csla),
+            "ef" => Some(&mut self.ef),
+            "gm" => Some(&mut self.gm),
+            "rf" => Some(&mut self.rf),
+            "spe" => Some(&mut self.spe),
+            "vn" => Some(&mut self.vn),
+            "ws" => Some(&mut self.ws),
+            _ => None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for DlcContent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Codes(Vec<String>),
+            Flags(std::collections::BTreeMap<String, bool>),
+        }
+
+        let mut dlc = DlcContent::default();
+        match Raw::deserialize(deserializer)? {
+            Raw::Codes(codes) => {
+                for code in codes {
+                    let normalized = code.trim().to_ascii_lowercase();
+                    match dlc.flag_mut(&normalized) {
+                        Some(flag) => *flag = true,
+                        None => return Err(unknown_dlc_code::<D>(&code)),
+                    }
+                }
+            }
+            Raw::Flags(flags) => {
+                for (code, value) in flags {
+                    let normalized = code.trim().to_ascii_lowercase();
+                    match dlc.flag_mut(&normalized) {
+                        Some(flag) => *flag = value,
+                        None => return Err(unknown_dlc_code::<D>(&code)),
+                    }
+                }
+            }
+        }
+
+        Ok(dlc)
+    }
+}
+
+fn unknown_dlc_code<'de, D: serde::Deserializer<'de>>(code: &str) -> D::Error {
+    serde::de::Error::custom(format!(
+        "unknown dlcContent code \"{}\": expected one of {}",
+        code,
+        DLC_CODES.join(", ")
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -158,6 +237,8 @@ pub struct RepoJson {
     pub repo_basic_authentication: RepoBasicAuthentication,
     pub version: String,
     pub servers: Vec<ServerEntry>,
+    #[serde(rename = "dlcContent", skip_serializing_if = "Option::is_none")]
+    pub dlc_content: Option<DlcContent>,
 }
 
 #[derive(Debug, Serialize)]
@@ -412,6 +493,73 @@ mod tests {
         );
     }
 
+    // ── dlcContent deserialization ──────────────────────────────────────
+
+    #[test]
+    fn repo_config_without_dlc_content_is_none() {
+        let json = r#"{"repoName": "Test", "basePath": "/mods"}"#;
+        let config: RepoConfig = serde_json::from_str(json).unwrap();
+        assert!(config.dlc_content.is_none());
+    }
+
+    #[test]
+    fn dlc_content_object_form_sets_named_flags() {
+        let json = r#"{
+            "repoName": "Test",
+            "basePath": "/mods",
+            "dlcContent": { "gm": true, "spe": true, "ws": false }
+        }"#;
+        let config: RepoConfig = serde_json::from_str(json).unwrap();
+        let dlc = config.dlc_content.unwrap();
+        assert!(dlc.gm);
+        assert!(dlc.spe);
+        assert!(!dlc.ws);
+        assert!(!dlc.csla);
+    }
+
+    #[test]
+    fn dlc_content_array_form_sets_listed_codes() {
+        let json = r#"{
+            "repoName": "Test",
+            "basePath": "/mods",
+            "dlcContent": ["GM", " spe "]
+        }"#;
+        let config: RepoConfig = serde_json::from_str(json).unwrap();
+        let dlc = config.dlc_content.unwrap();
+        assert!(dlc.gm);
+        assert!(dlc.spe);
+        assert!(!dlc.vn);
+    }
+
+    #[test]
+    fn dlc_content_rejects_unknown_code() {
+        let json = r#"{
+            "repoName": "Test",
+            "basePath": "/mods",
+            "dlcContent": { "apex": true }
+        }"#;
+        let err = serde_json::from_str::<RepoConfig>(json)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("unknown dlcContent code"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn dlc_content_serializes_all_seven_flags() {
+        let dlc = DlcContent {
+            gm: true,
+            ..DlcContent::default()
+        };
+        let json = serde_json::to_string(&dlc).unwrap();
+        assert_eq!(
+            json,
+            r#"{"csla":false,"ef":false,"gm":true,"rf":false,"spe":false,"vn":false,"ws":false}"#
+        );
+    }
+
     // ── ServerEntry deserialization ──────────────────────────────────────
 
     #[test]
@@ -443,10 +591,38 @@ mod tests {
             repo_basic_authentication: RepoBasicAuthentication::default(),
             version: "3.2.0.0".to_string(),
             servers: vec![],
+            dlc_content: None,
         };
         let json = serde_json::to_string(&repo).unwrap();
         assert!(!json.contains("foxyMode"));
         assert!(!json.contains("appUpdateUrl"));
+    }
+
+    #[test]
+    fn repo_json_includes_dlc_content_when_present() {
+        let repo = RepoJson {
+            repo_name: "Test".to_string(),
+            checksum: "CS".to_string(),
+            foxy_mode: None,
+            required_mods: vec![],
+            optional_mods: vec![],
+            icon_image_path: String::new(),
+            icon_image_checksum: String::new(),
+            repo_image_path: String::new(),
+            repo_image_checksum: String::new(),
+            app_update_url: None,
+            client_parameters: String::new(),
+            repo_basic_authentication: RepoBasicAuthentication::default(),
+            version: "3.2.0.0".to_string(),
+            servers: vec![],
+            dlc_content: Some(DlcContent {
+                spe: true,
+                ..DlcContent::default()
+            }),
+        };
+        let json = serde_json::to_string(&repo).unwrap();
+        assert!(json.contains(r#""dlcContent":{"csla":false"#));
+        assert!(json.contains(r#""spe":true"#));
     }
 
     #[test]
@@ -466,6 +642,7 @@ mod tests {
             repo_basic_authentication: RepoBasicAuthentication::default(),
             version: "3.2.0.0".to_string(),
             servers: vec![],
+            dlc_content: None,
         };
         let json = serde_json::to_string(&repo).unwrap();
         assert!(json.contains("FoxyModeV1"));
