@@ -3,6 +3,7 @@ mod cli;
 mod config;
 mod discover;
 mod hash;
+mod keys;
 mod mod_line;
 mod srf;
 mod types;
@@ -30,16 +31,26 @@ fn main() -> Result<()> {
             mode,
             mod_line_prefix,
             mod_line_include_optional,
+            collect_keys,
+            keys_output,
+            additional_keys,
         } => cmd_create(
             &config,
             &output,
-            app_update_url.as_deref(),
-            threads,
-            mode,
-            cli.no_progress,
-            mod_line::ModLineOptions {
-                prefix: &mod_line_prefix,
-                include_optional: mod_line_include_optional,
+            CreateOptions {
+                app_update_url: app_update_url.as_deref(),
+                threads,
+                mode,
+                no_progress: cli.no_progress,
+                mod_line: mod_line::ModLineOptions {
+                    prefix: &mod_line_prefix,
+                    include_optional: mod_line_include_optional,
+                },
+                keys: KeyCollectionRequest {
+                    enabled: collect_keys || keys_output.is_some() || !additional_keys.is_empty(),
+                    dest: keys_output,
+                    additional_sources: additional_keys,
+                },
             },
         ),
         cli::Command::New { output } => cmd_new(&output),
@@ -76,15 +87,36 @@ fn main() -> Result<()> {
     }
 }
 
-fn cmd_create(
-    config_path: &std::path::Path,
-    output_dir: &std::path::Path,
-    app_update_url: Option<&str>,
+/// Everything `create` needs beyond the config and output paths.
+struct CreateOptions<'a> {
+    app_update_url: Option<&'a str>,
     threads: usize,
     mode: GenerationMode,
     no_progress: bool,
-    mod_line_options: mod_line::ModLineOptions<'_>,
+    mod_line: mod_line::ModLineOptions<'a>,
+    keys: KeyCollectionRequest,
+}
+
+/// How `create` was asked to build the combined keys folder.
+struct KeyCollectionRequest {
+    enabled: bool,
+    dest: Option<std::path::PathBuf>,
+    additional_sources: Vec<std::path::PathBuf>,
+}
+
+fn cmd_create(
+    config_path: &std::path::Path,
+    output_dir: &std::path::Path,
+    options: CreateOptions<'_>,
 ) -> Result<()> {
+    let CreateOptions {
+        app_update_url,
+        threads,
+        mode,
+        no_progress,
+        mod_line: mod_line_options,
+        keys: key_collection,
+    } = options;
     let started = Instant::now();
 
     let mode_label = match mode {
@@ -198,6 +230,30 @@ fn cmd_create(
         effective_app_update_url,
     )?;
 
+    let key_report = if key_collection.enabled {
+        let dest = key_collection
+            .dest
+            .unwrap_or_else(|| output_dir.join("keys"));
+        println!("Collecting keys into: {}", dest.display());
+        let report = keys::collect_keys(
+            output_dir,
+            &processed_mods,
+            &keys::KeyCollectionOptions {
+                dest: &dest,
+                additional_sources: &key_collection.additional_sources,
+            },
+        )?;
+        for name in &report.conflicts {
+            log::warn!(
+                "Multiple different keys named {}; kept the first one found",
+                name
+            );
+        }
+        Some((dest, report))
+    } else {
+        None
+    };
+
     // Summary
     let total_files: usize = processed_mods.iter().map(|m| m.files.len()).sum();
     let total_bytes: u64 = processed_mods
@@ -227,6 +283,19 @@ fn cmd_create(
     }
     if use_swifty {
         println!("  Artifacts:  mod.srf (per mod), repo.json");
+    }
+    if let Some((dest, report)) = &key_report {
+        println!("  Keys:       {} in {}", report.copied, dest.display());
+        if report.duplicates > 0 {
+            println!("              {} duplicate keys skipped", report.duplicates);
+        }
+        if !report.conflicts.is_empty() {
+            println!(
+                "              {} conflicting key names kept at first match: {}",
+                report.conflicts.len(),
+                report.conflicts.join(", ")
+            );
+        }
     }
 
     println!();

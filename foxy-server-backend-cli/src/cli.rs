@@ -50,6 +50,15 @@ pub enum Command {
         /// Include optional mods in the printed -mod= line
         #[arg(long)]
         mod_line_include_optional: bool,
+        /// Copy every .bikey from the generated mods into a combined keys folder
+        #[arg(long)]
+        collect_keys: bool,
+        /// Destination for the combined keys folder (default: <output>/keys, implies --collect-keys)
+        #[arg(long, value_name = "DIR")]
+        keys_output: Option<PathBuf>,
+        /// Extra key file or directory to add to the combined keys folder (repeatable, implies --collect-keys)
+        #[arg(long, value_name = "PATH")]
+        additional_keys: Vec<PathBuf>,
     },
     /// Generate a blank repository config file
     New {

@@ -219,6 +219,20 @@ Creator DLC codes from `dlcContent` come first, then the enabled required mods.
 Client-side mods are always excluded; add `--mod-line-include-optional` to append
 the optional mods as well.
 
+`--collect-keys` copies every `.bikey` found in the generated mods into a single
+flat folder (`<output>/keys` by default) so a wrapper script can push it to a
+server in one step:
+
+```bash
+foxy-server-backend-cli create config.json ./output   --collect-keys   --keys-output ./server/keys   --additional-keys ./a3-keys
+```
+
+`--keys-output` chooses the destination and `--additional-keys` adds a key file or
+a directory of keys (repeatable) for things Foxy does not generate, such as
+`a3.bikey` and the Creator DLC keys. Both imply `--collect-keys`. Keys are flattened
+by file name: byte-identical duplicates are skipped, and a name clash between two
+different keys keeps the first one and is reported.
+
 App update manifest flow:
 ```bash
 foxy-server-backend-cli setup-app-updater \
