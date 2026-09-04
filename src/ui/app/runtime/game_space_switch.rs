@@ -318,9 +318,13 @@ impl Foxy {
         self.direct_download_error = None;
         self.direct_download_update_view = false;
 
-        // Watcher suppression belongs to the watcher that was just stopped.
+        // Watcher suppression and staleness tracking belong to the watcher that
+        // was just stopped.
         self.fs_watch_suppressed_until_ms
             .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.fs_watch_signature = None;
+        self.fs_watch_index_dirty = false;
+        self.fs_watch_observed_repositories_revision = 0;
 
         // Images and metadata fetches.
         self.pending_image_jobs.clear();

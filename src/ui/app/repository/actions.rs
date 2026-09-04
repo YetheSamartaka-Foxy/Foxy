@@ -543,7 +543,7 @@ impl Foxy {
         self.save_repository_spaces();
         self.reconcile_repository_space_paths();
         self.maybe_auto_fill_app_update_url_from_metadata();
-        let added_required = self.add_missing_required_repository_space_entries(&space_id);
+        let added_required = self.add_missing_required_repository_space_entries(&space_id, ctx);
 
         if !space.icon_image_checksum.is_empty() {
             self.download_and_load_image(
@@ -578,7 +578,11 @@ impl Foxy {
         space_id
     }
 
-    fn add_missing_required_repository_space_entries(&mut self, space_id: &str) -> usize {
+    fn add_missing_required_repository_space_entries(
+        &mut self,
+        space_id: &str,
+        ctx: &egui::Context,
+    ) -> usize {
         let Some(space) = self
             .repository_spaces
             .iter()
@@ -591,6 +595,7 @@ impl Foxy {
         let shared_path_key = Self::normalize_repo_path_identity(&space.shared_path);
         let mut added_count = 0usize;
         let mut changed = false;
+        let mut metadata_refresh_indices = Vec::new();
 
         for entry in space.entries.iter().filter(|entry| entry.required) {
             let normalized_address = Self::normalize_repository_address_input(&entry.address);
@@ -633,12 +638,20 @@ impl Foxy {
             repo.repository_space_entry_address = Some(normalized_address);
 
             self.repository_view_state.repositories.push(repo);
+            metadata_refresh_indices.push(self.repository_view_state.repositories.len() - 1);
             added_count += 1;
             changed = true;
         }
 
         if changed {
             self.save_repositories();
+        }
+
+        // Same first-fetch every other add path runs. Without it an auto-added
+        // required repository keeps an empty addon list, servers, images and
+        // launch parameters until the user triggers a refresh by hand.
+        for repo_idx in metadata_refresh_indices {
+            self.update_repository_from_url(repo_idx, ctx);
         }
 
         added_count

@@ -247,6 +247,14 @@ pub struct Foxy {
     pub fs_watch_worker: Option<std::thread::JoinHandle<()>>,
     pub fs_watch_stop: Option<Arc<std::sync::atomic::AtomicBool>>,
     pub fs_watch_suppressed_until_ms: Arc<AtomicU64>,
+    /// Watched repository folders of the running watcher, so a repository added
+    /// or removed after startup restarts it instead of being ignored for the
+    /// rest of the session.
+    pub fs_watch_signature: Option<String>,
+    /// Set when the watcher's repository/addon index may be stale (a sync
+    /// created or changed addon rows it was spawned without).
+    pub fs_watch_index_dirty: bool,
+    pub fs_watch_observed_repositories_revision: u64,
     pub deferred_fs_scan: HashSet<String>,
     pub pending_quick_scan_urls: HashSet<String>,
     pub pending_quick_scan_prevalidated_urls: HashSet<String>,

@@ -248,6 +248,9 @@ impl Foxy {
 
         self.poll_restore_pending_updates();
         self.poll_startup_quick_scan_filter_results();
+        if self.startup_tasks_started {
+            self.refresh_fs_watcher_if_stale();
+        }
         self.poll_fs_watch_results();
         self.poll_quick_scan_progress();
         self.poll_quick_scan_results();

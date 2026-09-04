@@ -8,7 +8,7 @@ use log::{debug, info, warn};
 
 use crate::core::api::{self, SyncMode};
 use crate::ui::app::{Foxy, QuickScanProgressState, StartupQuickScanFilterResult};
-use crate::ui::types::{RepoState, sanitize_user_path};
+use crate::ui::types::{RepoState, Repository, sanitize_user_path};
 
 const FS_WATCH_DOWNLOAD_GRACE_MS: u64 = 3_000;
 
@@ -654,22 +654,45 @@ impl Foxy {
         }
     }
 
+    /// Distinct repository download folders, ordered, as the watcher registers
+    /// them.
+    pub(crate) fn fs_watch_paths_from_repositories(repositories: &[Repository]) -> Vec<String> {
+        let mut seen = HashSet::new();
+        let mut paths = Vec::new();
+        for repo in repositories {
+            let folder = repo.path.trim();
+            if folder.is_empty() {
+                continue;
+            }
+            if seen.insert(Self::repo_instance_path_key(folder)) {
+                paths.push(folder.to_string());
+            }
+        }
+        paths.sort_by_key(|path| Self::repo_instance_path_key(path));
+        paths
+    }
+
+    fn fs_watch_signature_for(paths: &[String]) -> String {
+        paths
+            .iter()
+            .map(|path| Self::repo_instance_path_key(path))
+            .collect::<Vec<_>>()
+            .join("\u{1f}")
+    }
+
     pub fn start_fs_watcher(&mut self) {
         if self.fs_watch_worker.is_some() {
             debug!("Filesystem watcher is already running");
             return;
         }
 
-        let mut watch_paths = HashSet::new();
-        for repo in &self.repository_view_state.repositories {
-            let folder = repo.path.trim();
-            if folder.is_empty() {
-                continue;
-            }
-            watch_paths.insert(folder.to_string());
-        }
+        let watch_paths =
+            Self::fs_watch_paths_from_repositories(&self.repository_view_state.repositories);
+        self.fs_watch_index_dirty = false;
+        self.fs_watch_observed_repositories_revision = self.repositories_revision;
 
         if watch_paths.is_empty() {
+            self.fs_watch_signature = None;
             info!("Filesystem watcher not started: no repository folders configured");
             return;
         }
@@ -678,15 +701,66 @@ impl Foxy {
             "Starting filesystem watcher for {} paths",
             watch_paths.len()
         );
+        self.fs_watch_signature = Some(Self::fs_watch_signature_for(&watch_paths));
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.fs_watch_stop = Some(stop.clone());
         self.fs_watch_worker = Some(api::spawn_repo_fs_watcher(
-            watch_paths.into_iter().collect(),
+            watch_paths,
             self.fs_watch_suppressed_until_ms.clone(),
             self.fs_watch_tx.clone(),
             self.repaint_ctx.clone(),
             stop,
         ));
+    }
+
+    /// Mark the watcher's repository/addon index stale. The index is built once
+    /// when the worker starts, so a repository added or synced afterwards stays
+    /// invisible to it until it is respawned.
+    pub(in crate::ui::app) fn mark_fs_watch_index_dirty(&mut self) {
+        self.fs_watch_index_dirty = true;
+    }
+
+    /// Respawn the watcher when the repositories it was started for no longer
+    /// match the configured ones, when its index went stale, or when the worker
+    /// exited early (it does that when no watchable path or index existed yet).
+    ///
+    /// Deferred while a sync is running or queued so a bulk repository-space run
+    /// respawns once at the end instead of after every repository.
+    pub(in crate::ui::app) fn refresh_fs_watcher_if_stale(&mut self) {
+        if self.settings_view_state.debug_mode {
+            return;
+        }
+        let worker_exited = self
+            .fs_watch_worker
+            .as_ref()
+            .is_some_and(|handle| handle.is_finished());
+        let repositories_changed =
+            self.fs_watch_observed_repositories_revision != self.repositories_revision;
+        if !self.fs_watch_index_dirty && !worker_exited && !repositories_changed {
+            return;
+        }
+
+        let watch_paths =
+            Self::fs_watch_paths_from_repositories(&self.repository_view_state.repositories);
+        let signature =
+            (!watch_paths.is_empty()).then(|| Self::fs_watch_signature_for(&watch_paths));
+        if !self.fs_watch_index_dirty && !worker_exited && signature == self.fs_watch_signature {
+            self.fs_watch_observed_repositories_revision = self.repositories_revision;
+            return;
+        }
+
+        if self.repository_sync_active()
+            || self.is_direct_download_running()
+            || !self.repository_space_sync_queue.is_empty()
+            || !self.repository_visual_folder_sync_queue.is_empty()
+            || !self.startup_recheck_queue.is_empty()
+        {
+            return;
+        }
+
+        info!("Restarting filesystem watcher after repository changes");
+        self.stop_fs_watcher();
+        self.start_fs_watcher();
     }
 
     /// Signal the filesystem watcher to exit and forget its handle so a
@@ -832,5 +906,56 @@ impl Foxy {
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn repo_at(path: &str) -> Repository {
+        Repository {
+            path: path.to_string(),
+            ..Repository::default()
+        }
+    }
+
+    #[test]
+    fn fs_watch_paths_skip_unconfigured_folders() {
+        let repositories = vec![repo_at("  "), repo_at("C:/mods"), repo_at("")];
+        assert_eq!(
+            Foxy::fs_watch_paths_from_repositories(&repositories),
+            vec!["C:/mods".to_string()]
+        );
+    }
+
+    #[test]
+    fn fs_watch_paths_collapse_equivalent_folders() {
+        let repositories = vec![
+            repo_at("C:/mods"),
+            repo_at("C:\\mods\\"),
+            repo_at("C:/other"),
+        ];
+        assert_eq!(
+            Foxy::fs_watch_paths_from_repositories(&repositories),
+            vec!["C:/mods".to_string(), "C:/other".to_string()]
+        );
+    }
+
+    #[test]
+    fn fs_watch_paths_are_order_independent() {
+        let one = Foxy::fs_watch_paths_from_repositories(&[repo_at("C:/b"), repo_at("C:/a")]);
+        let two = Foxy::fs_watch_paths_from_repositories(&[repo_at("C:/a"), repo_at("C:/b")]);
+        assert_eq!(one, two);
+    }
+
+    #[test]
+    fn fs_watch_signature_tracks_added_folder() {
+        let before = Foxy::fs_watch_paths_from_repositories(&[repo_at("C:/a")]);
+        let after = Foxy::fs_watch_paths_from_repositories(&[repo_at("C:/a"), repo_at("C:/b")]);
+        assert_ne!(
+            Foxy::fs_watch_signature_for(&before),
+            Foxy::fs_watch_signature_for(&after)
+        );
     }
 }

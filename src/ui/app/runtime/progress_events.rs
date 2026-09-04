@@ -652,6 +652,11 @@ impl Foxy {
                     let had_updates = last_mode != Some(SyncMode::Download) && update_count > 0;
                     self.syncing_repository = None;
                     self.current_sync_mode = None;
+                    // A sync is what first writes a repository's addon rows, and
+                    // the watcher indexes those only when it starts.
+                    if finished_successfully {
+                        self.mark_fs_watch_index_dirty();
+                    }
                     if last_mode == Some(SyncMode::Download) {
                         self.suppress_fs_watch_after_download();
                     }
