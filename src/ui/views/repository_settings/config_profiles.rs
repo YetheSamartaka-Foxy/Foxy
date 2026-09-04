@@ -12,6 +12,17 @@ impl Foxy {
         pad_f32: f32,
         changed: &mut bool,
     ) {
+        let repo = &self.repository_view_state.repositories[repo_index];
+        let profile_selected = repo
+            .selected_profile
+            .as_ref()
+            .is_some_and(|name| repo.profiles.iter().any(|profile| &profile.name == name));
+        let launch_params_managed =
+            !profile_selected && self.repo_apply_repo_json_client_parameters(repo);
+        let managed_hint = tr(
+            "Auto apply repo.json launch parameters is on, so the repository overwrites these fields on every refresh. Turn that setting off, or select a launch profile, to edit them.",
+        );
+
         let repo = &mut self.repository_view_state.repositories[repo_index];
         let (
             csla,
@@ -100,8 +111,12 @@ impl Foxy {
         // Basic Parameters
         ui.horizontal(|ui| {
             ui.label(tr("Basic Parameters"));
+            if launch_params_managed {
+                ui.weak(tr("(managed by repo.json)"))
+                    .on_hover_text(managed_hint.as_str());
+            }
         });
-        ui.scope(|ui| {
+        ui.add_enabled_ui(!launch_params_managed, |ui| {
             ui.spacing_mut().item_spacing = Vec2::new(10.0, 6.0);
             ui.horizontal_wrapped(|ui| {
                 for (flag, label, desc_key) in &mut [
@@ -152,14 +167,19 @@ impl Foxy {
         // Additional Parameters
         ui.horizontal(|ui| {
             ui.label(tr("Additional Parameters"));
+            if launch_params_managed {
+                ui.weak(tr("(managed by repo.json)"))
+                    .on_hover_text(managed_hint.as_str());
+            }
         });
         ui.horizontal(|ui| {
             let w = ui.available_width() - 2.0 * pad_f32;
             let r = ui
-                .add(TextEdit::singleline(additional_params).desired_width(w))
-                .on_hover_text(tr("Extra CLI startup parameters. Separate multiple options with spaces and wrap paths with spaces in quotes."));
+                .add_enabled(!launch_params_managed, TextEdit::singleline(additional_params).desired_width(w))
+                .on_hover_text(tr("Extra CLI startup parameters. Separate multiple options with spaces and wrap paths with spaces in quotes."))
+                .on_disabled_hover_text(managed_hint.as_str());
             if r.changed() { *changed = true; }
-            if r.hovered() {
+            if r.hovered() && !launch_params_managed {
                 ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
             }
         });

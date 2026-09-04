@@ -660,6 +660,8 @@
     "{stage} {percent}% - {speed} - {elapsed} elapsed / {remaining} remaining":  "{stage} {percent}% - {speed} - {elapsed} elapsed / {remaining} remaining",
     "Total update size: {size} - Files: {files} - Parts: {parts}":  "Total update size: {size} - Files: {files} - Parts: {parts}",
     "Additional Parameters":  "Additional Parameters",
+    "(managed by repo.json)":  "(managed by repo.json)",
+    "Auto apply repo.json launch parameters is on, so the repository overwrites these fields on every refresh. Turn that setting off, or select a launch profile, to edit them.":  "Auto apply repo.json launch parameters is on, so the repository overwrites these fields on every refresh. Turn that setting off, or select a launch profile, to edit them.",
     "Local Path":  "Local Path",
     "Creator DLCs":  "Creator DLCs",
     "Enable or disable external addons for this repository - mods found on disk that are not part of this repo's own addons.\nThey come from your other repositories, additional folders, and Steam Workshop. Steam Workshop mods appear only when \"Include Steam Addons\" is enabled.":  "Enable or disable external addons for this repository - mods found on disk that are not part of this repo's own addons.\nThey come from your other repositories, additional folders, and Steam Workshop. Steam Workshop mods appear only when \"Include Steam Addons\" is enabled.",
