@@ -56,47 +56,47 @@ zlib-ng = ["flate2/zlib-ng"]
 prerelease = []
 
 [dependencies]
-flexi_logger = { version = "0.31.9", features = ["async", "colors"] }
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.150"
+flexi_logger = { version = "0.31.10", features = ["async", "colors"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
 toon-format = { version = "0.5.0", default-features = false }
 scraper = "0.27.0"
-egui = "0.35.0"
-eframe = { version = "0.35.0", features = ["glow", "inspection"] }
+egui = "0.36.1"
+eframe = { version = "0.36.1", features = ["glow", "inspection"] }
 rfd = "0.17.2"
-tokio = { version = "1.52.3", features = ["time", "rt", "rt-multi-thread", "macros", "sync", "io-util", "fs"] }
-flate2 = { version = "1.1.9" , default-features = false}
-log = "0.4.33"
-futures = "0.3.32"
+tokio = { version = "1.53.1", features = ["time", "rt", "rt-multi-thread", "macros", "sync", "io-util", "fs"] }
+flate2 = { version = "1.1.10" , default-features = false}
+log = "0.4.34"
+futures = "0.3.34"
 reqwest = { version = "0.13.4", features = ["json", "blocking", "stream", "gzip", "brotli", "deflate"] }
 image = "0.25.10"
 dirs = "6.0.0"
 sha1 = "0.11.0"
-sha2 = "0.10.9"
+sha2 = "0.11.0"
 hex = "0.4.3"
-tokio-util = "0.7.18"
-anyhow = "1.0.103"
+tokio-util = "0.7.19"
+anyhow = "1.0.104"
 chrono = "0.4.45"
 ansi_term = "0.12.1"
-rand = "0.10.1"
+rand = "0.10.2"
 md-5 = "0.11.0"
-blake3 = "1.8.5"
+blake3 = { version = "1.8.7", features = ["mmap"] }
 once_cell = "1.21.4"
 notify = "8.2.0"
-clap = { version = "4.6.1", features = ["derive"] }
+clap = { version = "4.6.6", features = ["derive"] }
 sys-locale = "0.3.2"
-icu_collator = { version = "2.2.1", features = ["compiled_data"] }
-icu_locale_core = "2.2.0"
+icu_collator = { version = "2.3.1", features = ["compiled_data"] }
+icu_locale_core = "2.3.0"
 # Enable Wayland data-control clipboard support while keeping X11 support on Linux.
 arboard = { version = "3.6.1", default-features = false, features = ["image-data", "wayland-data-control"] }
 semver = "1.0.28"
 # Turso is used as a local-file persistence engine. Remote sync is intentionally
 # off; default features stay off to avoid unused FTS support and a process-wide
 # allocator override.
-turso = { version = "0.6.1", default-features = false }
+turso = { version = "0.7.2", default-features = false }
 fs4 = "1.1.0"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
-sysinfo = "0.39.5"
+sysinfo = "0.39.6"
 jmespath = "0.5.0"
 steamworks = "0.13.1"
 foxy-formats = { path = "foxy-formats" }

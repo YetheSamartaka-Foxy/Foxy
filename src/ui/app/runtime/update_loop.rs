@@ -479,12 +479,8 @@ impl Foxy {
         }
 
         egui::Window::new(self.t("Renderer changed"))
-            .frame(
-                egui::Frame::window(&ctx.global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(eframe::egui::CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ctx))
+            .title_frame(self.modal_window_chrome(ctx))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)
@@ -550,12 +546,8 @@ impl Foxy {
         let mut close_clicked = false;
 
         egui::Window::new(self.t("Foxy is already running"))
-            .frame(
-                egui::Frame::window(&ctx.global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(eframe::egui::CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ctx))
+            .title_frame(self.modal_window_chrome(ctx))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)
@@ -627,12 +619,8 @@ impl Foxy {
         let mut dismiss_clicked = false;
 
         egui::Window::new(self.t("Database update required"))
-            .frame(
-                egui::Frame::window(&ctx.global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(eframe::egui::CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ctx))
+            .title_frame(self.modal_window_chrome(ctx))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)
@@ -745,12 +733,8 @@ impl Foxy {
         let mut later_clicked = false;
 
         egui::Window::new(self.t("Foxy update available"))
-            .frame(
-                egui::Frame::window(&ctx.global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(eframe::egui::CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ctx))
+            .title_frame(self.modal_window_chrome(ctx))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)

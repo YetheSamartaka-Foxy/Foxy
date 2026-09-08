@@ -192,12 +192,8 @@ impl Foxy {
     pub(super) fn render_application_settings_wipe_db_confirmation(&mut self, ui: &mut Ui) {
         if self.show_wipe_db_confirmation {
             egui::Window::new(tr("Confirm Wipe Database"))
-                .frame(
-                    egui::Frame::window(&ui.ctx().global_style())
-                        .fill(self.color_card_bg())
-                        .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                        .corner_radius(eframe::egui::CornerRadius::same(10)),
-                )
+                .frame(self.modal_window_chrome(ui.ctx()))
+                .title_frame(self.modal_window_chrome(ui.ctx()))
                 .title_bar(true)
                 .collapsible(false)
                 .resizable(false)

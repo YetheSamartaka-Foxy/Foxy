@@ -1,5 +1,17 @@
+use crate::core::tasks::calculate_hashes::HashStorageClass;
+use crate::ui::types::HashIoProfilePreference;
 use md5::{Digest, Md5};
 use std::path::{Path, PathBuf};
+
+/// BLAKE3's documented threshold where `update_rayon` starts to win over `update`.
+pub(crate) const BLAKE3_RAYON_MIN_LEN: u64 = 128 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Blake3ReadStrategy {
+    Buffered,
+    Mmap,
+    MmapRayon,
+}
 
 /// Finalize a BLAKE3 hasher and return the first 32 hex characters (128 bits),
 /// matching the length of MD5 hex output for DB column compatibility.
@@ -83,6 +95,100 @@ pub(crate) fn blake3_file_hash(path: &Path) -> std::io::Result<String> {
         hasher.update(&buffer[..bytes]);
     }
     Ok(blake3_hex(hasher))
+}
+
+/// Choose how to read a file for a whole-file BLAKE3 hash.
+///
+/// Aggressive large files select `MmapRayon`, but client execution still mmaps
+/// single-threaded because hashing already fans out across files.
+pub(crate) fn select_blake3_read_strategy(
+    preference: HashIoProfilePreference,
+    storage: HashStorageClass,
+    file_len: u64,
+    path: &Path,
+) -> Blake3ReadStrategy {
+    if !blake3_mmap_path_allowed(path) {
+        return Blake3ReadStrategy::Buffered;
+    }
+
+    match preference {
+        HashIoProfilePreference::Conservative => Blake3ReadStrategy::Buffered,
+        HashIoProfilePreference::Auto | HashIoProfilePreference::Balanced => match storage {
+            HashStorageClass::Ssd => Blake3ReadStrategy::Mmap,
+            HashStorageClass::Hdd | HashStorageClass::Removable | HashStorageClass::Unknown => {
+                Blake3ReadStrategy::Buffered
+            }
+        },
+        HashIoProfilePreference::Aggressive => {
+            if file_len >= BLAKE3_RAYON_MIN_LEN {
+                Blake3ReadStrategy::MmapRayon
+            } else {
+                Blake3ReadStrategy::Mmap
+            }
+        }
+    }
+}
+
+pub(crate) fn blake3_file_hash_with(
+    path: &Path,
+    strategy: Blake3ReadStrategy,
+) -> std::io::Result<String> {
+    match strategy {
+        Blake3ReadStrategy::Buffered => blake3_file_hash(path),
+        Blake3ReadStrategy::Mmap | Blake3ReadStrategy::MmapRayon => {
+            match blake3_mmap_file_hash(path) {
+                Ok(hex) => Ok(hex),
+                Err(_) => blake3_file_hash(path),
+            }
+        }
+    }
+}
+
+fn blake3_mmap_file_hash(path: &Path) -> std::io::Result<String> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update_mmap(path)?;
+    Ok(blake3_hex(hasher))
+}
+
+/// Whole-file BLAKE3 via mmap, returning the same full-length uppercase digest
+/// as [`FlexHasher::finalize_hex`] rather than the 32-char truncation.
+///
+/// `None` means the caller must fall back to a buffered read: either the
+/// strategy forbids mmap for this path or the mapping failed.
+pub(crate) fn blake3_mmap_file_hash_full(
+    path: &Path,
+    strategy: Blake3ReadStrategy,
+) -> Option<String> {
+    if strategy == Blake3ReadStrategy::Buffered {
+        return None;
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update_mmap(path).ok()?;
+    Some(hasher.finalize().to_hex().to_uppercase())
+}
+
+fn blake3_mmap_path_allowed(path: &Path) -> bool {
+    if path_is_network_share(path) {
+        return false;
+    }
+    let lossy = path.to_string_lossy();
+    !is_foxy_temp_artifact_path(&lossy)
+}
+
+pub(crate) fn path_is_network_share(path: &Path) -> bool {
+    path_string_is_network_share(&path.to_string_lossy())
+}
+
+fn path_string_is_network_share(raw: &str) -> bool {
+    let normalized = raw.replace('/', "\\");
+    let upper = normalized.to_ascii_uppercase();
+    if upper.starts_with(r"\\?\UNC\") {
+        return true;
+    }
+    if normalized.starts_with(r"\\?\") {
+        return false;
+    }
+    normalized.starts_with(r"\\")
 }
 
 // Do not include creation time: it changes on copies/restores while content does not.
@@ -461,5 +567,225 @@ mod tests {
         let mut h = FlexHasher::from_checksum("ABC");
         h.update(b"x");
         assert_eq!(h.finalize_hex().len(), 32);
+    }
+
+    fn local_hash_path() -> &'static Path {
+        Path::new("addons/file.pbo")
+    }
+
+    fn assert_strategy(
+        preference: HashIoProfilePreference,
+        storage: HashStorageClass,
+        file_len: u64,
+        expected: Blake3ReadStrategy,
+    ) {
+        assert_eq!(
+            select_blake3_read_strategy(preference, storage, file_len, local_hash_path()),
+            expected,
+            "{preference:?} {storage:?} len={file_len}"
+        );
+    }
+
+    #[test]
+    fn blake3_strategy_auto_follows_storage_class() {
+        assert_strategy(
+            HashIoProfilePreference::Auto,
+            HashStorageClass::Ssd,
+            1,
+            Blake3ReadStrategy::Mmap,
+        );
+        assert_strategy(
+            HashIoProfilePreference::Auto,
+            HashStorageClass::Ssd,
+            BLAKE3_RAYON_MIN_LEN,
+            Blake3ReadStrategy::Mmap,
+        );
+        assert_strategy(
+            HashIoProfilePreference::Auto,
+            HashStorageClass::Hdd,
+            BLAKE3_RAYON_MIN_LEN,
+            Blake3ReadStrategy::Buffered,
+        );
+        assert_strategy(
+            HashIoProfilePreference::Auto,
+            HashStorageClass::Removable,
+            BLAKE3_RAYON_MIN_LEN,
+            Blake3ReadStrategy::Buffered,
+        );
+        assert_strategy(
+            HashIoProfilePreference::Auto,
+            HashStorageClass::Unknown,
+            BLAKE3_RAYON_MIN_LEN,
+            Blake3ReadStrategy::Buffered,
+        );
+    }
+
+    #[test]
+    fn blake3_strategy_conservative_never_mmaps() {
+        for storage in [
+            HashStorageClass::Ssd,
+            HashStorageClass::Hdd,
+            HashStorageClass::Removable,
+            HashStorageClass::Unknown,
+        ] {
+            assert_strategy(
+                HashIoProfilePreference::Conservative,
+                storage,
+                BLAKE3_RAYON_MIN_LEN,
+                Blake3ReadStrategy::Buffered,
+            );
+        }
+    }
+
+    #[test]
+    fn blake3_strategy_balanced_mmaps_ssd_only() {
+        assert_strategy(
+            HashIoProfilePreference::Balanced,
+            HashStorageClass::Ssd,
+            BLAKE3_RAYON_MIN_LEN,
+            Blake3ReadStrategy::Mmap,
+        );
+        assert_strategy(
+            HashIoProfilePreference::Balanced,
+            HashStorageClass::Hdd,
+            BLAKE3_RAYON_MIN_LEN,
+            Blake3ReadStrategy::Buffered,
+        );
+        assert_strategy(
+            HashIoProfilePreference::Balanced,
+            HashStorageClass::Removable,
+            1,
+            Blake3ReadStrategy::Buffered,
+        );
+        assert_strategy(
+            HashIoProfilePreference::Balanced,
+            HashStorageClass::Unknown,
+            1,
+            Blake3ReadStrategy::Buffered,
+        );
+    }
+
+    #[test]
+    fn blake3_strategy_aggressive_uses_size_threshold() {
+        let below = BLAKE3_RAYON_MIN_LEN - 1;
+        for storage in [
+            HashStorageClass::Ssd,
+            HashStorageClass::Hdd,
+            HashStorageClass::Removable,
+            HashStorageClass::Unknown,
+        ] {
+            assert_strategy(
+                HashIoProfilePreference::Aggressive,
+                storage,
+                below,
+                Blake3ReadStrategy::Mmap,
+            );
+            assert_strategy(
+                HashIoProfilePreference::Aggressive,
+                storage,
+                BLAKE3_RAYON_MIN_LEN,
+                Blake3ReadStrategy::MmapRayon,
+            );
+        }
+    }
+
+    #[test]
+    fn blake3_strategy_unc_forces_buffered() {
+        let unc = Path::new(r"\\server\share\mod.pbo");
+        assert_eq!(
+            select_blake3_read_strategy(
+                HashIoProfilePreference::Aggressive,
+                HashStorageClass::Ssd,
+                BLAKE3_RAYON_MIN_LEN,
+                unc,
+            ),
+            Blake3ReadStrategy::Buffered
+        );
+    }
+
+    #[test]
+    fn blake3_strategy_temp_artifact_forces_buffered() {
+        let temp = Path::new("addons/file.pbo.foxy.part");
+        assert_eq!(
+            select_blake3_read_strategy(
+                HashIoProfilePreference::Auto,
+                HashStorageClass::Ssd,
+                1,
+                temp,
+            ),
+            Blake3ReadStrategy::Buffered
+        );
+    }
+
+    #[test]
+    fn path_string_detects_unc_and_extended_local() {
+        assert!(path_string_is_network_share(r"\\server\share\file.pbo"));
+        assert!(path_string_is_network_share(
+            r"\\?\UNC\server\share\file.pbo"
+        ));
+        assert!(!path_string_is_network_share(r"\\?\C:\Mods\file.pbo"));
+        assert!(!path_string_is_network_share(r"C:\Mods\file.pbo"));
+        assert!(!path_string_is_network_share("/home/user/mods/file.pbo"));
+    }
+
+    #[test]
+    fn blake3_mmap_file_hash_full_matches_flex_hasher() {
+        let dir = tempfile::tempdir().unwrap();
+        let cases: &[(&str, &[u8])] = &[
+            ("empty.bin", b""),
+            ("one.bin", b"x"),
+            ("small.bin", &[0x33; 64 * 1024]),
+            ("large.bin", &[0x44; 2 * 1024 * 1024]),
+        ];
+        for (name, bytes) in cases {
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            let mut flex = FlexHasher::new_blake3();
+            flex.update(bytes);
+            let expected = flex.finalize_hex();
+            assert_eq!(expected.len(), 64);
+            assert_eq!(
+                blake3_mmap_file_hash_full(&path, Blake3ReadStrategy::Mmap).as_deref(),
+                Some(expected.as_str()),
+                "{name}"
+            );
+            assert_eq!(
+                blake3_mmap_file_hash_full(&path, Blake3ReadStrategy::MmapRayon).as_deref(),
+                Some(expected.as_str()),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn blake3_mmap_file_hash_full_defers_to_caller_when_unusable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.bin");
+        std::fs::write(&path, b"data").unwrap();
+        assert!(blake3_mmap_file_hash_full(&path, Blake3ReadStrategy::Buffered).is_none());
+        assert!(
+            blake3_mmap_file_hash_full(&dir.path().join("missing.bin"), Blake3ReadStrategy::Mmap)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn blake3_file_hash_with_mmap_matches_buffered() {
+        let dir = tempfile::tempdir().unwrap();
+        let cases: &[(&str, &[u8])] = &[
+            ("empty.bin", b""),
+            ("one.bin", b"x"),
+            ("small.bin", &[0x11; 64 * 1024]),
+            ("large.bin", &[0x22; 2 * 1024 * 1024]),
+        ];
+        for (name, bytes) in cases {
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            let buffered = blake3_file_hash(&path).unwrap();
+            let mmap = blake3_file_hash_with(&path, Blake3ReadStrategy::Mmap).unwrap();
+            let mmap_rayon = blake3_file_hash_with(&path, Blake3ReadStrategy::MmapRayon).unwrap();
+            assert_eq!(buffered, mmap, "{name}");
+            assert_eq!(buffered, mmap_rayon, "{name}");
+        }
     }
 }

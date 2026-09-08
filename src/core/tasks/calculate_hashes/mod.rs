@@ -65,4 +65,7 @@ pub(crate) use propagation::{
     finalize_repository_hashes_from_tree, pre_propagate_sibling_checksums,
     propagate_checksums_to_siblings,
 };
-pub(crate) use scheduling::{AddonHashMetrics, HashStorageClass, detect_storage_class_for_path};
+pub(crate) use scheduling::{
+    AddonHashMetrics, HashStorageClass, detect_storage_class_for_path,
+    invalidate_storage_class_cache,
+};

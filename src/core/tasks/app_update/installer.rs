@@ -437,3 +437,48 @@ fn linux_sudo_noninteractive_available() -> bool {
         .status()
         .is_ok_and(|status| status.success())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verify_installer_sha256_matches_known_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("installer.bin");
+        std::fs::write(&path, b"hello").unwrap();
+
+        assert!(
+            verify_installer(
+                &path,
+                "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+                "sha256",
+            )
+            .unwrap()
+        );
+        assert!(
+            verify_installer(
+                &path,
+                "2CF24DBA5FB0A30E26E83B2AC5B9E29E1B161E5C1FA7425E73043362938B9824",
+                "sha-256",
+            )
+            .unwrap()
+        );
+        assert!(!verify_installer(&path, "deadbeef", "sha256").unwrap());
+    }
+
+    #[test]
+    fn verify_installer_sha256_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.bin");
+        std::fs::write(&path, b"").unwrap();
+        assert!(
+            verify_installer(
+                &path,
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "sha256",
+            )
+            .unwrap()
+        );
+    }
+}

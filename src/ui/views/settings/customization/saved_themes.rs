@@ -202,12 +202,8 @@ impl Foxy {
         let mut save_requested = false;
         let mut cancel_requested = ui.input(|input| input.key_pressed(Key::Escape));
         eframe::egui::Window::new(tr("Add new theme"))
-            .frame(
-                eframe::egui::Frame::window(&ui.ctx().global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(eframe::egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(eframe::egui::CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ui.ctx()))
+            .title_frame(self.modal_window_chrome(ui.ctx()))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)

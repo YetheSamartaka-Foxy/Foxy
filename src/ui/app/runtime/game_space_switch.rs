@@ -209,6 +209,10 @@ impl Foxy {
     /// startup default. App-global state (window, theme, locale, activity
     /// log, app updates, backups, tray) is deliberately left alone.
     fn reset_space_scoped_state(&mut self) {
+        // Mount table snapshot behind hash IO tuning: the incoming space may sit
+        // on a drive attached after the last refresh.
+        crate::core::tasks::calculate_hashes::invalidate_storage_class_cache();
+
         // Steam Workshop store of the outgoing space.
         self.workshop_view_state = crate::ui::views::workshop::WorkshopViewState::default();
 

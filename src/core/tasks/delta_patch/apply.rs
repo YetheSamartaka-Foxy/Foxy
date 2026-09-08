@@ -491,7 +491,17 @@ pub(crate) async fn cleanup_patch_artifacts(
 pub(super) async fn compute_file_integrity_hash(path: &Path) -> anyhow::Result<String> {
     let path = path.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        crate::core::utils::content_hash::blake3_file_hash(&path)
+        let storage = crate::core::tasks::calculate_hashes::detect_storage_class_for_path(
+            &path.to_string_lossy(),
+        );
+        let file_len = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+        let strategy = crate::core::utils::content_hash::select_blake3_read_strategy(
+            crate::ui::types::HashIoProfilePreference::Auto,
+            storage,
+            file_len,
+            &path,
+        );
+        crate::core::utils::content_hash::blake3_file_hash_with(&path, strategy)
             .map_err(|e| anyhow::anyhow!("failed to hash {}: {}", path.display(), e))
     })
     .await

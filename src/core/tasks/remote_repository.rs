@@ -751,15 +751,6 @@ pub(crate) async fn remote_repository(
 
     let repository = Arc::new(repository);
 
-    // Suppress WAL autocheckpoint during the metadata rebuild to avoid
-    // frequent fsyncs from mid-write checkpoints. The WAL will grow temporarily
-    // but self-corrects when autocheckpoint is restored.
-    let db = context.db();
-    let suppressed_wal = db
-        .execute("PRAGMA wal_autocheckpoint = 0", params![])
-        .await
-        .is_ok();
-
     // Temporarily increase write concurrency for the rebuild. During first-run
     // metadata rebuild there are no competing writers (no downloads, no hash
     // persist, no UI writes), so extra permits are safe. We add permits before
@@ -790,12 +781,6 @@ pub(crate) async fn remote_repository(
             "Metadata rebuild: restored write permits to {}",
             *DB_WRITE_PERMITS
         );
-    }
-
-    if suppressed_wal {
-        let _ = db
-            .execute("PRAGMA wal_autocheckpoint = 256", params![])
-            .await;
     }
 
     let final_has_linked_addons =

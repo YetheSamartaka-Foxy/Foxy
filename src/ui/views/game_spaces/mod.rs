@@ -419,12 +419,8 @@ impl Foxy {
         let (confirm_key, cancel_key) = Self::game_space_modal_keys(ui);
         let mut close_modal = cancel_key;
         egui::Window::new(tr("Open game space"))
-            .frame(
-                egui::Frame::window(&ui.ctx().global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(egui::CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ui.ctx()))
+            .title_frame(self.modal_window_chrome(ui.ctx()))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)
@@ -476,12 +472,8 @@ impl Foxy {
         let (confirm_key, cancel_key) = Self::game_space_modal_keys(ui);
         let mut close_modal = cancel_key;
         egui::Window::new(tr("Remove game space"))
-            .frame(
-                egui::Frame::window(&ui.ctx().global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(egui::CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ui.ctx()))
+            .title_frame(self.modal_window_chrome(ui.ctx()))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)
@@ -551,12 +543,8 @@ impl Foxy {
             .input_mut(|input| input.consume_key(egui::Modifiers::NONE, Key::Escape));
         let mut create_requested = false;
         egui::Window::new(tr("Create game space"))
-            .frame(
-                egui::Frame::window(&ui.ctx().global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(egui::CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ui.ctx()))
+            .title_frame(self.modal_window_chrome(ui.ctx()))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)

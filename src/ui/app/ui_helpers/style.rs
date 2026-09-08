@@ -238,6 +238,16 @@ impl Foxy {
         Self::square_icon_button_size(icon_size, 30.0)
     }
 
+    /// Body and title-bar chrome for titled modal dialogs. Pass the same frame to
+    /// `Window::frame` and `Window::title_frame` so the title bar follows Foxy's
+    /// palette instead of the default window style.
+    pub fn modal_window_chrome(&self, ctx: &egui::Context) -> egui::Frame {
+        egui::Frame::window(&ctx.global_style())
+            .fill(self.color_card_bg())
+            .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
+            .corner_radius(egui::CornerRadius::same(10))
+    }
+
     pub fn toolbar_icon_button_size(icon_size: f32) -> Vec2 {
         Self::square_icon_button_size(icon_size, 30.0)
     }

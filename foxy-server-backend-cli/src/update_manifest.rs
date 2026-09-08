@@ -42,10 +42,14 @@ pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 
 /// Compute the blake3 hash of a file and return (hex_hash, file_size).
 pub fn hash_file(path: &Path) -> Result<(String, u64)> {
-    let data =
-        std::fs::read(path).with_context(|| format!("Failed to read file: {}", path.display()))?;
-    let hash = blake3::hash(&data);
-    Ok((hash.to_hex().to_string(), data.len() as u64))
+    let mut hasher = blake3::Hasher::new();
+    hasher
+        .update_mmap_rayon(path)
+        .with_context(|| format!("Failed to read file: {}", path.display()))?;
+    let size = std::fs::metadata(path)
+        .with_context(|| format!("Failed to read file: {}", path.display()))?
+        .len();
+    Ok((hasher.finalize().to_hex().to_string(), size))
 }
 
 /// Build a `PlatformEntry` from an installer file path.
@@ -125,6 +129,18 @@ mod tests {
         let (hash, size) = hash_file(&file).unwrap();
         assert_eq!(size, 0);
         assert_eq!(hash.len(), 64);
+    }
+
+    #[test]
+    fn hash_file_larger_than_rayon_threshold_matches_in_memory_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("large.bin");
+        let data = vec![0x5A_u8; 256 * 1024];
+        fs::write(&file, &data).unwrap();
+
+        let (hash, size) = hash_file(&file).unwrap();
+        assert_eq!(size, data.len() as u64);
+        assert_eq!(hash, blake3::hash(&data).to_hex().to_string());
     }
 
     #[test]

@@ -3,7 +3,7 @@ use crate::core::api::SyncMode;
 use crate::ui::app::Foxy;
 use crate::ui::i18n::{tr, tr_fmt};
 use crate::ui::types::FoxyView;
-use eframe::egui::{self, Align2, CornerRadius, Frame, Layout, Margin, Ui};
+use eframe::egui::{self, Align2, Frame, Layout, Margin, Ui};
 use log::{info, warn};
 
 impl Foxy {
@@ -48,8 +48,6 @@ impl Foxy {
         let color_primary_accent = self.color_primary_accent();
         let color_text_error = self.color_text_error();
         let color_text_dim = self.color_text_dim();
-        let color_card_bg = self.color_card_bg();
-        let color_text_normal = self.color_text_normal();
 
         let mut delete_repository = false;
         let mut force_redownload = false;
@@ -115,12 +113,8 @@ impl Foxy {
             .clone();
         if self.show_delete_confirmation {
             egui::Window::new(tr("Confirm Deletion"))
-                .frame(
-                    egui::Frame::window(&ui.ctx().global_style())
-                        .fill(color_card_bg)
-                        .stroke(egui::Stroke::new(1.0, color_text_normal))
-                        .corner_radius(CornerRadius::same(10)),
-                )
+                .frame(self.modal_window_chrome(ui.ctx()))
+                .title_frame(self.modal_window_chrome(ui.ctx()))
                 .title_bar(true)
                 .collapsible(false)
                 .resizable(false)
@@ -177,10 +171,8 @@ impl Foxy {
 
         if self.show_force_redownload_confirmation {
             egui::Window::new(tr("Confirm Force Redownload"))
-                .frame(egui::Frame::window(&ui.ctx().global_style())
-                    .fill(color_card_bg)
-                    .stroke(egui::Stroke::new(1.0, color_text_normal))
-                    .corner_radius(CornerRadius::same(10)))
+                .frame(self.modal_window_chrome(ui.ctx()))
+                .title_frame(self.modal_window_chrome(ui.ctx()))
                 .title_bar(true)
                 .collapsible(false)
                 .resizable(false)
@@ -222,12 +214,8 @@ impl Foxy {
 
         if self.show_wipe_repo_db_confirmation {
             egui::Window::new(tr("Confirm Repository Database Wipe"))
-                .frame(
-                    egui::Frame::window(&ui.ctx().global_style())
-                        .fill(color_card_bg)
-                        .stroke(egui::Stroke::new(1.0, color_text_normal))
-                        .corner_radius(CornerRadius::same(10)),
-                )
+                .frame(self.modal_window_chrome(ui.ctx()))
+                .title_frame(self.modal_window_chrome(ui.ctx()))
                 .title_bar(true)
                 .collapsible(false)
                 .resizable(false)

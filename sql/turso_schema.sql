@@ -25,7 +25,7 @@
 --   * strftime('%s','now') / CURRENT_TIMESTAMP defaults.
 --   * All UNIQUE constraints that back ON CONFLICT upserts.
 --
--- The `turso` crate exposes `Connection::execute_batch` (0.6.1+), so this whole
+-- The `turso` crate exposes `Connection::execute_batch` (0.7.2), so this whole
 -- file can be applied in one call; the runner also tolerates statement-by-
 -- statement application by splitting on `;` for portability.
 
@@ -153,11 +153,11 @@ CREATE TABLE IF NOT EXISTS download_patch_file (
 );
 
 CREATE TABLE IF NOT EXISTS download_patch_op (
-    -- Plain INTEGER PRIMARY KEY (rowid alias) rather than AUTOINCREMENT: Turso's
-    -- MVCC mode (journal_mode='mvcc', default-on) rejects AUTOINCREMENT at parse
-    -- time, and `id` is not semantically consumed - rows are keyed by the
-    -- (file_id, data_order) UNIQUE constraint, so rowid reuse after deletes is
-    -- harmless. (plan.md §6/§11.)
+    -- Plain INTEGER PRIMARY KEY (rowid alias) rather than AUTOINCREMENT: `id`
+    -- is not semantically consumed - rows are keyed by the (file_id, data_order)
+    -- UNIQUE constraint, so rowid reuse after deletes is harmless. Turso 0.7
+    -- MVCC can parse AUTOINCREMENT via sequences, but Foxy still should not
+    -- use it (WAL is the default; sequence `changes()` had leaks through 0.7.2).
     id               INTEGER PRIMARY KEY,
     file_id          INTEGER NOT NULL,
     data_order       INTEGER NOT NULL,

@@ -84,12 +84,8 @@ impl Foxy {
         };
 
         egui::Window::new(title)
-            .frame(
-                egui::Frame::window(&ctx.global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ctx))
+            .title_frame(self.modal_window_chrome(ctx))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)
@@ -779,12 +775,8 @@ impl Foxy {
         let mut confirm = false;
         let mut cancel = false;
         egui::Window::new(self.t("Confirm Deletion"))
-            .frame(
-                egui::Frame::window(&ctx.global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ctx))
+            .title_frame(self.modal_window_chrome(ctx))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)
@@ -857,12 +849,8 @@ impl Foxy {
         let mut confirm = false;
         let mut cancel = false;
         egui::Window::new(self.t("Confirm Dependency Removal"))
-            .frame(
-                egui::Frame::window(&ctx.global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ctx))
+            .title_frame(self.modal_window_chrome(ctx))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)
@@ -932,12 +920,8 @@ impl Foxy {
         let mut confirm = false;
         let mut cancel = false;
         egui::Window::new(self.t("Duplicate mission"))
-            .frame(
-                egui::Frame::window(&ctx.global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ctx))
+            .title_frame(self.modal_window_chrome(ctx))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)
@@ -1022,12 +1006,8 @@ impl Foxy {
             self.t("Launch editor with external addons?")
         };
         egui::Window::new(title)
-            .frame(
-                egui::Frame::window(&ctx.global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ctx))
+            .title_frame(self.modal_window_chrome(ctx))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)
@@ -1146,12 +1126,8 @@ impl Foxy {
         let mut submit = false;
         let mut close = false;
         egui::Window::new(self.t("Add repository"))
-            .frame(
-                egui::Frame::window(&ctx.global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ctx))
+            .title_frame(self.modal_window_chrome(ctx))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)
@@ -1341,12 +1317,8 @@ impl Foxy {
             RepositorySpaceBulkMode::RecheckAll => self.t("Recheck all repositories"),
             RepositorySpaceBulkMode::UpdateAll => self.t("Update all repositories"),
         })
-        .frame(
-            egui::Frame::window(&ctx.global_style())
-                .fill(self.color_card_bg())
-                .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                .corner_radius(CornerRadius::same(10)),
-        )
+        .frame(self.modal_window_chrome(ctx))
+        .title_frame(self.modal_window_chrome(ctx))
         .title_bar(true)
         .collapsible(false)
         .resizable(false)
@@ -1505,12 +1477,8 @@ impl Foxy {
         let mut proceed = false;
         let mut cancel = false;
         egui::Window::new(self.t("Duplicate repository detected"))
-            .frame(
-                egui::Frame::window(&ctx.global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ctx))
+            .title_frame(self.modal_window_chrome(ctx))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)
@@ -1612,12 +1580,8 @@ impl Foxy {
         let mut confirm = false;
         let mut cancel = false;
         egui::Window::new(self.t("Confirm Repository Space Deletion"))
-            .frame(
-                egui::Frame::window(&ctx.global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ctx))
+            .title_frame(self.modal_window_chrome(ctx))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)
@@ -1680,12 +1644,8 @@ impl Foxy {
         let mut save = false;
         let mut cancel = false;
         egui::Window::new(title)
-            .frame(
-                egui::Frame::window(&ctx.global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ctx))
+            .title_frame(self.modal_window_chrome(ctx))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)
@@ -1772,12 +1732,8 @@ impl Foxy {
         let mut confirm = false;
         let mut cancel = false;
         egui::Window::new(self.t("Delete folder"))
-            .frame(
-                egui::Frame::window(&ctx.global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ctx))
+            .title_frame(self.modal_window_chrome(ctx))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)
@@ -1882,12 +1838,8 @@ impl Foxy {
         let mut confirm = false;
         let mut cancel = false;
         egui::Window::new(title)
-            .frame(
-                egui::Frame::window(&ctx.global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ctx))
+            .title_frame(self.modal_window_chrome(ctx))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)

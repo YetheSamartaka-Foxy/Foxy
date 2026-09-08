@@ -14,6 +14,8 @@
 //! - `wal_autocheckpoint` / `journal_size_limit` / `mmap_size` are no-ops (Turso
 //!   manages its own WAL) → dropped, not reproduced.
 //! - `connect()` is ~16µs → per-task connections, no pool.
+//! - No statement interrupt / query timeout on `Connection` in 0.7.2 (unlike the
+//!   Python SDK) → cancellation stays cooperative at the task level.
 #![allow(dead_code)] // A few helpers (db_retry_transaction, etc.) are exercised only by tests.
 
 use std::fs;
@@ -121,7 +123,7 @@ pub(crate) async fn build_and_bootstrap(path: &str) -> turso::Result<Database> {
     Ok(db)
 }
 
-/// Apply a multi-statement schema. Turso 0.6.1 has `execute_batch`, but the
+/// Apply a multi-statement schema. Turso 0.7.2 has `execute_batch`, but the
 /// bootstrap file is heavily commented (including inline `-- …` column notes),
 /// so we strip comments and execute statement-by-statement for deterministic
 /// behavior regardless of the engine's batch tokenizer.
@@ -261,10 +263,11 @@ pub(crate) async fn connect_tuned(db: &Database) -> turso::Result<Connection> {
 // baseline - almost entirely on `subfiles`. Compacting the file rebuilds those
 // B-trees densely and is the single highest-value lever (analysis4 §P0).
 //
-// In-place `VACUUM` is gated behind Turso's `--experimental-vacuum` (unusable at
-// runtime), but `VACUUM INTO '<file>'` - which writes a fully compacted *copy* to
-// a new file - works in 0.6.1 (probe `probe_vacuum_into`: 463→36 pages). So we
-// compact by VACUUM INTO a sibling temp file then atomically swap it in.
+// In-place `VACUUM` is still experimental in Turso 0.7.2. `VACUUM INTO` is
+// supported and 0.7 claims a nested-yield panic fix, but 0.6.1 panicked on
+// large/bloated files (`vdbe/vacuum.rs`) even though the tiny
+// `probe_vacuum_into` passed. Keep the manual row copy until a large bloated
+// file survives VACUUM INTO; then swap in VACUUM INTO with this copy as fallback.
 
 /// Compact only when the file is BOTH substantially free-paged AND large enough
 /// that the walk cost matters - a fresh/small db is never churned.
@@ -541,6 +544,8 @@ async fn copy_table(src: &Connection, dst: &Connection, table: &str) -> turso::R
                 "INSERT INTO {table} ({col_list}) VALUES {}",
                 vec![row_ph.as_str(); pending].join(", ")
             );
+            // Sequential await: 0.7 rejects a second write on the same connection
+            // while one is in flight (`StatementsInProgress`, not lock Busy).
             dst.execute(&sql, std::mem::take(&mut buf)).await?;
             pending = 0;
         }
@@ -559,9 +564,10 @@ async fn copy_table(src: &Connection, dst: &Connection, table: &str) -> turso::R
 /// file by re-inserting every live row into a fresh schema (a dense rebuild -
 /// the only free pages it has are its own). Returns the temp path on success.
 ///
-/// NB: we do NOT use `VACUUM INTO` - it **panics inside Turso 0.6.1**
-/// (`vdbe/vacuum.rs:845`) on large/bloated files (it worked only on the tiny
-/// probe db). The manual SELECT/INSERT copy avoids that engine path entirely.
+/// NB: we do NOT use `VACUUM INTO` yet. It panicked inside Turso 0.6.1 on
+/// large/bloated files (the tiny `probe_vacuum_into` passed). 0.7.2 claims a
+/// nested-yield fix, but compaction stays on this copy path until a large-file
+/// probe is green.
 async fn build_compacted_copy(path: &Path) -> turso::Result<PathBuf> {
     let tmp = with_suffix(path, ".compacting");
     remove_db_artifacts(&tmp);
@@ -884,8 +890,20 @@ pub(crate) async fn build_test_database() -> Arc<Database> {
     Arc::new(db)
 }
 
+/// Same-connection overlap: Turso 0.7 maps `StatementsInProgress` to `Error::Busy`
+/// (SQLITE_BUSY class) but waiting cannot help - only finishing or resetting the
+/// in-flight statement can. Must not burn [`DB_BUSY_TIMEOUT`] / retry backoff.
+fn db_error_is_same_connection_overlap(message: &str) -> bool {
+    message
+        .to_ascii_lowercase()
+        .contains("sql statements in progress")
+}
+
 /// Shared classifier for transient DB errors used by every retry loop.
 pub(crate) fn db_error_message_is_retryable(message: &str) -> bool {
+    if db_error_is_same_connection_overlap(message) {
+        return false;
+    }
     let m = message.to_ascii_lowercase();
     m.contains("conflict")
         || m.contains("busy")
@@ -898,10 +916,12 @@ pub(crate) fn db_error_message_is_retryable(message: &str) -> bool {
 /// Default-mode busy/locked → `Busy`/`BusySnapshot`. MVCC write–write conflicts
 /// surface as `Error(msg)` containing `"conflict"`, and an aborted conflicting
 /// txn can report `"no transaction is active"` at COMMIT (spike §11). All are
-/// transient and safe to retry after a fresh `BEGIN`.
+/// transient and safe to retry after a fresh `BEGIN`. Same-connection
+/// `StatementsInProgress` arrives as `Busy` but is not lock contention.
 pub(crate) fn db_is_retryable(err: &Error) -> bool {
     match err {
-        Error::Busy(_) | Error::BusySnapshot(_) => true,
+        Error::Busy(msg) if !db_error_is_same_connection_overlap(msg) => true,
+        Error::BusySnapshot(_) => true,
         Error::Error(msg) => db_error_message_is_retryable(msg),
         _ => false,
     }
@@ -1067,6 +1087,12 @@ mod tests {
         ));
         assert!(!db_error_message_is_retryable("no such table: files"));
         assert!(!db_error_message_is_retryable("disk I/O error"));
+        assert!(!db_error_message_is_retryable(
+            "cannot start a write statement - SQL statements in progress"
+        ));
+        assert!(!db_error_message_is_retryable(
+            "Busy: cannot commit transaction - SQL statements in progress"
+        ));
     }
 
     #[tokio::test]
@@ -1694,7 +1720,7 @@ mod tests {
 
     #[test]
     fn retryable_classification() {
-        assert!(db_is_retryable(&Error::Busy("x".into())));
+        assert!(db_is_retryable(&Error::Busy("Database is busy".into())));
         assert!(db_is_retryable(&Error::BusySnapshot("x".into())));
         assert!(db_is_retryable(&Error::Error(
             "write-write conflict".into()
@@ -1704,6 +1730,76 @@ mod tests {
         )));
         assert!(!db_is_retryable(&Error::Error("syntax error".into())));
         assert!(!db_is_retryable(&Error::Constraint("unique".into())));
+        assert!(!db_is_retryable(&Error::Busy(
+            "cannot start a write statement - SQL statements in progress".into()
+        )));
+        assert!(!db_is_retryable(&Error::Interrupt("cancelled".into())));
+    }
+
+    #[tokio::test]
+    async fn connect_tuned_defaults_to_wal_with_mvcc_off() {
+        assert!(
+            !mvcc_enabled(),
+            "FOXY_DB_MVCC must stay unset in the default test process"
+        );
+        let (_dir, db) = temp_db().await;
+        let conn = connect_tuned(&db).await.unwrap();
+        let mode = read_journal_mode(&conn).await.expect("journal_mode");
+        assert_eq!(mode.to_ascii_lowercase(), "wal");
+    }
+
+    #[tokio::test]
+    async fn statements_in_progress_is_not_retried_as_lock_busy() {
+        let (_dir, db) = temp_db().await;
+        let conn = connect_tuned(&db).await.unwrap();
+        let started = Instant::now();
+        let err = db_retry_transaction(&conn, "overlap", false, |_| {
+            Box::pin(async {
+                Err(Error::Busy(
+                    "cannot start a write statement - SQL statements in progress".into(),
+                ))
+            })
+        })
+        .await
+        .expect_err("same-connection overlap must fail");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "must not burn DB_BUSY_TIMEOUT, took {elapsed:?}"
+        );
+        assert!(!db_is_retryable(&err));
+    }
+
+    #[tokio::test]
+    async fn same_connection_overlapping_writes_do_not_burn_busy_timeout() {
+        let (_dir, db) = temp_db().await;
+        let conn = connect_tuned(&db).await.unwrap();
+        conn.execute(
+            "CREATE TABLE overlap_t (id INTEGER PRIMARY KEY, v BLOB)",
+            (),
+        )
+        .await
+        .unwrap();
+        let blob = vec![0u8; 256 * 1024];
+        let conn2 = conn.clone();
+        let started = Instant::now();
+        let (a, b) = tokio::join!(
+            conn.execute("INSERT INTO overlap_t (v) VALUES (?)", [blob.clone()]),
+            conn2.execute("INSERT INTO overlap_t (v) VALUES (?)", [blob]),
+        );
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < DB_BUSY_TIMEOUT,
+            "overlapping writes must not wait the full busy_timeout, took {elapsed:?}"
+        );
+        for result in [a, b] {
+            if let Err(err) = result {
+                assert!(
+                    !db_is_retryable(&err),
+                    "rejected second write must not be classified as lock Busy: {err}"
+                );
+            }
+        }
     }
 
     /// Diagnostic: inspect a copy of the production database for bloat (free
@@ -1934,10 +2030,10 @@ mod tests {
         }
     }
 
-    /// Probe: does Turso 0.6.1 support `VACUUM INTO 'file'` (compacted copy to a
-    /// new file, which does NOT need the experimental in-place vacuum flag)? If
-    /// yes, startup compaction is a one-liner + file swap. Bloats a fresh db, then
-    /// tries VACUUM INTO. Run:
+    /// Probe: does Turso 0.7.2 `VACUUM INTO 'file'` survive a bloated copy
+    /// (compacted copy to a new file, which does NOT need the experimental
+    /// in-place vacuum flag)? Tiny dbs passed on 0.6.1; large files panicked.
+    /// Keep `copy_table` until a large bloated file is green. Run:
     /// `cargo test -p Foxy probe_vacuum_into -- --ignored --nocapture`
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore]
@@ -1997,6 +2093,87 @@ mod tests {
                 );
             }
             Err(e) => eprintln!("VACUUM INTO ERR: {e}"),
+        }
+    }
+
+    /// Large-file companion to [`probe_vacuum_into`]. The tiny probe passed on
+    /// 0.6.1 while production-sized files panicked in `vdbe/vacuum.rs`, so
+    /// `build_compacted_copy` cannot be replaced by VACUUM INTO until a bloated
+    /// multi-hundred-MB file is green. Bloats the db to `FOXY_VACUUM_PROBE_MB`
+    /// (default 512), deletes every row, then vacuums into a sibling file. Run:
+    /// `cargo test --release -p Foxy probe_vacuum_into_large_bloated_file -- --ignored --nocapture`
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore]
+    async fn probe_vacuum_into_large_bloated_file() {
+        const ROW_PAYLOAD_BYTES: usize = 64 * 1024;
+
+        let target_mb: u64 = std::env::var("FOXY_VACUUM_PROBE_MB")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(512);
+        let target_bytes = target_mb * 1024 * 1024;
+        let rows = (target_bytes / ROW_PAYLOAD_BYTES as u64).max(1);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("database.db");
+        let path_str = path.to_string_lossy().to_string();
+        let db = build_and_bootstrap(&path_str).await.unwrap();
+        let conn = connect_tuned(&db).await.unwrap();
+
+        conn.execute(
+            "INSERT INTO files (id, name, remote_path, local_path) VALUES (1,'f','rp','lp')",
+            (),
+        )
+        .await
+        .unwrap();
+
+        let payload = "x".repeat(ROW_PAYLOAD_BYTES);
+        let sql = "INSERT INTO subfiles (file_id, path, local_length, local_start, remote_length, remote_start, local_checksum, remote_checksum, data_order) VALUES (1, ?, 0, 0, 0, 0, '', ?, ?)";
+        for i in 0..rows {
+            conn.execute(sql, (payload.clone(), format!("rc{i}"), i as i64))
+                .await
+                .unwrap();
+        }
+        conn.execute("DELETE FROM subfiles", ()).await.unwrap();
+
+        async fn pc(conn: &Connection, sql: &str) -> Option<turso::Value> {
+            let mut rows = conn.query(sql, ()).await.ok()?;
+            rows.next()
+                .await
+                .ok()
+                .flatten()
+                .and_then(|r| r.get_value(0).ok())
+        }
+        let file_bytes = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        eprintln!(
+            "before: bytes={file_bytes} page_count={:?} freelist={:?}",
+            pc(&conn, "PRAGMA page_count").await,
+            pc(&conn, "PRAGMA freelist_count").await
+        );
+        assert!(
+            file_bytes >= target_bytes / 2,
+            "probe did not build a large enough file: {file_bytes} bytes"
+        );
+
+        let into = dir.path().join("compacted.db");
+        let vacuum_sql = format!(
+            "VACUUM INTO '{}'",
+            into.to_string_lossy().replace('\\', "/")
+        );
+        // A panic here (not an Err) is the 0.6.1 failure this probe exists to catch.
+        match conn.execute(&vacuum_sql, ()).await {
+            Ok(_) => {
+                let vacuumed_bytes = fs::metadata(&into).map(|m| m.len()).unwrap_or(0);
+                eprintln!(
+                    "VACUUM INTO OK -> {} bytes={vacuumed_bytes}",
+                    into.display()
+                );
+                assert!(
+                    vacuumed_bytes > 0 && vacuumed_bytes < file_bytes,
+                    "VACUUM INTO did not shrink: {file_bytes} -> {vacuumed_bytes}"
+                );
+            }
+            Err(e) => eprintln!("VACUUM INTO ERR (still not usable for compaction): {e}"),
         }
     }
 

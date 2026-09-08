@@ -664,12 +664,8 @@ impl Foxy {
             };
 
             egui::Window::new(title)
-                .frame(
-                    egui::Frame::window(&ui.ctx().global_style())
-                        .fill(self.color_card_bg())
-                        .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                        .corner_radius(egui::CornerRadius::same(10)),
-                )
+                .frame(self.modal_window_chrome(ui.ctx()))
+                .title_frame(self.modal_window_chrome(ui.ctx()))
                 .title_bar(true)
                 .collapsible(false)
                 .resizable(false)
@@ -823,12 +819,8 @@ impl Foxy {
         let mut confirm = false;
         let mut cancel = false;
         egui::Window::new(title)
-            .frame(
-                egui::Frame::window(&ui.ctx().global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ui.ctx()))
+            .title_frame(self.modal_window_chrome(ui.ctx()))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)
@@ -922,12 +914,8 @@ impl Foxy {
         let mut confirm = false;
         let mut cancel = false;
         egui::Window::new(title)
-            .frame(
-                egui::Frame::window(&ui.ctx().global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ui.ctx()))
+            .title_frame(self.modal_window_chrome(ui.ctx()))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)
@@ -1061,12 +1049,8 @@ impl Foxy {
             .filter(|state| state.repo_index == repo_index)
         {
             egui::Window::new(tr("Restore addon backup"))
-                .frame(
-                    egui::Frame::window(&ctx.global_style())
-                        .fill(self.color_card_bg())
-                        .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                        .corner_radius(CornerRadius::same(10)),
-                )
+                .frame(self.modal_window_chrome(ctx))
+                .title_frame(self.modal_window_chrome(ctx))
                 .title_bar(true)
                 .collapsible(false)
                 .resizable(false)

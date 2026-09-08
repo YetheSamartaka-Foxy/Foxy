@@ -1,8 +1,14 @@
 use super::part_hashes::{PartHashProgress, PartSpanSource, calculate_part_hashes};
 use super::*;
+use crate::core::utils::content_hash::{
+    Blake3ReadStrategy, blake3_mmap_file_hash_full, is_blake3_checksum, select_blake3_read_strategy,
+};
 use crate::core::utils::resource_profile::{ResourcePressure, ResourceProfile};
 use crate::core::utils::speed_of_light::{SolLight, sol_line};
 use crate::ui::types::HashIoProfilePreference;
+use std::path::PathBuf;
+use std::sync::Mutex;
+use std::time::Duration;
 use sysinfo::Disks;
 
 #[derive(Clone)]
@@ -333,20 +339,43 @@ fn detect_hash_storage_class(jobs: &[FileHashJob]) -> HashStorageClass {
     detect_storage_class_for_path(path)
 }
 
-pub(crate) fn detect_storage_class_for_path(path: &str) -> HashStorageClass {
-    let path = path.trim();
-    if path.is_empty() {
-        return HashStorageClass::Unknown;
+/// How long a refreshed mount table is reused. Long enough that a per-file
+/// lookup is cheap, short enough that plugging a drive in is picked up.
+const STORAGE_CLASS_CACHE_TTL: Duration = Duration::from_secs(60);
+
+type StorageClassMounts = Vec<(PathBuf, HashStorageClass)>;
+
+static STORAGE_CLASS_MOUNTS: Mutex<Option<(Instant, StorageClassMounts)>> = Mutex::new(None);
+
+/// Snapshot of mount point -> storage class. Not space-derived (disk topology is
+/// process-global), but still invalidated on space switch so a space that lives
+/// on a freshly attached drive never inherits a stale classification.
+pub(crate) fn invalidate_storage_class_cache() {
+    if let Ok(mut guard) = STORAGE_CLASS_MOUNTS.lock() {
+        *guard = None;
     }
-    let path = Path::new(path);
-    let disks = Disks::new_with_refreshed_list();
-    disks
+}
+
+fn storage_class_mounts() -> StorageClassMounts {
+    let Ok(mut guard) = STORAGE_CLASS_MOUNTS.lock() else {
+        return refresh_storage_class_mounts();
+    };
+    if let Some((refreshed_at, mounts)) = guard.as_ref()
+        && refreshed_at.elapsed() < STORAGE_CLASS_CACHE_TTL
+    {
+        return mounts.clone();
+    }
+    let mounts = refresh_storage_class_mounts();
+    *guard = Some((Instant::now(), mounts.clone()));
+    mounts
+}
+
+fn refresh_storage_class_mounts() -> StorageClassMounts {
+    Disks::new_with_refreshed_list()
         .iter()
-        .filter(|disk| storage_path_starts_with_mount(path, disk.mount_point()))
-        .max_by_key(|disk| disk.mount_point().as_os_str().len())
         .map(|disk| {
             let kind = format!("{:?}", disk.kind()).to_ascii_lowercase();
-            if kind.contains("hdd") {
+            let class = if kind.contains("hdd") {
                 HashStorageClass::Hdd
             } else if kind.contains("ssd") {
                 HashStorageClass::Ssd
@@ -354,8 +383,23 @@ pub(crate) fn detect_storage_class_for_path(path: &str) -> HashStorageClass {
                 HashStorageClass::Removable
             } else {
                 HashStorageClass::Unknown
-            }
+            };
+            (disk.mount_point().to_path_buf(), class)
         })
+        .collect()
+}
+
+pub(crate) fn detect_storage_class_for_path(path: &str) -> HashStorageClass {
+    let path = path.trim();
+    if path.is_empty() {
+        return HashStorageClass::Unknown;
+    }
+    let path = Path::new(path);
+    storage_class_mounts()
+        .into_iter()
+        .filter(|(mount, _)| storage_path_starts_with_mount(path, mount))
+        .max_by_key(|(mount, _)| mount.as_os_str().len())
+        .map(|(_, class)| class)
         .unwrap_or(HashStorageClass::Unknown)
 }
 
@@ -530,11 +574,33 @@ pub(super) fn build_file_hash_jobs(
     jobs
 }
 
+/// The inputs `select_blake3_read_strategy` needs, resolved once per run and
+/// carried down to each whole-file hash.
+#[derive(Clone, Copy)]
+pub(super) struct WholeFileHashIo {
+    profile: HashIoProfilePreference,
+    storage_class: HashStorageClass,
+}
+
+impl WholeFileHashIo {
+    fn new(profile: HashIoProfilePreference, storage_class: HashStorageClass) -> Self {
+        Self {
+            profile,
+            storage_class,
+        }
+    }
+
+    fn strategy_for(&self, path: &Path, len: u64) -> Blake3ReadStrategy {
+        select_blake3_read_strategy(self.profile, self.storage_class, len, path)
+    }
+}
+
 async fn calculate_whole_file_checksum(
     file_path: String,
     expected_checksum: String,
     expected_len: u64,
     semaphore: Arc<Semaphore>,
+    hash_io: WholeFileHashIo,
 ) -> (Option<String>, super::part_hashes::PartHashMetrics) {
     const WHOLE_FILE_HASH_BUF_SIZE: usize = 4 * 1024 * 1024;
 
@@ -574,8 +640,17 @@ async fn calculate_whole_file_checksum(
 
     let blocking_started = Instant::now();
     let file_path_for_hash = file_path.clone();
+    let mmap_strategy = if is_blake3_checksum(&expected_checksum) {
+        hash_io.strategy_for(Path::new(&file_path), metadata.len())
+    } else {
+        Blake3ReadStrategy::Buffered
+    };
     let result = tokio::task::spawn_blocking(move || -> std::io::Result<String> {
         let _permit = permit;
+        if let Some(hex) = blake3_mmap_file_hash_full(Path::new(&file_path_for_hash), mmap_strategy)
+        {
+            return Ok(hex);
+        }
         let mut file = std::fs::File::open(&file_path_for_hash)?;
         let mut hasher = FlexHasher::from_checksum(&expected_checksum);
         let mut buffer = vec![0u8; WHOLE_FILE_HASH_BUF_SIZE];
@@ -617,6 +692,7 @@ pub(super) async fn recalculate_parts_for_jobs(
     progress_tx: Option<&Sender<ProgressEvent>>,
     progress: HashRunProgress,
     cancel_rx: Option<&watch::Receiver<bool>>,
+    hash_io: WholeFileHashIo,
 ) -> (Vec<FileHashResult>, bool) {
     // Shared semaphore limits the total in-flight spawn_blocking hash tasks across all files.
     let semaphore = Arc::new(Semaphore::new(global_part_concurrency));
@@ -683,6 +759,7 @@ pub(super) async fn recalculate_parts_for_jobs(
                     file_remote_checksum,
                     file_length,
                     sem,
+                    hash_io,
                 )
                 .await;
                 (
@@ -1162,6 +1239,7 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
             progress_tx,
             HashRunProgress::new(total_files, total_parts),
             cancel_rx,
+            WholeFileHashIo::new(profile, storage_class),
         )
         .await;
         let (results, cancelled) = results;
@@ -1206,6 +1284,7 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
             progress_tx,
             HashRunProgress::new(total_files, total_parts),
             cancel_rx,
+            WholeFileHashIo::new(effective_profile, storage_class),
         )
         .await;
         let (results, cancelled) = results;
@@ -1269,6 +1348,7 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
             progress_tx,
             HashRunProgress::new(total_files, total_parts),
             cancel_rx,
+            WholeFileHashIo::new(initial_profile, storage_class),
         )
         .await;
         let (results, cancelled) = results;
@@ -1351,6 +1431,7 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
             None,
             HashRunProgress::new(total_files, total_parts),
             cancel_rx,
+            WholeFileHashIo::new(profile, storage_class),
         )
         .await;
         let (mut results, cancelled) = results;
@@ -1429,6 +1510,7 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
             progress_tx,
             HashRunProgress::new(total_files, total_parts),
             cancel_rx,
+            WholeFileHashIo::new(initial_profile, storage_class),
         )
         .await;
         let (results, cancelled) = results;
@@ -1514,6 +1596,7 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
             initial_parts_done: benchmark_total_parts,
         },
         cancel_rx,
+        WholeFileHashIo::new(best_profile, storage_class),
     )
     .await;
     let (mut remaining_results, cancelled) = remaining_results;
@@ -1630,6 +1713,69 @@ mod tests {
         assert!(!missing_local_hash_pass_is_noop(&tree, &[0]));
     }
 
+    #[test]
+    fn storage_class_snapshot_is_reused_and_invalidated() {
+        invalidate_storage_class_cache();
+        let first = storage_class_mounts();
+        assert!(
+            STORAGE_CLASS_MOUNTS.lock().unwrap().is_some(),
+            "first lookup must populate the snapshot"
+        );
+        let second = storage_class_mounts();
+        assert_eq!(first.len(), second.len());
+        invalidate_storage_class_cache();
+        assert!(STORAGE_CLASS_MOUNTS.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn empty_path_has_unknown_storage_class() {
+        assert_eq!(
+            detect_storage_class_for_path("   "),
+            HashStorageClass::Unknown
+        );
+    }
+
+    #[tokio::test]
+    async fn whole_file_checksum_uses_mmap_for_blake3_on_ssd() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.bin");
+        let bytes = vec![0x5au8; 256 * 1024];
+        std::fs::write(&path, &bytes).unwrap();
+        let expected = blake3::hash(&bytes).to_hex().to_uppercase();
+
+        let (checksum, _) = calculate_whole_file_checksum(
+            path.to_string_lossy().to_string(),
+            expected.clone(),
+            bytes.len() as u64,
+            Arc::new(Semaphore::new(1)),
+            WholeFileHashIo::new(HashIoProfilePreference::Auto, HashStorageClass::Ssd),
+        )
+        .await;
+
+        assert_eq!(checksum.as_deref(), Some(expected.as_str()));
+    }
+
+    #[tokio::test]
+    async fn whole_file_checksum_md5_ignores_mmap_strategy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.bin");
+        std::fs::write(&path, b"hello").unwrap();
+        let mut md5 = FlexHasher::new_md5();
+        md5.update(b"hello");
+        let expected = md5.finalize_hex();
+
+        let (checksum, _) = calculate_whole_file_checksum(
+            path.to_string_lossy().to_string(),
+            expected.clone(),
+            5,
+            Arc::new(Semaphore::new(1)),
+            WholeFileHashIo::new(HashIoProfilePreference::Aggressive, HashStorageClass::Ssd),
+        )
+        .await;
+
+        assert_eq!(checksum.as_deref(), Some(expected.as_str()));
+    }
+
     #[tokio::test]
     async fn whole_file_checksum_hashes_no_part_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -1642,6 +1788,7 @@ mod tests {
             expected.clone(),
             5,
             Arc::new(Semaphore::new(1)),
+            WholeFileHashIo::new(HashIoProfilePreference::Auto, HashStorageClass::Unknown),
         )
         .await;
 
@@ -1661,6 +1808,7 @@ mod tests {
             expected,
             10,
             Arc::new(Semaphore::new(1)),
+            WholeFileHashIo::new(HashIoProfilePreference::Auto, HashStorageClass::Unknown),
         )
         .await;
 

@@ -665,16 +665,16 @@ impl Foxy {
             match viewport_class {
                 ViewportClass::EmbeddedWindow | ViewportClass::Root => {
                     let mut open = self.show_memory_diagnostics_window;
+                    let chrome = Frame::window(&viewport_ctx.global_style())
+                        .fill(self.color_main_bg())
+                        .stroke(egui::Stroke::new(1.0, self.color_text_gray()))
+                        .corner_radius(egui::CornerRadius::same(10));
                     egui::Window::new(self.t("Memory diagnostics"))
                         .open(&mut open)
                         .default_size(Vec2::new(940.0, 720.0))
                         .min_width(820.0)
-                        .frame(
-                            Frame::window(&viewport_ctx.global_style())
-                                .fill(self.color_main_bg())
-                                .stroke(egui::Stroke::new(1.0, self.color_text_gray()))
-                                .corner_radius(egui::CornerRadius::same(10)),
-                        )
+                        .frame(chrome)
+                        .title_frame(chrome)
                         .show(viewport_ctx, |ui| {
                             Frame::NONE.inner_margin(Margin::same(12)).show(ui, |ui| {
                                 self.refresh_memory_diagnostics_process_map(false);

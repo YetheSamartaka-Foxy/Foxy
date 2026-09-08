@@ -5,8 +5,8 @@ use crate::ui::types::{
     additional_folder_alias_key, path_is_inside_onedrive, sanitize_additional_folder_alias,
 };
 use eframe::egui::{
-    self, Align2, Button, CornerRadius, CursorIcon, Frame, Label, Margin, RichText, ScrollArea,
-    TextEdit, Ui, Vec2,
+    self, Align2, Button, CursorIcon, Frame, Label, Margin, RichText, ScrollArea, TextEdit, Ui,
+    Vec2,
 };
 use log::{info, warn};
 use rfd::FileDialog;
@@ -309,12 +309,8 @@ impl Foxy {
         let mut confirm = false;
         let mut cancel = false;
         egui::Window::new(tr("Confirm Folder Removal"))
-            .frame(
-                egui::Frame::window(&ui.ctx().global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ui.ctx()))
+            .title_frame(self.modal_window_chrome(ui.ctx()))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)
@@ -529,12 +525,8 @@ impl Foxy {
 
         egui::Window::new(tr("Direct download"))
             .open(&mut open)
-            .frame(
-                egui::Frame::window(&ctx.global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(eframe::egui::CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ctx))
+            .title_frame(self.modal_window_chrome(ctx))
             .collapsible(false)
             .resizable(true)
             .default_width(720.0)
