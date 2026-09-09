@@ -752,6 +752,7 @@ async fn run_repository_pipeline(
         mut cancel_rx,
         hash_algorithm_preference,
         hash_io_profile,
+        persisted_addon_selection,
     } = options;
     let mut builds_download_plan = should_build_download_plan(mode, prepare_download_plan);
     macro_rules! emit_progress {
@@ -784,11 +785,8 @@ async fn run_repository_pipeline(
     );
 
     // Normalize remote URL once so all stages use the same key that matches DB storage (trailing slash)
-    let normalized_repo_url = if repository_url.ends_with('/') {
-        repository_url.clone()
-    } else {
-        format!("{}/", repository_url)
-    };
+    let normalized_repo_url =
+        crate::core::models::repository::normalize_repository_url(&repository_url);
     let mut summary = PipelineSummary::new(
         operation_id.clone(),
         format!("{:?}", mode),
@@ -832,6 +830,25 @@ async fn run_repository_pipeline(
     );
     summary.push(StageEntry::new("create_context", stage.elapsed()));
     stage = std::time::Instant::now();
+
+    // `addons.enabled` is the scope signal every later DB-only read uses (quick
+    // scan readiness, the repository content-hash rollup, pending updates), and
+    // a metadata rebuild is skipped whenever the remote checksum is unchanged.
+    // Refresh it from the caller's durable selection so a deselected optional
+    // addon cannot keep the repository out of the quick scan fast path forever.
+    if let Some(selection) = persisted_addon_selection.as_ref() {
+        let selection: HashMap<String, bool> = selection
+            .iter()
+            .map(|(name, enabled)| (name.to_lowercase(), *enabled))
+            .collect();
+        crate::core::tasks::addon_enabled_state::persist_repository_addon_enabled_states(
+            context.clone(),
+            &normalized_repo_url,
+            &local_path,
+            &selection,
+        )
+        .await;
+    }
 
     // Self-heal a part-less repository. A repo whose files exist on disk but
     // whose `subfiles` (parts) were lost - e.g. an interrupted force-redownload

@@ -101,6 +101,19 @@ pub(crate) fn normalize_repository_local_path_identity(path: &str) -> String {
     crate::core::utils::content_hash::normalize_path(path)
 }
 
+/// Canonical remote-URL form: surrounding whitespace removed, separators
+/// forward-slashed, exactly one trailing slash. A repository instance is keyed
+/// by `(remote_url, local_path)`, so a stray trailing space in a configured
+/// address is enough to make every DB lookup miss its own row. An empty address
+/// stays empty rather than becoming a bare `/`.
+pub(crate) fn normalize_repository_url(url: &str) -> String {
+    let mut normalized = url.trim().replace('\\', "/");
+    if !normalized.is_empty() && !normalized.ends_with('/') {
+        normalized.push('/');
+    }
+    normalized
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn upsert_repository_entry(
     context: Arc<FoxyContext>,
@@ -235,6 +248,44 @@ pub async fn is_repository_foxy(remote_url: &str, local_path: &str) -> Option<bo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_repository_url_trims_surrounding_whitespace() {
+        assert_eq!(
+            normalize_repository_url("  https://example.com/repo/  "),
+            "https://example.com/repo/"
+        );
+        assert_eq!(
+            normalize_repository_url("https://example.com/repo\t\n"),
+            "https://example.com/repo/"
+        );
+    }
+
+    #[test]
+    fn normalize_repository_url_adds_single_trailing_slash() {
+        assert_eq!(
+            normalize_repository_url("https://example.com/repo"),
+            "https://example.com/repo/"
+        );
+        assert_eq!(
+            normalize_repository_url("https://example.com/repo/"),
+            "https://example.com/repo/"
+        );
+    }
+
+    #[test]
+    fn normalize_repository_url_forward_slashes_separators() {
+        assert_eq!(
+            normalize_repository_url("https://example.com\\repo"),
+            "https://example.com/repo/"
+        );
+    }
+
+    #[test]
+    fn normalize_repository_url_keeps_blank_blank() {
+        assert_eq!(normalize_repository_url(""), "");
+        assert_eq!(normalize_repository_url("   "), "");
+    }
 
     #[test]
     fn foxy_mode_from_db_str_v1() {

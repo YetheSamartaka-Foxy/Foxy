@@ -575,6 +575,12 @@ async fn refresh_content_hashes_for_tree_started(
                 let Some(addon) = tree.mods.get(*addon_idx) else {
                     continue;
                 };
+                // A disabled addon is never downloaded, so it can never earn a
+                // content hash; rolling it into the repository baseline would
+                // leave that baseline permanently empty.
+                if !addon.enabled {
+                    continue;
+                }
                 let Some(addon_hash) = addon_content_hash_by_idx.get(addon_idx).cloned() else {
                     all_addons_hashed = false;
                     break;

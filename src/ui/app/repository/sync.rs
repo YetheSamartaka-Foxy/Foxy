@@ -278,6 +278,9 @@ impl Foxy {
                 };
             let rollback_temp_directory = (mode == SyncMode::Download)
                 .then(|| sanitize_user_path(&self.effective_temp_directory()));
+            // The stored selection always comes from the profile, never from a
+            // transient override such as a standalone addon download.
+            let persisted_addon_selection = Self::resolve_selected_mod_states(&repo, None);
             let selected_mod_states =
                 Self::resolve_selected_mod_states(&repo, selected_mod_states_override);
             let repository_space_shared_path = repo.repository_space_id.as_deref().and_then(|id| {
@@ -311,6 +314,7 @@ impl Foxy {
                     cancel_rx,
                     hash_algorithm_preference: repo.hash_algorithm_preference,
                     hash_io_profile: self.settings_view_state.hash_io_profile,
+                    persisted_addon_selection: Some(persisted_addon_selection),
                 },
                 self.repaint_ctx.clone(),
             ));

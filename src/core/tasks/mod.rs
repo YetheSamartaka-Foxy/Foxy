@@ -1,3 +1,4 @@
+pub mod addon_enabled_state;
 pub mod app_update;
 pub mod calculate_hashes;
 pub mod create_context;

@@ -644,7 +644,7 @@ pub(crate) async fn finalize_repository_content_hashes_from_mods(
             r#"SELECT a.data_order, a.local_content_hash
                FROM repository_addons ra
                JOIN addons a ON a.id = ra.addon_id
-               WHERE ra.repository_id = ?
+               WHERE ra.repository_id = ? AND a.enabled = 1
                ORDER BY a.data_order ASC, a.id ASC"#,
             params![repo_id],
         )

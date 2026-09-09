@@ -908,11 +908,7 @@ fn repository_key(repository: &Repository) -> (String, String) {
 }
 
 fn normalize_repo_url(value: &str) -> String {
-    let mut normalized = value.trim().replace('\\', "/");
-    if !normalized.is_empty() && !normalized.ends_with('/') {
-        normalized.push('/');
-    }
-    normalized
+    crate::core::models::repository::normalize_repository_url(value)
 }
 
 fn normalize_zip_path_component(value: &str) -> String {

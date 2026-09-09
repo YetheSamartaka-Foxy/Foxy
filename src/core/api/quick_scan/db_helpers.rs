@@ -25,7 +25,7 @@ pub(crate) async fn remote_checksum_state_ready_joined(
             JOIN addons a ON a.id = ra.addon_id
             JOIN addon_files af ON af.addon_id = ra.addon_id
             JOIN files f ON f.id = af.file_id
-            WHERE ra.repository_id = ?"#,
+            WHERE ra.repository_id = ? AND a.enabled = 1"#,
             params![repository_id],
         )
         .await
@@ -60,9 +60,10 @@ pub(crate) async fn remote_checksum_state_ready_joined(
                 COUNT(*) AS part_count,
                 SUM(CASE WHEN sf.remote_checksum = '' THEN 1 ELSE 0 END) AS missing_part_checksums
             FROM repository_addons ra
+            JOIN addons a ON a.id = ra.addon_id
             JOIN addon_files af ON af.addon_id = ra.addon_id
             JOIN subfiles sf ON sf.file_id = af.file_id
-            WHERE ra.repository_id = ?"#,
+            WHERE ra.repository_id = ? AND a.enabled = 1"#,
             params![repository_id],
         )
         .await
@@ -107,7 +108,7 @@ pub(crate) async fn content_hash_baseline_ready_joined(
             JOIN addons a ON a.id = ra.addon_id
             JOIN addon_files af ON af.addon_id = ra.addon_id
             JOIN files f ON f.id = af.file_id
-            WHERE ra.repository_id = ?"#,
+            WHERE ra.repository_id = ? AND a.enabled = 1"#,
             params![repository_id],
         )
         .await

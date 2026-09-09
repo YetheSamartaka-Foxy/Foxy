@@ -423,11 +423,12 @@ fn run_repository_sync(
     let worker = api::spawn_repository_sync(
         repo.address.clone(),
         repo.path.clone(),
-        selected_mod_states,
+        selected_mod_states.clone(),
         tx,
         mode,
         api::RepositorySyncOptions {
             operation_id: api::next_operation_id("cli-sync"),
+            persisted_addon_selection: Some(selected_mod_states),
             prepare_download_plan: false,
             repository_space_shared_path: None,
             auto_backup_directory: None,

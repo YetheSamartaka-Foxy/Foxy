@@ -40,11 +40,9 @@ fn normalize_startup_repositories(
                 return None;
             }
             let normalized = StartupRepositoryInstance {
-                repo_url: if repository.repo_url.ends_with('/') {
-                    repository.repo_url
-                } else {
-                    format!("{}/", repository.repo_url)
-                },
+                repo_url: crate::core::models::repository::normalize_repository_url(
+                    &repository.repo_url,
+                ),
                 local_path: normalize_instance_path(&repository.local_path),
             };
             seen.insert(normalized.clone()).then_some(normalized)
@@ -75,11 +73,8 @@ pub async fn recalculate_hashes_for_addon_by_name(
         return Ok(false);
     }
 
-    let normalized_repo_url = if repository_url.ends_with('/') {
-        repository_url.to_string()
-    } else {
-        format!("{}/", repository_url)
-    };
+    let normalized_repo_url =
+        crate::core::models::repository::normalize_repository_url(repository_url);
 
     let context = create_context_with_recheck_level(RecheckLevel::DEFAULT).await;
     let tree = Tree::load(context.clone(), &normalized_repo_url).await?;
@@ -156,11 +151,8 @@ pub fn filter_repo_instances_with_db_entry(
         if repository.repo_url.trim().is_empty() {
             continue;
         }
-        let normalized_url = if repository.repo_url.ends_with('/') {
-            repository.repo_url.clone()
-        } else {
-            format!("{}/", repository.repo_url)
-        };
+        let normalized_url =
+            crate::core::models::repository::normalize_repository_url(&repository.repo_url);
         let identity = (
             normalized_url.clone(),
             normalize_instance_path(&repository.local_path),
@@ -809,11 +801,10 @@ pub fn spawn_quick_local_scan_instances(
             let mut join_set: JoinSet<QuickScanWorkerRepoOutcome> = JoinSet::new();
             let mut scheduled_repositories = HashSet::new();
             for repository in repositories {
-                let normalized_repo_url = if repository.repo_url.ends_with('/') {
-                    repository.repo_url
-                } else {
-                    format!("{}/", repository.repo_url)
-                };
+                let normalized_repo_url =
+                    crate::core::models::repository::normalize_repository_url(
+                        &repository.repo_url,
+                    );
                 let normalized_repository = StartupRepositoryInstance {
                     repo_url: normalized_repo_url.clone(),
                     local_path: normalize_instance_path(&repository.local_path),

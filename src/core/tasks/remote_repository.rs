@@ -370,11 +370,7 @@ pub(crate) async fn probe_remote_repository_checksum(
     repository_url: &str,
     hash_algorithm_preference: HashAlgorithmPreference,
 ) -> Option<String> {
-    let normalized_url = if repository_url.ends_with('/') {
-        repository_url.to_string()
-    } else {
-        format!("{}/", repository_url)
-    };
+    let normalized_url = crate::core::models::repository::normalize_repository_url(repository_url);
     let repo_url = format!("{}repo.json", normalized_url);
 
     let data = match fetch_json(context.clone(), &repo_url).await {
@@ -434,11 +430,7 @@ pub(crate) async fn remote_repository(
     hash_algorithm_preference: HashAlgorithmPreference,
 ) -> Option<RemoteRepositoryMetadata> {
     // Normalize remote URL to always have trailing slash for consistent path joins
-    let normalized_url = if repository_url.ends_with('/') {
-        repository_url.to_string()
-    } else {
-        format!("{}/", repository_url)
-    };
+    let normalized_url = crate::core::models::repository::normalize_repository_url(repository_url);
     let repo_url = format!("{}repo.json", normalized_url);
     info!("Loading repository metadata from: {}", repo_url);
 

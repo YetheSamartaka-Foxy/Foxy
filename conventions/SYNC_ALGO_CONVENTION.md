@@ -139,6 +139,17 @@ to a full-file download.
     be invalidated by clean quick scan, clean tree verification, successful
     download, repository removal, or local path changes.
 
+### Addon Enabled State
+
+`addons.enabled` is the durable scope signal for every DB-only read: quick scan
+readiness, the repository content-hash rollup, and the pending update scope. It
+must reflect the caller's effective addon selection, not just the value the
+remote manifest last published.
+
+Every sync run persists the caller's selection into `addons.enabled` before the
+pipeline reads it. A remote metadata rebuild is skipped whenever the remote
+checksum is unchanged, so the rebuild alone is not a sufficient write path.
+
 ## Layered Decision Model
 
 The system has four verification layers. Each layer may early-exit or escalate
@@ -255,7 +266,13 @@ Validity rules:
 
 Purpose: decide whether quick local checks are even meaningful.
 
-Required DB state:
+Every readiness check in this layer is scoped to the repository's **enabled**
+addons, exactly like the diff it gates. A deselected optional addon is never
+downloaded, so its files can never earn local tree checksums, part checksums or
+content hashes; counting it here would leave the repository permanently
+ineligible for the fast path and force a manual recheck on every launch.
+
+Required DB state (enabled addons only):
 
 - repository row exists
 - repository has linked addons
@@ -265,6 +282,9 @@ Required DB state:
   parts
 - local tree baseline exists, unless this run is explicitly allowed to bootstrap
 - local content baseline exists for quick scan
+
+The repository content-hash rollup follows the same scope: it is computed from
+the enabled addons' content hashes only.
 
 Early exits:
 

@@ -860,3 +860,154 @@ async fn startup_eligibility_requires_part_metadata() {
         StartupQuickScanEligibility::NeedsBootstrap
     );
 }
+
+/// A deselected optional addon is never downloaded, so its files can never earn
+/// local tree checksums, part checksums or content hashes. Counting it in the
+/// startup preflight left the repository `unknown` on every launch and forced a
+/// manual recheck that never stuck.
+#[tokio::test]
+async fn startup_eligibility_ignores_disabled_addon_without_local_state() {
+    let db = create_test_db().await;
+    let fdb = FoxyDb::from_turso(db.clone());
+
+    let repo_url = "https://example.invalid/optional/";
+
+    seed_repository(
+        &fdb,
+        1,
+        "Optional",
+        repo_url,
+        "",
+        "REPO_LOCAL",
+        "REPO_REMOTE",
+        "REPO_CONTENT",
+    )
+    .await;
+    seed_addon(
+        &fdb,
+        1,
+        "@required",
+        "",
+        "",
+        "MOD_LOCAL",
+        "MOD_REMOTE",
+        "MOD_CONTENT",
+        true,
+    )
+    .await;
+    seed_file(
+        &fdb,
+        1,
+        "data.pbo",
+        "",
+        "",
+        "FILE_LOCAL",
+        "FILE_REMOTE",
+        "FILE_CONTENT",
+        1024,
+        0,
+    )
+    .await;
+    seed_repository_addon(&fdb, 1, 1).await;
+    seed_addon_file(&fdb, 1, 1).await;
+    seed_subfile(&fdb, 1, 1, "PART_LOCAL", "PART_REMOTE").await;
+
+    // Never-downloaded optional addon: no local content hash anywhere and no
+    // local part checksum, mirroring a folder that does not exist on disk.
+    seed_addon(
+        &fdb,
+        2,
+        "@optional_not_installed",
+        "",
+        "",
+        "EMPTY_LOCAL",
+        "MOD_REMOTE_2",
+        "",
+        false,
+    )
+    .await;
+    seed_file(
+        &fdb,
+        2,
+        "missing.pbo",
+        "",
+        "",
+        "EMPTY_LOCAL",
+        "FILE_REMOTE_2",
+        "",
+        2048,
+        0,
+    )
+    .await;
+    seed_repository_addon(&fdb, 1, 2).await;
+    seed_addon_file(&fdb, 2, 2).await;
+    seed_subfile(&fdb, 2, 2, "", "PART_REMOTE_2").await;
+
+    let context = Arc::new(FoxyContext::new(db.clone(), reqwest::Client::new()));
+
+    // While the addon still looks enabled it blocks the fast path.
+    assert_eq!(
+        launch_quick_scan_repo_startup_eligibility(context.clone(), repo_url).await,
+        StartupQuickScanEligibility::Ineligible
+    );
+
+    fdb.execute("UPDATE addons SET enabled = 0 WHERE id = 2", params![])
+        .await
+        .expect("disable optional addon");
+
+    assert_eq!(
+        launch_quick_scan_repo_startup_eligibility(context, repo_url).await,
+        StartupQuickScanEligibility::Prevalidated
+    );
+    assert_eq!(
+        content_hash_baseline_ready_joined(&fdb, 1, "test").await,
+        Some(true)
+    );
+}
+
+#[tokio::test]
+async fn persisting_addon_selection_updates_only_changed_rows() {
+    use crate::core::tasks::addon_enabled_state::persist_repository_addon_enabled_states;
+    use std::collections::HashMap;
+
+    let db = create_test_db().await;
+    let fdb = FoxyDb::from_turso(db.clone());
+
+    let repo_url = "https://example.invalid/selection/";
+    let local_path = "D:/games/selection";
+
+    seed_repository(&fdb, 1, "Selection", repo_url, local_path, "", "", "").await;
+    seed_addon(&fdb, 1, "@keep", "", "", "", "", "", true).await;
+    seed_addon(&fdb, 2, "@Drop", "", "", "", "", "", false).await;
+    seed_repository_addon(&fdb, 1, 1).await;
+    seed_repository_addon(&fdb, 1, 2).await;
+
+    let context = Arc::new(FoxyContext::new(db.clone(), reqwest::Client::new()));
+    let mut overrides = HashMap::new();
+    overrides.insert("@keep".to_string(), true);
+    overrides.insert("@drop".to_string(), false);
+
+    let changed =
+        persist_repository_addon_enabled_states(context.clone(), repo_url, local_path, &overrides)
+            .await;
+    assert_eq!(changed, 1, "only the deselected addon should change");
+
+    let enabled_after = |id: i64| {
+        let fdb = fdb.clone();
+        async move {
+            fdb.query_one("SELECT enabled FROM addons WHERE id = ?", params![id])
+                .await
+                .expect("query addon")
+                .expect("addon row")
+                .get_bool("enabled")
+                .expect("enabled column")
+        }
+    };
+    assert!(enabled_after(1).await);
+    assert!(!enabled_after(2).await);
+
+    // Re-running is a no-op once the stored state already matches.
+    let changed_again =
+        persist_repository_addon_enabled_states(context, repo_url, local_path, &overrides).await;
+    assert_eq!(changed_again, 0);
+}

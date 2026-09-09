@@ -142,7 +142,11 @@ async fn quick_scan_preflight_combined_inner(
         });
     }
 
-    // Query 1: mod stats via subquery (avoids JOIN row inflation)
+    // Query 1: mod stats via subquery (avoids JOIN row inflation).
+    // Scoped to enabled addons, like the diff itself: a deselected optional
+    // addon is never downloaded, so its files can never earn local tree
+    // checksums, part checksums or content hashes, and counting it here would
+    // hold the repository out of the fast path on every launch.
     let mod_stats_started = Instant::now();
     let mod_row = match db
         .query_one(
@@ -152,7 +156,8 @@ async fn quick_scan_preflight_combined_inner(
                 SUM(CASE WHEN local_checksum = '' THEN 1 ELSE 0 END) AS missing_local,
                 SUM(CASE WHEN local_content_hash = '' THEN 1 ELSE 0 END) AS missing_content
             FROM addons
-            WHERE id IN (SELECT addon_id FROM repository_addons WHERE repository_id = ?)"#,
+            WHERE id IN (SELECT addon_id FROM repository_addons WHERE repository_id = ?)
+            AND enabled = 1"#,
             params![repository.id as i64],
         )
         .await
@@ -238,7 +243,8 @@ async fn quick_scan_preflight_combined_inner(
                 SELECT af.file_id
                 FROM addon_files af
                 JOIN repository_addons ra ON ra.addon_id = af.addon_id
-                WHERE ra.repository_id = ?
+                JOIN addons a ON a.id = ra.addon_id
+                WHERE ra.repository_id = ? AND a.enabled = 1
             )"#,
             params![repository.id as i64],
         )
@@ -329,7 +335,8 @@ async fn quick_scan_preflight_combined_inner(
                 SELECT af.file_id
                 FROM addon_files af
                 JOIN repository_addons ra ON ra.addon_id = af.addon_id
-                WHERE ra.repository_id = ?
+                JOIN addons a ON a.id = ra.addon_id
+                WHERE ra.repository_id = ? AND a.enabled = 1
             )"#,
             params![repository.id as i64],
         )
@@ -697,17 +704,37 @@ pub(super) fn content_hash_baseline_ready(tree: &Tree) -> bool {
         return false;
     }
 
+    let enabled_file_indices = enabled_addon_file_indices(tree);
     tree.repositories
         .iter()
         .all(|repo| !repo.local_content_hash.trim().is_empty())
         && tree
             .mods
             .iter()
+            .filter(|addon| addon.enabled)
             .all(|addon| !addon.local_content_hash.trim().is_empty())
-        && tree
-            .files
-            .iter()
-            .all(|file| !file.local_content_hash.trim().is_empty())
+        && enabled_file_indices.iter().all(|&file_idx| {
+            tree.files
+                .get(file_idx)
+                .map(|file| !file.local_content_hash.trim().is_empty())
+                .unwrap_or(true)
+        })
+}
+
+/// File indices reachable from the tree's enabled addons. Disabled addons are
+/// out of scope for every readiness gate, so their files must not decide
+/// whether a baseline is complete.
+fn enabled_addon_file_indices(tree: &Tree) -> HashSet<usize> {
+    tree.mod_nodes
+        .iter()
+        .filter(|addon_node| {
+            tree.mods
+                .get(addon_node.mod_idx)
+                .map(|addon| addon.enabled)
+                .unwrap_or(false)
+        })
+        .flat_map(|addon_node| addon_node.files.iter().copied())
+        .collect()
 }
 
 #[cfg(test)]
@@ -954,8 +981,8 @@ mod tests {
     }
 
     /// Single repo/addon/file/part tree with explicit checksum + content-hash
-    /// values for each level. Node graphs are intentionally omitted since the
-    /// checksum/content helpers only inspect the flat vectors.
+    /// values for each level, linked through the node graph so the enabled-addon
+    /// scoping in the content-hash helpers can walk it.
     #[allow(clippy::too_many_arguments)]
     fn checksum_tree(
         repo_tree: &str,
@@ -966,11 +993,35 @@ mod tests {
         file_content: &str,
         part_tree: &str,
     ) -> Tree {
+        checksum_tree_with_enabled(
+            repo_tree,
+            repo_content,
+            mod_tree,
+            mod_content,
+            file_tree,
+            file_content,
+            part_tree,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn checksum_tree_with_enabled(
+        repo_tree: &str,
+        repo_content: &str,
+        mod_tree: &str,
+        mod_content: &str,
+        file_tree: &str,
+        file_content: &str,
+        part_tree: &str,
+        enabled: bool,
+    ) -> Tree {
         Tree {
             repositories: vec![repo(repo_tree, repo_content)],
             mods: vec![FoxyMod {
                 id: 1,
                 name: "@a".to_string(),
+                enabled,
                 local_checksum: mod_tree.to_string(),
                 local_content_hash: mod_content.to_string(),
                 ..Default::default()
@@ -987,6 +1038,18 @@ mod tests {
                 file_id: 10,
                 local_checksum: part_tree.to_string(),
                 ..Default::default()
+            }],
+            repo_nodes: vec![RepositoryNode {
+                repo_idx: 0,
+                mods: vec![0],
+            }],
+            mod_nodes: vec![ModNode {
+                mod_idx: 0,
+                files: vec![0],
+            }],
+            file_nodes: vec![FileNode {
+                file_idx: 0,
+                parts: vec![0],
             }],
             ..Default::default()
         }
@@ -1076,6 +1139,23 @@ mod tests {
     #[test]
     fn content_hash_baseline_ready_false_on_empty_tree() {
         assert!(!content_hash_baseline_ready(&Tree::default()));
+    }
+
+    /// A deselected optional addon is never downloaded, so it can never earn a
+    /// content hash; it must not hold the repository baseline back forever.
+    #[test]
+    fn content_hash_baseline_ready_ignores_disabled_addon() {
+        let tree = checksum_tree_with_enabled("R", "RC", "M", "", "F", "", "P", false);
+        assert!(content_hash_baseline_ready(&tree));
+    }
+
+    #[test]
+    fn enabled_addon_file_indices_skips_disabled_addons() {
+        let enabled = checksum_tree("R", "RC", "M", "MC", "F", "FC", "P");
+        assert_eq!(enabled_addon_file_indices(&enabled), HashSet::from([0]));
+
+        let disabled = checksum_tree_with_enabled("R", "RC", "M", "MC", "F", "FC", "P", false);
+        assert!(enabled_addon_file_indices(&disabled).is_empty());
     }
 
     // ── collect_files_with_missing_local_tree_hashes ────────────────────

@@ -143,6 +143,11 @@ pub struct RepositorySyncOptions {
     pub cancel_rx: watch::Receiver<bool>,
     pub hash_algorithm_preference: crate::ui::types::HashAlgorithmPreference,
     pub hash_io_profile: crate::ui::types::HashIoProfilePreference,
+    /// The caller's durable addon selection, written to `addons.enabled` before
+    /// the pipeline reads it. Distinct from the run's enabled overrides, which
+    /// can be a transient one-shot scope (a standalone addon download narrows
+    /// them to a single addon) that must never become the stored state.
+    pub persisted_addon_selection: Option<Vec<(String, bool)>>,
 }
 
 #[cfg(test)]

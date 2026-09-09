@@ -462,6 +462,13 @@ pub fn push_arma3_profile_launch_args(
 
 pub fn sanitize_repository_paths(repo: &mut Repository) {
     repo.path = sanitize_user_path_value(&repo.path);
+    // A repository instance is keyed by `(remote_url, local_path)`; stray
+    // whitespace around a configured address makes every DB lookup miss its own
+    // row, so repair it on load instead of carrying it into the key.
+    repo.address = repo.address.trim().to_string();
+    if let Some(entry_address) = repo.repository_space_entry_address.as_mut() {
+        *entry_address = entry_address.trim().to_string();
+    }
     repo.app_update_url = repo.app_update_url.trim().to_string();
     sanitize_addon_favorites(&mut repo.optional_addon_favorites);
     sanitize_addon_favorites(&mut repo.optional_addon_client_side);
@@ -519,6 +526,11 @@ pub fn normalize_loaded_repositories(repositories: &mut [Repository]) {
 pub fn sanitize_repository_space_paths(space: &mut RepositorySpace) {
     space.shared_path = sanitize_user_path_value(&space.shared_path);
     space.app_update_url = space.app_update_url.trim().to_string();
+    space.source_address = space.source_address.trim().to_string();
+    space.source_base_url = space.source_base_url.trim().to_string();
+    for entry in &mut space.entries {
+        entry.address = entry.address.trim().to_string();
+    }
 }
 
 pub fn sanitize_repository_spaces_paths(spaces: &mut [RepositorySpace]) {

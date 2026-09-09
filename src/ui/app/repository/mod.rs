@@ -16,10 +16,6 @@ use crate::ui::app::Foxy;
 
 impl Foxy {
     pub fn normalize_repo_url(repo_url: &str) -> String {
-        let mut normalized = repo_url.replace('\\', "/");
-        if !normalized.ends_with('/') {
-            normalized.push('/');
-        }
-        normalized
+        crate::core::models::repository::normalize_repository_url(repo_url)
     }
 }

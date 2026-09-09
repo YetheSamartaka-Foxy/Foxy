@@ -13,11 +13,7 @@ use crate::core::tasks::create_context::create_context;
 use crate::core::utils::format::{sanitize_log_path, sanitize_log_url};
 
 fn normalize_url(url: &str) -> String {
-    if url.ends_with('/') {
-        url.to_string()
-    } else {
-        format!("{}/", url)
-    }
+    crate::core::models::repository::normalize_repository_url(url)
 }
 
 fn normalize_path_for_compare(path: &Path) -> String {
@@ -1621,8 +1617,16 @@ mod tests {
     }
 
     #[test]
-    fn normalize_url_empty() {
-        assert_eq!(normalize_url(""), "/");
+    fn normalize_url_empty_stays_empty() {
+        assert_eq!(normalize_url(""), "");
+    }
+
+    #[test]
+    fn normalize_url_trims_whitespace() {
+        assert_eq!(
+            normalize_url("  https://example.com/repo  "),
+            "https://example.com/repo/"
+        );
     }
 
     // ── normalize_path_for_compare ──────────────────────────────────────

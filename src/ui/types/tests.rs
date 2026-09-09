@@ -1,9 +1,10 @@
 use super::{
     AppUpdateMode, DownloadSummary, DownloadTelemetrySample, Repository, RepositoryProfile,
-    SettingsViewState, additional_folder_alias_key, apply_repo_client_parameters,
-    apply_repo_dlc_content_from_repo_json, merge_remote_addon_list, normalize_loaded_repository,
-    push_arma3_profile_launch_args, repo_json_dlc_content_value, sanitize_external_addons,
-    sanitize_settings_paths, selected_creator_dlc_codes, split_additional_launch_params,
+    RepositorySpace, RepositorySpaceEntry, SettingsViewState, additional_folder_alias_key,
+    apply_repo_client_parameters, apply_repo_dlc_content_from_repo_json, merge_remote_addon_list,
+    normalize_loaded_repository, push_arma3_profile_launch_args, repo_json_dlc_content_value,
+    sanitize_external_addons, sanitize_repository_space_paths, sanitize_settings_paths,
+    selected_creator_dlc_codes, split_additional_launch_params,
 };
 use crate::core::arma3_profiles::Arma3Profile;
 use serde_json::json;
@@ -829,4 +830,55 @@ fn swifty_required_dlcs_enable_creator_dlc_flags() {
     apply_repo_dlc_content_from_repo_json(&mut repo, repo_json_dlc_content_value(&json).unwrap());
     assert!(repo.ws);
     assert!(!repo.gm);
+}
+
+#[test]
+fn normalize_loaded_repository_trims_address_whitespace() {
+    let mut repo = Repository {
+        address: "  http://example.invalid/mody/TFR_Immers/  ".to_string(),
+        repository_space_entry_address: Some(
+            " http://example.invalid/mody/TFR_Immers ".to_string(),
+        ),
+        ..Repository::default()
+    };
+
+    normalize_loaded_repository(&mut repo);
+
+    assert_eq!(repo.address, "http://example.invalid/mody/TFR_Immers/");
+    assert_eq!(
+        repo.repository_space_entry_address.as_deref(),
+        Some("http://example.invalid/mody/TFR_Immers")
+    );
+}
+
+#[test]
+fn sanitize_repository_space_paths_trims_entry_addresses() {
+    let mut space = RepositorySpace {
+        id: "space-1".to_string(),
+        name: "Space".to_string(),
+        source_address: " http://example.invalid/space.json ".to_string(),
+        source_base_url: " http://example.invalid ".to_string(),
+        local_name_override: None,
+        collapsed: false,
+        shared_path: String::new(),
+        icon_image_path: String::new(),
+        icon_image_checksum: String::new(),
+        repo_image_path: String::new(),
+        repo_image_checksum: String::new(),
+        app_update_url: String::new(),
+        entries: vec![RepositorySpaceEntry {
+            name: "Entry".to_string(),
+            address: "  http://example.invalid/mody/Entry  ".to_string(),
+            required: false,
+        }],
+    };
+
+    sanitize_repository_space_paths(&mut space);
+
+    assert_eq!(space.source_address, "http://example.invalid/space.json");
+    assert_eq!(space.source_base_url, "http://example.invalid");
+    assert_eq!(
+        space.entries[0].address,
+        "http://example.invalid/mody/Entry"
+    );
 }
