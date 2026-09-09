@@ -205,6 +205,60 @@ async fn clear_stale_patch_plans(context: Arc<FoxyContext>, file_ids: &[i64], re
     }
 }
 
+pub(crate) async fn flush_pending_patch_clears(context: Arc<FoxyContext>) {
+    let mut file_ids = context.take_pending_patch_clear_ids();
+    if file_ids.is_empty() {
+        return;
+    }
+    file_ids.sort_unstable();
+    file_ids.dedup();
+    info!(
+        "Bulk-clearing stale delta patch plans for {} files",
+        file_ids.len()
+    );
+    clear_stale_patch_plans(context, &file_ids, "unpatchable file").await;
+}
+
+pub(crate) async fn flush_pending_download_targets(context: Arc<FoxyContext>) {
+    let pending = context.take_pending_download_targets();
+    if pending.is_empty() {
+        return;
+    }
+    let rows: Vec<DownloadTargetRow> = pending
+        .into_iter()
+        .map(|row| DownloadTargetRow {
+            file_id: row.file_id,
+            download_remote_url: row.download_remote_url,
+            download_local_path: row.download_local_path,
+            size: row.size,
+        })
+        .collect();
+    let chunk_size = download_file_target_upsert_chunk_size();
+    info!(
+        "Download target rebuild batch: file_targets={} file_insert_chunks={}",
+        rows.len(),
+        rows.len().div_ceil(chunk_size)
+    );
+    let db = context.db();
+    let rows = Arc::new(rows);
+    if let Err(e) = db
+        .transaction("download target rebuild", |txn| {
+            let rows = rows.clone();
+            Box::pin(async move {
+                for chunk in rows.chunks(chunk_size) {
+                    let sql = download_file_target_upsert_sql(chunk.len());
+                    txn.execute(&sql, download_file_target_upsert_values(chunk))
+                        .await?;
+                }
+                Ok(())
+            })
+        })
+        .await
+    {
+        warn!("Failed to upsert download file targets: {}", e);
+    }
+}
+
 fn stale_subfile_ids(
     refreshed_parts: &HashMap<(i64, String), FoxyModFilePart>,
     desired_part_ids_by_file: &HashMap<i64, HashSet<i64>>,
@@ -540,7 +594,7 @@ pub(crate) async fn remote_file_parts_batch(
         }
 
         if parts_for_file.is_empty() {
-            let local_file_ready = std::fs::metadata(&file.local_path)
+            let local_file_ready = crate::core::utils::profiling::fs::metadata(&file.local_path)
                 .map(|meta| meta.is_file() && meta.len() == file.length)
                 .unwrap_or(false);
             let needs_file_download = context.force_download_targets
@@ -633,7 +687,7 @@ pub(crate) async fn remote_file_parts_batch(
             // always needs a full download. Skip plan_file_patch entirely and just
             // mark its stale plan for clearing. The metadata probe only runs for
             // files already proven to need a download, so clean files pay nothing.
-            let local_file_present = std::fs::metadata(&file.local_path)
+            let local_file_present = crate::core::utils::profiling::fs::metadata(&file.local_path)
                 .map(|meta| meta.is_file())
                 .unwrap_or(false);
             if context.force_download_targets {
@@ -687,11 +741,12 @@ pub(crate) async fn remote_file_parts_batch(
 
     let plan_loop_elapsed = plan_loop_started.elapsed();
     info!(
-        "Remote file parts batch timings: files={} part_rows={} upsert_rows={} planned_patches={} prefetch={:.3}s upsert={:.3}s reload={:.3}s plan_loop={:.3}s total={:.3}s",
+        "Remote file parts batch timings: files={} part_rows={} upsert_rows={} planned_patches={} skipped_part_targets={} prefetch={:.3}s upsert={:.3}s reload={:.3}s plan_loop={:.3}s total={:.3}s",
         file_ids.len(),
         all_part_rows.len(),
         upsert_row_count,
         planned_patch_files,
+        skipped_part_target_rows,
         prefetch_elapsed.as_secs_f64(),
         upsert_elapsed.as_secs_f64(),
         reload_elapsed.as_secs_f64(),
@@ -699,17 +754,11 @@ pub(crate) async fn remote_file_parts_batch(
         batch_started.elapsed().as_secs_f64(),
     );
 
-    // Flush all stale patch-plan clears in two bulk transactions rather than two
-    // transactions per file (the dominant SQLite write cost when a whole repo of
-    // files is missing and none are patchable).
-    if !patch_clear_file_ids.is_empty() {
-        patch_clear_file_ids.sort_unstable();
-        patch_clear_file_ids.dedup();
-        info!(
-            "Bulk-clearing stale delta patch plans for {} files",
-            patch_clear_file_ids.len()
-        );
-        clear_stale_patch_plans(context.clone(), &patch_clear_file_ids, "unpatchable file").await;
+    // Flush all stale patch-plan clears in two bulk transactions after the
+    // metadata fan-out rather than two transactions per mod. A force-redownload
+    // purge already emptied these tables, so skip the no-op deletes.
+    if !patch_clear_file_ids.is_empty() && !context.force_download_targets {
+        context.buffer_patch_clear_ids(patch_clear_file_ids);
     }
 
     if !context.queue_download_targets {
@@ -722,30 +771,14 @@ pub(crate) async fn remote_file_parts_batch(
     }
 
     if !download_file_models.is_empty() {
-        let chunk_size = download_file_target_upsert_chunk_size();
-        info!(
-            "Download target rebuild batch: file_targets={} file_insert_chunks={} skipped_part_targets={}",
-            download_file_models.len(),
-            download_file_models.len().div_ceil(chunk_size),
-            skipped_part_target_rows
-        );
-        let download_file_models = Arc::new(download_file_models);
-        if let Err(e) = db
-            .transaction("download target rebuild", |txn| {
-                let download_file_models = download_file_models.clone();
-                Box::pin(async move {
-                    for chunk in download_file_models.chunks(chunk_size) {
-                        let sql = download_file_target_upsert_sql(chunk.len());
-                        txn.execute(&sql, download_file_target_upsert_values(chunk))
-                            .await?;
-                    }
-                    Ok(())
-                })
-            })
-            .await
-        {
-            warn!("Failed to upsert download file targets: {}", e);
-        }
+        context.buffer_download_targets(download_file_models.into_iter().map(|row| {
+            crate::core::models::context::PendingDownloadTarget {
+                file_id: row.file_id,
+                download_remote_url: row.download_remote_url,
+                download_local_path: row.download_local_path,
+                size: row.size,
+            }
+        }));
     }
 }
 
@@ -757,11 +790,14 @@ pub(crate) async fn remote_file_parts_batch(
 /// globally-empty `subfiles` table - same `fresh=true` SQL as the inline fast path).
 /// No-op when nothing was deferred.
 pub(crate) async fn flush_deferred_part_inserts(context: Arc<FoxyContext>) -> bool {
-    let rows = context.take_deferred_parts();
+    let mut rows = context.take_deferred_parts();
     context.set_deferred_part_inserts_fresh_load(false);
     if rows.is_empty() {
         return true;
     }
+    // Both subfiles indexes lead with file_id, and the buffer arrives in mod
+    // completion order, so inserting unsorted walks the index B-trees at random.
+    rows.sort_unstable_by_key(|row| (row.file_id, row.data_order));
     let total = rows.len();
     let db = context.db();
     let chunk_size = file_part_upsert_chunk_size();

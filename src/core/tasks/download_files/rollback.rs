@@ -16,7 +16,7 @@ pub(crate) type SharedRollbackSession = Arc<Mutex<UpdateRollbackSession>>;
 
 const ROLLBACK_DIR_NAME: &str = "update-rollback";
 const MANIFEST_FILE_NAME: &str = "manifest.json";
-const BACKUPS_DIR_NAME: &str = "backups";
+const SIDECAR_BAK_SUFFIX: &str = ".foxy.bak";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct RollbackManifest {
@@ -39,7 +39,6 @@ struct RollbackEntry {
 pub(crate) struct UpdateRollbackSession {
     session_dir: PathBuf,
     manifest_path: PathBuf,
-    backups_dir: PathBuf,
     manifest: RollbackManifest,
 }
 
@@ -58,11 +57,10 @@ impl UpdateRollbackSession {
 
         let session_id = unique_session_id();
         let session_dir = base_dir.join(session_id);
-        let backups_dir = session_dir.join(BACKUPS_DIR_NAME);
-        fs::create_dir_all(&backups_dir).await.with_context(|| {
+        fs::create_dir_all(&session_dir).await.with_context(|| {
             format!(
-                "failed to create rollback backup directory {}",
-                sanitize_log_path(&backups_dir)
+                "failed to create rollback session directory {}",
+                sanitize_log_path(&session_dir)
             )
         })?;
 
@@ -75,7 +73,6 @@ impl UpdateRollbackSession {
         let session = Self {
             session_dir,
             manifest_path,
-            backups_dir,
             manifest,
         };
         session.persist_manifest().await?;
@@ -106,22 +103,21 @@ impl UpdateRollbackSession {
             };
 
             if manifest.committed || manifest.entries.iter().all(|entry| entry.restored) {
+                discard_sidecars(&manifest.entries).await?;
                 remove_dir_if_exists(&session_dir).await?;
                 continue;
             }
 
-            let backups_dir = session_dir.join(BACKUPS_DIR_NAME);
             let session = Self {
                 session_dir,
                 manifest_path,
-                backups_dir,
                 manifest,
             };
             warn!(
                 "Discarding stale rollback session for repository {} and preserving promoted files for resume",
                 session.manifest.repository_url
             );
-            if let Err(err) = remove_dir_if_exists(&session.session_dir).await {
+            if let Err(err) = discard_stale_session(&session).await {
                 warn!(
                     "Failed to discard stale rollback session for repository {}: {}",
                     session.manifest.repository_url, err
@@ -257,9 +253,8 @@ impl UpdateRollbackSession {
             Ok(())
         } else {
             Err(anyhow!(
-                "rollback failed for {} file(s); rollback backups were kept in {}",
+                "rollback failed for {} file(s); sidecars were left beside the target files",
                 restore_errors.len(),
-                sanitize_log_path(&self.session_dir)
             ))
         }
     }
@@ -267,6 +262,7 @@ impl UpdateRollbackSession {
     pub(crate) async fn commit(&mut self) -> anyhow::Result<()> {
         self.manifest.committed = true;
         self.persist_manifest().await?;
+        discard_sidecars(&self.manifest.entries).await?;
         remove_dir_if_exists(&self.session_dir)
             .await
             .with_context(|| {
@@ -293,23 +289,33 @@ impl UpdateRollbackSession {
         let metadata = fs::metadata(target_path).await;
         let (original_existed, original_size, backup_path) = match metadata {
             Ok(meta) => {
-                let backup_path = self.backup_path(file_id, target_path);
-                fs::copy(target_path, &backup_path).await.with_context(|| {
-                    format!(
-                        "failed to create rollback backup {} -> {}",
-                        sanitize_log_path(target_path),
-                        sanitize_log_path(&backup_path)
-                    )
-                })?;
+                let backup_path = sidecar_bak_path(target_path);
+                if fs::metadata(&backup_path).await.is_ok() {
+                    remove_file_if_exists(&backup_path).await.with_context(|| {
+                        format!(
+                            "failed to remove stale rollback sidecar {}",
+                            sanitize_log_path(&backup_path)
+                        )
+                    })?;
+                }
+                fs::rename(target_path, &backup_path)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to rename {} aside to {}",
+                            sanitize_log_path(target_path),
+                            sanitize_log_path(&backup_path)
+                        )
+                    })?;
                 let backup_meta = fs::metadata(&backup_path).await.with_context(|| {
                     format!(
-                        "failed to verify rollback backup {}",
+                        "failed to verify rollback sidecar {}",
                         sanitize_log_path(&backup_path)
                     )
                 })?;
                 if backup_meta.len() != meta.len() {
                     return Err(anyhow!(
-                        "rollback backup size mismatch for {}: expected {}, got {}",
+                        "rollback sidecar size mismatch for {}: expected {}, got {}",
                         sanitize_log_path(target_path),
                         meta.len(),
                         backup_meta.len()
@@ -340,27 +346,6 @@ impl UpdateRollbackSession {
         self.persist_manifest().await
     }
 
-    fn backup_path(&self, file_id: u64, target_path: &Path) -> PathBuf {
-        let mut sanitized = target_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("file")
-            .chars()
-            .map(|ch| {
-                if ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-' {
-                    ch
-                } else {
-                    '_'
-                }
-            })
-            .collect::<String>();
-        if sanitized.is_empty() {
-            sanitized = "file".to_string();
-        }
-        self.backups_dir
-            .join(format!("{}_{}.original", file_id, sanitized))
-    }
-
     async fn persist_manifest(&self) -> anyhow::Result<()> {
         let json =
             serde_json::to_vec_pretty(&self.manifest).context("failed to serialize manifest")?;
@@ -373,6 +358,38 @@ impl UpdateRollbackSession {
     }
 }
 
+fn sidecar_bak_path(target: &Path) -> PathBuf {
+    let mut raw = target.as_os_str().to_os_string();
+    raw.push(SIDECAR_BAK_SUFFIX);
+    PathBuf::from(raw)
+}
+
+async fn discard_sidecars(entries: &[RollbackEntry]) -> anyhow::Result<()> {
+    for entry in entries {
+        if let Some(backup_path) = entry.backup_path.as_ref() {
+            remove_file_if_exists(backup_path).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn discard_stale_session(session: &UpdateRollbackSession) -> anyhow::Result<()> {
+    for entry in &session.manifest.entries {
+        if entry.promoted {
+            if let Some(backup_path) = entry.backup_path.as_ref() {
+                remove_file_if_exists(backup_path).await?;
+            }
+        } else if let Err(err) = restore_entry_filesystem(entry).await {
+            warn!(
+                "Failed to restore unpromoted rollback sidecar {}: {}",
+                sanitize_log_path(&entry.target_path),
+                err
+            );
+        }
+    }
+    remove_dir_if_exists(&session.session_dir).await
+}
+
 async fn restore_entry_filesystem(entry: &RollbackEntry) -> anyhow::Result<()> {
     if !entry.promoted && entry.target_path.exists() == entry.original_existed {
         return Ok(());
@@ -381,7 +398,7 @@ async fn restore_entry_filesystem(entry: &RollbackEntry) -> anyhow::Result<()> {
     if entry.original_existed {
         let Some(backup_path) = entry.backup_path.as_ref() else {
             return Err(anyhow!(
-                "rollback manifest is missing backup path for {}",
+                "rollback manifest is missing sidecar path for {}",
                 sanitize_log_path(&entry.target_path)
             ));
         };
@@ -394,11 +411,11 @@ async fn restore_entry_filesystem(entry: &RollbackEntry) -> anyhow::Result<()> {
                 )
             })?;
         }
-        fs::copy(backup_path, &entry.target_path)
+        fs::rename(backup_path, &entry.target_path)
             .await
             .with_context(|| {
                 format!(
-                    "failed to restore rollback backup {} -> {}",
+                    "failed to restore rollback sidecar {} -> {}",
                     sanitize_log_path(backup_path),
                     sanitize_log_path(&entry.target_path)
                 )
@@ -490,6 +507,7 @@ mod tests {
 
         session.restore_all(None).await.unwrap();
         assert_eq!(fs::read(&target).await.unwrap(), b"original");
+        assert!(!sidecar_bak_path(&target).exists());
         assert!(session.touched_file_ids().contains(&7));
     }
 
@@ -509,6 +527,33 @@ mod tests {
 
         session.restore_all(None).await.unwrap();
         assert!(!target.exists());
+    }
+
+    #[tokio::test]
+    async fn promote_renames_original_aside_instead_of_copying() {
+        let dir = tempdir().unwrap();
+        let rollback_root = dir.path().join("tmp");
+        let target = dir.path().join("addon.pbo");
+        let staged = dir.path().join("addon.pbo.foxy.part");
+        fs::write(&target, b"original").await.unwrap();
+        fs::write(&staged, b"updated").await.unwrap();
+
+        let mut session = UpdateRollbackSession::new(&rollback_root, "https://example.test/")
+            .await
+            .unwrap();
+        session.promote_file(7, &staged, &target).await.unwrap();
+
+        let bak = sidecar_bak_path(&target);
+        assert_eq!(fs::read(&bak).await.unwrap(), b"original");
+        assert_eq!(fs::read(&target).await.unwrap(), b"updated");
+        assert_eq!(
+            dir_size(&rollback_root).await,
+            dir_size(&session.session_dir).await
+        );
+
+        session.commit().await.unwrap();
+        assert!(!bak.exists());
+        assert_eq!(fs::read(&target).await.unwrap(), b"updated");
     }
 
     #[tokio::test]
@@ -546,5 +591,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(fs::read(&target).await.unwrap(), b"updated");
+        assert!(!sidecar_bak_path(&target).exists());
+    }
+
+    async fn dir_size(path: &Path) -> u64 {
+        let mut total = 0;
+        let mut dirs = vec![path.to_path_buf()];
+        while let Some(dir) = dirs.pop() {
+            let mut entries = fs::read_dir(&dir).await.unwrap();
+            while let Some(entry) = entries.next_entry().await.unwrap() {
+                let meta = entry.metadata().await.unwrap();
+                if meta.is_dir() {
+                    dirs.push(entry.path());
+                } else {
+                    total += meta.len();
+                }
+            }
+        }
+        total
     }
 }

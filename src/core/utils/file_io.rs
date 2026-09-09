@@ -8,12 +8,16 @@
 #[cfg(unix)]
 pub(crate) fn write_at(file: &std::fs::File, offset: u64, buf: &[u8]) -> std::io::Result<()> {
     use std::os::unix::fs::FileExt;
-    file.write_all_at(buf, offset)
+    let profiled = crate::core::utils::profiling::FsTimer::start();
+    let result = file.write_all_at(buf, offset);
+    profiled.stop("write_at", buf.len() as u64);
+    result
 }
 
 #[cfg(windows)]
 pub(crate) fn write_at(file: &std::fs::File, offset: u64, buf: &[u8]) -> std::io::Result<()> {
     use std::os::windows::fs::FileExt;
+    let profiled = crate::core::utils::profiling::FsTimer::start();
     let mut written = 0;
     while written < buf.len() {
         let n = file.seek_write(&buf[written..], offset + written as u64)?;
@@ -25,6 +29,7 @@ pub(crate) fn write_at(file: &std::fs::File, offset: u64, buf: &[u8]) -> std::io
         }
         written += n;
     }
+    profiled.stop("write_at", buf.len() as u64);
     Ok(())
 }
 
@@ -32,12 +37,18 @@ pub(crate) fn write_at(file: &std::fs::File, offset: u64, buf: &[u8]) -> std::io
 #[cfg(unix)]
 pub(crate) fn read_at(file: &std::fs::File, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
     use std::os::unix::fs::FileExt;
-    file.read_exact_at(buf, offset)
+    let profiled = crate::core::utils::profiling::FsTimer::start();
+    let bytes = buf.len() as u64;
+    let result = file.read_exact_at(buf, offset);
+    profiled.stop("read_at", bytes);
+    result
 }
 
 #[cfg(windows)]
 pub(crate) fn read_at(file: &std::fs::File, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
     use std::os::windows::fs::FileExt;
+    let profiled = crate::core::utils::profiling::FsTimer::start();
+    let bytes = buf.len() as u64;
     let mut pos = 0;
     while pos < buf.len() {
         let n = file.seek_read(&mut buf[pos..], offset + pos as u64)?;
@@ -49,6 +60,7 @@ pub(crate) fn read_at(file: &std::fs::File, offset: u64, buf: &mut [u8]) -> std:
         }
         pos += n;
     }
+    profiled.stop("read_at", bytes);
     Ok(())
 }
 
@@ -72,6 +84,13 @@ fn is_transient_lock_error(err: &std::io::Error) -> bool {
 /// Returns `Ok(())` if the file was removed or did not exist.
 /// After exhausting retries the last error is returned.
 pub(crate) async fn retry_remove_file(path: &std::path::Path) -> std::io::Result<()> {
+    let profiled = crate::core::utils::profiling::FsTimer::start();
+    let result = retry_remove_file_inner(path).await;
+    profiled.stop("remove", 0);
+    result
+}
+
+async fn retry_remove_file_inner(path: &std::path::Path) -> std::io::Result<()> {
     for attempt in 0..REMOVE_RETRY_ATTEMPTS {
         match tokio::fs::remove_file(path).await {
             Ok(()) => return Ok(()),
@@ -99,6 +118,13 @@ pub(crate) async fn retry_remove_file(path: &std::path::Path) -> std::io::Result
 /// Returns `Ok(())` if the file was removed or did not exist.
 /// After exhausting retries the last error is returned.
 pub(crate) fn retry_remove_file_sync(path: &std::path::Path) -> std::io::Result<()> {
+    let profiled = crate::core::utils::profiling::FsTimer::start();
+    let result = retry_remove_file_sync_inner(path);
+    profiled.stop("remove", 0);
+    result
+}
+
+fn retry_remove_file_sync_inner(path: &std::path::Path) -> std::io::Result<()> {
     for attempt in 0..REMOVE_RETRY_ATTEMPTS {
         match std::fs::remove_file(path) {
             Ok(()) => return Ok(()),
@@ -128,9 +154,8 @@ mod tests {
 
     #[test]
     fn write_at_and_read_at_roundtrip() {
-        let dir = std::env::temp_dir().join("foxy_file_io_test");
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("roundtrip.bin");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("roundtrip.bin");
 
         let file = std::fs::OpenOptions::new()
             .create(true)
@@ -152,15 +177,12 @@ mod tests {
         assert_eq!(&buf, b"world");
 
         drop(file);
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_dir(&dir);
     }
 
     #[test]
     fn write_at_offset_zero() {
-        let dir = std::env::temp_dir().join("foxy_file_io_test");
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("offset_zero.bin");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("offset_zero.bin");
 
         let file = std::fs::OpenOptions::new()
             .create(true)
@@ -179,7 +201,5 @@ mod tests {
         assert_eq!(&buf[..5], b"start");
 
         drop(f);
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_dir(&dir);
     }
 }

@@ -46,6 +46,14 @@ async fn query_ids_in_chunks(
     Ok(out)
 }
 
+fn sort_parts_for_tree_load(parts: &mut [FoxyModFilePart]) {
+    parts.sort_unstable_by_key(|part| (part.file_id, part.data_order, part.id));
+}
+
+fn deferred_part_synthetic_id(attached: usize) -> u64 {
+    u64::MAX - attached as u64
+}
+
 /// Runtime tree node types (link indices to children)
 #[derive(Debug, Clone)]
 pub struct RepositoryNode {
@@ -281,10 +289,8 @@ impl Tree {
                         .collect::<Result<_, DbErr>>()?
                     };
 
-                    // Load parts directly by file_id using the covering index
-                    // (idx_subfiles_file_id_data_order) instead of the two-step join
-                    // through file_subfiles. This eliminates an entire link-table scan
-                    // and lets the engine satisfy the query from the index alone.
+                    // Load parts directly by file_id. ORDER BY is applied in process:
+                    // the matching index does not pay for a ten-column ordered scan.
                     let mut parts: Vec<FoxyModFilePart> = Vec::new();
                     let mut file_part_pairs: Vec<(i64, i64)> = Vec::new();
                     if !files.is_empty() {
@@ -296,16 +302,21 @@ impl Tree {
                                 "SELECT {} FROM subfiles WHERE file_id IN ",
                                 modification_file_part::SUBFILE_COLUMNS
                             ),
-                            " ORDER BY file_id ASC, data_order ASC, id ASC",
+                            "",
                             &ids,
                             chunk_size,
                         )
                         .await?;
+                        parts.reserve(rows.len());
                         for row in &rows {
-                            let part = FoxyModFilePart::from_row(row)?;
-                            file_part_pairs.push((part.file_id as i64, part.id as i64));
-                            parts.push(part);
+                            parts.push(FoxyModFilePart::from_row(row)?);
                         }
+                        sort_parts_for_tree_load(&mut parts);
+                        file_part_pairs.extend(
+                            parts
+                                .iter()
+                                .map(|part| (part.file_id as i64, part.id as i64)),
+                        );
                     }
 
                     Ok(RawTreeData {
@@ -344,7 +355,7 @@ impl Tree {
                 .filter(|row| file_ids.contains(&row.file_id))
             {
                 let file_id = row.file_id;
-                let synthetic_id = parts.len() as u64 + 1;
+                let synthetic_id = deferred_part_synthetic_id(attached);
                 parts.push(FoxyModFilePart {
                     id: synthetic_id,
                     file_id: file_id as u64,
@@ -571,5 +582,46 @@ mod tests {
         assert!(tree.parts[0].local_checksum.is_empty());
         assert_eq!(tree.parts[0].local_length, 0);
         assert_eq!(tree.parts[0].local_start, 0);
+    }
+
+    #[test]
+    fn part_reload_sort_matches_query_order() {
+        let mut parts = vec![
+            FoxyModFilePart {
+                id: 3,
+                file_id: 2,
+                data_order: 0,
+                ..Default::default()
+            },
+            FoxyModFilePart {
+                id: 1,
+                file_id: 1,
+                data_order: 1,
+                ..Default::default()
+            },
+            FoxyModFilePart {
+                id: 2,
+                file_id: 1,
+                data_order: 0,
+                ..Default::default()
+            },
+        ];
+        sort_parts_for_tree_load(&mut parts);
+        let keys: Vec<(u64, i64, u64)> = parts
+            .iter()
+            .map(|part| (part.file_id, part.data_order, part.id))
+            .collect();
+        assert_eq!(keys, vec![(1, 0, 2), (1, 1, 1), (2, 0, 3)]);
+    }
+
+    #[test]
+    fn deferred_part_synthetic_ids_are_outside_rowid_range() {
+        assert!(!FoxyModFilePart::id_is_persisted_rowid(
+            deferred_part_synthetic_id(0)
+        ));
+        assert!(!FoxyModFilePart::id_is_persisted_rowid(
+            deferred_part_synthetic_id(12)
+        ));
+        assert_ne!(deferred_part_synthetic_id(0), deferred_part_synthetic_id(1));
     }
 }

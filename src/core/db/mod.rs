@@ -23,6 +23,8 @@ pub(crate) use error::DbErr;
 pub(crate) use row::DbRow;
 pub(crate) use value::{DbValue, params};
 
+use crate::core::tasks::db_turso::{PooledConnection, TunedConnection};
+
 /// The concrete connection-handle type stored in
 /// [`crate::core::models::context::FoxyContext`] and returned by
 /// `init_database()` (plan.md §5.1).
@@ -65,9 +67,10 @@ impl FoxyDb {
     }
 
     /// Execute a single write statement with transient-error retry, returning the
-    /// number of affected rows. The statement runs in its own `BEGIN CONCURRENT`
-    /// transaction when MVCC is enabled; otherwise it uses plain `BEGIN`.
-    /// The statement may re-run after rollback, so it must be idempotent.
+    /// number of affected rows. WAL runs the statement in autocommit (it is already
+    /// atomic); an explicit `BEGIN CONCURRENT` is used only when MVCC is on, so a
+    /// conflict can roll back. The statement may re-run after a retryable error, so
+    /// it must be idempotent.
     pub(crate) async fn execute_retry(
         &self,
         label: &'static str,
@@ -80,26 +83,29 @@ impl FoxyDb {
         // a running purge drains this call too.
         let _shared = crate::core::tasks::init_database::acquire_db_shared().await;
         let conn = connect_turso(&self.db).await?;
-        let begin_sql = if crate::core::tasks::db_turso::mvcc_enabled() {
-            "BEGIN CONCURRENT"
-        } else {
-            "BEGIN"
-        };
+        let mvcc = crate::core::tasks::db_turso::mvcc_enabled();
         // Release the write gate before retry backoff, then re-acquire it.
         let (mut gate, mut gate_wait) =
             crate::core::tasks::init_database::acquire_db_write_gate().await;
         // Per-category write instrumentation (plan.md §5.4) so this label shows up
-        // in the final write-category report again. Timer starts AFTER the gate so
-        // `total_ms` is pure write work and `permit_wait_ms` is the gate wait.
+        // in the final write-category report again. The timer starts after the gate,
+        // so it measures the transaction window (`txn_ms`), not the work: Turso has
+        // one internal writer, so past a gate of 1 the waiters block inside
+        // `conn.execute` and that queue time lands here rather than in
+        // `permit_wait_ms`.
         let metric_baseline = crate::core::tasks::init_database::sqlite_perf_snapshot();
         let metric_started = std::time::Instant::now();
         let mut attempt = 0;
         loop {
             let step: Result<u64, DbErr> = async {
-                turso_execute(&conn, begin_sql, Vec::new()).await?;
-                let n = turso_execute(&conn, sql, params.clone()).await?;
-                turso_execute(&conn, "COMMIT", Vec::new()).await?;
-                Ok(n)
+                if mvcc {
+                    turso_execute(&conn, "BEGIN CONCURRENT", Vec::new()).await?;
+                    let n = turso_execute(&conn, sql, params.clone()).await?;
+                    turso_execute(&conn, "COMMIT", Vec::new()).await?;
+                    Ok(n)
+                } else {
+                    turso_execute(&conn, sql, params.clone()).await
+                }
             }
             .await;
             match step {
@@ -114,7 +120,9 @@ impl FoxyDb {
                     return Ok(n);
                 }
                 Err(e) if attempt < MAX_RETRIES && dberr_is_retryable(&e) => {
-                    let _ = turso_execute(&conn, "ROLLBACK", Vec::new()).await;
+                    if mvcc {
+                        let _ = turso_execute(&conn, "ROLLBACK", Vec::new()).await;
+                    }
                     drop(gate);
                     let backoff =
                         std::time::Duration::from_millis(50 * 2u64.saturating_pow(attempt as u32));
@@ -126,7 +134,9 @@ impl FoxyDb {
                     attempt += 1;
                 }
                 Err(e) => {
-                    let _ = turso_execute(&conn, "ROLLBACK", Vec::new()).await;
+                    if mvcc {
+                        let _ = turso_execute(&conn, "ROLLBACK", Vec::new()).await;
+                    }
                     crate::core::tasks::init_database::record_db_transaction_metrics(
                         label,
                         false,
@@ -238,7 +248,7 @@ impl FoxyDb {
     {
         // Shared barrier: coexists with other readers/writers, yields to a purge.
         let _shared = crate::core::tasks::init_database::acquire_db_shared().await;
-        turso_transaction(&self.db, label, false, work).await
+        turso_transaction(&self.db, label, false, false, work).await
     }
 
     /// Like [`FoxyDb::transaction`] but for the repository purge: runs with
@@ -256,13 +266,13 @@ impl FoxyDb {
         // FK enforcement OFF: the purge deletes children before parents, so it is
         // redundant, and ON it makes Turso scan surviving sibling child tables per
         // deleted parent row (the force-redownload wedge). See `turso_transaction`.
-        turso_transaction(&self.db, label, true, work).await
+        turso_transaction(&self.db, label, true, true, work).await
     }
 }
 
 /// A transaction handle passed to [`FoxyDb::transaction`]'s closure. Statements
 /// run on the enclosing connection so they share its atomic scope.
-pub(crate) struct DbTxn<'a>(&'a turso::Connection);
+pub(crate) struct DbTxn<'a>(&'a TunedConnection);
 
 impl DbTxn<'_> {
     pub(crate) async fn execute(&self, sql: &str, params: Vec<DbValue>) -> Result<u64, DbErr> {
@@ -301,7 +311,7 @@ impl DbTxn<'_> {
 /// `commit`/`rollback` explicitly; dropping without committing leaves the
 /// connection's transaction to be rolled back when the connection drops.
 pub(crate) struct OwnedDbTxn {
-    conn: turso::Connection,
+    conn: PooledConnection,
     /// Write-gate permit held for the life of the transaction; released on
     /// commit/rollback (which consume `self`) or on drop. `None` only if the gate
     /// semaphore was closed (never in practice).
@@ -357,23 +367,31 @@ fn turso_value_to_db(v: turso::Value) -> DbValue {
     }
 }
 
-async fn connect_turso(db: &Arc<turso::Database>) -> Result<turso::Connection, DbErr> {
-    crate::core::tasks::db_turso::connect_tuned(db)
+async fn connect_turso(db: &Arc<turso::Database>) -> Result<PooledConnection, DbErr> {
+    crate::core::tasks::db_turso::connect_pooled(db)
         .await
         .map_err(map_turso_err)
 }
 
 async fn turso_execute(
-    conn: &turso::Connection,
+    conn: &TunedConnection,
     sql: &str,
     params: Vec<DbValue>,
 ) -> Result<u64, DbErr> {
     let values: Vec<turso::Value> = params.into_iter().map(DbValue::into_turso_value).collect();
-    conn.execute(sql, values).await.map_err(map_turso_err)
+    let profiled = crate::core::utils::profiling::FsTimer::start();
+    let affected = conn.execute(sql, values).await.map_err(map_turso_err)?;
+    profiled.stop_db("write", sql, affected);
+    // Cached programs are compiled against the roots the schema had at prepare
+    // time, so DDL has to retire every pooled connection's cache.
+    if crate::core::tasks::db_turso::sql_is_ddl(sql) {
+        crate::core::tasks::db_turso::bump_schema_epoch();
+    }
+    Ok(affected)
 }
 
 async fn turso_execute_insert(
-    conn: &turso::Connection,
+    conn: &TunedConnection,
     sql: &str,
     params: Vec<DbValue>,
 ) -> Result<i64, DbErr> {
@@ -382,11 +400,14 @@ async fn turso_execute_insert(
 }
 
 async fn turso_query_all(
-    conn: &turso::Connection,
+    conn: &TunedConnection,
     sql: &str,
     params: Vec<DbValue>,
 ) -> Result<Vec<DbRow>, DbErr> {
     let values: Vec<turso::Value> = params.into_iter().map(DbValue::into_turso_value).collect();
+    // Timed around the whole drain, not just `query`: the engine streams rows, so
+    // the cost of a read is in `next`, not in handing back the cursor.
+    let profiled = crate::core::utils::profiling::FsTimer::start();
     let mut rows = conn.query(sql, values).await.map_err(map_turso_err)?;
     let columns = Arc::new(rows.column_names());
     let mut out = Vec::new();
@@ -400,6 +421,7 @@ async fn turso_query_all(
             values: vals,
         });
     }
+    profiled.stop_db("read", sql, out.len() as u64);
     Ok(out)
 }
 
@@ -411,13 +433,14 @@ async fn turso_transaction<F>(
     db: &Arc<turso::Database>,
     label: &str,
     disable_foreign_keys: bool,
+    exclusive: bool,
     work: F,
 ) -> Result<(), DbErr>
 where
     F: for<'a> Fn(&'a DbTxn<'a>) -> Pin<Box<dyn Future<Output = Result<(), DbErr>> + Send + 'a>>,
 {
     const MAX_RETRIES: usize = 5;
-    let conn = connect_turso(db).await?;
+    let mut conn = connect_turso(db).await?;
     // The purge deletes child rows before their parents, so FK enforcement is
     // redundant - and catastrophic: with `foreign_keys=ON`, deleting a repo's
     // ~1.5k `files`/`addons` while sibling repos' rows survive makes Turso scan
@@ -428,21 +451,30 @@ where
     // before the retry loop; the pragma rides this connection only (connections
     // are per-transaction), so it never weakens other writers' enforcement.
     if disable_foreign_keys {
+        // The pragma is connection-scoped, so this connection must not go back to
+        // the pool with enforcement still off.
+        conn.retire();
         turso_execute(&conn, "PRAGMA foreign_keys = OFF", Vec::new()).await?;
     }
     // Stage B (plan.md §5.2): under MVCC, independent write transactions run
     // concurrently via `BEGIN CONCURRENT` - write–write conflicts abort at COMMIT
     // and are retried by this loop (`dberr_is_retryable` matches the conflict
     // variants). Falls back to plain `BEGIN` (single-writer WAL) when MVCC is off.
-    let begin_sql = if crate::core::tasks::db_turso::mvcc_enabled() {
-        "BEGIN CONCURRENT"
-    } else {
+    //
+    // An exclusive transaction always uses plain `BEGIN`: it holds `DB_EXCLUSIVE`,
+    // so there is no concurrency for `BEGIN CONCURRENT` to buy, and the purge runs
+    // DDL (the `subfiles` DROP/CREATE, the temp id tables) which Turso rejects
+    // outside an exclusive transaction.
+    let begin_sql = if exclusive || !crate::core::tasks::db_turso::mvcc_enabled() {
         "BEGIN"
+    } else {
+        "BEGIN CONCURRENT"
     };
     // Release the write gate before retry backoff, then re-acquire it.
     let (mut gate, mut gate_wait) =
         crate::core::tasks::init_database::acquire_db_write_gate().await;
-    // Start after the gate so total_ms is write work and permit_wait_ms is queue wait.
+    // Starts after the gate, so this is the transaction window (`txn_ms`), which
+    // includes any wait on Turso's single writer inside `conn.execute`.
     let metric_baseline = crate::core::tasks::init_database::sqlite_perf_snapshot();
     let metric_started = std::time::Instant::now();
     let mut attempt = 0;
@@ -568,5 +600,27 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.get_i64("c").unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn execute_retry_autocommit_insert_is_visible() {
+        let db = test_db().await;
+        let affected = db
+            .execute_retry(
+                "test autocommit insert",
+                "INSERT INTO repositories (id, name, remote_url, local_path) \
+                 VALUES (3, 'n3', 'u3', 'p3')",
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(affected, 1);
+
+        let row = db
+            .query_one("SELECT name FROM repositories WHERE id = 3", Vec::new())
+            .await
+            .unwrap()
+            .expect("autocommit insert visible");
+        assert_eq!(row.get_string("name").unwrap(), "n3");
     }
 }

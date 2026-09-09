@@ -715,8 +715,10 @@ Full download is the correctness fallback for every file.
    limiter.
 5. Validate `Content-Range` for ranged responses.
 6. Validate final byte count (resumed chunks count toward it).
-7. Remove the sidecar, then promote `*.foxy.part` atomically to the final path
-   with rollback protection.
+7. Remove the sidecar, then rename the live file aside to a sibling `*.foxy.bak`
+   (same volume, no byte copy) and promote `*.foxy.part` onto the final path.
+   Success deletes the aside file; failure renames it back. Do not copy the
+   original into the config or temp directory.
 8. Update in-memory and persisted progress at coarse intervals.
 
 Never write directly to the final file path during transfer. Never trust a
@@ -932,6 +934,23 @@ Expected retry-after-failure path:
    match.
 4. Discard only invalid patch plans, not the whole queue.
 5. Continue from the remaining files after rollback has restored touched files.
+
+### Journal mode (WAL vs MVCC)
+
+Sync wall clock is not a reason to turn MVCC on. Force-redownload and
+download `elapsed_s` are dominated by transfer, not by `db_write_time_ms`.
+On the 2026-09-09 test-kit pair (Foxy 1.2.0, Turso 0.7.2, write-gate 4, NVMe):
+
+- Small (`perf-redownload-small-ssd`, 217 files, warm): 51.17 s WAL vs 51.35 s
+  MVCC; write time 125 ms vs 210 ms (+68%).
+- Big (`perf-redownload-big-ssd`, 3738 files, ~92 GB, cold): 801 s WAL
+  vs 805 s MVCC; `db_write_time_ms` 11.6 s vs 37.4 s (about 3x worse). Recheck
+  after a successful download is ~0.45 s on both.
+
+Do not set `FOXY_DB_MVCC=1` to make a sync, download, or recheck faster. WAL
+is the shipping journal. The measured matrix, engine benches, and how to
+re-run the pair live in `conventions/CORE_CONVENTIONS.md` (WAL vs MVCC) and
+`conventions/SPEED_OF_LIGHT.md` O7.
 
 ## Logging Requirements
 

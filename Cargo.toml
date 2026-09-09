@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "foxy-formats", "foxy-server-backend-cli"]
+members = [".", "foxy-formats", "foxy-server-backend-cli", "testkit/mutator", "testkit/runner", "testkit/oracle"]
 
 [package]
 name = "Foxy"

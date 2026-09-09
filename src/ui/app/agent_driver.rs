@@ -4942,6 +4942,8 @@ impl Foxy {
             "open-help" => self.open_reference_view(FoxyView::Help),
             "open-app-update" => self.open_reference_view(FoxyView::AppUpdate),
             "open-add-repository-modal" => self.show_add_repository_modal = true,
+            "open-add-profile-window" => self.show_add_profile_window = true,
+            "open-rename-profile-window" => self.show_rename_profile_window = true,
             "close-modals" => self.agent_gui_close_modals(),
             "toggle-activity-log" => self.set_activity_log_visibility(
                 ctx,
@@ -5122,6 +5124,18 @@ const AGENT_ACTIONS: &[AgentAction] = &[
         destructive: false,
         params: "",
         summary: "Open the add-repository modal",
+    },
+    AgentAction {
+        name: "open-add-profile-window",
+        destructive: false,
+        params: "",
+        summary: "Open the add-profile window",
+    },
+    AgentAction {
+        name: "open-rename-profile-window",
+        destructive: false,
+        params: "",
+        summary: "Open the rename-profile window",
     },
     AgentAction {
         name: "close-modals",

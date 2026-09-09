@@ -32,6 +32,7 @@ Keep this file as the compact root router. Put detailed conventions in `conventi
 - Content-format parsers (PBO, PAC1) live in the shared `foxy-formats` workspace crate behind `ContentFormat`/`FormatRegistry`, consumed by both `Foxy` and `foxy-server-backend-cli`.
 - The authoritative schema is the folded bootstrap file `sql/turso_schema.sql`; `migrations/` holds the historical SQLite migrations (no longer applied). Data/manifest references live in `sql/` and `examples/`.
 - Server-side repository generator lives in `foxy-server-backend-cli/`; standalone helper tools live in `tools/`.
+- The developer-machine test kit lives in `testkit/`: three Rust workspace members (`runner/` = `foxy-testkit`, `oracle/` = `foxy-testkit-oracle`, `mutator/` = `foxy-testkit-mutate`) plus `cases/`, `ledger/`, `runs/`, and `origin/data/` (those four git-ignored; the crates, docs, and examples are tracked). The kit crates are covered by workspace clippy and `cargo test`, but the *cases* never run from `cargo test`, CI, or a hook.
 - Shareable repo-maintained agent skills live in `skills/`; Claude Code project-skill entrypoints live in `.claude/skills/` and should point back to the repo-maintained source.
 - Runtime data defaults to `%APPDATA%\Foxy` on Windows and can be overridden with `FOXY_CONFIG_DIR` or CLI `--config-dir`. Only app-global files (`app_settings.json`, `games.json`, logs, backups, window state) live at that root; everything else is per game space under `games/<space_id>/`.
 
@@ -48,6 +49,7 @@ Keep this file as the compact root router. Put detailed conventions in `conventi
 - Sync algorithm, quick scan, remote refresh, tree hashing, download queue, delta patch, pending updates, or sync performance: `conventions/SYNC_ALGO_CONVENTION.md`.
 - Performance budgets, speed-of-light ratios, `SOL` log lines, perf baselines, or regression analysis: `conventions/SPEED_OF_LIGHT.md`.
 - Tests, validation commands, pure helper coverage, or regression tests: `conventions/TESTING_CONVENTIONS.md`.
+- Running the on-demand UX click-through or downloader/checker/database performance cases against a real build, the perf ledger and baselines, the local repository origin, or a WAL vs MVCC comparison: `skills/foxy-testkit/SKILL.md`, then `testkit/README.md`.
 - Config examples, manifest examples, generated repository JSON, or sample fixtures: `conventions/EXAMPLES_CONVENTIONS.md`.
 - Changelog entries: `conventions/CHANGELOG_CONVENTIONS.md`.
 - `foxy-server-backend-cli/` changes: `foxy-server-backend-cli/AGENTS.md`.

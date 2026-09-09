@@ -1,0 +1,32 @@
+{
+  "id": "perf-mvcc-refresh",
+  "kind": "perf",
+  "description": "Isolated metadata refresh for WAL versus MVCC comparison, served from a local manifest mirror.",
+  "build": "release",
+  "harness": "cli",
+  "origin": {
+    "root": "${REPO_ROOT}\\testkit\\origin\\data\\example-mirror",
+    "port": 8131
+  },
+  "repository": {
+    "name": "Example Repository",
+    "address": "http://127.0.0.1:8131/",
+    "path": "D:\\Foxy-TestKit\\Example",
+    "space_id": null
+  },
+  "operations": [
+    {
+      "op": "wipe-db"
+    },
+    {
+      "op": "remote-refresh",
+      "wait_timeout_s": 3600
+    }
+  ],
+  "repetitions": 3,
+  "guards": {
+    "require_no_other_foxy": true,
+    "require_clean_worktree": false,
+    "fail_on_db_wipe": false
+  }
+}

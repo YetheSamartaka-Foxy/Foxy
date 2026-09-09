@@ -1,0 +1,10 @@
+{
+  "ok": true,
+  "command": "close",
+  "view": "repository-list",
+  "elapsed_ms": 3,
+  "data": {
+    "close_requested": true
+  },
+  "errors": []
+}

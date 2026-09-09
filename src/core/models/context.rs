@@ -50,6 +50,17 @@ pub(crate) struct FoxyContext {
     /// was true. The metadata fan-out clears `fresh_subfiles_load` before the hash
     /// bootstrap flushes local state, so the buffer needs its own durable marker.
     pub(crate) deferred_part_inserts_fresh_load: Arc<AtomicBool>,
+    pending_addon_file_links: Arc<Mutex<Vec<(i64, i64)>>>,
+    pending_download_targets: Arc<Mutex<Vec<PendingDownloadTarget>>>,
+    pending_patch_clear_ids: Arc<Mutex<Vec<i64>>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct PendingDownloadTarget {
+    pub(crate) file_id: i64,
+    pub(crate) download_remote_url: String,
+    pub(crate) download_local_path: String,
+    pub(crate) size: i64,
 }
 
 /// Constructor
@@ -69,6 +80,9 @@ impl FoxyContext {
             defer_part_inserts: Arc::new(AtomicBool::new(false)),
             deferred_part_inserts: Arc::new(Mutex::new(Vec::new())),
             deferred_part_inserts_fresh_load: Arc::new(AtomicBool::new(false)),
+            pending_addon_file_links: Arc::new(Mutex::new(Vec::new())),
+            pending_download_targets: Arc::new(Mutex::new(Vec::new())),
+            pending_patch_clear_ids: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -140,6 +154,60 @@ impl FoxyContext {
     pub(crate) fn set_deferred_part_inserts_fresh_load(&self, value: bool) {
         self.deferred_part_inserts_fresh_load
             .store(value, Ordering::Relaxed);
+    }
+
+    pub(crate) fn buffer_addon_file_links(&self, links: impl IntoIterator<Item = (i64, i64)>) {
+        let mut links = links.into_iter().peekable();
+        if links.peek().is_none() {
+            return;
+        }
+        if let Ok(mut buffer) = self.pending_addon_file_links.lock() {
+            buffer.extend(links);
+        }
+    }
+
+    pub(crate) fn take_pending_addon_file_links(&self) -> Vec<(i64, i64)> {
+        self.pending_addon_file_links
+            .lock()
+            .map(|mut buffer| std::mem::take(&mut *buffer))
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn buffer_download_targets(
+        &self,
+        rows: impl IntoIterator<Item = PendingDownloadTarget>,
+    ) {
+        let mut rows = rows.into_iter().peekable();
+        if rows.peek().is_none() {
+            return;
+        }
+        if let Ok(mut buffer) = self.pending_download_targets.lock() {
+            buffer.extend(rows);
+        }
+    }
+
+    pub(crate) fn take_pending_download_targets(&self) -> Vec<PendingDownloadTarget> {
+        self.pending_download_targets
+            .lock()
+            .map(|mut buffer| std::mem::take(&mut *buffer))
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn buffer_patch_clear_ids(&self, file_ids: impl IntoIterator<Item = i64>) {
+        let mut file_ids = file_ids.into_iter().peekable();
+        if file_ids.peek().is_none() {
+            return;
+        }
+        if let Ok(mut buffer) = self.pending_patch_clear_ids.lock() {
+            buffer.extend(file_ids);
+        }
+    }
+
+    pub(crate) fn take_pending_patch_clear_ids(&self) -> Vec<i64> {
+        self.pending_patch_clear_ids
+            .lock()
+            .map(|mut buffer| std::mem::take(&mut *buffer))
+            .unwrap_or_default()
     }
 
     pub(crate) fn with_forced_mod_refreshes(

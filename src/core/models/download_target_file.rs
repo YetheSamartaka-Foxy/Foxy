@@ -123,9 +123,10 @@ pub(crate) async fn update_download_target_progress_batch(
                     let sql = format!(
                         "WITH progress(file_id, download_total, download_cycle) AS (VALUES {}) \
                          UPDATE download_target_file \
-                         SET download_total = (SELECT download_total FROM progress WHERE progress.file_id = download_target_file.file_id), \
-                             download_cycle = (SELECT download_cycle FROM progress WHERE progress.file_id = download_target_file.file_id) \
-                         WHERE file_id IN (SELECT file_id FROM progress)",
+                         SET download_total = progress.download_total, \
+                             download_cycle = progress.download_cycle \
+                         FROM progress \
+                         WHERE download_target_file.file_id = progress.file_id",
                         placeholders
                     );
                     let mut values: Vec<DbValue> = Vec::with_capacity(batch.len() * 3);

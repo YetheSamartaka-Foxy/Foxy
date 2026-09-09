@@ -1,0 +1,23 @@
+{
+  "id": "ux-repo-list-smoke",
+  "kind": "ux",
+  "description": "Boot and select the single isolated repository fixture.",
+  "build": "debug",
+  "harness": "gui",
+  "repository": {
+    "name": "Example Repository",
+    "address": "https://repo.example.invalid/mods/example/",
+    "path": "D:\\Foxy-TestKit\\Example",
+    "space_id": null
+  },
+  "steps": [
+    { "command": "health" },
+    { "command": "open-view", "view": "repository-list", "repository_index": null, "tab": null },
+    { "command": "assert", "field": "view", "equals": "repository-list", "contains": null },
+    { "command": "select", "repository": 0, "server": null, "mission": null, "space": null },
+    { "command": "assert", "field": "selected_repository", "equals": "0", "contains": null }
+  ],
+  "screenshots": "on-failure",
+  "stable_render": true,
+  "allow_warnings": []
+}

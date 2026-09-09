@@ -1,0 +1,82 @@
+---
+source: testkit/runner/src/collect/mod.rs
+expression: "digest(&corpus(\"remote-refresh\"))"
+---
+{
+  "run_metrics": {
+    "files": null,
+    "bytes": null,
+    "db_write_time_ms": null,
+    "lock_retries": null,
+    "total_backoff_ms": null,
+    "elapsed_ms": null,
+    "permit_wait_ms_total": 881.8,
+    "write_calls_total": 395.0,
+    "write_failures_total": 0.0,
+    "write_retries_total": 0.0,
+    "checkpoint_total_s": null
+  },
+  "category_line_counts": {
+    "network": 14,
+    "disk": 0,
+    "hash": 0,
+    "hash_profile": 0,
+    "scan": 1,
+    "patch": 2,
+    "db": 3
+  },
+  "db_values": [
+    {
+      "repo": "http://127.0.0.1:8132/",
+      "mode": "RemoteRefreshOnly",
+      "lock_retries": 0.0,
+      "avg_backoff_ms": 0.0,
+      "total_backoff_ms": 0.0,
+      "db_write_time_ms": 284.1,
+      "elapsed_ms": 1844.0
+    },
+    {
+      "txn": 0.08,
+      "checkpoint": 0.0
+    },
+    {
+      "repo": "http://127.0.0.1:8132/",
+      "mode": "RemoteRefreshOnly",
+      "lock_retries": 0.0,
+      "avg_backoff_ms": 0.0,
+      "total_backoff_ms": 0.0,
+      "db_write_time_ms": 904.5,
+      "conn_opened": 732.0,
+      "conn_reused": 0.0,
+      "elapsed_ms": 1577.0
+    }
+  ],
+  "sol_operations": [
+    {
+      "op": "download",
+      "record": null
+    },
+    {
+      "op": "hash",
+      "record": null
+    },
+    {
+      "op": "quick_scan",
+      "record": {
+        "op": "quick_scan",
+        "actual_s": 0.058,
+        "sol": "na",
+        "light_src": "self_baseline",
+        "repo": "http://127.0.0.1:8132/",
+        "addons_total": 96.0,
+        "addons_hashed": 0.0,
+        "cache_hits_shared": 0.0,
+        "cache_hits_persistent": 0.0,
+        "deep_scan_files": 0.0,
+        "addons_per_s": 1646.7,
+        "outcome": "updates"
+      }
+    }
+  ],
+  "sol_records": 1
+}

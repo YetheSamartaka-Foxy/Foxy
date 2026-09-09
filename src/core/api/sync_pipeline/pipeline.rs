@@ -203,6 +203,14 @@ fn should_queue_download_targets_during_remote_metadata(
     mode == SyncMode::Download && force_redownload
 }
 
+fn should_load_bootstrap_tree(
+    repo_already_complete: bool,
+    force_redownload: bool,
+    mode: SyncMode,
+) -> bool {
+    !repo_already_complete && (!force_redownload || local_path_mismatch_guard_applies(mode))
+}
+
 /// True when this repository instance has file rows whose tree hash is missing
 /// (`local_checksum` NULL/empty) AND ZERO part rows (`subfiles`). This is a
 /// structurally broken state: the tree-hash rollup derives every file's
@@ -350,9 +358,8 @@ async fn collect_missing_addon_path_summary(
     let mut sample_paths = Vec::new();
     let empty_repo_root = {
         let root = Path::new(repo.local_path.trim());
-        root.is_dir()
-            && root
-                .read_dir()
+        crate::core::utils::profiling::fs::is_dir(root)
+            && crate::core::utils::profiling::fs::read_dir(root)
                 .map(|mut entries| entries.next().is_none())
                 .unwrap_or(false)
     };
@@ -367,7 +374,7 @@ async fn collect_missing_addon_path_summary(
 
         enabled_addons += 1;
         let local_path = addon.local_path.trim();
-        if local_path.is_empty() || !Path::new(local_path).is_dir() {
+        if local_path.is_empty() || !crate::core::utils::profiling::fs::is_dir(local_path) {
             missing_addons += 1;
             if sample_paths.len() < SUSPECT_MISSING_ADDON_SAMPLE_LIMIT {
                 sample_paths.push(local_path.to_string());
@@ -753,6 +760,7 @@ async fn run_repository_pipeline(
         };
     }
     let overall_start = std::time::Instant::now();
+    crate::core::utils::profiling::phase("pre-download");
     ensure_logger();
     info!(
         "Starting sync: op={} mode={:?} repo={} path={}",
@@ -1568,20 +1576,25 @@ async fn run_repository_pipeline(
     let mut targeted_tree_hash_init = false;
     let mut bootstrap_tree_for_content_hash: Option<Tree> = None;
     let scoped_tree_bootstrap = builds_download_plan && !quick_update_mod_names.is_empty();
-    let bootstrap_tree_result = if !repo_already_complete {
-        if scoped_tree_bootstrap {
-            Tree::load_for_mod_names(
-                context.clone(),
-                &normalized_repo_url,
-                &quick_update_mod_names,
-            )
-            .await
+    summary.push(StageEntry::new("bootstrap_prepare", stage.elapsed()));
+    stage = std::time::Instant::now();
+    let bootstrap_tree_result =
+        if should_load_bootstrap_tree(repo_already_complete, force_redownload, mode) {
+            if scoped_tree_bootstrap {
+                Tree::load_for_mod_names(
+                    context.clone(),
+                    &normalized_repo_url,
+                    &quick_update_mod_names,
+                )
+                .await
+            } else {
+                Tree::load(context.clone(), &normalized_repo_url).await
+            }
         } else {
-            Tree::load(context.clone(), &normalized_repo_url).await
-        }
-    } else {
-        Ok(Tree::default())
-    };
+            Ok(Tree::default())
+        };
+    summary.push(StageEntry::new("bootstrap_tree_load", stage.elapsed()));
+    stage = std::time::Instant::now();
     if !repo_already_complete && let Ok(mut tree) = bootstrap_tree_result {
         if local_path_mismatch_guard_applies(mode) {
             let repo_label = tree
@@ -1611,6 +1624,8 @@ async fn run_repository_pipeline(
             }
         }
 
+        summary.push(StageEntry::new("local_path_preflight", stage.elapsed()));
+        stage = std::time::Instant::now();
         if force_redownload {
             // a#7 Step 1 / §3: skip the local tree-hash baseline init on a
             // force-redownload. Every file re-downloads unconditionally and
@@ -2150,6 +2165,7 @@ async fn run_repository_pipeline(
         // pending updates, so only the guards stay scoped to non-empty pending
         // mods.
         if !reuse_prepared_queue && (force_redownload || !pending_mod_names.is_empty()) {
+            stage = std::time::Instant::now();
             if !pending_mod_names.is_empty()
                 && let Some(missing_summary) = collect_missing_addon_path_summary(
                     context.clone(),
@@ -2250,6 +2266,8 @@ async fn run_repository_pipeline(
                 }
             }
 
+            summary.push(StageEntry::new("addon_path_check", stage.elapsed()));
+            stage = std::time::Instant::now();
             let existing_targets = if force_redownload {
                 HashSet::new()
             } else {
@@ -2261,6 +2279,8 @@ async fn run_repository_pipeline(
                 .await
                 .0
             };
+            summary.push(StageEntry::new("download_target_collect", stage.elapsed()));
+            stage = std::time::Instant::now();
             let rebuilt_files = if force_redownload {
                 // a#6 Step 3 / P2: on a force-redownload the local files are deleted, so
                 // there are no patch sources and patch planning is a no-op (every measured
@@ -2493,6 +2513,7 @@ async fn run_repository_pipeline(
     }
 
     // Download files
+    crate::core::utils::profiling::phase("download");
     let download_start = std::time::Instant::now();
     let mut hashed_download_file_ids: HashSet<u64> = HashSet::new();
     let mut incremental_hash_duration = Duration::ZERO;
@@ -2965,6 +2986,7 @@ async fn run_repository_pipeline(
     }
 
     // Recalculate hashes
+    crate::core::utils::profiling::phase("hash");
     let hash_start = std::time::Instant::now();
     emit_progress!(ProgressEvent::Stage {
         label: "Hashing...".into(),
@@ -3125,6 +3147,7 @@ async fn run_repository_pipeline(
         label: format!("Hash {:.1}s", total_hash_duration.as_secs_f32()),
         percent: 0.95,
     });
+    crate::core::utils::profiling::phase("finalize");
 
     // Emit a fresh diff after hashes so UI can update downloaded states immediately
     if download_file_ids.is_empty() {
@@ -3628,6 +3651,18 @@ mod tests {
         assert!(!should_queue_download_targets_during_remote_metadata(
             SyncMode::Download,
             false
+        ));
+    }
+
+    #[test]
+    fn force_redownload_skips_bootstrap_tree_load_on_download() {
+        assert!(!should_load_bootstrap_tree(false, true, SyncMode::Download));
+        assert!(!should_load_bootstrap_tree(true, false, SyncMode::Download));
+        assert!(should_load_bootstrap_tree(false, false, SyncMode::Download));
+        assert!(should_load_bootstrap_tree(
+            false,
+            true,
+            SyncMode::RecheckOnly
         ));
     }
 

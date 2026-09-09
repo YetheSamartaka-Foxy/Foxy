@@ -11,7 +11,8 @@ use crate::core::tasks::download_files::{
     apply_download_plan_bytes, build_download_estimate_diffs,
 };
 use crate::core::tasks::remote_file_parts::{
-    FilePartData, FilePartsPayload, remote_file_parts_batch,
+    FilePartData, FilePartsPayload, flush_pending_download_targets, flush_pending_patch_clears,
+    remote_file_parts_batch,
 };
 
 fn normalize_pending_file_name(name: &str) -> String {
@@ -311,10 +312,8 @@ pub(crate) async fn refresh_patch_plan_metadata_for_pending_updates(
     let mut parts_by_file_id: HashMap<i64, Vec<FoxyModFilePart>> = HashMap::new();
     for chunk in file_ids.chunks(chunk_size) {
         let placeholders = vec!["?"; chunk.len()].join(", ");
-        let sql = format!(
-            "SELECT {SUBFILE_COLUMNS} FROM subfiles WHERE file_id IN ({placeholders}) \
-             ORDER BY data_order ASC"
-        );
+        let sql =
+            format!("SELECT {SUBFILE_COLUMNS} FROM subfiles WHERE file_id IN ({placeholders})");
         let values: Vec<DbValue> = chunk.iter().copied().map(DbValue::from).collect();
         match db.query_all(&sql, values).await {
             Ok(rows) => {
@@ -367,7 +366,9 @@ pub(crate) async fn refresh_patch_plan_metadata_for_pending_updates(
                 .clone()
                 .with_patch_plan_metadata_refresh(true),
         );
-        remote_file_parts_batch(refresh_context, payloads).await;
+        remote_file_parts_batch(refresh_context.clone(), payloads).await;
+        flush_pending_download_targets(refresh_context.clone()).await;
+        flush_pending_patch_clears(refresh_context).await;
     }
     info!(
         "Patch-plan metadata refresh finished for repo={} files={} elapsed={:.2?}",

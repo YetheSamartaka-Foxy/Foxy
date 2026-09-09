@@ -1,0 +1,253 @@
+{
+  "ok": true,
+  "command": "logs",
+  "view": "repository-list",
+  "elapsed_ms": 1,
+  "data": {
+    "generation": 52262,
+    "count": 2000,
+    "entries": [
+      {
+        "timestamp": "2026-09-09 12:21:36.022318 +02:00",
+        "level": "INFO",
+        "source": "Foxy::ui::app::runtime::background_tasks",
+        "message": "Starting filesystem watcher for 1 paths"
+      },
+      {
+        "timestamp": "2026-09-09 12:21:36.022448 +02:00",
+        "level": "INFO",
+        "source": "Foxy::core::api::fs_watcher",
+        "message": "Filesystem watcher worker spawned for 1 configured paths"
+      },
+      {
+        "timestamp": "2026-09-09 12:21:36.023336 +02:00",
+        "level": "INFO",
+        "source": "Foxy::core::tasks::create_web_client",
+        "message": "HTTP client created: gzip=true brotli=true deflate=true http2_adaptive_window=true connect_timeout=15s pool_idle=none pool_max_idle_per_host=256"
+      },
+      {
+        "timestamp": "2026-09-09 12:21:36.023520 +02:00",
+        "level": "WARN",
+        "source": "Foxy::core::api::fs_watcher",
+        "message": "Skipping watcher path that does not exist: ~\\Documents\\GitHub\\Foxy\\testkit/runs\\diag-driver-capture\\20260909T102103Z-059f2c84\\payload"
+      },
+      {
+        "timestamp": "2026-09-09 12:21:36.023540 +02:00",
+        "level": "WARN",
+        "source": "Foxy::core::api::fs_watcher",
+        "message": "Filesystem watcher disabled: no valid watch paths were registered"
+      },
+      {
+        "timestamp": "2026-09-09 12:21:36.025574 +02:00",
+        "level": "INFO",
+        "source": "Foxy::ui::app::runtime::background_tasks",
+        "message": "Restarting filesystem watcher after repository changes"
+      },
+      {
+        "timestamp": "2026-09-09 12:21:36.025617 +02:00",
+        "level": "INFO",
+        "source": "Foxy::ui::app::runtime::background_tasks",
+        "message": "Filesystem watcher stop requested"
+      },
+      {
+        "timestamp": "2026-09-09 12:21:36.025633 +02:00",
+        "level": "INFO",
+        "source": "Foxy::ui::app::runtime::background_tasks",
+        "message": "Starting filesystem watcher for 1 paths"
+      },
+      {
+        "timestamp": "2026-09-09 12:21:36.025752 +02:00",
+        "level": "INFO",
+        "source": "Foxy::core::api::fs_watcher",
+        "message": "Filesystem watcher worker spawned for 1 configured paths"
+      },
+      {
+        "timestamp": "2026-09-09 12:21:36.026579 +02:00",
+        "level": "INFO",
+        "source": "Foxy::core::tasks::create_web_client",
+        "message": "HTTP client created: gzip=true brotli=true deflate=true http2_adaptive_window=true connect_timeout=15s pool_idle=none pool_max_idle_per_host=256"
+      },
+      {
+        "timestamp": "2026-09-09 12:21:36.026757 +02:00",
+        "level": "WARN",
+        "source": "Foxy::core::api::fs_watcher",
+        "message": "Skipping watcher path that does not exist: ~\\Documents\\GitHub\\Foxy\\testkit/runs\\diag-driver-capture\\20260909T102103Z-059f2c84\\payload"
+      },
+      {
+        "timestamp": "2026-09-09 12:21:36.026777 +02:00",
+        "level": "WARN",
+        "source": "Foxy::core::api::fs_watcher",
+        "message": "Filesystem watcher disabled: no valid watch paths were registered"
+      },
+      {
+        "timestamp": "2026-09-09 12:21:36.029803 +02:00",
+        "level": "INFO",
+        "source": "Foxy::ui::app::runtime::background_tasks",
+        "message": "Restarting filesystem watcher after repository changes"
+      },
+      {
+        "timestamp": "2026-09-09 12:21:36.029847 +02:00",
+        "level": "INFO",
+        "source": "Foxy::ui::app::runtime::background_tasks",
+        "message": "Filesystem watcher stop requested"
+      },
+      {
+        "timestamp": "2026-09-09 12:21:36.029863 +02:00",
+        "level": "INFO",
+        "source": "Foxy::ui::app::runtime::background_tasks",
+        "message": "Starting filesystem watcher for 1 paths"
+      },
+      {
+        "timestamp": "2026-09-09 12:21:36.030000 +02:00",
+        "level": "INFO",
+        "source": "Foxy::core::api::fs_watcher",
+        "message": "Filesystem watcher worker spawned for 1 configured paths"
+      },
+      {
+        "timestamp": "2026-09-09 12:21:36.030870 +02:00",
+        "level": "INFO",
+        "source": "Foxy::core::tasks::create_web_client",
+        "message": "HTTP client created: gzip=true brotli=true deflate=true http2_adaptive_window=true connect_timeout=15s pool_idle=none pool_max_idle_per_host=256"
+      },
+      {
+        "timestamp": "2026-09-09 12:21:36.031058 +02:00",
+        "level": "WARN",
+        "source": "Foxy::core::api::fs_watcher",
+        "message": "Skipping watcher path that does not exist: ~\\Documents\\GitHub\\Foxy\\testkit/runs\\diag-driver-capture\\20260909T102103Z-059f2c84\\payload"
+      },
+      {
+        "timestamp": "2026-09-09 12:21:36.031078 +02:00",
+        "level": "WARN",
+        "source": "Foxy::core::api::fs_watcher",
+        "message": "Filesystem watcher disabled: no valid watch paths were registered"
+      },
+      {
+        "timestamp": "2026-09-09 12:21:36.033878 +02:00",
+        "level": "INFO",
+        "source": "Foxy::ui::app::runtime::background_tasks",
+        "message": "Restarting filesystem watcher after repository changes"
+      },
+      {
+        "timestamp": "2026-09-09 12:21:37.229467 +02:00",
+        "level": "INFO",
+        "source": "Foxy::ui::app::runtime::background_tasks",
+        "message": "Filesystem watcher stop requested"
+      },
+      {
+        "timestamp": "2026-09-09 12:21:37.229482 +02:00",
+        "level": "INFO",
+        "source": "Foxy::ui::app::runtime::background_tasks",
+        "message": "Starting filesystem watcher for 1 paths"
+      },
+      {
+        "timestamp": "2026-09-09 12:21:37.229613 +02:00",
+        "level": "INFO",
+        "source": "Foxy::core::api::fs_watcher",
+        "message": "Filesystem watcher worker spawned for 1 configured paths"
+      },
+      {
+        "timestamp": "2026-09-09 12:21:37.230621 +02:00",
+        "level": "INFO",
+        "source": "Foxy::core::tasks::create_web_client",
+        "message": "HTTP client created: gzip=true brotli=true deflate=true http2_adaptive_window=true connect_timeout=15s pool_idle=none pool_max_idle_per_host=256"
+      },
+      {
+        "timestamp": "2026-09-09 12:21:37.230809 +02:00",
+        "level": "WARN",
+        "source": "Foxy::core::api::fs_watcher",
+        "message": "Skipping watcher path that does not exist: ~\\Documents\\GitHub\\Foxy\\testkit/runs\\diag-driver-capture\\20260909T102103Z-059f2c84\\payload"
+      },
+      {
+        "timestamp": "2026-09-09 12:21:37.230830 +02:00",
+        "level": "WARN",
+        "source": "Foxy::core::api::fs_watcher",
+        "message": "Filesystem watcher disabled: no valid watch paths were registered"
+      },
+      {
+        "timestamp": "2026-09-09 12:21:37.233674 +02:00",
+        "level": "INFO",
+        "source": "Foxy::ui::app::runtime::background_tasks",
+        "message": "Restarting filesystem watcher after repository changes"
+      },
+      {
+        "timestamp": "2026-09-09 12:21:37.233720 +02:00",
+        "level": "INFO",
+        "source": "Foxy::ui::app::runtime::background_tasks",
+        "message": "Filesystem watcher stop requested"
+      },
+      {
+        "timestamp": "2026-09-09 12:21:37.233736 +02:00",
+        "level": "INFO",
+        "source": "Foxy::ui::app::runtime::background_tasks",
+        "message": "Starting filesystem watcher for 1 paths"
+      },
+      {
+        "timestamp": "2026-09-09 12:21:37.233883 +02:00",
+        "level": "INFO",
+        "source": "Foxy::core::api::fs_watcher",
+        "message": "Filesystem watcher worker spawned for 1 configured paths"
+      },
+      {
+        "timestamp": "2026-09-09 12:21:37.234769 +02:00",
+        "level": "INFO",
+        "source": "Foxy::core::tasks::create_web_client",
+        "message": "HTTP client created: gzip=true brotli=true deflate=true http2_adaptive_window=true connect_timeout=15s pool_idle=none pool_max_idle_per_host=256"
+      },
+      {
+        "timestamp": "2026-09-09 12:21:37.234953 +02:00",
+        "level": "WARN",
+        "source": "Foxy::core::api::fs_watcher",
+        "message": "Skipping watcher path that does not exist: ~\\Documents\\GitHub\\Foxy\\testkit/runs\\diag-driver-capture\\20260909T102103Z-059f2c84\\payload"
+      },
+      {
+        "timestamp": "2026-09-09 12:21:37.234974 +02:00",
+        "level": "WARN",
+        "source": "Foxy::core::api::fs_watcher",
+        "message": "Filesystem watcher disabled: no valid watch paths were registered"
+      },
+      {
+        "timestamp": "2026-09-09 12:21:37.237783 +02:00",
+        "level": "INFO",
+        "source": "Foxy::ui::app::runtime::background_tasks",
+        "message": "Restarting filesystem watcher after repository changes"
+      },
+      {
+        "timestamp": "2026-09-09 12:21:37.237842 +02:00",
+        "level": "INFO",
+        "source": "Foxy::ui::app::runtime::background_tasks",
+        "message": "Filesystem watcher stop requested"
+      },
+      {
+        "timestamp": "2026-09-09 12:21:37.237861 +02:00",
+        "level": "INFO",
+        "source": "Foxy::ui::app::runtime::background_tasks",
+        "message": "Starting filesystem watcher for 1 paths"
+      },
+      {
+        "timestamp": "2026-09-09 12:21:37.238004 +02:00",
+        "level": "INFO",
+        "source": "Foxy::core::api::fs_watcher",
+        "message": "Filesystem watcher worker spawned for 1 configured paths"
+      },
+      {
+        "timestamp": "2026-09-09 12:21:37.238859 +02:00",
+        "level": "INFO",
+        "source": "Foxy::core::tasks::create_web_client",
+        "message": "HTTP client created: gzip=true brotli=true deflate=true http2_adaptive_window=true connect_timeout=15s pool_idle=none pool_max_idle_per_host=256"
+      },
+      {
+        "timestamp": "2026-09-09 12:21:37.239040 +02:00",
+        "level": "WARN",
+        "source": "Foxy::core::api::fs_watcher",
+        "message": "Skipping watcher path that does not exist: ~\\Documents\\GitHub\\Foxy\\testkit/runs\\diag-driver-capture\\20260909T102103Z-059f2c84\\payload"
+      },
+      {
+        "timestamp": "2026-09-09 12:21:37.239061 +02:00",
+        "level": "WARN",
+        "source": "Foxy::core::api::fs_watcher",
+        "message": "Filesystem watcher disabled: no valid watch paths were registered"
+      }
+    ]
+  },
+  "errors": []
+}

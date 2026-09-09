@@ -113,7 +113,7 @@ Ratios computed against someone else's baseline are meaningless.
 | B1 | Network downlink `R_net` (bytes/s) | Speedtest/iperf3, or `peak_1s_bps` from a large unthrottled download run | 115,099,474 bytes/s (109.8 MiB/s), from 2026-06-13 `peak_1s_bps` |
 | B2 | Disk sequential read `R_disk_r` | `winsat disk -seq -read -drive C`, or max `throughput` among `Hash profile auto benchmark sample:` lines | _fill in_ |
 | B3 | Disk sequential write `R_disk_w` | `winsat disk -seq -write -drive C`, or `disk: ... p95` from `-- DOWNLOAD REPORT --` | _fill in_ |
-| B4 | RTT to repo server `RTT` | `ping <repo-host>`, or debug `Fetched response body for .../repo.json (... download=...)` - for a tiny payload, download ≈ RTT | _fill in_ (ICMP to `a3.tfrod.cz` timed out on 2026-06-13; use debug fetch timing) |
+| B4 | RTT to repo server `RTT` | `ping <repo-host>`, or debug `Fetched response body for .../repo.json (... download=...)` - for a tiny payload, download ≈ RTT | _fill in_ (ICMP to the repo host timed out on 2026-06-13; use debug fetch timing) |
 | B5 | Quick-scan stat rate (entries/s) | `addons_per_s` from `SOL op=quick_scan` on a clean, warm-cache run - record best ever as the light | 2,462 addons/s, from 2026-06-13 best clean scan; re-record after persistent-cache fix |
 | B6 | Hash compute rate `R_hash` | `work_bytes / compute_s` from `SOL op=hash` (pure aggregated hash time, I/O excluded); BLAKE3 is multi-GB/s multicore, MD5 ≈ 0.5–0.7 GB/s per stream | ≈1,234,800,000 bytes/s (1.15 GiB/s), warm 2026-06-13 hash run; re-measure cold |
 
@@ -277,6 +277,27 @@ directly.
 overhead (no physics in a retry); a healthy run shows ~0. `db_write_time_ms`
 vs operation `elapsed_ms` gives the persistence share of the run.
 
+`db_write_time_ms`, and the per-category `txn_ms` it sums, are gated transaction
+windows, not row cost. Turso has one internal writer, so above a write gate of 1
+the waiters block inside `conn.execute` without surfacing `Busy` and that queue
+time is charged here rather than to `permit_wait_ms`: one frozen refresh reports
+~300 ms at gate 1 and ~2 180 ms at gate 8 for identical work. Both lines carry
+`write_gate=`; never compare either number across gate sizes, and take gate 1 as
+the uncontended reference. Before 2026-09-09 the per-category field was named
+`total_ms`; the measurement is unchanged, only the name.
+
+Never compare a WAL `db_write_time_ms` to an MVCC one except through
+`foxy-testkit compare` on the same case, gate, harness, and build. Shipping
+journal is WAL (`FOXY_DB_MVCC` unset). On Turso 0.7.2 / Foxy 1.2.0 / gate 4
+(2026-09-09, NVMe): MVCC is worse on persistence and not faster on wall clock.
+Small redownload (217 files) write time 125 ms WAL vs 210 ms MVCC, elapsed
+~51 s either way. Big redownload (3738 files, ~92 GB) write time
+11.6 s WAL vs 37.4 s MVCC (~3x), elapsed 801 s vs 805 s (network-bound; O1
+drowns O7). Recheck after that download is ~0.45 s on both. Engine benches
+where MVCC looks better (flat write-gate curve, 16 concurrent writers) do
+not show up in these sync ratios. Full matrix and how to re-run:
+`conventions/CORE_CONVENTIONS.md` (WAL vs MVCC).
+
 ### O8 - Startup to first sync verdict
 
 - **Work**: first frame (UI) + per-repo remote probe + quick scan (O4/O6 per repo).
@@ -315,8 +336,8 @@ numbers straight from the logs.
 | 2026-07-03 | 1.0.0 | 9950X3D desktop | deferred part insert | 433,016 rows | 107.30 s | 4,035 rows/s | self_baseline | na | SQLite insert with live indexes | 1,692 batches of 256; biggest sync cost |
 | 2026-07-03 | 1.0.0 | 9950X3D desktop | remote refresh rebuild | 3,738 files | 125.73 s | 29.7 files/s | self_baseline | na | DB persistence | 110.84 s DB write time; tree_hash_bootstrap 118.29 s |
 | 2026-07-03 | 1.0.0 | 9950X3D desktop | no-change remote skip | repo.json + foxy_addons | 0.27 s | 1 clean verdict | self_baseline | na | RTT + quick verify | repeat clean skip after rebuild |
-| 2026-07-03 | 1.0.0 | 9950X3D desktop | quick_scan clean | 96 addons | 0.072 s | 1,324.4 addons/s | 2,462 addons/s (B5 self) | 0.538 | addon hash + DB load | TFR Main startup quick scan |
-| 2026-07-03 | 1.0.0 | 9950X3D desktop | quick_scan updates | 41 addons | 0.167 s | 245.6 addons/s | self_baseline | na | missing-file diff | TFR_40K before download: 41 addons updated, 1,515 files missing |
+| 2026-07-03 | 1.0.0 | 9950X3D desktop | quick_scan clean | 96 addons | 0.072 s | 1,324.4 addons/s | 2,462 addons/s (B5 self) | 0.538 | addon hash + DB load | large-repo startup quick scan |
+| 2026-07-03 | 1.0.0 | 9950X3D desktop | quick_scan updates | 41 addons | 0.167 s | 245.6 addons/s | self_baseline | na | missing-file diff | 41-addon repo before download: 41 addons updated, 1,515 files missing |
 | 2026-07-03 | 1.0.0 | 9950X3D desktop | quick_scan updates | 41 addons | 0.158 s | 260.2 addons/s | self_baseline | na | missing-file diff | repeated update check before download |
 | 2026-07-03 | 1.0.0 | 9950X3D desktop | quick_scan updates | 41 addons | 0.154 s | 265.5 addons/s | self_baseline | na | missing-file diff | repeated update check before download |
 | 2026-07-03 | 1.0.0 | 9950X3D desktop | quick_scan updates | 41 addons | 0.153 s | 268.8 addons/s | self_baseline | na | missing-file diff | repeated update check before download |
@@ -324,9 +345,15 @@ numbers straight from the logs.
 | 2026-07-03 | 1.0.0 | 9950X3D desktop | download pipeline | 22.56 GiB | 247.54 s | 93.31 MiB/s | self_baseline | na | post-download tail | download 240.68 s, hash_finalize 17.75 s, DB writes 14.84 s |
 | 2026-07-03 | 1.0.0 | 9950X3D desktop | hash finalize tail | 22.56 GiB | 15.15 s | 1,524.6 MiB/s | self_baseline | na | rollup or persistence tail | all 1,515 files incrementally hashed during download |
 | 2026-07-03 | 1.0.0 | 9950X3D desktop | download DB checkpoint | 3,583 rows | 1.79 s | 2,002 rows/s | self_baseline | na | SQLite progress persistence | 36 batches, avg_batch=49.6ms |
-| 2026-07-03 | 1.0.0 | 9950X3D desktop | quick_scan clean | 41 addons | 0.040 s | 1,019.4 addons/s | 2,462 addons/s (B5 self) | 0.414 | addon hash + DB load | TFR_40K clean after download |
-| 2026-07-03 | 1.0.0 | 9950X3D desktop | quick_scan clean | 41 addons | 0.042 s | 972.4 addons/s | 2,462 addons/s (B5 self) | 0.395 | addon hash + DB load | TFR_40K remote skip verification |
-| 2026-07-03 | 1.0.0 | 9950X3D desktop | no-change remote skip | repo.json + foxy_addons | 0.21 s | 1 clean verdict | self_baseline | na | RTT + quick verify | TFR_40K clean skip after download |
+| 2026-07-03 | 1.0.0 | 9950X3D desktop | quick_scan clean | 41 addons | 0.040 s | 1,019.4 addons/s | 2,462 addons/s (B5 self) | 0.414 | addon hash + DB load | 41-addon repo clean after download |
+| 2026-07-03 | 1.0.0 | 9950X3D desktop | quick_scan clean | 41 addons | 0.042 s | 972.4 addons/s | 2,462 addons/s (B5 self) | 0.395 | addon hash + DB load | 41-addon repo remote skip verification |
+| 2026-07-03 | 1.0.0 | 9950X3D desktop | no-change remote skip | repo.json + foxy_addons | 0.21 s | 1 clean verdict | self_baseline | na | RTT + quick verify | 41-addon repo clean skip after download |
+| 2026-09-09 | 1.2.0 Turso 0.7.2 gate 4 WAL | 9950X3D NVMe | force-redownload | 217 files | 51.17 s | 86.4 MB/s | peak_1s | 0.79 | network | perf-redownload-small-ssd warm; db_write 125 ms |
+| 2026-09-09 | 1.2.0 Turso 0.7.2 gate 4 MVCC | 9950X3D NVMe | force-redownload | 217 files | 51.35 s | 86.3 MB/s | peak_1s | 0.78 | network | same case; db_write 210 ms (+68%); elapsed no-difference |
+| 2026-09-09 | 1.2.0 Turso 0.7.2 gate 4 WAL | 9950X3D NVMe | force-redownload | 92.2 GB / 3738 files | 801 s | 116.1 MB/s | peak_1s | 0.97 | network | perf-redownload-big-ssd cold; db_write 11.6 s |
+| 2026-09-09 | 1.2.0 Turso 0.7.2 gate 4 MVCC | 9950X3D NVMe | force-redownload | 92.2 GB / 3738 files | 805 s | 115.4 MB/s | peak_1s | 0.97 | network | same case; db_write 37.4 s (~3x); elapsed no-difference |
+| 2026-09-09 | 1.2.0 Turso 0.7.2 gate 4 WAL | 9950X3D NVMe | recheck | large repo after redownload | 0.44 s | 1 clean | self_baseline | na | RTT + quick verify | big-ssd cold recheck |
+| 2026-09-09 | 1.2.0 Turso 0.7.2 gate 4 MVCC | 9950X3D NVMe | recheck | large repo after redownload | 0.45 s | 1 clean | self_baseline | na | RTT + quick verify | same; not faster than WAL |
 | | | | | | | | | | | |
 
 Workflow rules:

@@ -283,6 +283,9 @@ pub(super) async fn calculate_part_hashes(
     let blocking_started = Instant::now();
     let blocking_progress = progress.clone();
     let result = tokio::task::spawn_blocking(move || {
+        // Timed per file rather than per part: a 562-entry PBO would otherwise
+        // charge the profiler more events than the hashing does work.
+        let profiled = crate::core::utils::profiling::FsTimer::start();
         let file = match std::fs::File::open(&file_path_owned) {
             Ok(f) => f,
             Err(e) => {
@@ -424,6 +427,13 @@ pub(super) async fn calculate_part_hashes(
             }
         }
 
+        profiled.stop(
+            "hash_read",
+            indexed_parts
+                .iter()
+                .map(|(_, part)| part.local_length)
+                .sum::<u64>(),
+        );
         indexed_parts
     })
     .await;

@@ -295,6 +295,7 @@ fn cmd_repo_force_redownload(
     let runtime = Runtime::new().map_err(|e| {
         CommandError::operation("repo.force-redownload", format!("Runtime error: {}", e))
     })?;
+    crate::core::utils::profiling::phase("purge");
     runtime
         .block_on(purge_repository_by_url(&normalized, repo_path.as_deref()))
         .map_err(|e| {

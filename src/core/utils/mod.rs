@@ -8,6 +8,7 @@ pub mod format;
 pub mod fs_safety;
 pub mod http_range;
 pub mod platform;
+pub mod profiling;
 pub mod renderer_fallback;
 pub mod resource_profile;
 pub mod speed_of_light;

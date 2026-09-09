@@ -53,7 +53,12 @@ use crate::core::utils::format::sanitize_log_path;
 /// write. Removing it cuts the 66k-row force-redownload insert ~25%
 /// (after_turso_regression_analysis6.md). Existing `23` databases rebuild so the
 /// dropped index does not linger.
-pub const DB_SCHEMA_VERSION: u32 = 24;
+///
+/// `25`: dropped `idx_subfiles_file_id_data_order (file_id, data_order, id)`.
+/// Ordered part reloads sort in process; keeping the covering index cost ~1.4 s
+/// per 433k-row insert. The unique `(file_id, path)` index stays. Existing `24`
+/// databases rebuild so the dropped index does not linger.
+pub const DB_SCHEMA_VERSION: u32 = 25;
 
 /// Content-hash format generation understood by this binary.
 pub const CONTENT_HASH_FORMAT: u32 = 2;

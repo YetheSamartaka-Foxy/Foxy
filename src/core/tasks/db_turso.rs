@@ -13,7 +13,9 @@
 //! - `busy_timeout` is a `Connection` method, not a PRAGMA.
 //! - `wal_autocheckpoint` / `journal_size_limit` / `mmap_size` are no-ops (Turso
 //!   manages its own WAL) → dropped, not reproduced.
-//! - `connect()` is ~16µs → per-task connections, no pool.
+//! - `connect()` builds a fresh pager, reads page 1 and clones the schema, and
+//!   its statement cache dies with it → tuned connections are pooled per
+//!   database and hand out cached programs (see `connect_pooled`).
 //! - No statement interrupt / query timeout on `Connection` in 0.7.2 (unlike the
 //!   Python SDK) → cancellation stays cooperative at the task level.
 #![allow(dead_code)] // A few helpers (db_retry_transaction, etc.) are exercised only by tests.
@@ -23,14 +25,18 @@ use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::FutureExt;
 use log::{debug, info, warn};
-use turso::{Builder, Connection, Database, Error};
+use turso::{Builder, Connection, Database, Error, Statement};
 
 use crate::core::utils::format::sanitize_log_path;
+
+#[cfg(test)]
+#[path = "db_turso/round2_benches.rs"]
+mod round2_benches;
 
 /// The folded bootstrap schema (migrations 01..21 in final state). Applied once
 /// to a fresh database; the auto-wipe gate (`db_schema_version.rs`) guarantees a
@@ -51,28 +57,16 @@ pub(crate) const SUBFILES_CREATE_TABLE: &str = "CREATE TABLE IF NOT EXISTS subfi
     data_order INTEGER, \
     FOREIGN KEY (file_id) REFERENCES files(id))";
 
-/// `subfiles` index `CREATE` statements (the unique `(file_id, path)` index that
-/// backs `ON CONFLICT`, plus the `(file_id, data_order, id)` ordered-read index).
-/// The whole-wipe purge recreates these with the table. Order: unique first so reads
-/// have it as soon as possible.
+/// `subfiles` unique `(file_id, path)` index that backs `ON CONFLICT`.
+/// The whole-wipe purge recreates it with the table.
 ///
-/// The old `idx_subfiles_path_remote_checksum (path, remote_checksum)` index was
-/// dropped in schema v24 (after_turso_regression_analysis6.md): every `subfiles`
-/// query filters by `file_id` (covered by the two indexes below), so the
-/// `(path, remote_checksum)` tree had no primary user - it only appeared as a
-/// secondary join filter in sibling hash propagation, which is already narrowed to a
-/// single file's parts by `file_id`. Removing it cuts every part insert/delete from
-/// 4 → 3 B-trees (~25% less write work on the 66k-row TFR_40K force-redownload).
-pub(crate) const SUBFILES_INDEX_CREATE_SQL: [&str; 2] = [
-    "CREATE UNIQUE INDEX IF NOT EXISTS idx_subfiles_file_id_path ON subfiles(file_id, path)",
-    "CREATE INDEX IF NOT EXISTS idx_subfiles_file_id_data_order ON subfiles(file_id, data_order, id)",
-];
+/// Schema v24 dropped `idx_subfiles_path_remote_checksum`. Schema v25 dropped
+/// `idx_subfiles_file_id_data_order`; ordered part reloads sort in process.
+pub(crate) const SUBFILES_INDEX_CREATE_SQL: [&str; 1] =
+    ["CREATE UNIQUE INDEX IF NOT EXISTS idx_subfiles_file_id_path ON subfiles(file_id, path)"];
 
 /// `subfiles` index names, for `DROP INDEX IF EXISTS` when rebuilding the indexes.
-pub(crate) const SUBFILES_INDEX_NAMES: [&str; 2] = [
-    "idx_subfiles_file_id_path",
-    "idx_subfiles_file_id_data_order",
-];
+pub(crate) const SUBFILES_INDEX_NAMES: [&str; 1] = ["idx_subfiles_file_id_path"];
 
 const DB_BUSY_TIMEOUT: Duration = Duration::from_millis(5000);
 const DB_MAX_RETRIES: usize = 5;
@@ -119,7 +113,7 @@ pub(crate) async fn build_and_bootstrap(path: &str) -> turso::Result<Database> {
     let db = Builder::new_local(path).build().await?;
     // Schema creation needs FK enforcement on so the CASCADE chains are recorded.
     let conn = connect_tuned(&db).await?;
-    apply_schema(&conn, TURSO_BOOTSTRAP_SCHEMA).await?;
+    apply_schema(conn.raw(), TURSO_BOOTSTRAP_SCHEMA).await?;
     Ok(db)
 }
 
@@ -158,6 +152,7 @@ pub(crate) async fn wipe_and_rebuild_live(db: &Database) -> turso::Result<()> {
     let _exclusive = crate::core::tasks::init_database::acquire_db_exclusive().await;
     // FK enforcement is on per tuned connection; drop in dependency order so the
     // CASCADE chains don't fight the explicit DROPs.
+    bump_schema_epoch();
     let conn = connect_tuned(db).await?;
     let tables = [
         "pending_updates",
@@ -178,27 +173,17 @@ pub(crate) async fn wipe_and_rebuild_live(db: &Database) -> turso::Result<()> {
             .await?;
     }
     info!("Re-applying Turso bootstrap schema...");
-    apply_schema(&conn, TURSO_BOOTSTRAP_SCHEMA).await?;
+    apply_schema(conn.raw(), TURSO_BOOTSTRAP_SCHEMA).await?;
     info!("Database wipe complete.");
     Ok(())
 }
 
 /// Whether Turso's MVCC concurrent-write mode is active.
 ///
-/// Defaults **OFF**. MVCC (`journal_mode='mvcc'` + `BEGIN CONCURRENT`) is still
-/// beta and measured *much* slower than single-writer WAL for this app's
-/// write-heavy metadata-rebuild / hash-persist workload: the per-Database version
-/// store accumulates across a session, so sustained sequential upserts run ~8×
-/// slower and, fanned out across the ~16-way concurrent mod rebuild, degrade to
-/// O(N²) (a single 16k-row batch hit 372s on TFR_40K). It also caused
-/// cross-connection read-after-write misses ("Part record missing after upsert")
-/// and the cross-runtime purge deadlock. Single-writer WAL matches the proven-fast
-/// pre-Turso SQLite baseline and handles the concurrent fan-out cleanly via
-/// busy_timeout + retry (benchmarked: 16 writers, 0 retries). Reproducers:
-/// `bench_mvcc_write_degradation` / `bench_mvcc_concurrent_writers`.
-///
-/// Set `FOXY_DB_MVCC=1` (or `true`/`on`/`yes`) to opt back in for experiments
-/// once the engine's MVCC write path matures.
+/// Defaults **OFF**. `FOXY_DB_MVCC=1` (or `true`/`on`/`yes`) opts into
+/// `journal_mode='mvcc'` + `BEGIN CONCURRENT`. On Turso 0.7.2 that is still
+/// worse for measured Foxy sync and purge; see
+/// `conventions/CORE_CONVENTIONS.md` (WAL vs MVCC).
 pub(crate) fn mvcc_enabled() -> bool {
     matches!(
         std::env::var("FOXY_DB_MVCC")
@@ -221,10 +206,323 @@ pub(crate) async fn read_journal_mode(conn: &Connection) -> Option<String> {
     row.get::<String>(0).ok()
 }
 
-/// Open a fresh connection and apply the honored PRAGMAs + busy timeout. Per the
-/// spike, connections are ~16µs to create, so callers take one per task.
-pub(crate) async fn connect_tuned(db: &Database) -> turso::Result<Connection> {
-    let conn = db.connect()?;
+/// Statement programs kept per connection. `prepare_cached` stores compiled
+/// programs in an unbounded map inside the engine, so admission is capped here:
+/// without a cap a long session's one-off `IN (?, ?, ...)` shapes would pin a
+/// program each.
+const MAX_CACHED_STATEMENTS: usize = 128;
+
+/// Idle connections kept warm per database. Each holds its own pager and its own
+/// page cache (`cache_size = -16384`, so 16 MiB apiece at full), which bounds the
+/// idle pool's resident cost at six times that, roughly 96 MiB. The limit does
+/// not cap active concurrency: a burst may open more, and connections above it
+/// are discarded on return. Override with `FOXY_DB_POOL_IDLE`, where `0` is the
+/// unpooled A/B control.
+const DEFAULT_MAX_IDLE_CONNECTIONS: usize = 6;
+
+fn max_idle_connections() -> usize {
+    static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        std::env::var("FOXY_DB_POOL_IDLE")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(DEFAULT_MAX_IDLE_CONNECTIONS)
+            .min(32)
+    })
+}
+
+static DB_CONNECTIONS_OPENED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DB_CONNECTIONS_REUSED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Bumped whenever DDL runs. A cached statement program is only rechecked
+/// against its own connection's schema snapshot, and that snapshot is refreshed
+/// only when a statement is compiled - so a connection that DDL happened
+/// *around* can serve a program built against dropped roots. Pooled connections
+/// carry the epoch they were opened at and are retired once it moves.
+static DB_SCHEMA_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Retire every pooled connection: their cached programs may reference roots the
+/// DDL just replaced.
+pub(crate) fn bump_schema_epoch() {
+    DB_SCHEMA_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn schema_epoch() -> u64 {
+    DB_SCHEMA_EPOCH.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Whether a statement changes the schema, and so has to retire cached programs.
+pub(crate) fn sql_is_ddl(sql: &str) -> bool {
+    let head = sql.trim_start();
+    let word_len = head
+        .find(|c: char| !c.is_ascii_alphabetic())
+        .unwrap_or(head.len());
+    matches!(
+        head[..word_len].to_ascii_uppercase().as_str(),
+        "CREATE" | "DROP" | "ALTER" | "REINDEX" | "VACUUM"
+    )
+}
+
+/// Connections opened and connections served from the pool since process start.
+pub(crate) fn connection_counters() -> (u64, u64) {
+    (
+        DB_CONNECTIONS_OPENED.load(std::sync::atomic::Ordering::Relaxed),
+        DB_CONNECTIONS_REUSED.load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+/// A tuned connection plus the admission record for its statement cache.
+///
+/// Cloneable because the seam hands the same connection to a transaction handle
+/// and its statements; clones share one engine connection, so they must not run
+/// statements concurrently (Turso rejects overlapping use of one connection).
+#[derive(Clone)]
+pub(crate) struct TunedConnection {
+    conn: Connection,
+    admission: Arc<Mutex<StatementAdmission>>,
+    epoch: u64,
+}
+
+#[derive(Default)]
+struct StatementAdmission {
+    /// SQL seen once; a shape is only admitted to the engine cache on its second
+    /// use so single-shot statements never consume a cache slot.
+    seen: std::collections::HashSet<u64>,
+    cached: std::collections::HashSet<u64>,
+}
+
+fn sql_fingerprint(sql: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    sql.hash(&mut hasher);
+    hasher.finish()
+}
+
+impl TunedConnection {
+    fn new(conn: Connection) -> Self {
+        Self {
+            conn,
+            admission: Arc::new(Mutex::new(StatementAdmission::default())),
+            epoch: schema_epoch(),
+        }
+    }
+
+    /// The underlying engine connection, for call sites that need it directly.
+    pub(crate) fn raw(&self) -> &Connection {
+        &self.conn
+    }
+
+    /// Prepare `sql`, reusing this connection's compiled program when the shape
+    /// has been seen before and the cache still has room.
+    pub(crate) async fn prepare_tuned(&self, sql: &str) -> turso::Result<Statement> {
+        let cacheable = {
+            let fingerprint = sql_fingerprint(sql);
+            let mut admission = self
+                .admission
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if admission.cached.contains(&fingerprint) {
+                true
+            } else if admission.seen.remove(&fingerprint)
+                && admission.cached.len() < MAX_CACHED_STATEMENTS
+            {
+                admission.cached.insert(fingerprint);
+                true
+            } else {
+                if admission.seen.len() >= MAX_CACHED_STATEMENTS * 4 {
+                    admission.seen.clear();
+                }
+                admission.seen.insert(fingerprint);
+                false
+            }
+        };
+        if cacheable {
+            self.conn.prepare_cached(sql).await
+        } else {
+            self.conn.prepare(sql).await
+        }
+    }
+
+    pub(crate) async fn execute(
+        &self,
+        sql: &str,
+        params: impl turso::IntoParams,
+    ) -> turso::Result<u64> {
+        let mut stmt = self.prepare_tuned(sql).await?;
+        stmt.execute(params).await
+    }
+
+    pub(crate) async fn query(
+        &self,
+        sql: &str,
+        params: impl turso::IntoParams,
+    ) -> turso::Result<turso::Rows> {
+        let mut stmt = self.prepare_tuned(sql).await?;
+        stmt.query(params).await
+    }
+
+    pub(crate) fn last_insert_rowid(&self) -> i64 {
+        self.conn.last_insert_rowid()
+    }
+
+    pub(crate) async fn pragma_update<V: std::fmt::Display>(
+        &self,
+        name: &str,
+        value: V,
+    ) -> turso::Result<Vec<turso::Row>> {
+        self.conn.pragma_update(name, value).await
+    }
+
+    pub(crate) fn busy_timeout(&self, duration: Duration) -> turso::Result<()> {
+        self.conn.busy_timeout(duration)
+    }
+
+    pub(crate) fn is_autocommit(&self) -> turso::Result<bool> {
+        self.conn.is_autocommit()
+    }
+}
+
+/// Warm tuned connections for one database handle.
+///
+/// A checkout is exclusive: the guard owns the connection until it drops, so
+/// pooling changes only where a connection comes from, never how many tasks
+/// share one.
+struct ConnectionPool {
+    idle: Mutex<Vec<TunedConnection>>,
+}
+
+impl ConnectionPool {
+    fn take(&self) -> Option<TunedConnection> {
+        let epoch = schema_epoch();
+        let mut idle = self
+            .idle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while let Some(conn) = idle.pop() {
+            if conn.epoch == epoch {
+                return Some(conn);
+            }
+        }
+        None
+    }
+
+    fn put(&self, conn: TunedConnection) {
+        if conn.epoch != schema_epoch() {
+            return;
+        }
+        let mut idle = self
+            .idle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if idle.len() < max_idle_connections() {
+            idle.push(conn);
+        }
+    }
+}
+
+/// Pools keyed by database identity. `Weak` so a pool never keeps a closed
+/// database alive; dead entries are pruned on the next lookup.
+static CONNECTION_POOLS: Mutex<Vec<(Weak<Database>, Arc<ConnectionPool>)>> = Mutex::new(Vec::new());
+
+fn pool_for(db: &Arc<Database>) -> Arc<ConnectionPool> {
+    let mut pools = CONNECTION_POOLS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    pools.retain(|(weak, _)| weak.strong_count() > 0);
+    if let Some((_, pool)) = pools
+        .iter()
+        .find(|(weak, _)| weak.upgrade().is_some_and(|other| Arc::ptr_eq(&other, db)))
+    {
+        return pool.clone();
+    }
+    let pool = Arc::new(ConnectionPool {
+        idle: Mutex::new(Vec::new()),
+    });
+    pools.push((Arc::downgrade(db), pool.clone()));
+    pool
+}
+
+/// Drop every idle connection for every database.
+///
+/// Idle connections hold the engine database alive, so releasing a game space's
+/// file (a space switch, a live wipe) has to drain them or the directory stays
+/// locked.
+pub(crate) fn drain_connection_pools() {
+    let mut pools = CONNECTION_POOLS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    for (_, pool) in pools.iter() {
+        pool.idle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+    }
+    pools.clear();
+}
+
+/// A tuned connection borrowed from its database's pool, returned on drop.
+pub(crate) struct PooledConnection {
+    conn: TunedConnection,
+    pool: Arc<ConnectionPool>,
+    retire: bool,
+}
+
+impl PooledConnection {
+    /// Drop this connection on release instead of returning it to the pool.
+    /// Callers that change connection-scoped state (the purge's
+    /// `foreign_keys = OFF`) must retire it so the change cannot leak into the
+    /// next borrower.
+    pub(crate) fn retire(&mut self) {
+        self.retire = true;
+    }
+}
+
+impl std::ops::Deref for PooledConnection {
+    type Target = TunedConnection;
+    fn deref(&self) -> &Self::Target {
+        &self.conn
+    }
+}
+
+impl Drop for PooledConnection {
+    fn drop(&mut self) {
+        // A connection left inside a transaction would hand its open write to the
+        // next borrower, so only autocommit connections go back.
+        if self.retire || !self.conn.is_autocommit().unwrap_or(false) {
+            return;
+        }
+        self.pool.put(self.conn.clone());
+    }
+}
+
+/// Borrow a tuned connection from `db`'s pool, opening one if none is idle.
+pub(crate) async fn connect_pooled(db: &Arc<Database>) -> turso::Result<PooledConnection> {
+    let pool = pool_for(db);
+    if let Some(conn) = pool.take() {
+        DB_CONNECTIONS_REUSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return Ok(PooledConnection {
+            conn,
+            pool,
+            retire: false,
+        });
+    }
+    let conn = connect_tuned(db.as_ref()).await?;
+    Ok(PooledConnection {
+        conn,
+        pool,
+        retire: false,
+    })
+}
+
+/// Open a fresh connection and apply the honored PRAGMAs + busy timeout.
+///
+/// Prefer [`connect_pooled`]: a connect builds a pager, reads page 1 and clones
+/// the schema, and the five pragmas below are five more prepared statements.
+/// This unpooled form is for bootstrap, compaction, and callers that mutate
+/// connection-scoped pragmas.
+pub(crate) async fn connect_tuned(db: &Database) -> turso::Result<TunedConnection> {
+    DB_CONNECTIONS_OPENED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let conn = TunedConnection::new(db.connect()?);
     // Honored PRAGMAs only (spike §11). `pragma_update` issues `PRAGMA x = v`
     // and drains any returned row.
     conn.pragma_update("foreign_keys", "ON").await?;
@@ -485,7 +783,7 @@ async fn should_compact_database(db: &Database) -> bool {
             return false;
         }
     };
-    let stats = read_db_bloat_stats(&conn).await;
+    let stats = read_db_bloat_stats(conn.raw()).await;
     if let Some(s) = stats {
         info!(
             "STARTUP: Turso db file≈{:.1}MiB pages={} free_pages={} ({:.0}% free) live≈{:.1}MiB",
@@ -585,7 +883,7 @@ async fn build_compacted_copy(path: &Path) -> turso::Result<PathBuf> {
 
     dst.execute("BEGIN", ()).await?;
     for table in COMPACT_COPY_TABLES {
-        let n = copy_table(&src, &dst, table).await?;
+        let n = copy_table(src.raw(), &dst, table).await?;
         debug!("STARTUP: compaction copied {n} rows from {table}");
     }
     dst.execute("COMMIT", ()).await?;
@@ -771,6 +1069,9 @@ pub(crate) async fn init_turso_database_with_path() -> (PathBuf, Arc<Database>) 
 /// resolves to.
 pub(crate) async fn close_active_database() {
     let mut slot = DB_SLOT.lock().await;
+    // Idle pooled connections hold the engine database alive, so they have to go
+    // before the handle for the space directory to become deletable.
+    drain_connection_pools();
     if let Some((path, _)) = slot.take() {
         info!(
             "Released the database handle for {}",
@@ -849,7 +1150,7 @@ async fn open_and_prepare_database(path: &Path) -> Arc<Database> {
     // (see `mvcc_enabled` rationale).
     match connect_tuned(&db).await {
         Ok(conn) => {
-            let mode = read_journal_mode(&conn)
+            let mode = read_journal_mode(conn.raw())
                 .await
                 .unwrap_or_else(|| "unknown".to_string());
             info!(
@@ -1140,7 +1441,7 @@ mod tests {
     /// purged `subfiles` table (the force-redownload case, where no row can
     /// conflict), is a plain `INSERT` materially faster than the production
     /// `INSERT … ON CONFLICT (file_id, path) DO UPDATE`, and where is the
-    /// per-statement chunk-size knee? Inserts 66 336 rows (real TFR_40K part
+    /// per-statement chunk-size knee? Inserts 66 336 rows (a large-repo part
     /// count) under single-writer WAL, one transaction, chunked - mirroring
     /// `remote_file_parts::batch::file_part_upsert_*`. Prints wall time for both
     /// statement shapes across several chunk sizes.
@@ -1151,7 +1452,7 @@ mod tests {
         const PARAMS_PER_ROW: usize = 6;
 
         // file_id=1 must exist (FK target for subfiles.file_id).
-        async fn seed_file(db: &Database) -> Connection {
+        async fn seed_file(db: &Database) -> TunedConnection {
             let conn = connect_tuned(db).await.unwrap();
             conn.execute(
                 "INSERT INTO files (id, name, remote_path, local_path) VALUES (1, 'f', 'rp', 'lp')",
@@ -1316,7 +1617,7 @@ mod tests {
     }
 
     /// Benchmark (run explicitly: `cargo test --release bench_mvcc_write_degradation
-    /// -- --ignored --nocapture`). Reproduces the production TFR_40K pattern: a
+    /// -- --ignored --nocapture`). Reproduces a large production-repo pattern: a
     /// populated `subfiles` table re-upserted by a long series of independent write
     /// transactions, each on its own fresh connection (matching the seam). Prints
     /// per-batch timings for MVCC on vs off so the O(N²) version-store growth is
@@ -1658,7 +1959,7 @@ mod tests {
     async fn retry_transaction_commits() {
         let (_dir, db) = temp_db().await;
         let conn = connect_tuned(&db).await.unwrap();
-        db_retry_transaction(&conn, "test insert", false, |c| {
+        db_retry_transaction(conn.raw(), "test insert", false, |c| {
             Box::pin(async move {
                 c.execute(
                     "INSERT INTO repositories (id, name, remote_url, local_path) VALUES (2, 'n', 'u2', 'p2')",
@@ -1689,7 +1990,7 @@ mod tests {
     async fn retry_transaction_rolls_back_on_constraint() {
         let (_dir, db) = temp_db().await;
         let conn = connect_tuned(&db).await.unwrap();
-        let result = db_retry_transaction(&conn, "bad insert", false, |c| {
+        let result = db_retry_transaction(conn.raw(), "bad insert", false, |c| {
             Box::pin(async move {
                 c.execute(
                     "INSERT INTO repositories (id, name, remote_url, local_path) VALUES (3, 'ok', 'u3', 'p3')",
@@ -1744,7 +2045,7 @@ mod tests {
         );
         let (_dir, db) = temp_db().await;
         let conn = connect_tuned(&db).await.unwrap();
-        let mode = read_journal_mode(&conn).await.expect("journal_mode");
+        let mode = read_journal_mode(conn.raw()).await.expect("journal_mode");
         assert_eq!(mode.to_ascii_lowercase(), "wal");
     }
 
@@ -1753,7 +2054,7 @@ mod tests {
         let (_dir, db) = temp_db().await;
         let conn = connect_tuned(&db).await.unwrap();
         let started = Instant::now();
-        let err = db_retry_transaction(&conn, "overlap", false, |_| {
+        let err = db_retry_transaction(conn.raw(), "overlap", false, |_| {
             Box::pin(async {
                 Err(Error::Busy(
                     "cannot start a write statement - SQL statements in progress".into(),
@@ -2069,8 +2370,8 @@ mod tests {
         }
         eprintln!(
             "before: page_count={:?} freelist={:?}",
-            pc(&conn, "PRAGMA page_count").await,
-            pc(&conn, "PRAGMA freelist_count").await
+            pc(conn.raw(), "PRAGMA page_count").await,
+            pc(conn.raw(), "PRAGMA freelist_count").await
         );
 
         let into = dir.path().join("compacted.db");
@@ -2147,8 +2448,8 @@ mod tests {
         let file_bytes = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         eprintln!(
             "before: bytes={file_bytes} page_count={:?} freelist={:?}",
-            pc(&conn, "PRAGMA page_count").await,
-            pc(&conn, "PRAGMA freelist_count").await
+            pc(conn.raw(), "PRAGMA page_count").await,
+            pc(conn.raw(), "PRAGMA freelist_count").await
         );
         assert!(
             file_bytes >= target_bytes / 2,
@@ -2224,7 +2525,9 @@ mod tests {
             conn.execute("DELETE FROM subfiles WHERE data_order >= 1000", ())
                 .await
                 .unwrap();
-            let free = read_pragma_i64(&conn, "freelist_count").await.unwrap_or(0);
+            let free = read_pragma_i64(conn.raw(), "freelist_count")
+                .await
+                .unwrap_or(0);
             assert!(
                 free > 20,
                 "expected bloat before compaction, got {free} free pages"
@@ -2242,13 +2545,19 @@ mod tests {
         let db = build_and_bootstrap(&path_str).await.unwrap();
         let conn = connect_tuned(&db).await.unwrap();
         assert_eq!(
-            count(&conn, "subfiles").await,
+            count(conn.raw(), "subfiles").await,
             1000,
             "subfile rows preserved"
         );
-        assert_eq!(count(&conn, "files").await, 1, "file rows preserved");
-        assert_eq!(count(&conn, "repositories").await, 1, "repo rows preserved");
-        let free_after = read_pragma_i64(&conn, "freelist_count").await.unwrap_or(-1);
+        assert_eq!(count(conn.raw(), "files").await, 1, "file rows preserved");
+        assert_eq!(
+            count(conn.raw(), "repositories").await,
+            1,
+            "repo rows preserved"
+        );
+        let free_after = read_pragma_i64(conn.raw(), "freelist_count")
+            .await
+            .unwrap_or(-1);
         assert!(
             free_after < 50,
             "expected dense file, got {free_after} free pages"
@@ -2420,14 +2729,15 @@ mod tests {
     /// trivial. Production deletes one repo among many, so `delete addons`/`delete
     /// files` must FK-verify against the huge surviving sibling tables (~400k
     /// `subfiles`) per deleted row. Run FK=ON (default) vs FK=OFF:
-    ///   FOXY_INSPECT_DB=<copy> REPO_LIKE=TFR_40K FK=ON  cargo test -p Foxy diag_scoped_purge_fk -- --ignored --nocapture
-    ///   FOXY_INSPECT_DB=<copy> REPO_LIKE=TFR_40K FK=OFF cargo test -p Foxy diag_scoped_purge_fk -- --ignored --nocapture
+    ///   FOXY_INSPECT_DB=<copy> REPO_LIKE=<url-substring> FK=ON  cargo test -p Foxy diag_scoped_purge_fk -- --ignored --nocapture
+    ///   FOXY_INSPECT_DB=<copy> REPO_LIKE=<url-substring> FK=OFF cargo test -p Foxy diag_scoped_purge_fk -- --ignored --nocapture
     /// If ON wedges/crawls and OFF is fast, FK enforcement is the hang.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore]
     async fn diag_scoped_purge_fk() {
         let path = std::env::var("FOXY_INSPECT_DB").expect("set FOXY_INSPECT_DB");
-        let repo_like = std::env::var("REPO_LIKE").unwrap_or_else(|_| "TFR_40K".into());
+        let repo_like =
+            std::env::var("REPO_LIKE").expect("set REPO_LIKE to a remote_url substring");
         let fk = std::env::var("FK").unwrap_or_else(|_| "ON".into());
         let db = Builder::new_local(&path).build().await.expect("open db");
         let conn = connect_tuned(&db).await.expect("connect");
@@ -2544,7 +2854,7 @@ mod tests {
     /// `BYPASS_BARRIER=1` to issue raw ungated connections instead (no barrier):
     /// that wedges forever, demonstrating the original bug. Tune the concurrent
     /// reader count with `READERS` (default 2).
-    /// Run: `FOXY_INSPECT_DB=<copy> cargo test -p Foxy repro_purge_wedge_under_concurrency -- --ignored --nocapture`
+    /// Run: `FOXY_INSPECT_DB=<copy> REPO_LIKE=<url-substring> cargo test -p Foxy repro_purge_wedge_under_concurrency -- --ignored --nocapture`
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore]
     async fn repro_purge_wedge_under_concurrency() {
@@ -2552,6 +2862,8 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         let path = std::env::var("FOXY_INSPECT_DB").expect("set FOXY_INSPECT_DB");
+        let repo_like =
+            std::env::var("REPO_LIKE").expect("set REPO_LIKE to a remote_url substring");
         let readers: usize = std::env::var("READERS")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -2565,7 +2877,7 @@ mod tests {
                 .await
                 .expect("wal");
         }
-        eprintln!("[repro] readers={readers} bypass_barrier={bypass}");
+        eprintln!("[repro] readers={readers} bypass_barrier={bypass} repo_like={repo_like}");
 
         let stop = Arc::new(AtomicBool::new(false));
         let mut workers = Vec::new();
@@ -2602,69 +2914,70 @@ mod tests {
             }));
         }
 
-        const STEPS: &[(&str, &str)] = &[
+        let insert_repo_sql = format!(
+            "INSERT OR IGNORE INTO temp.fp_repo SELECT id FROM repositories WHERE remote_url LIKE '%{}%'",
+            repo_like.replace('\'', "''")
+        );
+        // Scope to ONE repository (REPO_LIKE substring of remote_url) so the
+        // purge matches a production single-repo force-redownload and leaves
+        // sibling repos' rows in place.
+        let steps: Vec<(&str, String)> = vec![
             (
                 "create repo_ids",
-                "CREATE TEMP TABLE temp.fp_repo (id INTEGER PRIMARY KEY)",
+                "CREATE TEMP TABLE temp.fp_repo (id INTEGER PRIMARY KEY)".into(),
             ),
             (
                 "create orphan_addon_ids",
-                "CREATE TEMP TABLE temp.fp_oaddon (addon_id INTEGER PRIMARY KEY)",
+                "CREATE TEMP TABLE temp.fp_oaddon (addon_id INTEGER PRIMARY KEY)".into(),
             ),
             (
                 "create orphan_file_ids",
-                "CREATE TEMP TABLE temp.fp_ofile (file_id INTEGER PRIMARY KEY)",
+                "CREATE TEMP TABLE temp.fp_ofile (file_id INTEGER PRIMARY KEY)".into(),
             ),
-            // Scope to ONE repository (matching REPO_LIKE, default TFR_40K) so the
-            // purge matches a production single-repo force-redownload (~66k
-            // subfiles) and leaves sibling repos' rows in place.
-            (
-                "insert repo_ids",
-                "INSERT OR IGNORE INTO temp.fp_repo SELECT id FROM repositories WHERE remote_url LIKE '%TFR_40K%'",
-            ),
+            ("insert repo_ids", insert_repo_sql),
             (
                 "insert orphan_addon_ids",
-                "INSERT OR IGNORE INTO temp.fp_oaddon SELECT addon_id FROM repository_addons WHERE repository_id IN (SELECT id FROM temp.fp_repo)",
+                "INSERT OR IGNORE INTO temp.fp_oaddon SELECT addon_id FROM repository_addons WHERE repository_id IN (SELECT id FROM temp.fp_repo)".into(),
             ),
             (
                 "insert orphan_file_ids",
-                "INSERT OR IGNORE INTO temp.fp_ofile SELECT file_id FROM addon_files WHERE addon_id IN (SELECT addon_id FROM temp.fp_oaddon)",
+                "INSERT OR IGNORE INTO temp.fp_ofile SELECT file_id FROM addon_files WHERE addon_id IN (SELECT addon_id FROM temp.fp_oaddon)".into(),
             ),
             (
                 "delete repositories",
-                "DELETE FROM repositories WHERE id IN (SELECT id FROM temp.fp_repo)",
+                "DELETE FROM repositories WHERE id IN (SELECT id FROM temp.fp_repo)".into(),
             ),
             (
                 "delete dtfp (nested)",
-                "DELETE FROM download_target_file_part WHERE subfile_id IN (SELECT id FROM subfiles WHERE file_id IN (SELECT file_id FROM temp.fp_ofile))",
+                "DELETE FROM download_target_file_part WHERE subfile_id IN (SELECT id FROM subfiles WHERE file_id IN (SELECT file_id FROM temp.fp_ofile))".into(),
             ),
             (
                 "delete subfiles",
-                "DELETE FROM subfiles WHERE file_id IN (SELECT file_id FROM temp.fp_ofile)",
+                "DELETE FROM subfiles WHERE file_id IN (SELECT file_id FROM temp.fp_ofile)".into(),
             ),
             (
                 "delete download_patch_op",
-                "DELETE FROM download_patch_op WHERE file_id IN (SELECT file_id FROM temp.fp_ofile)",
+                "DELETE FROM download_patch_op WHERE file_id IN (SELECT file_id FROM temp.fp_ofile)".into(),
             ),
             (
                 "delete download_patch_file",
-                "DELETE FROM download_patch_file WHERE file_id IN (SELECT file_id FROM temp.fp_ofile)",
+                "DELETE FROM download_patch_file WHERE file_id IN (SELECT file_id FROM temp.fp_ofile)".into(),
             ),
             (
                 "delete download_target_file",
-                "DELETE FROM download_target_file WHERE file_id IN (SELECT file_id FROM temp.fp_ofile)",
+                "DELETE FROM download_target_file WHERE file_id IN (SELECT file_id FROM temp.fp_ofile)".into(),
             ),
             (
                 "delete addon_files",
-                "DELETE FROM addon_files WHERE addon_id IN (SELECT addon_id FROM temp.fp_oaddon)",
+                "DELETE FROM addon_files WHERE addon_id IN (SELECT addon_id FROM temp.fp_oaddon)".into(),
             ),
             (
                 "delete addons",
-                "DELETE FROM addons WHERE id IN (SELECT addon_id FROM temp.fp_oaddon)",
+                "DELETE FROM addons WHERE id IN (SELECT addon_id FROM temp.fp_oaddon)".into(),
             ),
             (
                 "delete files",
-                "DELETE FROM files WHERE id IN (SELECT file_id FROM temp.fp_ofile)",
+                "DELETE FROM files WHERE id IN (SELECT file_id FROM temp.fp_ofile)".into(),
             ),
         ];
 
@@ -2673,9 +2986,9 @@ mod tests {
             // Pre-fix path: raw connection, no barrier - wedges under readers.
             let conn = connect_tuned(&db).await.expect("purge connect");
             conn.execute("BEGIN", ()).await.unwrap();
-            for (label, sql) in STEPS {
+            for (label, sql) in &steps {
                 let t = Instant::now();
-                conn.execute(*sql, ())
+                conn.execute(sql.as_str(), ())
                     .await
                     .unwrap_or_else(|e| panic!("{label}: {e}"));
                 eprintln!("[repro]   {label:<28} {:.3}s", t.elapsed().as_secs_f64());
@@ -2685,10 +2998,11 @@ mod tests {
             // Fixed path: exclusive seam transaction quiesces the readers.
             let foxy = FoxyDb::from_turso(db.clone());
             foxy.transaction_exclusive("repro purge", |tx| {
+                let steps = steps.clone();
                 Box::pin(async move {
-                    for (label, sql) in STEPS {
+                    for (label, sql) in &steps {
                         let t = Instant::now();
-                        tx.execute(sql, vec![]).await?;
+                        tx.execute(sql.as_str(), vec![]).await?;
                         let label: &str = label;
                         eprintln!("[repro]   {label:<28} {:.3}s", t.elapsed().as_secs_f64());
                     }
@@ -2708,5 +3022,709 @@ mod tests {
             let iters = w.join().unwrap();
             eprintln!("[repro] background reader did {iters} iterations");
         }
+    }
+
+    /// Benchmark (`cargo test --release bench_connection_reuse -- --ignored --nocapture`).
+    /// The seam opens a fresh tuned connection for every `execute`/`query`, on the
+    /// 0.5-era claim that connections are ~16us. Turso 0.7.2 builds a new `Pager`,
+    /// reads page 1, clones the schema and runs five pragmas per connect, and its
+    /// statement cache dies with the connection - so this measures what the seam
+    /// pays per call and what reuse plus `prepare_cached` would save.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "perf benchmark; run manually with --ignored --nocapture"]
+    async fn bench_connection_reuse() {
+        const ROWS: usize = 20_000;
+        const CALLS: usize = 2_000;
+        let (_dir, db) = temp_db().await;
+
+        // Seed a realistically sized subfiles table so page-cache warmth matters.
+        let seed = connect_tuned(&db).await.unwrap();
+        seed.execute(
+            "INSERT INTO files (id, name, remote_path, local_path) VALUES (1, 'f', 'rp', 'lp')",
+            (),
+        )
+        .await
+        .unwrap();
+        seed.execute("BEGIN", ()).await.unwrap();
+        for start in (0..ROWS).step_by(256) {
+            let end = (start + 256).min(ROWS);
+            let ph = vec!["(1, ?, 0, 0, 4096, 0, '', ?, ?)"; end - start].join(", ");
+            let sql = format!(
+                "INSERT INTO subfiles (file_id, path, local_length, local_start, remote_length, \
+                 remote_start, local_checksum, remote_checksum, data_order) VALUES {ph}"
+            );
+            let mut binds: Vec<turso::Value> = Vec::new();
+            for i in start..end {
+                binds.push(turso::Value::Text(format!("p{i}")));
+                binds.push(turso::Value::Text(format!("rc{i}")));
+                binds.push(turso::Value::Integer(i as i64));
+            }
+            seed.execute(&sql, binds).await.unwrap();
+        }
+        seed.execute("COMMIT", ()).await.unwrap();
+        drop(seed);
+
+        let t = Instant::now();
+        for _ in 0..CALLS {
+            let _c = db.connect().unwrap();
+        }
+        println!(
+            "[bench conn] raw db.connect()          {:>8.1} us/call",
+            t.elapsed().as_secs_f64() * 1e6 / CALLS as f64
+        );
+
+        let t = Instant::now();
+        for _ in 0..CALLS {
+            let _c = connect_tuned(&db).await.unwrap();
+        }
+        println!(
+            "[bench conn] connect_tuned()           {:>8.1} us/call",
+            t.elapsed().as_secs_f64() * 1e6 / CALLS as f64
+        );
+
+        let sql = "SELECT id, remote_checksum FROM subfiles WHERE file_id = 1 AND path = ?";
+
+        let t = Instant::now();
+        for i in 0..CALLS {
+            let conn = connect_tuned(&db).await.unwrap();
+            let mut rows = conn
+                .query(sql, vec![turso::Value::Text(format!("p{i}"))])
+                .await
+                .unwrap();
+            let _ = rows.next().await.unwrap();
+        }
+        let per_fresh = t.elapsed().as_secs_f64() * 1e6 / CALLS as f64;
+        println!("[bench conn] query, fresh conn/call    {per_fresh:>8.1} us/call");
+
+        let conn = connect_tuned(&db).await.unwrap();
+        let t = Instant::now();
+        for i in 0..CALLS {
+            let mut rows = conn
+                .query(sql, vec![turso::Value::Text(format!("p{i}"))])
+                .await
+                .unwrap();
+            let _ = rows.next().await.unwrap();
+        }
+        let per_reused = t.elapsed().as_secs_f64() * 1e6 / CALLS as f64;
+        println!("[bench conn] query, reused conn        {per_reused:>8.1} us/call");
+
+        let t = Instant::now();
+        for i in 0..CALLS {
+            let mut stmt = conn.raw().prepare_cached(sql).await.unwrap();
+            let mut rows = stmt
+                .query(vec![turso::Value::Text(format!("p{i}"))])
+                .await
+                .unwrap();
+            let _ = rows.next().await.unwrap();
+        }
+        let per_cached = t.elapsed().as_secs_f64() * 1e6 / CALLS as f64;
+        println!("[bench conn] query, reused + cached    {per_cached:>8.1} us/call");
+        println!(
+            "[bench conn] speedup reuse={:.1}x reuse+cached={:.1}x",
+            per_fresh / per_reused,
+            per_fresh / per_cached
+        );
+
+        // Same comparison for a small write statement, which is what the seam's
+        // `execute_retry` and per-row upserts actually do.
+        let wsql = "UPDATE subfiles SET data_order = data_order WHERE file_id = 1 AND path = ?";
+        let t = Instant::now();
+        for i in 0..500 {
+            let c = connect_tuned(&db).await.unwrap();
+            c.execute(wsql, vec![turso::Value::Text(format!("p{i}"))])
+                .await
+                .unwrap();
+        }
+        let w_fresh = t.elapsed().as_secs_f64() * 1e6 / 500.0;
+        let t = Instant::now();
+        for i in 0..500 {
+            let mut stmt = conn.raw().prepare_cached(wsql).await.unwrap();
+            stmt.execute(vec![turso::Value::Text(format!("p{i}"))])
+                .await
+                .unwrap();
+        }
+        let w_cached = t.elapsed().as_secs_f64() * 1e6 / 500.0;
+        println!(
+            "[bench conn] write fresh={w_fresh:.1} us  reused+cached={w_cached:.1} us  speedup={:.1}x",
+            w_fresh / w_cached
+        );
+    }
+
+    /// Benchmark (`cargo test --release bench_cached_chunk_knee -- --ignored --nocapture`).
+    /// `bulk_write_chunk_rows` sits at 256 because Turso's per-statement parse and
+    /// plan cost is superlinear in row count. A pooled connection reuses compiled
+    /// programs, so this re-measures the knee with and without that reuse.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "perf benchmark; run manually with --ignored --nocapture"]
+    async fn bench_cached_chunk_knee() {
+        const ROWS: usize = 66_336;
+
+        fn plain_sql(n: usize) -> String {
+            let ph = vec!["(?, ?, 0, 0, ?, ?, '', ?, ?)"; n].join(", ");
+            format!(
+                "INSERT INTO subfiles (file_id, path, local_length, local_start, remote_length, \
+                 remote_start, local_checksum, remote_checksum, data_order) VALUES {ph}"
+            )
+        }
+        fn binds(start: usize, end: usize) -> Vec<turso::Value> {
+            let mut v = Vec::with_capacity((end - start) * 6);
+            for i in start..end {
+                v.push(turso::Value::Integer(1));
+                v.push(turso::Value::Text(format!("p{i}")));
+                v.push(turso::Value::Integer(4096));
+                v.push(turso::Value::Integer(0));
+                v.push(turso::Value::Text(format!("rc{i}")));
+                v.push(turso::Value::Integer(i as i64));
+            }
+            v
+        }
+
+        for chunk_rows in [256usize, 512, 1_024, 2_048, 4_096] {
+            for cached in [false, true] {
+                let (_dir, db) = temp_db().await;
+                let conn = connect_tuned(&db).await.unwrap();
+                conn.execute(
+                    "INSERT INTO files (id, name, remote_path, local_path) VALUES (1, 'f', 'rp', 'lp')",
+                    (),
+                )
+                .await
+                .unwrap();
+                let started = Instant::now();
+                conn.execute("BEGIN", ()).await.unwrap();
+                let mut start = 0;
+                while start < ROWS {
+                    let end = (start + chunk_rows).min(ROWS);
+                    let sql = plain_sql(end - start);
+                    if cached {
+                        conn.execute(&sql, binds(start, end)).await.unwrap();
+                    } else {
+                        let mut stmt = conn.raw().prepare(&sql).await.unwrap();
+                        stmt.execute(binds(start, end)).await.unwrap();
+                    }
+                    start = end;
+                }
+                conn.execute("COMMIT", ()).await.unwrap();
+                let elapsed = started.elapsed().as_secs_f64();
+                println!(
+                    "[bench chunk-knee] chunk_rows={chunk_rows:<5} cached={cached:<5} \
+                     total={elapsed:.3}s per_row_us={:.1}",
+                    elapsed * 1_000_000.0 / ROWS as f64
+                );
+            }
+        }
+    }
+
+    /// Benchmark (`cargo test --release bench_bulk_read_path -- --ignored --nocapture`).
+    /// The incremental hasher reloads every `subfiles` row for the repository in
+    /// one statement (433k rows, 1.66 s on the profiled case). Splits that between
+    /// the engine scan and the seam's per-row `DbRow`/`DbValue` materialization.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "perf benchmark; run manually with --ignored --nocapture"]
+    async fn bench_bulk_read_path() {
+        const ROWS: usize = 433_248;
+        const FILES: usize = 864;
+        const COLUMNS: &str = "id, file_id, path, remote_length, local_length, remote_start,              local_start, remote_checksum, local_checksum, data_order";
+
+        let (_dir, db) = temp_db().await;
+        let conn = connect_tuned(&db).await.unwrap();
+        for file in 1..=FILES {
+            conn.execute(
+                "INSERT INTO files (id, name, remote_path, local_path) VALUES (?, ?, ?, ?)",
+                (file as i64, format!("f{file}"), "rp", "lp"),
+            )
+            .await
+            .unwrap();
+        }
+        let per_file = ROWS / FILES;
+        conn.execute("BEGIN", ()).await.unwrap();
+        let mut written = 0usize;
+        while written < ROWS {
+            let batch = 256.min(ROWS - written);
+            let ph = vec!["(?, ?, 0, 0, ?, ?, '', ?, ?)"; batch].join(", ");
+            let sql = format!(
+                "INSERT INTO subfiles (file_id, path, local_length, local_start, remote_length,                  remote_start, local_checksum, remote_checksum, data_order) VALUES {ph}"
+            );
+            let mut binds = Vec::with_capacity(batch * 6);
+            for row in written..written + batch {
+                let order = (row % per_file) as i64;
+                let file_id = ((row / per_file) as i64 + 1).min(FILES as i64);
+                binds.push(turso::Value::Integer(file_id));
+                binds.push(turso::Value::Text(format!("data/e_{row:06}.bin")));
+                binds.push(turso::Value::Integer(64));
+                binds.push(turso::Value::Integer(order * 64));
+                binds.push(turso::Value::Text(format!("rc{row}")));
+                binds.push(turso::Value::Integer(order));
+            }
+            conn.execute(&sql, binds).await.unwrap();
+            written += batch;
+        }
+        conn.execute("COMMIT", ()).await.unwrap();
+
+        let bare = format!("SELECT {COLUMNS} FROM subfiles");
+        let ordered =
+            format!("SELECT {COLUMNS} FROM subfiles ORDER BY file_id ASC, data_order ASC, id ASC");
+        let in_list = vec!["?"; FILES].join(", ");
+        // The shape the incremental hasher actually issues (`model_tree.rs`).
+        let scoped = format!(
+            "SELECT {COLUMNS} FROM subfiles WHERE file_id IN ({in_list})              ORDER BY file_id ASC, data_order ASC, id ASC"
+        );
+        let scoped_binds: Vec<crate::core::db::DbValue> = (1..=FILES as i64)
+            .map(crate::core::db::DbValue::from)
+            .collect();
+        let sql = bare.clone();
+        let shared = Arc::new(db);
+        let fdb = crate::core::db::FoxyDb::from_turso(shared.clone());
+
+        // Warm the page cache so this measures materialization, not first-touch IO.
+        let _ = fdb
+            .query_all(&sql, crate::core::db::params![])
+            .await
+            .unwrap();
+
+        let started = Instant::now();
+        let seam = fdb
+            .query_all(&sql, crate::core::db::params![])
+            .await
+            .unwrap();
+        let seam_s = started.elapsed().as_secs_f64();
+        assert_eq!(seam.len(), ROWS);
+
+        let conn = connect_tuned(shared.as_ref()).await.unwrap();
+        let started = Instant::now();
+        let mut rows = conn.query(&sql, ()).await.unwrap();
+        let mut counted = 0usize;
+        let mut checksum_bytes = 0usize;
+        while let Some(row) = rows.next().await.unwrap() {
+            let _id = row.get_value(0).unwrap();
+            let _file_id = row.get_value(1).unwrap();
+            if let turso::Value::Text(text) = row.get_value(2).unwrap() {
+                checksum_bytes += text.len();
+            }
+            counted += 1;
+        }
+        let raw_s = started.elapsed().as_secs_f64();
+        assert_eq!(counted, ROWS);
+        assert!(checksum_bytes > 0);
+
+        let started = Instant::now();
+        let ordered_rows = fdb
+            .query_all(&ordered, crate::core::db::params![])
+            .await
+            .unwrap();
+        let ordered_s = started.elapsed().as_secs_f64();
+        assert_eq!(ordered_rows.len(), ROWS);
+
+        let started = Instant::now();
+        let scoped_rows = fdb.query_all(&scoped, scoped_binds).await.unwrap();
+        let scoped_s = started.elapsed().as_secs_f64();
+        assert_eq!(scoped_rows.len(), ROWS);
+
+        // The same scoping expressed as a subquery instead of a literal id list.
+        let subquery = format!(
+            "SELECT {COLUMNS} FROM subfiles WHERE file_id IN (SELECT id FROM files)              ORDER BY file_id ASC, data_order ASC, id ASC"
+        );
+        let started = Instant::now();
+        let subquery_rows = fdb
+            .query_all(&subquery, crate::core::db::params![])
+            .await
+            .unwrap();
+        let subquery_s = started.elapsed().as_secs_f64();
+        assert_eq!(subquery_rows.len(), ROWS);
+
+        // Unordered scan plus an in-process sort, for comparison with ORDER BY.
+        let started = Instant::now();
+        let mut sorted = fdb
+            .query_all(&bare, crate::core::db::params![])
+            .await
+            .unwrap();
+        sorted.sort_by_key(|row| {
+            (
+                row.get_i64("file_id").unwrap_or_default(),
+                row.get_i64("data_order").unwrap_or_default(),
+                row.get_i64("id").unwrap_or_default(),
+            )
+        });
+        let rust_sort_s = started.elapsed().as_secs_f64();
+        assert_eq!(sorted.len(), ROWS);
+        // Keep the database-side scoping but sort in process.
+        let scoped_unordered =
+            format!("SELECT {COLUMNS} FROM subfiles WHERE file_id IN ({in_list})");
+        let binds: Vec<crate::core::db::DbValue> = (1..=FILES as i64)
+            .map(crate::core::db::DbValue::from)
+            .collect();
+        let started = Instant::now();
+        let mut scoped_sorted = fdb.query_all(&scoped_unordered, binds).await.unwrap();
+        scoped_sorted.sort_by_key(|row| {
+            (
+                row.get_i64("file_id").unwrap_or_default(),
+                row.get_i64("data_order").unwrap_or_default(),
+                row.get_i64("id").unwrap_or_default(),
+            )
+        });
+        let scoped_sort_s = started.elapsed().as_secs_f64();
+        assert_eq!(scoped_sorted.len(), ROWS);
+        println!(
+            "[bench bulk-read] seam_bare_plus_rust_sort={rust_sort_s:.3}s              seam_scoped_plus_rust_sort={scoped_sort_s:.3}s subquery_scoped={subquery_s:.3}s"
+        );
+
+        println!(
+            "[bench bulk-read] rows={ROWS} raw_stream={raw_s:.3}s seam_bare={seam_s:.3}s              seam_ordered={ordered_s:.3}s seam_scoped_ordered={scoped_s:.3}s              seam_overhead={:.3}s order_by_cost={:.3}s in_list_cost={:.3}s",
+            seam_s - raw_s,
+            ordered_s - seam_s,
+            scoped_s - ordered_s,
+        );
+    }
+
+    /// Benchmark (`cargo test --release bench_subfiles_index_cost -- --ignored --nocapture`).
+    /// The download-overlapped deferred flush inserts 433k `subfiles` rows against
+    /// live indexes. Splits that cost between the table write, index maintenance in
+    /// key order, and index maintenance in arrival order.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "perf benchmark; run manually with --ignored --nocapture"]
+    async fn bench_subfiles_index_cost() {
+        const ROWS: usize = 433_248;
+        const FILES: usize = 864;
+        const CHUNK: usize = 256;
+
+        fn plain_sql(n: usize) -> String {
+            let ph = vec!["(?, ?, 0, 0, ?, ?, '', ?, ?)"; n].join(", ");
+            format!(
+                "INSERT INTO subfiles (file_id, path, local_length, local_start, remote_length,                  remote_start, local_checksum, remote_checksum, data_order) VALUES {ph}"
+            )
+        }
+
+        // (file_id, data_order) in either key order or the mod-completion order the
+        // deferred buffer actually arrives in.
+        fn rows(sorted: bool) -> Vec<(i64, i64)> {
+            let per_file = ROWS / FILES;
+            let mut out = Vec::with_capacity(ROWS);
+            for file in 0..FILES {
+                for order in 0..per_file {
+                    out.push((file as i64 + 1, order as i64));
+                }
+            }
+            if !sorted {
+                let mut state = 0x2545_f491_4f6c_dd1d_u64;
+                for i in (1..out.len()).rev() {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    out.swap(i, (state % (i as u64 + 1)) as usize);
+                }
+            }
+            out
+        }
+
+        for (label, sorted, drop_names) in [
+            ("live_indexes_arrival_order", false, &[][..]),
+            ("live_indexes_key_order", true, &[][..]),
+            (
+                "dropped_unique_index_key_order",
+                true,
+                &SUBFILES_INDEX_NAMES[..],
+            ),
+        ] {
+            let (_dir, db) = temp_db().await;
+            let conn = connect_tuned(&db).await.unwrap();
+            for file in 1..=FILES {
+                conn.execute(
+                    "INSERT INTO files (id, name, remote_path, local_path) VALUES (?, ?, ?, ?)",
+                    (file as i64, format!("f{file}"), "rp", "lp"),
+                )
+                .await
+                .unwrap();
+            }
+            let data = rows(sorted);
+            let started = Instant::now();
+            conn.execute("BEGIN", ()).await.unwrap();
+            let mut drop_s = 0.0;
+            if !drop_names.is_empty() {
+                let t = Instant::now();
+                for name in drop_names {
+                    conn.execute(&format!("DROP INDEX IF EXISTS {name}"), ())
+                        .await
+                        .unwrap();
+                }
+                drop_s = t.elapsed().as_secs_f64();
+            }
+            let insert_started = Instant::now();
+            for chunk in data.chunks(CHUNK) {
+                let mut binds = Vec::with_capacity(chunk.len() * 6);
+                for (file_id, order) in chunk {
+                    binds.push(turso::Value::Integer(*file_id));
+                    binds.push(turso::Value::Text(format!("data/e_{order:05}.bin")));
+                    binds.push(turso::Value::Integer(64));
+                    binds.push(turso::Value::Integer(order * 64));
+                    binds.push(turso::Value::Text(format!("rc{file_id}_{order}")));
+                    binds.push(turso::Value::Integer(*order));
+                }
+                conn.execute(&plain_sql(chunk.len()), binds).await.unwrap();
+            }
+            let insert_s = insert_started.elapsed().as_secs_f64();
+            let mut rebuild_s = 0.0;
+            if drop_names.len() == SUBFILES_INDEX_NAMES.len() {
+                let t = Instant::now();
+                for sql in SUBFILES_INDEX_CREATE_SQL {
+                    conn.execute(sql, ()).await.unwrap();
+                }
+                rebuild_s = t.elapsed().as_secs_f64();
+            }
+            let commit_started = Instant::now();
+            conn.execute("COMMIT", ()).await.unwrap();
+            let commit_s = commit_started.elapsed().as_secs_f64();
+            let total = started.elapsed().as_secs_f64();
+            println!(
+                "[bench subfiles-index] {label:<26} total={total:.3}s drop={drop_s:.3}s                  insert={insert_s:.3}s rebuild={rebuild_s:.3}s commit={commit_s:.3}s                  per_row_us={:.1}",
+                total * 1_000_000.0 / ROWS as f64
+            );
+        }
+    }
+
+    /// Benchmark (`cargo test --release bench_addon_files_insert -- --ignored --nocapture`).
+    /// `addon_files insert` costs ~190 µs/row on the metadata rebuild, more than
+    /// twice the eight-column `files` upsert it accompanies, which points at its
+    /// two `ON DELETE CASCADE` parents rather than at row width. Splits the cost
+    /// between FK enforcement, the conflict clause, and the write itself.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "perf benchmark; run manually with --ignored --nocapture"]
+    async fn bench_addon_files_insert() {
+        const MODS: usize = 97;
+        const FILES_PER_MOD: usize = 38;
+
+        for foreign_keys in ["ON", "OFF"] {
+            for shape in ["on-conflict", "plain"] {
+                let (_dir, db) = temp_db().await;
+                let conn = connect_tuned(&db).await.unwrap();
+                conn.pragma_update("foreign_keys", foreign_keys)
+                    .await
+                    .unwrap();
+                for m in 0..MODS {
+                    conn.execute(
+                        "INSERT INTO addons (id, name, remote_path, local_path, required) \
+                         VALUES (?, 'a', ?, 'lp', 1)",
+                        vec![
+                            turso::Value::Integer(m as i64 + 1),
+                            turso::Value::Text(format!("rp{m}")),
+                        ],
+                    )
+                    .await
+                    .unwrap();
+                }
+                for f in 0..MODS * FILES_PER_MOD {
+                    conn.execute(
+                        "INSERT INTO files (id, name, remote_path, local_path) VALUES (?, 'f', ?, 'lp')",
+                        vec![
+                            turso::Value::Integer(f as i64 + 1),
+                            turso::Value::Text(format!("rp{f}")),
+                        ],
+                    )
+                    .await
+                    .unwrap();
+                }
+
+                let started = Instant::now();
+                for m in 0..MODS {
+                    let ph = vec!["(?, ?)"; FILES_PER_MOD].join(", ");
+                    let sql = if shape == "on-conflict" {
+                        format!(
+                            "INSERT INTO addon_files (addon_id, file_id) VALUES {ph} \
+                             ON CONFLICT(addon_id, file_id) DO NOTHING"
+                        )
+                    } else {
+                        format!("INSERT INTO addon_files (addon_id, file_id) VALUES {ph}")
+                    };
+                    let mut values = Vec::with_capacity(FILES_PER_MOD * 2);
+                    for f in 0..FILES_PER_MOD {
+                        values.push(turso::Value::Integer(m as i64 + 1));
+                        values.push(turso::Value::Integer((m * FILES_PER_MOD + f) as i64 + 1));
+                    }
+                    conn.execute("BEGIN", ()).await.unwrap();
+                    conn.execute(&sql, values).await.unwrap();
+                    conn.execute("COMMIT", ()).await.unwrap();
+                }
+                let elapsed = started.elapsed().as_secs_f64();
+                let rows = MODS * FILES_PER_MOD;
+                println!(
+                    "[bench addon_files] fk={foreign_keys:<3} shape={shape:<11} \
+                     total={elapsed:.3}s per_row_us={:.1}",
+                    elapsed * 1_000_000.0 / rows as f64
+                );
+            }
+        }
+    }
+
+    /// A released connection goes back to its database's pool, and the next
+    /// borrow reuses it rather than paying another connect.
+    #[tokio::test]
+    async fn pooled_connection_is_reused_after_release() {
+        let (_dir, db) = temp_db().await;
+        let db = Arc::new(db);
+        // Asserted against this database's own pool and connection identity, not
+        // the global connect counters: every other database test shares those and
+        // runs in parallel with this one.
+        let first = {
+            let conn = connect_pooled(&db).await.unwrap();
+            conn.query("SELECT 1", ()).await.unwrap();
+            conn.conn.admission.clone()
+        };
+        assert_eq!(
+            pool_for(&db).idle.lock().unwrap().len(),
+            1,
+            "a released connection has to go back to its pool"
+        );
+        let conn = connect_pooled(&db).await.unwrap();
+        conn.query("SELECT 1", ()).await.unwrap();
+        assert!(
+            Arc::ptr_eq(&first, &conn.conn.admission),
+            "second borrow must be served the pooled connection, not a fresh one"
+        );
+        assert!(
+            pool_for(&db).idle.lock().unwrap().is_empty(),
+            "a borrowed connection must not stay listed as idle"
+        );
+    }
+
+    /// A connection left inside a transaction is dropped rather than pooled, so
+    /// the next borrower never inherits an open write.
+    #[tokio::test]
+    async fn connection_in_a_transaction_is_not_pooled() {
+        let (_dir, db) = temp_db().await;
+        let db = Arc::new(db);
+        {
+            let conn = connect_pooled(&db).await.unwrap();
+            conn.execute("BEGIN", ()).await.unwrap();
+        }
+        let conn = connect_pooled(&db).await.unwrap();
+        assert!(
+            conn.is_autocommit().unwrap(),
+            "a fresh borrow must not be inside a transaction"
+        );
+    }
+
+    /// DDL retires pooled connections: a cached program compiled against the old
+    /// index roots must not survive a DROP/CREATE of that index.
+    #[tokio::test]
+    async fn ddl_retires_pooled_connections() {
+        let (_dir, db) = temp_db().await;
+        let db = Arc::new(db);
+        let fdb = crate::core::db::FoxyDb::from_turso(db.clone());
+        fdb.execute(
+            "INSERT INTO files (id, name, remote_path, local_path) VALUES (1, 'f', 'rp', 'lp')",
+            crate::core::db::params![],
+        )
+        .await
+        .unwrap();
+        // Run the read twice so its program is admitted to the statement cache.
+        let sql = "SELECT COUNT(*) AS c FROM subfiles WHERE file_id = 1";
+        for _ in 0..2 {
+            fdb.query_one(sql, crate::core::db::params![])
+                .await
+                .unwrap();
+        }
+        let before = schema_epoch();
+        for name in SUBFILES_INDEX_NAMES {
+            fdb.execute(
+                &format!("DROP INDEX IF EXISTS {name}"),
+                crate::core::db::params![],
+            )
+            .await
+            .unwrap();
+        }
+        assert!(
+            schema_epoch() > before,
+            "DDL through the seam must bump the schema epoch"
+        );
+        fdb.execute(
+            "INSERT INTO subfiles (file_id, path, remote_length, remote_start, remote_checksum, \
+             data_order) VALUES (1, 'p', 1, 0, 'c', 0)",
+            crate::core::db::params![],
+        )
+        .await
+        .unwrap();
+        for sql in SUBFILES_INDEX_CREATE_SQL {
+            fdb.execute(sql, crate::core::db::params![]).await.unwrap();
+        }
+        let row = fdb
+            .query_one(sql, crate::core::db::params![])
+            .await
+            .unwrap()
+            .expect("count row");
+        assert_eq!(
+            row.get_i64("c").unwrap(),
+            1,
+            "the read after the index rebuild must see the inserted part"
+        );
+    }
+
+    /// A database written under WAL can be reopened as MVCC and back without
+    /// losing rows. The engine mode is a file property, so switching the default
+    /// would have to migrate live databases in place rather than rebuild them.
+    #[tokio::test]
+    async fn wal_database_round_trips_through_mvcc() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("database.db");
+        let path_str = path.to_str().unwrap().to_string();
+
+        let db = build_and_bootstrap(&path_str).await.unwrap();
+        let conn = connect_tuned(&db).await.unwrap();
+        conn.execute(
+            "INSERT INTO repositories (id, name, remote_url, local_path) \
+             VALUES (1, 'n', 'u', 'p')",
+            (),
+        )
+        .await
+        .unwrap();
+        assert_eq!(read_journal_mode(conn.raw()).await.as_deref(), Some("wal"));
+        drop(conn);
+        drop(db);
+
+        let db = Builder::new_local(&path_str).build().await.unwrap();
+        let conn = db.connect().unwrap();
+        conn.pragma_update("journal_mode", "mvcc").await.unwrap();
+        {
+            // A live `Rows` pins a read transaction, and dropping the database
+            // under one leaves the file locked for the next open.
+            let mut rows = conn
+                .query("SELECT name FROM repositories WHERE id = 1", ())
+                .await
+                .unwrap();
+            let row = rows.next().await.unwrap().expect("row survives the switch");
+            assert_eq!(row.get::<String>(0).unwrap(), "n");
+        }
+        conn.execute(
+            "INSERT INTO repositories (id, name, remote_url, local_path) \
+             VALUES (2, 'n2', 'u2', 'p2')",
+            (),
+        )
+        .await
+        .unwrap();
+        drop(conn);
+        drop(db);
+
+        let db = Builder::new_local(&path_str).build().await.unwrap();
+        let conn = connect_tuned(&db).await.unwrap();
+        assert_eq!(read_journal_mode(conn.raw()).await.as_deref(), Some("wal"));
+        let mut rows = conn
+            .query("SELECT COUNT(*) FROM repositories", ())
+            .await
+            .unwrap();
+        let row = rows.next().await.expect("count step").expect("count row");
+        assert_eq!(
+            row.get::<i64>(0).unwrap(),
+            2,
+            "both rows must survive the wal -> mvcc -> wal round trip"
+        );
+    }
+
+    #[test]
+    fn ddl_detection_covers_the_statements_the_seam_runs() {
+        assert!(sql_is_ddl("DROP INDEX IF EXISTS idx_subfiles_file_id_path"));
+        assert!(sql_is_ddl("  create unique index idx ON t(a)"));
+        assert!(sql_is_ddl("CREATE TEMP TABLE temp.x (id INTEGER)"));
+        assert!(sql_is_ddl("ALTER TABLE t ADD COLUMN c TEXT"));
+        assert!(!sql_is_ddl("INSERT INTO subfiles (file_id) VALUES (1)"));
+        assert!(!sql_is_ddl("SELECT 1"));
+        assert!(!sql_is_ddl("BEGIN"));
+        assert!(!sql_is_ddl("  update files SET length = 1"));
     }
 }

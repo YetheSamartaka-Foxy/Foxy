@@ -244,7 +244,7 @@ pub(super) async fn load_changed_part_stats_by_file_ids(
 
     // Use a single SQL GROUP BY query directly on subfiles instead of the previous
     // two-step application-side join through the file_subfiles junction table.
-    // The covering index idx_subfiles_file_id_data_order makes this efficient.
+    // GROUP BY file_id uses idx_subfiles_file_id_path (leads with file_id).
     let mut result: HashMap<i64, PartChangeStats> = HashMap::new();
     for chunk in file_ids.chunks(chunk_size) {
         let placeholders = vec!["?"; chunk.len()].join(",");

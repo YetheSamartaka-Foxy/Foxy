@@ -39,3 +39,10 @@ errors.txt
 _afh.tmp
 
 temporary_files/
+
+# Developer-machine test kit inputs and results
+testkit/cases/
+testkit/ledger/
+testkit/runs/
+testkit/origin/data/
+testkit/private/

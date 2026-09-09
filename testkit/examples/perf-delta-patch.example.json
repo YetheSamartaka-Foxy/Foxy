@@ -1,0 +1,55 @@
+{
+  "id": "perf-delta-patch-scattered",
+  "kind": "perf",
+  "description": "Sync, deterministically mutate PBO entries, and measure patch repair.",
+  "build": "release",
+  "harness": "gui",
+  "repository": {
+    "name": "Example Repository",
+    "address": "https://repo.example.invalid/mods/example/",
+    "path": "D:\\Foxy-TestKit\\Example",
+    "space_id": null
+  },
+  "operations": [
+    {
+      "op": "download",
+      "setup_once": true,
+      "wait_timeout_s": 3600
+    },
+    {
+      "op": "mutate",
+      "profile": "scattered",
+      "seed": 42,
+      "files": 4,
+      "entries": 8
+    },
+    {
+      "op": "download",
+      "wait_timeout_s": 3600,
+      "expect": [
+        {
+          "path": "summary.patched_files",
+          "min": 1
+        },
+        {
+          "path": "summary.delta_savings_percent",
+          "min": 0.01
+        }
+      ]
+    },
+    {
+      "op": "restore"
+    }
+  ],
+  "repetitions": 3,
+  "guards": {
+    "require_storage_class": "hdd",
+    "require_no_other_foxy": true,
+    "fail_on_db_wipe": true,
+    "oracle_command": [
+      "independent-repository-verifier.exe",
+      "--repository-path",
+      "${REPOSITORY_PATH}"
+    ]
+  }
+}

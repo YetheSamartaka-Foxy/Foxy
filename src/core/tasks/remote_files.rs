@@ -10,7 +10,7 @@ use crate::core::tasks::init_database::{
 use crate::core::tasks::remote_file_parts::{
     FilePartData, FilePartsPayload, remote_file_parts_batch,
 };
-use crate::core::utils::fetch_json::fetch_json_timed;
+use crate::core::utils::fetch_json::{FetchJsonTiming, fetch_json_timed};
 use log::{debug, error, info, warn};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -119,8 +119,33 @@ fn file_identity_key(remote_path: &str, local_path: &str) -> String {
     format!("{}|{}", remote_path, normalize_local_path_key(local_path))
 }
 
+struct StagedFileKey {
+    name: String,
+    remote_checksum: String,
+    length: i64,
+    remote_path: String,
+    local_path: String,
+    parts: Vec<ManifestPart>,
+    data_order: i64,
+}
+
+pub(crate) struct StagedModFiles {
+    mod_parent: Arc<FoxyMod>,
+    file_keys: Vec<StagedFileKey>,
+    http_download_duration: std::time::Duration,
+    http_response_bytes: usize,
+    http_parse_duration: std::time::Duration,
+    mod_start: Instant,
+}
+
+#[derive(Clone)]
+pub(crate) struct FileUpsertResult {
+    files: HashMap<String, FoxyModFile>,
+    previous: HashMap<String, FoxyModFile>,
+}
+
 fn file_present_with_expected_len(path: &str, expected_len: u64) -> bool {
-    std::fs::metadata(path)
+    crate::core::utils::profiling::fs::metadata(path)
         .map(|meta| meta.is_file() && meta.len() == expected_len)
         .unwrap_or(false)
 }
@@ -227,13 +252,118 @@ async fn load_files_by_remote_paths(db: &FoxyDb, remote_paths: &[String]) -> Vec
     out
 }
 
+pub(crate) async fn upsert_file_rows_batch(
+    db: &FoxyDb,
+    staged_mods: &[StagedModFiles],
+) -> FileUpsertResult {
+    let mut desired_file_keys: HashSet<String> = HashSet::new();
+    let mut unique_rows: HashMap<String, &StagedFileKey> = HashMap::new();
+    let mut remote_paths: Vec<String> = Vec::new();
+    for staged in staged_mods {
+        for row in &staged.file_keys {
+            let key = file_identity_key(&row.remote_path, &row.local_path);
+            if unique_rows.insert(key.clone(), row).is_none() {
+                desired_file_keys.insert(key);
+                remote_paths.push(row.remote_path.clone());
+            }
+        }
+    }
+
+    let mut previous: HashMap<String, FoxyModFile> = HashMap::new();
+    let mut ignored_existing_path_mismatches = 0usize;
+    if !remote_paths.is_empty() {
+        for file in load_files_by_remote_paths(db, &remote_paths).await {
+            let key = file_identity_key(&file.remote_path, &file.local_path);
+            if desired_file_keys.contains(&key) {
+                previous.insert(key, file);
+            } else {
+                ignored_existing_path_mismatches += 1;
+            }
+        }
+    }
+    if ignored_existing_path_mismatches > 0 {
+        info!(
+            "Ignored {} existing file row(s) with matching remote paths but different local paths during batched file upsert",
+            ignored_existing_path_mismatches
+        );
+    }
+
+    let has_new_files = unique_rows.keys().any(|key| !previous.contains_key(key));
+    let rows: Vec<&StagedFileKey> = unique_rows.into_values().collect();
+    let file_chunk_size = crate::core::tasks::init_database::bulk_write_rows_for(8);
+    for chunk in rows.chunks(file_chunk_size) {
+        let placeholders = vec!["(?, ?, ?, ?, ?, ?, ?, ?)"; chunk.len()].join(", ");
+        let sql = format!(
+            "INSERT INTO files \
+             (name, remote_path, local_path, remote_checksum, local_checksum, \
+              local_content_hash, length, data_order) \
+             VALUES {placeholders} \
+             ON CONFLICT(name, remote_path, local_path) DO UPDATE SET \
+                remote_checksum = excluded.remote_checksum, \
+                length = excluded.length, \
+                data_order = excluded.data_order, \
+                local_path = excluded.local_path"
+        );
+        let mut values: Vec<DbValue> = Vec::with_capacity(chunk.len() * 8);
+        for row in chunk {
+            let key = file_identity_key(&row.remote_path, &row.local_path);
+            let (local_checksum, local_content_hash) = previous
+                .get(&key)
+                .map(|existing| {
+                    (
+                        existing.local_checksum.clone(),
+                        existing.local_content_hash.clone(),
+                    )
+                })
+                .unwrap_or_default();
+            values.push(row.name.clone().into());
+            values.push(row.remote_path.clone().into());
+            values.push(row.local_path.clone().into());
+            values.push(row.remote_checksum.clone().into());
+            values.push(local_checksum.into());
+            values.push(local_content_hash.into());
+            values.push(row.length.into());
+            values.push(row.data_order.into());
+        }
+        if let Err(e) = db.execute_retry("file upsert", &sql, values).await {
+            warn!("Failed to upsert batched files: {}", e);
+        }
+    }
+
+    let files = if remote_paths.is_empty() {
+        HashMap::new()
+    } else if has_new_files {
+        let mut files: HashMap<String, FoxyModFile> = HashMap::new();
+        for file in load_files_by_remote_paths(db, &remote_paths).await {
+            let key = file_identity_key(&file.remote_path, &file.local_path);
+            if desired_file_keys.contains(&key) {
+                files.insert(key, file);
+            }
+        }
+        files
+    } else {
+        let mut files = previous.clone();
+        for row in &rows {
+            let key = file_identity_key(&row.remote_path, &row.local_path);
+            if let Some(file) = files.get_mut(&key) {
+                file.remote_checksum = row.remote_checksum.clone();
+                file.length = row.length as u64;
+                file.local_path = row.local_path.clone();
+                file.data_order = row.data_order;
+            }
+        }
+        files
+    };
+    FileUpsertResult { files, previous }
+}
+
 async fn reconcile_addon_file_links(
     context: Arc<FoxyContext>,
     mod_parent: Arc<FoxyMod>,
     desired_file_ids: HashSet<i64>,
     can_prune_stale: bool,
 ) {
-    let db = context.db();
+    let mod_id = mod_parent.id as i64;
     if !can_prune_stale {
         warn!(
             "Skipping stale addon_files cleanup for {} due to unresolved file ids",
@@ -241,46 +371,23 @@ async fn reconcile_addon_file_links(
         );
     }
 
-    let mod_id = mod_parent.id as i64;
-
-    // Phase 1: Insert new addon_file links. This is the critical path - without
-    // these links the tree loader cannot find files for this mod, causing the hash
-    // pipeline to skip it and leaving local_checksum empty. Use the same resilient
-    // retry pattern as the file upsert (outside a transaction, idempotent inserts)
-    // to survive heavy DB lock contention during first-run metadata rebuilds.
+    // Phase 1: Stage addon_file links for a single cross-mod flush after the
+    // metadata fan-out. Inserting per mod was 96 nine-row statements.
     if !desired_file_ids.is_empty() {
-        let link_ids: Vec<i64> = desired_file_ids.iter().copied().collect();
-        let insert_chunk_size = crate::core::tasks::init_database::bulk_write_rows_for(2);
-        for chunk in link_ids.chunks(insert_chunk_size) {
-            let placeholders = vec!["(?, ?)"; chunk.len()].join(", ");
-            let sql = format!(
-                "INSERT INTO addon_files (addon_id, file_id) VALUES {placeholders} \
-                 ON CONFLICT(addon_id, file_id) DO NOTHING"
-            );
-            let build_values = || -> Vec<DbValue> {
-                let mut values: Vec<DbValue> = Vec::with_capacity(chunk.len() * 2);
-                for file_id in chunk {
-                    values.push(mod_id.into());
-                    values.push((*file_id).into());
-                }
-                values
-            };
-            if let Err(e) = db
-                .execute_retry("addon_files insert", &sql, build_values())
-                .await
-            {
-                warn!(
-                    "Failed to insert addon_files for {}: {}",
-                    mod_parent.remote_path, e
-                );
-            }
-        }
+        context.buffer_addon_file_links(
+            desired_file_ids
+                .iter()
+                .copied()
+                .map(|file_id| (mod_id, file_id)),
+        );
     }
 
-    // Phase 2: Prune stale addon_file links (less critical - a missed prune only
-    // leaves orphan links that the next recheck will clean up).
+    // Phase 2: Prune stale addon_file links. A whole-wipe force-redownload has
+    // no leftover links, so skip the per-mod SELECT/DELETE.
     if can_prune_stale
-        && let Err(e) = db
+        && !context.is_fresh_subfiles_load()
+        && let Err(e) = context
+            .db()
             .transaction("prune addon_files", |txn| {
                 let desired_file_ids = desired_file_ids.clone();
                 Box::pin(async move {
@@ -332,6 +439,32 @@ async fn reconcile_addon_file_links(
     }
 }
 
+pub(crate) async fn flush_pending_addon_file_links(context: Arc<FoxyContext>) {
+    let mut links = context.take_pending_addon_file_links();
+    if links.is_empty() {
+        return;
+    }
+    links.sort_unstable();
+    links.dedup();
+    let db = context.db();
+    let chunk_size = crate::core::tasks::init_database::bulk_write_rows_for(2);
+    for chunk in links.chunks(chunk_size) {
+        let placeholders = vec!["(?, ?)"; chunk.len()].join(", ");
+        let sql = format!(
+            "INSERT INTO addon_files (addon_id, file_id) VALUES {placeholders} \
+             ON CONFLICT(addon_id, file_id) DO NOTHING"
+        );
+        let mut values: Vec<DbValue> = Vec::with_capacity(chunk.len() * 2);
+        for (addon_id, file_id) in chunk {
+            values.push((*addon_id).into());
+            values.push((*file_id).into());
+        }
+        if let Err(e) = db.execute_retry("addon_files insert", &sql, values).await {
+            warn!("Failed to insert batched addon_files: {}", e);
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ModRecheckStats {
     pub mod_path: String,
@@ -352,11 +485,39 @@ pub(crate) struct ModRecheckStats {
     pub parts_persist_duration: std::time::Duration,
 }
 
-pub(crate) async fn remote_files_transaction(
+fn empty_recheck_stats(
+    mod_parent: &FoxyMod,
+    http_timing: FetchJsonTiming,
+    duration: std::time::Duration,
+) -> ModRecheckStats {
+    ModRecheckStats {
+        mod_path: mod_parent.remote_path.clone(),
+        files: 0,
+        parts: 0,
+        bytes: 0,
+        mod_concurrency_limit: 1,
+        duration,
+        http_download_duration: http_timing.download,
+        http_response_bytes: http_timing.response_bytes,
+        http_parse_duration: http_timing.parse,
+        file_upsert_duration: std::time::Duration::ZERO,
+        parts_persist_duration: std::time::Duration::ZERO,
+    }
+}
+
+fn zero_fetch_timing() -> FetchJsonTiming {
+    FetchJsonTiming {
+        download: std::time::Duration::ZERO,
+        parse: std::time::Duration::ZERO,
+        response_bytes: 0,
+    }
+}
+
+pub(crate) async fn fetch_mod_file_manifest(
     context: Arc<FoxyContext>,
     repository_parent: Arc<FoxyRepository>,
     mod_parent: Arc<FoxyMod>,
-) -> ModRecheckStats {
+) -> Result<StagedModFiles, ModRecheckStats> {
     let mod_start = Instant::now();
     let is_foxy_mode = repository_parent.foxy_mode.is_foxy();
 
@@ -384,19 +545,11 @@ pub(crate) async fn remote_files_transaction(
                             "Unable to fetch mod files metadata (foxy + fallback): {} : {}",
                             files_metadata_url, e2
                         );
-                        return ModRecheckStats {
-                            mod_path: mod_parent.remote_path.clone(),
-                            files: 0,
-                            parts: 0,
-                            bytes: 0,
-                            duration: mod_start.elapsed(),
-                            mod_concurrency_limit: 0,
-                            http_download_duration: std::time::Duration::ZERO,
-                            http_response_bytes: 0,
-                            http_parse_duration: std::time::Duration::ZERO,
-                            file_upsert_duration: std::time::Duration::ZERO,
-                            parts_persist_duration: std::time::Duration::ZERO,
-                        };
+                        return Err(empty_recheck_stats(
+                            &mod_parent,
+                            zero_fetch_timing(),
+                            mod_start.elapsed(),
+                        ));
                     }
                 }
             }
@@ -405,19 +558,11 @@ pub(crate) async fn remote_files_transaction(
                     "Unable to fetch mod files metadata: {} : {}",
                     files_metadata_url, e
                 );
-                return ModRecheckStats {
-                    mod_path: mod_parent.remote_path.clone(),
-                    files: 0,
-                    parts: 0,
-                    bytes: 0,
-                    duration: mod_start.elapsed(),
-                    mod_concurrency_limit: 0,
-                    http_download_duration: std::time::Duration::ZERO,
-                    http_response_bytes: 0,
-                    http_parse_duration: std::time::Duration::ZERO,
-                    file_upsert_duration: std::time::Duration::ZERO,
-                    parts_persist_duration: std::time::Duration::ZERO,
-                };
+                return Err(empty_recheck_stats(
+                    &mod_parent,
+                    zero_fetch_timing(),
+                    mod_start.elapsed(),
+                ));
             }
         };
 
@@ -426,25 +571,17 @@ pub(crate) async fn remote_files_transaction(
         Ok(m) => m,
         Err(e) => {
             warn!("Failed to deserialize mod manifest: {}", e);
-            return ModRecheckStats {
-                mod_path: mod_parent.remote_path.clone(),
-                files: 0,
-                parts: 0,
-                bytes: 0,
-                mod_concurrency_limit: 0,
-                duration: mod_start.elapsed(),
-                http_download_duration: http_timing.download,
-                http_response_bytes: http_timing.response_bytes,
-                http_parse_duration: http_timing.parse,
-                file_upsert_duration: std::time::Duration::ZERO,
-                parts_persist_duration: std::time::Duration::ZERO,
-            };
+            return Err(empty_recheck_stats(
+                &mod_parent,
+                http_timing,
+                mod_start.elapsed(),
+            ));
         }
     };
     // Total parse = JSON-to-Value (in fetch_json) + Value-to-ModManifest
     let total_parse_duration = http_timing.parse + manifest_parse_start.elapsed();
 
-    let file_keys_with_json: Vec<_> = manifest
+    let file_keys: Vec<StagedFileKey> = manifest
         .files
         .into_iter()
         .enumerate()
@@ -452,158 +589,66 @@ pub(crate) async fn remote_files_transaction(
             let file_name = mf.path.replace('\\', "/");
             let remote_path = join_path(&mod_parent.remote_path, &file_name);
             let local_path = join_path(&mod_parent.local_path, &file_name);
-            (
-                file_name,
-                mf.checksum,
-                mf.length,
+            StagedFileKey {
+                name: file_name,
+                remote_checksum: mf.checksum,
+                length: mf.length,
                 remote_path,
                 local_path,
-                mf.parts,
-                index as i64,
-            )
+                parts: mf.parts,
+                data_order: index as i64,
+            }
         })
         .collect();
 
-    let file_upsert_start = Instant::now();
+    Ok(StagedModFiles {
+        mod_parent,
+        file_keys,
+        http_download_duration: http_timing.download,
+        http_response_bytes: http_timing.response_bytes,
+        http_parse_duration: total_parse_duration,
+        mod_start,
+    })
+}
+
+pub(crate) async fn apply_mod_file_rows(
+    context: Arc<FoxyContext>,
+    staged: StagedModFiles,
+    upsert: &FileUpsertResult,
+) -> ModRecheckStats {
+    let StagedModFiles {
+        mod_parent,
+        file_keys,
+        http_download_duration,
+        http_response_bytes,
+        http_parse_duration,
+        mod_start,
+    } = staged;
     let mut all_rows_with_json = Vec::new();
     let mut desired_file_ids: HashSet<i64> = HashSet::new();
     let mut can_prune_file_links = true;
-    let db = context.db();
-
     let mut total_bytes: u64 = 0;
     let mut total_parts: usize = 0;
-    let mut existing_models: HashMap<String, FoxyModFile> = HashMap::new();
-    let mut ignored_existing_path_mismatches = 0usize;
-    let desired_file_keys: HashSet<String> = file_keys_with_json
-        .iter()
-        .map(|(_, _, _, remote_path, local_path, _, _)| file_identity_key(remote_path, local_path))
-        .collect();
-    let remote_paths: Vec<String> = file_keys_with_json
-        .iter()
-        .map(|(_, _, _, remote_path, _, _, _)| remote_path.clone())
-        .collect();
 
-    // Bulk upsert files to reduce round-trips
-    if !file_keys_with_json.is_empty() {
-        // Prefetch existing file models to preserve local checksums and reuse after upsert
-        for file in load_files_by_remote_paths(&db, &remote_paths).await {
-            let key = file_identity_key(&file.remote_path, &file.local_path);
-            if desired_file_keys.contains(&key) {
-                existing_models.insert(key, file);
-            } else {
-                ignored_existing_path_mismatches += 1;
-            }
-        }
-        if ignored_existing_path_mismatches > 0 {
-            info!(
-                "Ignored {} existing file row(s) with matching remote paths but different local paths for mod {}",
-                ignored_existing_path_mismatches, mod_parent.remote_path
-            );
-        }
-
-        let file_chunk_size = crate::core::tasks::init_database::bulk_write_rows_for(8);
-        let mut chunk_idx = 0;
-        while chunk_idx < file_keys_with_json.len() {
-            let chunk_end = usize::min(chunk_idx + file_chunk_size, file_keys_with_json.len());
-            let chunk = &file_keys_with_json[chunk_idx..chunk_end];
-            let placeholders = vec!["(?, ?, ?, ?, ?, ?, ?, ?)"; chunk.len()].join(", ");
-            let sql = format!(
-                "INSERT INTO files \
-                 (name, remote_path, local_path, remote_checksum, local_checksum, \
-                  local_content_hash, length, data_order) \
-                 VALUES {placeholders} \
-                 ON CONFLICT(name, remote_path, local_path) DO UPDATE SET \
-                    remote_checksum = excluded.remote_checksum, \
-                    length = excluded.length, \
-                    data_order = excluded.data_order, \
-                    local_path = excluded.local_path"
-            );
-            let build_values = || -> Vec<DbValue> {
-                let mut values: Vec<DbValue> = Vec::with_capacity(chunk.len() * 8);
-                for (name, remote_checksum, length, remote_path, local_path, _json, data_order) in
-                    chunk
-                {
-                    let key = file_identity_key(remote_path, local_path);
-                    let (local_checksum, local_content_hash) = existing_models
-                        .get(&key)
-                        .map(|existing| {
-                            (
-                                existing.local_checksum.clone(),
-                                existing.local_content_hash.clone(),
-                            )
-                        })
-                        .unwrap_or_default();
-                    values.push(name.clone().into());
-                    values.push(remote_path.clone().into());
-                    values.push(local_path.clone().into());
-                    values.push(remote_checksum.clone().into());
-                    values.push(local_checksum.into());
-                    values.push(local_content_hash.into());
-                    values.push((*length).into());
-                    values.push((*data_order).into());
-                }
-                values
-            };
-
-            if let Err(e) = db.execute_retry("file upsert", &sql, build_values()).await {
-                warn!(
-                    "Failed to upsert files for mod {}: {}",
-                    mod_parent.remote_path, e
-                );
-            }
-            chunk_idx = chunk_end;
-        }
-    }
-
-    if !file_keys_with_json.is_empty() {
-        // Reuse prefetched models when no new files; re-query only when new IDs are needed
-        let has_new_files =
-            file_keys_with_json
-                .iter()
-                .any(|(_, _, _, remote_path, local_path, _, _)| {
-                    !existing_models.contains_key(&file_identity_key(remote_path, local_path))
-                });
-        let previous_files_by_identity = existing_models.clone();
-
-        let file_map: HashMap<String, FoxyModFile> = if has_new_files {
-            let mut map = HashMap::new();
-            for file in load_files_by_remote_paths(&db, &remote_paths).await {
-                let key = file_identity_key(&file.remote_path, &file.local_path);
-                if desired_file_keys.contains(&key) {
-                    map.insert(key, file);
-                }
-            }
-            map
-        } else {
-            // Overlay fields updated by the upsert onto prefetched models
-            for (_, remote_checksum, length, remote_path, local_path, _, data_order) in
-                &file_keys_with_json
-            {
-                let key = file_identity_key(remote_path, local_path);
-                if let Some(file) = existing_models.get_mut(&key) {
-                    file.remote_checksum = remote_checksum.clone();
-                    file.length = *length as u64;
-                    file.local_path = local_path.clone();
-                    file.data_order = *data_order;
-                }
-            }
-            existing_models
-        };
-
-        let manifest_file_ids: HashSet<i64> =
-            file_map.values().map(|file| file.id as i64).collect();
+    if !file_keys.is_empty() {
+        let db = context.db();
+        let manifest_file_ids: HashSet<i64> = file_keys
+            .iter()
+            .filter_map(|row| {
+                let key = file_identity_key(&row.remote_path, &row.local_path);
+                upsert.files.get(&key).map(|file| file.id as i64)
+            })
+            .collect();
         let file_graph_states = load_file_remote_graph_states(&db, &manifest_file_ids).await;
 
-        for (_name, _remote_checksum, length, remote_path, local_path, parts, _data_order) in
-            file_keys_with_json
-        {
-            let key = file_identity_key(&remote_path, &local_path);
-            if let Some(file) = file_map.get(&key) {
+        for row in file_keys {
+            let key = file_identity_key(&row.remote_path, &row.local_path);
+            if let Some(file) = upsert.files.get(&key) {
                 desired_file_ids.insert(file.id as i64);
 
-                total_bytes = total_bytes.saturating_add(length as u64);
-                total_parts += parts.len();
-                let previous = previous_files_by_identity.get(&key);
+                total_bytes = total_bytes.saturating_add(row.length as u64);
+                total_parts += row.parts.len();
+                let previous = upsert.previous.get(&key);
                 let remote_graph_unchanged = previous.is_some_and(|existing| {
                     existing.remote_checksum == file.remote_checksum
                         && existing.length == file.length
@@ -633,9 +678,9 @@ pub(crate) async fn remote_files_transaction(
                     );
                     continue;
                 }
-                all_rows_with_json.push((file.clone(), previous.cloned(), parts));
+                all_rows_with_json.push((file.clone(), previous.cloned(), row.parts));
             } else {
-                warn!("File record missing after upsert: {}", remote_path);
+                warn!("File record missing after upsert: {}", row.remote_path);
                 can_prune_file_links = false;
             }
         }
@@ -648,8 +693,6 @@ pub(crate) async fn remote_files_transaction(
         can_prune_file_links,
     )
     .await;
-
-    let file_upsert_duration = file_upsert_start.elapsed();
 
     let parts_start = Instant::now();
     let total_files = all_rows_with_json.len();
@@ -724,10 +767,10 @@ pub(crate) async fn remote_files_transaction(
         bytes: total_bytes,
         mod_concurrency_limit: sub_batch_count,
         duration: mod_start.elapsed(),
-        http_download_duration: http_timing.download,
-        http_response_bytes: http_timing.response_bytes,
-        http_parse_duration: total_parse_duration,
-        file_upsert_duration,
+        http_download_duration,
+        http_response_bytes,
+        http_parse_duration,
+        file_upsert_duration: std::time::Duration::ZERO,
         parts_persist_duration,
     }
 }
@@ -1010,5 +1053,53 @@ mod tests {
             chunk_size,
             crate::core::tasks::init_database::bulk_write_chunk_rows()
         );
+    }
+
+    fn staged_file(mod_name: &str, file_name: &str, checksum: &str) -> StagedModFiles {
+        let remote_path = format!("https://repo.example/{mod_name}/{file_name}");
+        let local_path = format!("C:/mods/{mod_name}/{file_name}");
+        StagedModFiles {
+            mod_parent: Arc::new(FoxyMod {
+                name: mod_name.to_string(),
+                remote_path: format!("https://repo.example/{mod_name}"),
+                local_path: format!("C:/mods/{mod_name}"),
+                ..Default::default()
+            }),
+            file_keys: vec![StagedFileKey {
+                name: file_name.to_string(),
+                remote_checksum: checksum.to_string(),
+                length: 10,
+                remote_path,
+                local_path,
+                parts: Vec::new(),
+                data_order: 0,
+            }],
+            http_download_duration: std::time::Duration::ZERO,
+            http_response_bytes: 0,
+            http_parse_duration: std::time::Duration::ZERO,
+            mod_start: Instant::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn batched_file_upsert_maps_ids_across_mods() {
+        use crate::core::tasks::db_turso::build_test_database;
+        let db = FoxyDb::from_turso(build_test_database().await);
+        let staged = vec![
+            staged_file("@one", "a.pbo", "aa"),
+            staged_file("@two", "b.pbo", "bb"),
+        ];
+        let result = upsert_file_rows_batch(&db, &staged).await;
+        assert_eq!(result.files.len(), 2);
+        for row in staged.iter().flat_map(|s| s.file_keys.iter()) {
+            let key = file_identity_key(&row.remote_path, &row.local_path);
+            let file = result
+                .files
+                .get(&key)
+                .expect("batched upsert must map identity to a row id");
+            assert!(file.id > 0);
+            assert_eq!(file.remote_checksum, row.remote_checksum);
+            assert_eq!(file.name, row.name);
+        }
     }
 }

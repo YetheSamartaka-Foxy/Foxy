@@ -114,7 +114,7 @@ async fn probe_and_record(path: &Path, conn: &Connection) {
 /// Convenience wrapper that opens its own tuned connection.
 pub(crate) async fn probe_database(path: &Path, db: &Database) {
     match crate::core::tasks::db_turso::connect_tuned(db).await {
-        Ok(conn) => probe_and_record(path, &conn).await,
+        Ok(conn) => probe_and_record(path, conn.raw()).await,
         Err(err) => warn!("STARTUP: could not probe live database schema: {}", err),
     }
 }
@@ -347,7 +347,7 @@ mod tests {
             .await
             .unwrap();
 
-        let result = probe(&conn).await;
+        let result = probe(conn.raw()).await;
 
         assert!(
             result.is_compatible(),
@@ -381,7 +381,7 @@ mod tests {
         .await
         .unwrap();
 
-        let result = probe(&conn).await;
+        let result = probe(conn.raw()).await;
 
         assert!(!result.is_compatible());
         assert!(
@@ -416,7 +416,7 @@ mod tests {
         .await
         .unwrap();
 
-        let result = probe(&conn).await;
+        let result = probe(conn.raw()).await;
 
         assert!(!result.is_compatible());
         assert!(

@@ -51,6 +51,13 @@ pub(super) async fn persist_part_checksums<F>(
         return;
     }
 
+    debug_assert!(
+        part_updates
+            .iter()
+            .all(|part| FoxyModFilePart::id_is_persisted_rowid(part.id)),
+        "persist_part_checksums requires real subfiles rowids; synthetic buffer ids are not writable"
+    );
+
     // Use one chunked set-based update; callers pre-sort by PK for sequential B-tree walks.
     let params_per_row = 4usize;
     let update_batch_size = bulk_write_rows_for(params_per_row);
@@ -577,6 +584,12 @@ mod tests {
             );
             assert_eq!(batch_size, 256);
         }
+    }
+
+    #[test]
+    fn persist_part_checksums_rejects_synthetic_ids_as_non_rowids() {
+        assert!(!FoxyModFilePart::id_is_persisted_rowid(u64::MAX));
+        assert!(FoxyModFilePart::id_is_persisted_rowid(1));
     }
 
     #[test]

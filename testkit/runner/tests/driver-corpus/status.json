@@ -1,0 +1,18 @@
+{
+  "ok": true,
+  "command": "status",
+  "view": "repository-list",
+  "elapsed_ms": 0,
+  "data": {
+    "pid": 14960,
+    "host": "127.0.0.1",
+    "port": 58430,
+    "session_file": "<path>",
+    "uptime_ms": 1414,
+    "debug_mode": false,
+    "startup_frame_rendered": true,
+    "busy": false,
+    "active_modal_count": 0
+  },
+  "errors": []
+}

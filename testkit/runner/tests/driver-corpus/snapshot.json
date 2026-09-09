@@ -1,0 +1,145 @@
+{
+  "ok": true,
+  "command": "snapshot",
+  "view": "repository-list",
+  "elapsed_ms": 0,
+  "data": {
+    "view": "repository-list",
+    "update_modal_open": false,
+    "fps": 276.80194091796875,
+    "startup_frame_rendered": true,
+    "busy": false,
+    "active_modal_count": 0,
+    "active_modals": [],
+    "pointer": null,
+    "focused": null,
+    "repositories_count": 1,
+    "selected_repository": 0,
+    "settings_tab": null,
+    "repository_settings_tab": null,
+    "frame": 7604,
+    "cumulative_pass_nr": 7604,
+    "pixels_per_point": 1.5,
+    "zoom_factor": 1.0,
+    "busy_reasons": [],
+    "content_rect": {
+      "x": 0.0,
+      "y": 0.0,
+      "w": 1024.0,
+      "h": 768.0
+    },
+    "texts": [
+      "277 FPS",
+      "Foxy",
+      "Settings",
+      "Open about",
+      "Open help",
+      "Open changelog",
+      "Example Repository",
+      "Show activity log",
+      "repository-list"
+    ],
+    "nodes": [
+      {
+        "id": "app.title",
+        "role": "label",
+        "text": "Foxy",
+        "enabled": true,
+        "focused": false,
+        "rect": {
+          "x": 0.0,
+          "y": 0.0,
+          "w": 220.0,
+          "h": 42.0
+        }
+      },
+      {
+        "id": "header.settings",
+        "role": "button",
+        "text": "Settings",
+        "enabled": true,
+        "focused": false,
+        "rect": {
+          "x": 972.0,
+          "y": 0.0,
+          "w": 44.0,
+          "h": 30.0
+        }
+      },
+      {
+        "id": "footer.changelog",
+        "role": "button",
+        "text": "Open changelog",
+        "enabled": true,
+        "focused": false,
+        "rect": {
+          "x": 8.0,
+          "y": 738.0,
+          "w": 44.0,
+          "h": 30.0
+        }
+      },
+      {
+        "id": "footer.about",
+        "role": "button",
+        "text": "Open about",
+        "enabled": true,
+        "focused": false,
+        "rect": {
+          "x": 72.0,
+          "y": 738.0,
+          "w": 44.0,
+          "h": 30.0
+        }
+      },
+      {
+        "id": "footer.help",
+        "role": "button",
+        "text": "Open help",
+        "enabled": true,
+        "focused": false,
+        "rect": {
+          "x": 124.0,
+          "y": 738.0,
+          "w": 44.0,
+          "h": 30.0
+        }
+      },
+      {
+        "id": "footer.activity-log",
+        "role": "button",
+        "text": "Show activity log",
+        "enabled": true,
+        "focused": false,
+        "rect": {
+          "x": 968.0,
+          "y": 738.0,
+          "w": 44.0,
+          "h": 30.0
+        }
+      },
+      {
+        "id": "view.current",
+        "role": "status",
+        "text": "repository-list",
+        "enabled": true,
+        "focused": false,
+        "rect": null
+      },
+      {
+        "id": "footer.fps",
+        "role": "status",
+        "text": "277 FPS",
+        "enabled": true,
+        "focused": false,
+        "rect": {
+          "x": 892.0,
+          "y": 738.0,
+          "w": 72.0,
+          "h": 30.0
+        }
+      }
+    ]
+  },
+  "errors": []
+}

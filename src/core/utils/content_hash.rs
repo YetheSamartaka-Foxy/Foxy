@@ -84,16 +84,20 @@ pub(crate) fn is_foxy_temp_artifact_path(path: &str) -> bool {
 /// Compute a whole-file BLAKE3 hash (synchronous, for use inside `spawn_blocking`).
 /// Returns the first 32 hex characters for DB column compatibility.
 pub(crate) fn blake3_file_hash(path: &Path) -> std::io::Result<String> {
+    let profiled = crate::core::utils::profiling::FsTimer::start();
     let mut file = std::fs::File::open(path)?;
     let mut hasher = blake3::Hasher::new();
     let mut buffer = vec![0u8; 512 * 1024];
+    let mut read_bytes = 0u64;
     loop {
         let bytes = std::io::Read::read(&mut file, &mut buffer)?;
         if bytes == 0 {
             break;
         }
+        read_bytes += bytes as u64;
         hasher.update(&buffer[..bytes]);
     }
+    profiled.stop("hash_read", read_bytes);
     Ok(blake3_hex(hasher))
 }
 
@@ -145,8 +149,10 @@ pub(crate) fn blake3_file_hash_with(
 }
 
 fn blake3_mmap_file_hash(path: &Path) -> std::io::Result<String> {
+    let profiled = crate::core::utils::profiling::FsTimer::start();
     let mut hasher = blake3::Hasher::new();
     hasher.update_mmap(path)?;
+    profiled.stop("hash_mmap", hasher.count());
     Ok(blake3_hex(hasher))
 }
 
@@ -193,6 +199,7 @@ fn path_string_is_network_share(raw: &str) -> bool {
 
 // Do not include creation time: it changes on copies/restores while content does not.
 pub fn calculate_addon_folder_content_hash(path: &Path) -> Result<String, std::io::Error> {
+    let profiled = crate::core::utils::profiling::FsTimer::start();
     let metadata = std::fs::metadata(path)?;
     if !metadata.is_dir() {
         return Ok(String::new());
@@ -235,6 +242,8 @@ pub fn calculate_addon_folder_content_hash(path: &Path) -> Result<String, std::i
     hasher.update(b"FOXY_ADDON_FOLDER_HASH_V3");
     hasher.update(normalize_path(&path.to_string_lossy()).as_bytes());
 
+    let scanned = (dir_entries.len() + file_entries.len()) as u64;
+
     hasher.update(&(dir_entries.len() as u64).to_le_bytes());
     for relative_path in dir_entries {
         hasher.update(relative_path.as_bytes());
@@ -247,6 +256,7 @@ pub fn calculate_addon_folder_content_hash(path: &Path) -> Result<String, std::i
         hasher.update(&modified_ns.to_le_bytes());
     }
 
+    profiled.stop("dir_scan", scanned);
     Ok(blake3_hex(hasher))
 }
 

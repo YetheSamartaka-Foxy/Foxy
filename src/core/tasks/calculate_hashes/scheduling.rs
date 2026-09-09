@@ -647,20 +647,25 @@ async fn calculate_whole_file_checksum(
     };
     let result = tokio::task::spawn_blocking(move || -> std::io::Result<String> {
         let _permit = permit;
+        let profiled = crate::core::utils::profiling::FsTimer::start();
         if let Some(hex) = blake3_mmap_file_hash_full(Path::new(&file_path_for_hash), mmap_strategy)
         {
+            profiled.stop("hash_mmap", expected_len);
             return Ok(hex);
         }
         let mut file = std::fs::File::open(&file_path_for_hash)?;
         let mut hasher = FlexHasher::from_checksum(&expected_checksum);
         let mut buffer = vec![0u8; WHOLE_FILE_HASH_BUF_SIZE];
+        let mut read_bytes = 0u64;
         loop {
             let read = file.read(&mut buffer)?;
             if read == 0 {
                 break;
             }
+            read_bytes += read as u64;
             hasher.update(&buffer[..read]);
         }
+        profiled.stop("hash_read", read_bytes);
         Ok(hasher.finalize_hex())
     })
     .await;

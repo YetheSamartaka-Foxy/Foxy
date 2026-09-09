@@ -228,7 +228,10 @@ impl RangeMetaWriter {
     async fn persist_locked(meta_path: &str, meta: &RangePartMeta) -> std::io::Result<()> {
         let tmp_path = format!("{}.tmp", meta_path);
         tokio::fs::write(&tmp_path, meta.serialize()).await?;
-        tokio::fs::rename(&tmp_path, meta_path).await
+        let profiled = crate::core::utils::profiling::FsTimer::start();
+        let renamed = tokio::fs::rename(&tmp_path, meta_path).await;
+        profiled.stop("rename", 0);
+        renamed
     }
 
     /// Write the current state to disk (atomic replace via temp + rename).
@@ -277,9 +280,11 @@ fn prepare_part_file(
     if fresh {
         options.truncate(true);
     }
+    let profiled = crate::core::utils::profiling::FsTimer::start();
     let file = options.open(part_path)?;
     // Pre-allocate (fresh) or extend an adopted shorter part to full length.
     file.set_len(total_size)?;
+    profiled.stop("preallocate", total_size);
     Ok(file)
 }
 
@@ -505,7 +510,10 @@ pub(super) async fn download_large_file_with_range_queue(
 
 /// Remove a resume sidecar, ignoring not-found.
 pub(super) async fn remove_range_meta(meta_path: &str) {
-    match tokio::fs::remove_file(meta_path).await {
+    let profiled = crate::core::utils::profiling::FsTimer::start();
+    let removed = tokio::fs::remove_file(meta_path).await;
+    profiled.stop("remove", 0);
+    match removed {
         Ok(()) => {}
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
         Err(err) => warn!(

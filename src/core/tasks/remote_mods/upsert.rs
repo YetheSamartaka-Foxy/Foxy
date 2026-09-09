@@ -8,12 +8,18 @@ use crate::core::models::modification::{ADDON_COLUMNS, FoxyMod};
 use crate::core::models::recheck_level::RecheckLevel;
 use crate::core::models::repository::FoxyRepository;
 use crate::core::tasks::init_database::{SQLITE_MAX_VARIABLES, read_chunk_ids};
-use crate::core::tasks::remote_files::{ModRecheckStats, remote_files_transaction};
-use log::{debug, warn};
+use crate::core::tasks::remote_file_parts::{
+    flush_pending_download_targets, flush_pending_patch_clears,
+};
+use crate::core::tasks::remote_files::{
+    ModRecheckStats, apply_mod_file_rows, fetch_mod_file_manifest, flush_pending_addon_file_links,
+    upsert_file_rows_batch,
+};
+use log::{debug, info, warn};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::Semaphore;
 
 #[derive(Clone)]
@@ -432,7 +438,8 @@ pub(super) async fn process_mods_upsert(
             .unwrap_or_default();
         tasks.push(tokio::spawn(async move {
             let _permit = mod_semaphore_clone.acquire_owned().await.ok();
-            let local_mod_exists = Path::new(mod_entry.local_path.trim()).exists();
+            let local_mod_exists =
+                crate::core::utils::profiling::fs::exists(mod_entry.local_path.trim());
             let has_content_hash = !mod_entry.local_content_hash.trim().is_empty();
             let force_mod_refresh = context_clone
                 .forced_mod_refreshes
@@ -480,24 +487,69 @@ pub(super) async fn process_mods_upsert(
             }
 
             let mod_entry = Arc::new(mod_entry);
-            let mut stats =
-                remote_files_transaction(context_clone, repository_parent_clone, mod_entry.clone())
-                    .await;
-            stats.mod_concurrency_limit = mod_limit;
-            Some(stats)
+            Some(
+                fetch_mod_file_manifest(context_clone, repository_parent_clone, mod_entry).await,
+            )
         }))
     }
 
+    let mut staged = Vec::new();
     let mut collected = Vec::new();
     for task in tasks {
         match task.await {
-            Ok(Some(stats)) => collected.push(stats),
+            Ok(Some(Ok(files))) => staged.push(files),
+            Ok(Some(Err(stats))) => collected.push(stats),
             Ok(None) => {}
             Err(err) => {
                 warn!("Mod file processing task failed: {}", err);
             }
         }
     }
+
+    let upsert_started = Instant::now();
+    let db = context.db();
+    let upsert = Arc::new(upsert_file_rows_batch(&db, &staged).await);
+    let file_upsert_duration = upsert_started.elapsed();
+    if !staged.is_empty() {
+        info!(
+            "Batched file upsert for {} mods in {:.2?}",
+            staged.len(),
+            file_upsert_duration
+        );
+    }
+
+    let mut apply_tasks = Vec::with_capacity(staged.len());
+    for staged_mod in staged {
+        let context_clone = context.clone();
+        let upsert = upsert.clone();
+        let mod_semaphore_clone = mod_semaphore.clone();
+        apply_tasks.push(tokio::spawn(async move {
+            let _permit = mod_semaphore_clone.acquire_owned().await.ok();
+            let mut stats = apply_mod_file_rows(context_clone, staged_mod, &upsert).await;
+            stats.mod_concurrency_limit = mod_limit;
+            stats
+        }));
+    }
+
+    let mut assigned_upsert_duration = false;
+    for task in apply_tasks {
+        match task.await {
+            Ok(mut stats) => {
+                if !assigned_upsert_duration {
+                    stats.file_upsert_duration = file_upsert_duration;
+                    assigned_upsert_duration = true;
+                }
+                collected.push(stats);
+            }
+            Err(err) => {
+                warn!("Mod file apply task failed: {}", err);
+            }
+        }
+    }
+
+    flush_pending_addon_file_links(context.clone()).await;
+    flush_pending_download_targets(context.clone()).await;
+    flush_pending_patch_clears(context).await;
 
     (collected, resolved_mod_ids)
 }

@@ -55,6 +55,11 @@ impl SqlitePerfSnapshot {
         self.lock_backoff_ms_total as f64 / self.lock_retries as f64
     }
 
+    /// Aggregate of every category's gated transaction window. Like
+    /// [`SqliteWriteMetricSnapshot::txn_time_ms`] it grows with the write gate,
+    /// because Turso's waiters block inside `conn.execute` rather than on the
+    /// gate: the same refresh reports ~300 ms at gate 1 and ~2 180 ms at gate 8.
+    /// Never compare it across gate sizes; the logs carry `write_gate=` for that.
     pub(crate) fn db_write_time_ms(self) -> f64 {
         self.db_write_time_ns_total as f64 / 1_000_000.0
     }
@@ -102,7 +107,7 @@ pub(crate) struct SqliteWriteMetricSnapshot {
     pub(crate) lock_retries: u64,
     pub(crate) lock_backoff_ms_total: u64,
     pub(crate) permit_wait_ns_total: u64,
-    pub(crate) total_time_ns_total: u64,
+    pub(crate) txn_time_ns_total: u64,
 }
 
 impl SqliteWriteMetricSnapshot {
@@ -118,14 +123,24 @@ impl SqliteWriteMetricSnapshot {
             permit_wait_ns_total: self
                 .permit_wait_ns_total
                 .saturating_sub(baseline.permit_wait_ns_total),
-            total_time_ns_total: self
-                .total_time_ns_total
-                .saturating_sub(baseline.total_time_ns_total),
+            txn_time_ns_total: self
+                .txn_time_ns_total
+                .saturating_sub(baseline.txn_time_ns_total),
         }
     }
 
-    pub(crate) fn total_time_ms(self) -> f64 {
-        self.total_time_ns_total as f64 / 1_000_000.0
+    /// Time inside the gated transaction window (after the write permit, through
+    /// COMMIT), summed over the category's calls.
+    ///
+    /// This is **not** the cost of the work. Turso has one internal writer, so
+    /// past a gate size of 1 the waiters block inside `conn.execute` and that
+    /// wait lands here rather than in `permit_wait_ms`. The same 3 738-row
+    /// `addon_files insert` measures ~72 ms at gate 1, ~130 ms at gate 2,
+    /// ~260-380 ms at gate 4 and 570-1 150 ms at gate 8 on one frozen case. Read
+    /// it against the gate size the run reports, and treat gate 1 as the
+    /// uncontended reference.
+    pub(crate) fn txn_time_ms(self) -> f64 {
+        self.txn_time_ns_total as f64 / 1_000_000.0
     }
 
     pub(crate) fn permit_wait_ms(self) -> f64 {
@@ -160,14 +175,40 @@ pub(crate) static DB_WRITE_PERMITS: Lazy<usize> = Lazy::new(sqlite_write_permits
 pub(crate) static DB_WRITE_SEMAPHORE: Lazy<std::sync::Arc<Semaphore>> =
     Lazy::new(|| std::sync::Arc::new(Semaphore::new(*DB_WRITE_PERMITS)));
 
-/// Permits for the Turso **write-serialization gate** (`DB_WRITE_GATE`). Defaults
-/// to **1** - single-writer serialization that matches Turso's one internal
-/// writer. Overridable via `FOXY_DB_WRITE_GATE` for sweeps (see
-/// `after_turso_regression_analysis2.md`).
+/// Permits for the Turso **write-serialization gate** (`DB_WRITE_GATE`).
+///
+/// Defaults to `min(4, cpus)`. It was 1 - single-writer serialization matching
+/// Turso's one internal writer (`after_turso_regression_analysis2.md`) - until a
+/// gate sweep showed the serialization costs more than the convoy it avoids on
+/// the metadata rebuild: on a 96-mod / 433k-part repository the refresh went from
+/// a 2.032 s median (range 1.958-2.096, n=10) at gate 1 to 1.659 s (1.610-1.766,
+/// n=10) at gate 4, an 18% improvement with disjoint ranges and zero lock
+/// retries or write failures at any gate size.
+///
+/// The win is confined to write-heavy work. On a real 4 GB download the gate
+/// waits total ~0.5 s of a ~68 s run and the difference is not separable from
+/// server variance (n=4, overlapping ranges), and on a file-count-heavy download
+/// it is ~2% of the median while removing a long tail. Nothing regressed, so the
+/// default takes the metadata-rebuild win.
+///
+/// Capped at 4 rather than `SQLITE_WRITE_PERMITS_CAP` because the sweep showed
+/// the curve flat from 4 to 8 while `db_write_time_ms` keeps climbing - above 4
+/// the waiters simply queue *inside* `conn.execute` instead of on this gate,
+/// which is the convoy the gate exists to avoid. Overridable via
+/// `FOXY_DB_WRITE_GATE` for sweeps.
 fn db_write_gate_permits() -> usize {
     env_usize("FOXY_DB_WRITE_GATE")
-        .unwrap_or(1)
+        .unwrap_or_else(default_db_write_gate)
         .clamp(1, SQLITE_WRITE_PERMITS_CAP)
+}
+
+/// Concurrent committers to allow by default: 4, or fewer on a small machine so
+/// a 2-core host does not oversubscribe its cores with write transactions.
+fn default_db_write_gate() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(4)
 }
 
 /// Serializes the seam's write transactions (`transaction` / `execute_retry` /
@@ -182,8 +223,9 @@ fn db_write_gate_permits() -> usize {
 /// `after_turso_regression_analysis2.md` convoy (87-row and 18 008-row batches
 /// both ~24s). Gating at 1 lets the writer run flat-out back-to-back instead.
 /// Reads (`read_transaction`, `query_*`) are intentionally NOT gated.
+pub(crate) static DB_WRITE_GATE_PERMITS: Lazy<usize> = Lazy::new(db_write_gate_permits);
 pub(crate) static DB_WRITE_GATE: Lazy<std::sync::Arc<Semaphore>> =
-    Lazy::new(|| std::sync::Arc::new(Semaphore::new(db_write_gate_permits())));
+    Lazy::new(|| std::sync::Arc::new(Semaphore::new(*DB_WRITE_GATE_PERMITS)));
 
 /// Acquire the write-serialization gate, returning the held permit and the time
 /// spent waiting for it. The permit is released when dropped; callers hold it for
@@ -331,7 +373,7 @@ fn record_sqlite_write_metrics(
     metric.lock_retries += retry_delta.lock_retries;
     metric.lock_backoff_ms_total += retry_delta.lock_backoff_ms_total;
     metric.permit_wait_ns_total += duration_ns(permit_wait);
-    metric.total_time_ns_total += duration_ns(elapsed);
+    metric.txn_time_ns_total += duration_ns(elapsed);
 }
 
 pub(crate) fn sqlite_write_metrics_snapshot() -> BTreeMap<String, SqliteWriteMetricSnapshot> {
@@ -358,16 +400,17 @@ pub(crate) fn log_sqlite_write_metrics_since(
             (delta.calls > 0).then_some((label, delta))
         })
         .collect::<Vec<_>>();
-    deltas.sort_by_key(|entry| std::cmp::Reverse(entry.1.total_time_ns_total));
+    deltas.sort_by_key(|entry| std::cmp::Reverse(entry.1.txn_time_ns_total));
 
     info!(
-        "SQLite write category summary: context={} categories={}",
+        "SQLite write category summary: context={} categories={} write_gate={}",
         context,
-        deltas.len()
+        deltas.len(),
+        *DB_WRITE_GATE_PERMITS
     );
     for (label, metric) in deltas.into_iter().take(12) {
         info!(
-            "SQLite write category metrics: context={} label={} calls={} committed={} failed={} retries={} backoff_ms={} permit_wait_ms={:.1} total_ms={:.1}",
+            "SQLite write category metrics: context={} label={} calls={} committed={} failed={} retries={} backoff_ms={} permit_wait_ms={:.1} txn_ms={:.1} write_gate={}",
             context,
             label,
             metric.calls,
@@ -376,7 +419,8 @@ pub(crate) fn log_sqlite_write_metrics_since(
             metric.lock_retries,
             metric.lock_backoff_ms_total,
             metric.permit_wait_ms(),
-            metric.total_time_ms()
+            metric.txn_time_ms(),
+            *DB_WRITE_GATE_PERMITS
         );
     }
 }

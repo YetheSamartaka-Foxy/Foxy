@@ -1,0 +1,28 @@
+{
+  "id": "perf-repo",
+  "kind": "perf",
+  "description": "Force redownload and recheck a named repository.",
+  "build": "release",
+  "harness": "gui",
+  "timeout_s": 3600,
+  "repository": {
+    "name": "Example Repository",
+    "address": "https://repo.example.invalid/mods/example/",
+    "path": "D:\\Foxy-TestKit\\Example",
+    "space_id": null
+  },
+  "operations": [
+    { "op": "force-redownload", "wait_timeout_s": 3600 },
+    { "op": "recheck", "wait_timeout_s": 3600 }
+  ],
+  "repetitions": 3,
+  "warmup": false,
+  "thresholds": {},
+  "guards": {
+    "require_storage_class": "ssd",
+    "require_no_other_foxy": true,
+    "require_clean_worktree": false,
+    "fail_on_db_wipe": true,
+    "max_run_gb": 20
+  }
+}

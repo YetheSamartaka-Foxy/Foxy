@@ -103,6 +103,23 @@ impl Foxy {
                 return;
             }
 
+            if self.show_add_repository_modal {
+                self.show_add_repository_modal = false;
+                self.add_repository_input_error = None;
+                self.add_repository_input_name.clear();
+                self.add_repository_input_path.clear();
+                self.pending_repository_duplicate_add = None;
+                info!("Closed add repository modal from Escape shortcut");
+                return;
+            }
+            if self.show_add_profile_window || self.show_rename_profile_window {
+                self.show_add_profile_window = false;
+                self.show_rename_profile_window = false;
+                self.new_profile_name.clear();
+                info!("Closed profile modal from Escape shortcut");
+                return;
+            }
+
             if Self::is_reference_view(self.current_view) {
                 self.close_reference_view();
                 info!("Closed reference view from Escape shortcut");

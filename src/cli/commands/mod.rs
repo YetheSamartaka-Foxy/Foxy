@@ -416,6 +416,10 @@ fn run_repository_sync(
     ensure_backend_ready();
     let (tx, mut rx) = broadcast::channel(512);
     let (_pause_tx, pause_rx) = watch::channel(false);
+    // The sender has to outlive the worker: the pipeline treats a closed cancel
+    // channel as a cancellation, so a temporary sender here races the database
+    // open and intermittently fails the sync with "Cancelled".
+    let (_cancel_tx, cancel_rx) = watch::channel(false);
     let worker = api::spawn_repository_sync(
         repo.address.clone(),
         repo.path.clone(),
@@ -441,7 +445,7 @@ fn run_repository_sync(
             force_redownload,
             allow_suspect_full_redownload: force_redownload,
             download_pause_rx: pause_rx,
-            cancel_rx: watch::channel(false).1,
+            cancel_rx,
             hash_algorithm_preference: repo.hash_algorithm_preference,
             hash_io_profile: settings.hash_io_profile,
         },

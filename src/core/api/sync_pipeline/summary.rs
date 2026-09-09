@@ -123,6 +123,13 @@ impl PipelineSummary {
         lines.push(sep);
 
         info!("{}", lines.join("\n"));
+
+        // Every pipeline exit path lands here, success or failure, so this is the
+        // one place a profiled run is guaranteed to report from.
+        crate::core::utils::profiling::report(&format!(
+            "op={} mode={} outcome={}",
+            self.operation_id, self.mode, outcome
+        ));
     }
 }
 

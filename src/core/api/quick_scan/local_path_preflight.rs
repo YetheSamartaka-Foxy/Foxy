@@ -116,7 +116,8 @@ pub(crate) fn summarize_local_path_availability(tree: &Tree) -> LocalPathAvailab
         .first()
         .map(|repo| repo.local_path.clone())
         .unwrap_or_default();
-    let root_exists = !repo_root.trim().is_empty() && Path::new(&repo_root).is_dir();
+    let root_exists =
+        !repo_root.trim().is_empty() && crate::core::utils::profiling::fs::is_dir(&repo_root);
 
     // Prior-download evidence. A repo that was previously verified/downloaded carries
     // a non-empty local_checksum or local_content_hash on the repository row, or on any of its
@@ -161,7 +162,8 @@ pub(crate) fn summarize_local_path_availability(tree: &Tree) -> LocalPathAvailab
 
         expected_addons += 1;
         let addon_path = addon.local_path.trim();
-        let addon_dir_exists = !addon_path.is_empty() && Path::new(addon_path).is_dir();
+        let addon_dir_exists =
+            !addon_path.is_empty() && crate::core::utils::profiling::fs::is_dir(addon_path);
         if addon_dir_exists {
             existing_addons += 1;
         } else {
@@ -181,7 +183,7 @@ pub(crate) fn summarize_local_path_availability(tree: &Tree) -> LocalPathAvailab
             addon_expected_files += 1;
 
             let path = Path::new(file.local_path.trim());
-            let Ok(metadata) = path.metadata() else {
+            let Ok(metadata) = crate::core::utils::profiling::fs::metadata(path) else {
                 missing_files += 1;
                 if sample_missing_files.len() < SAMPLE_LIMIT {
                     sample_missing_files.push(file.local_path.clone());
@@ -289,7 +291,7 @@ fn count_disk_files_capped(
     let mut entry_budget = LAYOUT_MISMATCH_ENTRY_BUDGET;
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(read_dir) = std::fs::read_dir(&dir) else {
+        let Ok(read_dir) = crate::core::utils::profiling::fs::read_dir(&dir) else {
             continue;
         };
         for entry in read_dir.flatten() {
@@ -321,7 +323,7 @@ fn count_disk_files_capped(
 /// only for diagnostic logging, so it is bounded and never fails.
 fn sample_dir_entries(dir: &Path, limit: usize) -> Vec<String> {
     const GATHER_CAP: usize = 256;
-    let read_dir = match std::fs::read_dir(dir) {
+    let read_dir = match crate::core::utils::profiling::fs::read_dir(dir) {
         Ok(read_dir) => read_dir,
         Err(err) => return vec![format!("<unreadable: {}>", err.kind())],
     };
@@ -365,7 +367,7 @@ fn locate_files_under_root_by_name(
     let mut entry_budget = ROOT_LOCATE_ENTRY_BUDGET;
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(read_dir) = std::fs::read_dir(&dir) else {
+        let Ok(read_dir) = crate::core::utils::profiling::fs::read_dir(&dir) else {
             continue;
         };
         for entry in read_dir.flatten() {

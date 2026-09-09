@@ -189,10 +189,13 @@ impl Foxy {
         self.apply_runtime_palette_visuals(&ctx);
         self.apply_runtime_ui_scale(&ctx);
         self.invalidate_galley_caches_on_font_atlas_change(&ctx);
-        self.handle_global_accessibility_shortcuts(&ctx);
         self.log_display_metrics_if_changed(&ctx);
         self.update_fps_estimate(&ctx);
         self.poll_agent_gui(&ctx);
+        // After `poll_agent_gui`: the driver pushes injected key events into the
+        // current frame's `InputState`, which egui rebuilds from RawInput next
+        // frame, so a handler running before it never sees them.
+        self.handle_global_accessibility_shortcuts(&ctx);
 
         if self.close_requested_at.is_none() && ctx.input(|i| i.viewport().close_requested()) {
             self.persist_window_state_if_changed(&ctx);

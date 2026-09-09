@@ -368,14 +368,18 @@ impl Drop for SqlitePerfRunGuard {
             return;
         }
         let delta = sqlite_perf_snapshot().delta_since(self.baseline);
+        let (conn_opened, conn_reused) = crate::core::tasks::db_turso::connection_counters();
         info!(
-            "SQLite sync metrics: repo={} mode={:?} lock_retries={} avg_backoff_ms={:.1} total_backoff_ms={} db_write_time_ms={:.1} elapsed_ms={}",
+            "SQLite sync metrics: repo={} mode={:?} lock_retries={} avg_backoff_ms={:.1} total_backoff_ms={} db_write_time_ms={:.1} write_gate={} conn_opened={} conn_reused={} elapsed_ms={}",
             self.repository_url,
             self.mode,
             delta.lock_retries,
             delta.avg_backoff_ms(),
             delta.lock_backoff_ms_total,
             delta.db_write_time_ms(),
+            *crate::core::tasks::init_database::DB_WRITE_GATE_PERMITS,
+            conn_opened,
+            conn_reused,
             self.started_at.elapsed().as_millis()
         );
         log_sqlite_write_metrics_since(
@@ -416,23 +420,34 @@ impl SqlitePerfRunGuard {
                 (delta.calls > 0).then_some((label, delta))
             })
             .collect::<Vec<_>>();
-        categories.sort_by_key(|entry| std::cmp::Reverse(entry.1.total_time_ns_total));
+        categories.sort_by_key(|entry| std::cmp::Reverse(entry.1.txn_time_ns_total));
 
         let mut lines = Vec::new();
         lines.push("-- DATABASE METRICS SUMMARY --".to_owned());
+        let (conn_opened, conn_reused) = crate::core::tasks::db_turso::connection_counters();
         lines.push(format!(
-            "sqlite: mode={:?} lock_retries={} avg_backoff_ms={:.1} total_backoff_ms={} db_write_time_ms={:.1} elapsed_ms={}",
+            "sqlite: mode={:?} lock_retries={} avg_backoff_ms={:.1} total_backoff_ms={} db_write_time_ms={:.1} write_gate={} conn_opened={} conn_reused={} elapsed_ms={}",
             self.mode,
             delta.lock_retries,
             delta.avg_backoff_ms(),
             delta.lock_backoff_ms_total,
             delta.db_write_time_ms(),
+            *crate::core::tasks::init_database::DB_WRITE_GATE_PERMITS,
+            conn_opened,
+            conn_reused,
             self.started_at.elapsed().as_millis()
         ));
-        lines.push(format!("write_categories={}", categories.len()));
+        // `txn_ms` below is the gated transaction window, which grows with the
+        // gate size because Turso's waiters block inside `conn.execute`; the gate
+        // is printed so the numbers are never read without it.
+        lines.push(format!(
+            "write_categories={} write_gate={}",
+            categories.len(),
+            *crate::core::tasks::init_database::DB_WRITE_GATE_PERMITS
+        ));
         for (label, metric) in categories.into_iter().take(12) {
             lines.push(format!(
-                "  {:<32} calls={} committed={} failed={} retries={} backoff_ms={} permit_wait_ms={:.1} total_ms={:.1}",
+                "  {:<32} calls={} committed={} failed={} retries={} backoff_ms={} permit_wait_ms={:.1} txn_ms={:.1}",
                 label,
                 metric.calls,
                 metric.committed,
@@ -440,7 +455,7 @@ impl SqlitePerfRunGuard {
                 metric.lock_retries,
                 metric.lock_backoff_ms_total,
                 metric.permit_wait_ms(),
-                metric.total_time_ms()
+                metric.txn_time_ms()
             ));
         }
         lines.push("-- END DATABASE METRICS --".to_owned());

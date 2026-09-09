@@ -1,0 +1,38 @@
+{
+  "id": "perf-db-parts-bulk",
+  "kind": "perf",
+  "description": "Part-row-bound database case: a synthetic PBO origin whose entries become manifest parts, force-redownloaded so the deferred bulk part insert runs at the row count of a real large repository.",
+  "build": "release",
+  "harness": "cli",
+  "timeout_s": 3600,
+  "tags": [
+    "database",
+    "writes",
+    "parts"
+  ],
+  "origin": {
+    "root": "${REPO_ROOT}\\testkit\\origin\\data\\example-parts",
+    "port": 8134
+  },
+  "repository": {
+    "name": "Example Synthetic Parts",
+    "address": "http://127.0.0.1:8134/",
+    "path": "D:\\Foxy-TestKit\\Parts",
+    "space_id": null
+  },
+  "operations": [
+    {
+      "op": "force-redownload",
+      "wait_timeout_s": 3600
+    }
+  ],
+  "repetitions": 3,
+  "guards": {
+    "require_storage_class": "ssd",
+    "require_no_other_foxy": true,
+    "require_clean_worktree": false,
+    "fail_on_db_wipe": false,
+    "max_run_gb": 1
+  },
+  "notes": "Build the origin with `foxy-testkit synthetic --pbo-entries`. Payload is byte-light on purpose, so the measurement is the part-row writes; do not read download.* metrics from this case."
+}
