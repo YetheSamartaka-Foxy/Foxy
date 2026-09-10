@@ -175,7 +175,7 @@ pub struct Foxy {
     pub server_row_galleys: ListGalleyCache,
     repository_settings_addon_preload_rx: StdReceiver<RepositorySettingsAddonPreloadResult>,
     repository_settings_addon_preload_tx: StdSender<RepositorySettingsAddonPreloadResult>,
-    repository_settings_addon_preload_worker: Option<std::thread::JoinHandle<()>>,
+    repository_settings_addon_preload_worker: Option<(u64, std::thread::JoinHandle<()>)>,
     pub(crate) repository_addon_size_load_rx: StdReceiver<RepositoryAddonSizeLoadResult>,
     pub(crate) repository_addon_size_load_tx: StdSender<RepositoryAddonSizeLoadResult>,
     pub(crate) repository_addon_size_load_pending: bool,

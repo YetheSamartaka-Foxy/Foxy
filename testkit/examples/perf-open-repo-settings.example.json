@@ -1,0 +1,72 @@
+{
+  "id": "perf-open-repo-settings-example",
+  "kind": "perf",
+  "description": "Open repo settings load time: what the first open of Repository Settings costs on a freshly launched app.",
+  "build": "release",
+  "harness": "gui",
+  "timeout_s": 3600,
+  "tags": [
+    "ui",
+    "repository-settings",
+    "startup"
+  ],
+  "notes": "The startup operation comes first on purpose: it restarts the app, so every ui-walk iteration opens Repository Settings in a process whose in-memory addon inventory is still empty, which is the launch a user complains about. Point config_seed at a real configuration directory and pick the repository_index of the repository whose settings you want to open.",
+  "config_seed": "C:/Users/<you>/AppData/Roaming/Foxy",
+  "repository": {
+    "name": "Example Repository",
+    "address": "http://repo.example.invalid/mody/Example/",
+    "path": "D:/Games/ExampleRepository",
+    "space_id": null
+  },
+  "operations": [
+    {
+      "op": "startup",
+      "wait_timeout_s": 900
+    },
+    {
+      "op": "ui-walk",
+      "wait_timeout_s": 900,
+      "steps": [
+        {
+          "command": "open-view",
+          "view": "repository-list",
+          "repository_index": null,
+          "tab": null
+        },
+        {
+          "command": "assert",
+          "field": "view",
+          "equals": "repository-list"
+        },
+        {
+          "command": "open-view",
+          "view": "repository-settings",
+          "repository_index": 0,
+          "tab": "configuration"
+        },
+        {
+          "command": "assert",
+          "field": "repository_settings_tab",
+          "equals": "Configuration"
+        },
+        {
+          "command": "snapshot"
+        }
+      ]
+    }
+  ],
+  "repetitions": 3,
+  "warmup": false,
+  "metrics": [
+    "summary.total_ms",
+    "elapsed_s",
+    "memory.peak_private_bytes"
+  ],
+  "thresholds": {},
+  "guards": {
+    "require_no_other_foxy": true,
+    "require_clean_worktree": false,
+    "fail_on_db_wipe": true,
+    "max_run_gb": 1
+  }
+}

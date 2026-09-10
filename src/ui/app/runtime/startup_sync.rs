@@ -90,7 +90,9 @@ impl Foxy {
             .is_some_and(|tracker| !tracker.settled)
     }
 
-    fn startup_sync_settled(&self) -> bool {
+    /// Every startup-scoped background job has finished. Also the gate for
+    /// opportunistic idle work, so nothing competes with sync for the disk.
+    pub(in crate::ui::app) fn startup_sync_settled(&self) -> bool {
         self.startup_quick_scan_filter_worker.is_none()
             && self.startup_quick_scan_filter_rx.is_none()
             && self.startup_pending_restore_worker.is_none()

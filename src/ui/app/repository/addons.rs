@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use log::{info, warn};
 
@@ -11,6 +13,17 @@ use crate::ui::types::{
     Repository, RepositoryProfile, RepositoryServer, UpdateSummaryNotice,
     additional_folder_alias_key, sanitize_additional_folder_alias,
 };
+
+/// Upper bound on the addon size-walk workers. The walks are metadata-bound
+/// rather than CPU-bound, so more threads than this buy nothing and only add
+/// queue depth on a spinning disk.
+const ADDON_SIZE_SCAN_MAX_WORKERS: usize = 8;
+
+/// How often the UI thread rechecks an in-flight inventory worker while waiting
+/// to adopt its result. Waiting on a slow worker is still cheaper than racing it
+/// with a second scan; the recheck only exists so a worker that died without
+/// sending cannot wedge the wait.
+const ADDON_INVENTORY_ADOPT_POLL: Duration = Duration::from_millis(25);
 
 impl Foxy {
     pub(crate) fn invalidate_addon_inventory_cache(&mut self) {
@@ -370,8 +383,13 @@ impl Foxy {
         arma3_directory: &str,
         steam_directory: &str,
     ) -> Vec<AddonInventoryEntry> {
-        let mut discovered = Vec::new();
+        let mut discovered: Vec<(String, String, String)> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
+        // Every repository joined to a repository space shares one folder, so
+        // without these caches the same directory tree and the same origin
+        // lookup are repeated once per repository.
+        let mut scanned_by_path: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        let mut origins_by_addon_path: HashMap<String, Vec<String>> = HashMap::new();
         let additional_origin_by_folder =
             Self::additional_folder_origin_map_from(additional_folders, additional_folder_aliases);
 
@@ -380,10 +398,16 @@ impl Foxy {
             if repo_path.is_empty() {
                 continue;
             }
-            let scanned = Foxy::discover_addons_in_path(repo_path);
+            let scanned = scanned_by_path
+                .entry(Self::normalize_origin_lookup_path(repo_path))
+                .or_insert_with(|| Foxy::discover_addons_in_path(repo_path))
+                .clone();
             for (addon_name, absolute_path) in scanned {
-                let repo_origins =
-                    Self::addon_repo_origins_from(repositories, &addon_name, &absolute_path);
+                let repo_origins = origins_by_addon_path
+                    .entry(absolute_path.clone())
+                    .or_insert_with(|| {
+                        Self::addon_repo_origins_from(repositories, &addon_name, &absolute_path)
+                    });
                 if repo_origins.is_empty() {
                     continue;
                 }
@@ -393,8 +417,7 @@ impl Foxy {
                         [single] => single.clone(),
                         many => many.join(", "),
                     };
-                    let size_bytes = addon_directory_total_size(Path::new(&absolute_path)).ok();
-                    discovered.push((addon_name, absolute_path, origin, size_bytes));
+                    discovered.push((addon_name, absolute_path, origin));
                 }
             }
         }
@@ -411,7 +434,10 @@ impl Foxy {
                 .get(&folder_key)
                 .cloned()
                 .unwrap_or_else(|| "Additional folders".to_string());
-            let scanned = Foxy::discover_addons_in_path(folder);
+            let scanned = scanned_by_path
+                .entry(folder_key)
+                .or_insert_with(|| Foxy::discover_addons_in_path(folder))
+                .clone();
             for (addon_name, absolute_path) in scanned {
                 if seen.insert(absolute_path.clone()) {
                     let origin = if Self::is_steam_workshop_path_with_root(
@@ -422,8 +448,7 @@ impl Foxy {
                     } else {
                         additional_origin.clone()
                     };
-                    let size_bytes = addon_directory_total_size(Path::new(&absolute_path)).ok();
-                    discovered.push((addon_name, absolute_path, origin, size_bytes));
+                    discovered.push((addon_name, absolute_path, origin));
                 }
             }
         }
@@ -439,30 +464,44 @@ impl Foxy {
             if !scanned_roots.insert(canonical) {
                 continue;
             }
-            let scanned = Foxy::discover_addons_in_path(workshop_folder);
+            let scanned = scanned_by_path
+                .entry(Self::normalize_origin_lookup_path(
+                    &workshop_folder.to_string_lossy(),
+                ))
+                .or_insert_with(|| Foxy::discover_addons_in_path(workshop_folder))
+                .clone();
             for (addon_name, absolute_path) in scanned {
                 if seen.insert(absolute_path.clone()) {
-                    let size_bytes = addon_directory_total_size(Path::new(&absolute_path)).ok();
-                    discovered.push((
-                        addon_name,
-                        absolute_path,
-                        "Steam Workshop".to_string(),
-                        size_bytes,
-                    ));
+                    discovered.push((addon_name, absolute_path, "Steam Workshop".to_string()));
                 }
             }
         }
 
         discovered.sort_by(|a, b| {
-            let (a_name, a_path, a_origin, _) = a;
-            let (b_name, b_path, b_origin, _) = b;
+            let (a_name, a_path, a_origin) = a;
+            let (b_name, b_path, b_origin) = b;
             a_name
                 .cmp(b_name)
                 .then(a_origin.cmp(b_origin))
                 .then(a_path.cmp(b_path))
         });
 
+        // The recursive size walk dominates the inventory build and every entry
+        // is an independent directory tree, so the walks run across workers
+        // instead of one folder after another.
+        let sizes = addon_directory_total_sizes(
+            &discovered
+                .iter()
+                .map(|(_, path, _)| path.clone())
+                .collect::<Vec<_>>(),
+        );
         discovered
+            .into_iter()
+            .zip(sizes)
+            .map(|((addon_name, absolute_path, origin), size_bytes)| {
+                (addon_name, absolute_path, origin, size_bytes)
+            })
+            .collect()
     }
 
     pub fn gather_all_addon_origins(&self) -> Vec<AddonInventoryEntry> {
@@ -475,9 +514,74 @@ impl Foxy {
         )
     }
 
+    /// Take the inventory an already running worker is building rather than
+    /// starting a second scan of the same folders on the UI thread.
+    ///
+    /// A worker spawned before the last `invalidate_addon_inventory_cache` is
+    /// scanning for a generation nobody wants any more, so it is left to finish
+    /// on its own rather than waited on.
+    fn adopt_pending_addon_inventory(&mut self) {
+        if self
+            .repository_settings_addon_preload_worker
+            .as_ref()
+            .is_none_or(|(generation, _)| *generation != self.addon_inventory_generation)
+        {
+            return;
+        }
+        let Some((_, worker)) = self.repository_settings_addon_preload_worker.take() else {
+            return;
+        };
+
+        let started_at = Instant::now();
+        let mut adopted = None;
+        loop {
+            match self
+                .repository_settings_addon_preload_rx
+                .recv_timeout(ADDON_INVENTORY_ADOPT_POLL)
+            {
+                Ok(result) => {
+                    adopted = Some(result);
+                    break;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if worker.is_finished() {
+                        adopted = self.repository_settings_addon_preload_rx.try_recv().ok();
+                        break;
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        if worker.join().is_err() {
+            warn!("Repository settings addon preload worker panicked");
+        }
+
+        let Some(result) = adopted else {
+            return;
+        };
+        if result.inventory_generation != self.addon_inventory_generation {
+            return;
+        }
+        info!(
+            "Adopted the background addon inventory after {:.2?} ({} addons)",
+            started_at.elapsed(),
+            result.addons.len()
+        );
+        self.cached_all_addons = Some(result.addons);
+    }
+
     pub fn get_or_generate_all_addons(&mut self) -> &Vec<AddonInventoryEntry> {
         if self.cached_all_addons.is_none() {
+            self.adopt_pending_addon_inventory();
+        }
+        if self.cached_all_addons.is_none() {
+            let started_at = Instant::now();
             let new_data = self.gather_all_addon_origins();
+            info!(
+                "Built addon inventory on the UI thread in {:.2?} ({} addons)",
+                started_at.elapsed(),
+                new_data.len()
+            );
             self.cached_all_addons = Some(new_data);
         }
         self.cached_all_addons.as_ref().unwrap()
@@ -519,7 +623,36 @@ impl Foxy {
             return;
         }
 
-        if self.repository_settings_addon_preload_worker.is_some() {
+        self.start_addon_inventory_worker(repo_index);
+    }
+
+    /// Build the addon inventory in the background whenever the app is idle
+    /// and does not have one, so opening Repository Settings finds it ready
+    /// instead of paying for the whole folder walk between the click and the
+    /// first frame.
+    ///
+    /// Idle is the gate rather than "once at startup". The inventory is dropped
+    /// on an addon delete, a path change, a finished download or a game space
+    /// switch, and without a re-arm the next open would pay the walk again.
+    /// Idle keeps the scan off the disk while sync work is using it, and reads
+    /// the repository list only once a switch has finished installing it.
+    pub(in crate::ui::app) fn maybe_warm_addon_inventory(&mut self) {
+        if self.cached_all_addons.is_some()
+            || self.repository_settings_addon_preload_worker.is_some()
+            || self.repository_view_state.repositories.is_empty()
+        {
+            return;
+        }
+        if !self.startup_tasks_started || !self.startup_sync_settled() {
+            return;
+        }
+        self.start_addon_inventory_worker(self.selected_repository_for_settings.unwrap_or(0));
+    }
+
+    fn start_addon_inventory_worker(&mut self, repo_index: usize) {
+        if self.cached_all_addons.is_some()
+            || self.repository_settings_addon_preload_worker.is_some()
+        {
             return;
         }
 
@@ -532,39 +665,44 @@ impl Foxy {
         let result_tx = self.repository_settings_addon_preload_tx.clone();
         let repaint_ctx = self.repaint_ctx.clone();
 
-        self.repository_settings_addon_preload_worker = Some(std::thread::spawn(move || {
-            let started_at = std::time::Instant::now();
-            let addons = Foxy::gather_all_addon_origins_from(
-                &repositories,
-                &additional_folders,
-                &additional_folder_aliases,
-                &arma3_directory,
-                &steam_directory,
-            );
-            info!(
-                "Preloaded addon inventory for repository settings in {:.2?} ({} addons)",
-                started_at.elapsed(),
-                addons.len()
-            );
-            if result_tx
-                .send(RepositorySettingsAddonPreloadResult {
-                    repo_index,
-                    inventory_generation,
-                    addons,
-                })
-                .is_err()
-            {
-                warn!("Failed to send repository settings addon preload result: UI channel closed");
-            }
-            Self::request_background_repaint(repaint_ctx.as_ref());
-        }));
+        self.repository_settings_addon_preload_worker = Some((
+            inventory_generation,
+            std::thread::spawn(move || {
+                let started_at = std::time::Instant::now();
+                let addons = Foxy::gather_all_addon_origins_from(
+                    &repositories,
+                    &additional_folders,
+                    &additional_folder_aliases,
+                    &arma3_directory,
+                    &steam_directory,
+                );
+                info!(
+                    "Preloaded addon inventory for repository settings in {:.2?} ({} addons)",
+                    started_at.elapsed(),
+                    addons.len()
+                );
+                if result_tx
+                    .send(RepositorySettingsAddonPreloadResult {
+                        repo_index,
+                        inventory_generation,
+                        addons,
+                    })
+                    .is_err()
+                {
+                    warn!(
+                        "Failed to send repository settings addon preload result: UI channel closed"
+                    );
+                }
+                Self::request_background_repaint(repaint_ctx.as_ref());
+            }),
+        ));
     }
 
     pub(crate) fn poll_repository_settings_addon_preload_results(&mut self) {
         loop {
             match self.repository_settings_addon_preload_rx.try_recv() {
                 Ok(result) => {
-                    if let Some(worker) = self.repository_settings_addon_preload_worker.take()
+                    if let Some((_, worker)) = self.repository_settings_addon_preload_worker.take()
                         && worker.join().is_err()
                     {
                         warn!("Repository settings addon preload worker panicked");
@@ -847,6 +985,59 @@ impl Foxy {
     }
 }
 
+/// Total size of every addon folder in `paths`, in the same order.
+///
+/// One `addon_directory_total_size` per entry, spread over workers: the walks
+/// touch disjoint trees and are metadata-bound, so they overlap rather than
+/// queue behind each other.
+fn addon_directory_total_sizes(paths: &[String]) -> Vec<Option<u64>> {
+    let mut sizes: Vec<Option<u64>> = vec![None; paths.len()];
+    if paths.is_empty() {
+        return sizes;
+    }
+
+    let workers = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1)
+        .clamp(1, ADDON_SIZE_SCAN_MAX_WORKERS)
+        .min(paths.len());
+    if workers <= 1 {
+        for (index, path) in paths.iter().enumerate() {
+            sizes[index] = addon_directory_total_size(Path::new(path)).ok();
+        }
+        return sizes;
+    }
+
+    let cursor = AtomicUsize::new(0);
+    let partials: Vec<Vec<(usize, Option<u64>)>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                let cursor = &cursor;
+                scope.spawn(move || {
+                    let mut local = Vec::new();
+                    loop {
+                        let index = cursor.fetch_add(1, Ordering::Relaxed);
+                        let Some(path) = paths.get(index) else {
+                            break;
+                        };
+                        local.push((index, addon_directory_total_size(Path::new(path)).ok()));
+                    }
+                    local
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap_or_default())
+            .collect()
+    });
+
+    for (index, size) in partials.into_iter().flatten() {
+        sizes[index] = size;
+    }
+    sizes
+}
+
 fn addon_directory_total_size(path: &Path) -> std::io::Result<u64> {
     let metadata = std::fs::metadata(path)?;
     if metadata.is_file() {
@@ -874,4 +1065,110 @@ fn addon_directory_total_size(path: &Path) -> std::io::Result<u64> {
         }
     }
     Ok(total)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_addon(root: &Path, addon: &str, files: &[(&str, usize)]) {
+        let addons_dir = root.join(addon).join("addons");
+        std::fs::create_dir_all(&addons_dir).expect("addon dir");
+        for (name, size) in files {
+            std::fs::write(addons_dir.join(name), vec![b'x'; *size]).expect("addon file");
+        }
+    }
+
+    fn repository_at(name: &str, path: &Path, addons: &[&str]) -> Repository {
+        Repository {
+            name: name.to_string(),
+            path: path.display().to_string(),
+            addons: addons
+                .iter()
+                .map(|addon| ((*addon).to_string(), true))
+                .collect(),
+            ..Repository::default()
+        }
+    }
+
+    #[test]
+    fn addon_directory_total_sizes_matches_the_serial_walk() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path();
+        let mut paths = Vec::new();
+        for index in 0..25 {
+            let addon = format!("@addon_{index}");
+            write_addon(root, &addon, &[("a.pbo", index + 1), ("b.pbo", 2 * index)]);
+            paths.push(root.join(&addon).display().to_string());
+        }
+        paths.push(root.join("@missing").display().to_string());
+
+        let parallel = addon_directory_total_sizes(&paths);
+        let serial: Vec<Option<u64>> = paths
+            .iter()
+            .map(|path| addon_directory_total_size(Path::new(path)).ok())
+            .collect();
+
+        assert_eq!(parallel, serial);
+        assert_eq!(parallel[0], Some(1));
+        assert_eq!(parallel[3], Some(4 + 6));
+        assert_eq!(parallel.last().copied().flatten(), None);
+    }
+
+    #[test]
+    fn addon_directory_total_sizes_handles_an_empty_request() {
+        assert!(addon_directory_total_sizes(&[]).is_empty());
+    }
+
+    #[test]
+    fn addon_inventory_is_unchanged_when_repositories_share_a_folder() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path();
+        write_addon(root, "@shared", &[("a.pbo", 10)]);
+        write_addon(root, "@only_main", &[("a.pbo", 20)]);
+        write_addon(root, "@only_ww2", &[("a.pbo", 30)]);
+        // No `addons` subfolder, so it is not an addon folder at all.
+        std::fs::create_dir_all(root.join("@not_an_addon")).expect("plain dir");
+
+        let aliases = HashMap::new();
+        let main = repository_at("Main", root, &["@shared", "@only_main"]);
+        let ww2 = repository_at("WW2", root, &["@shared", "@only_ww2"]);
+
+        let one_repo =
+            Foxy::gather_all_addon_origins_from(std::slice::from_ref(&main), &[], &aliases, "", "");
+        let shared_folder = Foxy::gather_all_addon_origins_from(
+            &[main.clone(), ww2.clone(), main.clone()],
+            &[],
+            &aliases,
+            "",
+            "",
+        );
+
+        let names: Vec<&str> = one_repo
+            .iter()
+            .map(|(name, _, _, _)| name.as_str())
+            .collect();
+        assert_eq!(names, vec!["@only_main", "@shared"]);
+        assert_eq!(one_repo[0].3, Some(20));
+        assert_eq!(one_repo[1].2, "Main");
+
+        let names: Vec<&str> = shared_folder
+            .iter()
+            .map(|(name, _, _, _)| name.as_str())
+            .collect();
+        assert_eq!(names, vec!["@only_main", "@only_ww2", "@shared"]);
+        // The same folder scanned once per repository must still report every
+        // repository that lists the addon, and each path exactly once.
+        assert_eq!(shared_folder[2].2, "Main, WW2");
+        assert_eq!(shared_folder[2].3, Some(10));
+        assert_eq!(shared_folder[1].2, "WW2");
+
+        let mut paths: Vec<&str> = shared_folder
+            .iter()
+            .map(|(_, path, _, _)| path.as_str())
+            .collect();
+        let total = paths.len();
+        paths.sort_unstable();
+        paths.dedup();
+        assert_eq!(paths.len(), total);
+    }
 }
