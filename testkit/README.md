@@ -116,6 +116,28 @@ starts, and the live directory is only ever read. Close Foxy first: the copy is
 protected by `require_no_other_foxy`, not by a lock. See
 [`examples/perf-startup.example.json`](examples/perf-startup.example.json).
 
+## Measuring memory
+
+Every operation is bracketed by a process memory sampler, so memory is a
+dimension of every perf row rather than something only a memory case records.
+The reduced block lands in `summary.memory` and in the ledger row's `memory`;
+the raw series is written to `memory-<iteration>-<operation>.json`.
+
+`perf-memory-arma3-live` is the dedicated case: it seeds the live configuration,
+then measures launch to sync verdict, a recheck of the largest repository, a
+`ui-walk` through the views a user actually opens, and a no-change sync.
+
+```powershell
+foxy-testkit run --case .\testkit\cases\perf-memory-arma3-live.json --no-build
+```
+
+Read private commit, not working set: the OS trims resident pages under
+pressure, so only commit moves when an allocation regression lands. To separate
+Foxy's own state from the renderer floor, launch once against an empty
+`--config-dir` and subtract - that floor is not Foxy code and moves with eframe,
+wgpu and the graphics driver. `conventions/SPEED_OF_LIGHT.md` M1 has the
+equation, the levers, and the recorded floor for this machine.
+
 ## Deep profiling
 
 A case with `"profile": true` runs Foxy with `FOXY_PROFILE=1`, and the run gains

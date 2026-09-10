@@ -281,8 +281,12 @@ pub fn plan_startup_quick_scan_repos(
             }
             (eligible_set, prevalidated_set)
         };
-        let (remote_changed_set, (eligible_set, prevalidated_set)) =
+        let (probe, (eligible_set, prevalidated_set)) =
             tokio::join!(remote_probe, local_eligibility);
+        let StartupRemoteProbe {
+            changed: remote_changed_set,
+            unknown: remote_unknown_set,
+        } = probe;
         if !remote_changed_set.is_empty() {
             info!(
                 "Startup remote checksum probe found {} changed repositories",
@@ -298,9 +302,15 @@ pub fn plan_startup_quick_scan_repos(
             })
             .cloned()
             .collect();
+        // A repository whose remote freshness the probe could not establish is
+        // not prevalidated. Prevalidation is the claim "nothing to check here",
+        // and an unanswered probe is exactly the case where that claim is
+        // unearned - the local scan still runs, it just does not get to skip.
         let prevalidated_repositories = eligible_repositories
             .iter()
-            .filter(|repository| prevalidated_set.contains(*repository))
+            .filter(|repository| {
+                prevalidated_set.contains(*repository) && !remote_unknown_set.contains(*repository)
+            })
             .cloned()
             .collect();
         let remote_changed_repositories = normalized_unique
@@ -316,12 +326,76 @@ pub fn plan_startup_quick_scan_repos(
     })
 }
 
+/// What one `repo.json` probe learned about a repository's remote freshness.
+///
+/// `Unknown` is not `Unchanged`. A server that is down, slow, or serving a
+/// checksum this repository cannot be compared against tells us nothing, and
+/// reporting that as "up to date" is how a real remote update goes unnoticed
+/// until the user rechecks by hand.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RemoteFreshness {
+    Changed,
+    Unchanged,
+    Unknown,
+}
+
+/// Decide freshness from the remote `repo.json` checksum and what the database
+/// already knows about this repository instance.
+///
+/// The stored remote checksum is the authoritative comparison: it is the value
+/// this same field held the last time the repository was refreshed, so it is
+/// always the remote's own algorithm and a difference means the published
+/// repository moved. The local rollup is only a fallback for an instance that
+/// has never completed a refresh, and it is comparable only when both sides
+/// are the same width - a FoxyMode repository stores a BLAKE3 rollup locally
+/// while `repo.json` may publish a SHA-1, and comparing those can only ever
+/// produce a false "changed".
+fn remote_freshness(
+    remote_checksum: &str,
+    stored_remote_checksum: &str,
+    local_checksum: &str,
+) -> RemoteFreshness {
+    let remote = remote_checksum.trim();
+    if remote.is_empty() {
+        return RemoteFreshness::Unknown;
+    }
+    let stored_remote = stored_remote_checksum.trim();
+    if !stored_remote.is_empty() {
+        return if remote.eq_ignore_ascii_case(stored_remote) {
+            RemoteFreshness::Unchanged
+        } else {
+            RemoteFreshness::Changed
+        };
+    }
+    let local = local_checksum.trim();
+    if local.is_empty() {
+        return RemoteFreshness::Changed;
+    }
+    if remote.len() != local.len() {
+        return RemoteFreshness::Unknown;
+    }
+    if remote.eq_ignore_ascii_case(local) {
+        RemoteFreshness::Unchanged
+    } else {
+        RemoteFreshness::Changed
+    }
+}
+
+struct StartupRemoteProbe {
+    changed: HashSet<StartupRepositoryInstance>,
+    unknown: HashSet<StartupRepositoryInstance>,
+}
+
 async fn startup_remote_changed_repositories(
     context: Arc<FoxyContext>,
     repositories: &[StartupRepositoryInstance],
-) -> HashSet<StartupRepositoryInstance> {
+) -> StartupRemoteProbe {
+    let empty = || StartupRemoteProbe {
+        changed: HashSet::new(),
+        unknown: HashSet::new(),
+    };
     if repositories.is_empty() {
-        return HashSet::new();
+        return empty();
     }
     let started = Instant::now();
 
@@ -329,46 +403,48 @@ async fn startup_remote_changed_repositories(
         .iter()
         .map(|repository| repository.repo_url.clone())
         .collect::<Vec<_>>();
-    if normalized_urls.is_empty() {
-        return HashSet::new();
-    }
     let placeholders = vec!["?"; normalized_urls.len()].join(", ");
     let sql = format!(
-        "SELECT remote_url, local_path, local_checksum \
+        "SELECT remote_url, local_path, local_checksum, remote_checksum \
          FROM repositories WHERE remote_url IN ({placeholders})"
     );
     let values: Vec<DbValue> = normalized_urls.into_iter().map(DbValue::from).collect();
-    let rows: Vec<(String, String, String)> = match context.db().query_all(&sql, values).await {
-        Ok(rows) => rows
-            .iter()
-            .filter_map(|row| {
-                Some((
-                    row.get_string("remote_url").ok()?,
-                    row.get_string("local_path").ok()?,
-                    row.get_string("local_checksum").ok()?,
-                ))
-            })
-            .collect(),
-        Err(err) => {
-            warn!(
-                "Failed to load repositories for startup remote checksum probe: {}",
-                err
-            );
-            return HashSet::new();
-        }
-    };
+    let rows: Vec<(String, String, String, String)> =
+        match context.db().query_all(&sql, values).await {
+            Ok(rows) => rows
+                .iter()
+                .filter_map(|row| {
+                    Some((
+                        row.get_string("remote_url").ok()?,
+                        row.get_string("local_path").ok()?,
+                        row.get_string("local_checksum").ok()?,
+                        row.get_string("remote_checksum").ok()?,
+                    ))
+                })
+                .collect(),
+            Err(err) => {
+                warn!(
+                    "Failed to load repositories for startup remote checksum probe: {}",
+                    err
+                );
+                return empty();
+            }
+        };
 
-    let mut join_set: JoinSet<(StartupRepositoryInstance, bool)> = JoinSet::new();
+    let mut join_set: JoinSet<(StartupRepositoryInstance, RemoteFreshness)> = JoinSet::new();
     for repository in repositories {
-        let Some((_, _, local_checksum)) = rows.iter().find(|(repo_url, local_path, _)| {
-            repo_url == &repository.repo_url
-                && normalize_instance_path(local_path) == repository.local_path
-        }) else {
+        let Some((_, _, local_checksum, stored_remote_checksum)) =
+            rows.iter().find(|(repo_url, local_path, _, _)| {
+                repo_url == &repository.repo_url
+                    && normalize_instance_path(local_path) == repository.local_path
+            })
+        else {
             continue;
         };
         let repository = repository.clone();
         let repo_url = repository.repo_url.clone();
         let local_checksum = local_checksum.clone();
+        let stored_remote_checksum = stored_remote_checksum.clone();
         let context = context.clone();
         join_set.spawn(async move {
             let repo_json_url = format!("{}repo.json", repo_url);
@@ -386,57 +462,56 @@ async fn startup_remote_changed_repositories(
                     .to_string(),
                 Ok(Err(err)) => {
                     debug!(
-                        "Startup remote checksum probe skipped for {}: {}",
+                        "Startup remote checksum probe could not reach {}: {}",
                         repo_url, err
                     );
-                    return (repository, false);
+                    return (repository, RemoteFreshness::Unknown);
                 }
                 Err(_) => {
                     debug!(
                         "Startup remote checksum probe timed out for {} after {:?}",
                         repo_url, STARTUP_REMOTE_CHECK_TIMEOUT
                     );
-                    return (repository, false);
+                    return (repository, RemoteFreshness::Unknown);
                 }
             };
-            let local_checksum = local_checksum.trim();
-            // Only compare checksums of the same algorithm/length. A FoxyMode/Hybrid
-            // repo stores a BLAKE3 (64 hex) local_checksum while repo.json may carry a SHA-1
-            // (40 hex) value; comparing across algorithms can never match and would flag a
-            // false "remote changed" on every launch. When the lengths differ, the repo.json
-            // checksum is not authoritative for this repo, so we do not treat it as changed.
-            if !local_checksum.is_empty() && remote_checksum.len() != local_checksum.len() {
-                debug!(
-                    "Startup remote checksum probe skipped for {}: checksum algorithm mismatch (local len={}, remote len={})",
-                    repo_url,
-                    local_checksum.len(),
-                    remote_checksum.len()
-                );
-                return (repository, false);
+            let freshness = remote_freshness(
+                &remote_checksum,
+                &stored_remote_checksum,
+                &local_checksum,
+            );
+            match freshness {
+                RemoteFreshness::Changed => info!(
+                    "Startup remote checksum changed for repo={} stored_remote={} remote={}",
+                    repo_url, stored_remote_checksum, remote_checksum
+                ),
+                RemoteFreshness::Unknown => debug!(
+                    "Startup remote freshness unknown for repo={}: remote checksum is not comparable with local state",
+                    repo_url
+                ),
+                RemoteFreshness::Unchanged => {}
             }
-            let changed =
-                !remote_checksum.is_empty() && !remote_checksum.eq_ignore_ascii_case(local_checksum);
-            if changed {
-                info!(
-                    "Startup remote checksum changed for repo={} local_checksum={} remote_checksum={}",
-                    repo_url, local_checksum, remote_checksum
-                );
-            }
-            (repository, changed)
+            (repository, freshness)
         });
     }
 
     let probed = join_set.len();
-    let mut changed = HashSet::new();
+    let mut probe = empty();
     let mut answered = 0usize;
     let deadline = tokio::time::Instant::now() + STARTUP_REMOTE_PROBE_BUDGET;
     loop {
         match tokio::time::timeout_at(deadline, join_set.join_next()).await {
             Ok(None) => break,
-            Ok(Some(Ok((repository, is_changed)))) => {
+            Ok(Some(Ok((repository, freshness)))) => {
                 answered += 1;
-                if is_changed {
-                    changed.insert(repository);
+                match freshness {
+                    RemoteFreshness::Changed => {
+                        probe.changed.insert(repository);
+                    }
+                    RemoteFreshness::Unknown => {
+                        probe.unknown.insert(repository);
+                    }
+                    RemoteFreshness::Unchanged => {}
                 }
             }
             Ok(Some(Err(err))) => {
@@ -454,6 +529,17 @@ async fn startup_remote_changed_repositories(
             }
         }
     }
+    // Everything the budget cut off is unknown too, not merely uncounted.
+    let unanswered = probed.saturating_sub(answered);
+    if unanswered > 0 || !probe.unknown.is_empty() {
+        warn!(
+            "Startup remote freshness is unknown for {} of {} repositories ({} unreachable or not comparable, {} unanswered); the local quick scan decides for those",
+            probe.unknown.len() + unanswered,
+            probed,
+            probe.unknown.len(),
+            unanswered
+        );
+    }
 
     info!(
         "{}",
@@ -465,11 +551,12 @@ async fn startup_remote_changed_repositories(
             &[
                 ("repos", probed.to_string()),
                 ("answered", answered.to_string()),
-                ("changed", changed.len().to_string()),
+                ("changed", probe.changed.len().to_string()),
+                ("unknown", (probe.unknown.len() + unanswered).to_string()),
             ],
         )
     );
-    changed
+    probe
 }
 
 struct QuickScanWorkerRepoOutcome {
@@ -948,7 +1035,10 @@ pub fn spawn_quick_local_scan_instances(
 
 #[cfg(test)]
 mod tests {
-    use super::{StartupRepositoryInstance, normalize_startup_repositories};
+    use super::{
+        RemoteFreshness, StartupRepositoryInstance, normalize_startup_repositories,
+        remote_freshness,
+    };
 
     #[test]
     fn startup_repositories_deduplicate_only_matching_url_and_path() {
@@ -986,5 +1076,44 @@ mod tests {
         ]);
 
         assert!(repositories.is_empty());
+    }
+
+    #[test]
+    fn stored_remote_checksum_decides_freshness_regardless_of_local_algorithm() {
+        // FoxyMode: BLAKE3 locally, SHA-1 published. The stored remote value is
+        // the only comparable one, and it must still produce a verdict.
+        let local = "b".repeat(64);
+        assert_eq!(
+            remote_freshness("aaaa", "aaaa", &local),
+            RemoteFreshness::Unchanged
+        );
+        assert_eq!(
+            remote_freshness("bbbb", "aaaa", &local),
+            RemoteFreshness::Changed
+        );
+        assert_eq!(
+            remote_freshness("AAAA", "aaaa", &local),
+            RemoteFreshness::Unchanged
+        );
+    }
+
+    #[test]
+    fn without_a_stored_remote_checksum_only_same_width_local_values_compare() {
+        assert_eq!(
+            remote_freshness("abc", "", "abc"),
+            RemoteFreshness::Unchanged
+        );
+        assert_eq!(remote_freshness("abc", "", "abd"), RemoteFreshness::Changed);
+        assert_eq!(
+            remote_freshness(&"a".repeat(40), "", &"b".repeat(64)),
+            RemoteFreshness::Unknown
+        );
+    }
+
+    #[test]
+    fn nothing_local_means_changed_and_nothing_remote_means_unknown() {
+        assert_eq!(remote_freshness("abc", "", ""), RemoteFreshness::Changed);
+        assert_eq!(remote_freshness("", "abc", "abc"), RemoteFreshness::Unknown);
+        assert_eq!(remote_freshness("   ", "", ""), RemoteFreshness::Unknown);
     }
 }

@@ -98,11 +98,19 @@ no unallowlisted WARN or ERROR entries.
 | `thresholds` | no | `{}` | Per-metric `{min,max}` hard gates |
 | `guards` | no | defaults below | Precondition object |
 
-Supported operations are `startup`, `remote-refresh`, `quick-check`, `recheck`,
-`recheck-integrity`, `force-redownload`, `download`, `wipe-db`, `mutate`, and
-`restore`. Each operation may contain `wait_timeout_s` and `expect`. GUI cannot
-express remote-refresh-only or quick-check, so those operations require the CLI
-harness. Setup operations are not ledgered.
+Supported operations are `startup`, `ui-walk`, `remote-refresh`, `quick-check`,
+`recheck`, `recheck-integrity`, `force-redownload`, `download`, `wipe-db`,
+`mutate`, and `restore`. Each operation may contain `wait_timeout_s` and
+`expect`. GUI cannot express remote-refresh-only or quick-check, so those
+operations require the CLI harness. Setup operations are not ledgered.
+
+`ui-walk` runs an array of driver `steps` - the same command objects a UX case
+uses - as one measured operation, and requires the GUI harness. A UX case
+answers "did the scenario pass"; a `ui-walk` answers "what did walking the app
+cost", which is a perf question and belongs on a perf row. The row records
+`summary.total_ms` and `summary.steps`, and the operation fails if any step
+fails or if fewer steps ran than the case listed. The scenario transcript is
+written to `ui-walk-transcript.json` in the run directory.
 
 `startup` measures O8, launch to sync verdict. It stops the running app, starts
 a fresh one, and waits for the `startup-sync` busy reason to clear, which the app
@@ -123,6 +131,42 @@ the outer bracket and includes the driver's readiness polling. The row carries:
 Because the operation restarts the app, the config directory persists across
 iterations: iteration 0 is the cold pass and later iterations are warm, exactly
 as for every other perf case.
+
+## Memory
+
+Every operation is sampled from outside the process, so a footprint regression
+shows up on a download row as readily as on a memory case's. The sampler reads
+`PrivateUsage` and `WorkingSetSize` every 100 ms for the pid the run is driving
+(the GUI child, or the `Foxy.exe` invocation for a CLI operation), and reduces
+the series into `summary.memory`, mirrored into the ledger row as `memory`:
+
+| field | meaning |
+| --- | --- |
+| `peak_private_bytes` | highest private commit seen during the operation |
+| `retained_private_bytes` | lowest commit in the quiet window after it |
+| `growth_private_bytes` | retained minus the operation's first sample, floored at zero |
+| `transient_private_bytes` | peak minus retained: what the operation borrowed |
+| `median_private_bytes`, `peak_working_set_bytes`, `retained_working_set_bytes`, `process_peak_working_set_bytes`, `page_faults`, `samples`, `span_ms` | supporting detail |
+
+Private commit is the gated metric because the OS trims working set under
+pressure: commit moves when an allocation regression lands, resident pages move
+when another process wants memory. `memory.peak_private_bytes` and
+`memory.retained_private_bytes` carry a 15% tolerance and
+`memory.growth_private_bytes` 50%, because footprint moves in allocator-sized
+steps rather than in percent.
+
+A settle window runs after the operation's own work and before the watch stops,
+which is what separates "peaked here" from "still holding it"; it defaults to
+1500 ms and an operation may set `memory_settle_ms`. It is charged after
+`elapsed_s` is taken, so it does not enter any timing metric. The raw series is
+written to `memory-<iteration>-<operation>.json` beside the other artifacts and
+stripped from the ledger row.
+
+A `startup` operation replaces the app mid-watch; the sampler notices the pid
+change and discards the outgoing process's samples, so `start_private_bytes` for
+a startup row is a fresh process rather than the one being replaced. For a CLI
+operation the process exits at the end, so `retained_private_bytes` is the last
+live sample and only `peak_private_bytes` is meaningful.
 
 An expectation is `{path, equals}`, `{path, min}`, `{path, max}`, or
 `{path, between:[low,high]}`. Dotted paths resolve against the collected result.

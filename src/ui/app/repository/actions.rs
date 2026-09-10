@@ -370,7 +370,7 @@ impl Foxy {
     /// Worker-thread fetch + parse of a repository-space manifest. Tries each
     /// candidate URL in turn and returns the first valid manifest, `Ok(None)`
     /// if none of the candidates yields one, or `Err` on a parse failure.
-    fn fetch_repository_space_manifest(
+    pub(in crate::ui::app) fn fetch_repository_space_manifest(
         input: &str,
     ) -> Result<Option<FetchedRepositorySpace>, String> {
         let candidates = Self::repository_space_manifest_candidates(input);

@@ -3,8 +3,8 @@
 Each measured operation appends one compact JSON object to
 `ledger/<case-id>.jsonl`. Rows include run identity, Git/build identity, case
 hash, harness, cache state, database mode, write-gate size, connection-pool idle
-override, work counters, summary timings, telemetry percentiles, parsed SOL
-records, attribution breakdown, flags, and a verdict.
+override, work counters, summary timings, telemetry percentiles, process memory,
+parsed SOL records, attribution breakdown, flags, and a verdict.
 
 `db_pool_idle` records `FOXY_DB_POOL_IDLE` when it was set, and is null for a
 shipping-default run (idle limit 6). Comparisons never cross it, so an A/B run
@@ -26,8 +26,14 @@ ledger/<case-id>.<harness>.<build>.<database-mode>.gate-<n>.baseline.json
 two warm samples. A baseline stores the accepted Git SHA, case hash, sample
 size, warm medians, and tolerances.
 
+`memory` carries the process footprint the runner sampled around the operation
+(see `CASE_FORMAT.md`). It is null for rows recorded before the memory lane
+existed, which is what keeps `replay --all` byte-identical over them. The raw
+sample series stays in the run directory and is not part of the row.
+
 Default regression tolerances are 8 percent for SOL ratios, 12 percent for
-elapsed/stage durations, and zero for correctness counters. Lower is better for
+elapsed/stage durations, 15 percent for peak and retained private commit,
+50 percent for commit growth, and zero for correctness counters. Lower is better for
 durations. Higher is better for SOL ratios, throughput, savings, and rates.
 A regression or improvement must exceed tolerance in two complete runs before
 the runner emits a confirmed verdict; the first occurrence is `candidate`.

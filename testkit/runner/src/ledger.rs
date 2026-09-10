@@ -108,6 +108,12 @@ pub fn build_row(
         sums[key] = fallback(&summary[key], 0.into());
     }
     metadata["summary"] = sums;
+    // Null when the artifact predates the memory lane, which keeps `replay`
+    // byte-identical over recorded runs.
+    metadata["memory"] = summary["memory"].clone();
+    if let Some(block) = metadata["memory"].as_object_mut() {
+        block.remove("series");
+    }
     let samples: Vec<&Value> = summary["telemetry_samples"]
         .as_array()
         .into_iter()
@@ -201,6 +207,12 @@ pub const DEFINITIONS: &[(&str, bool, f64)] = &[
     ("database.permit_wait_ms", false, 0.12),
     ("database.write_retries", false, 0.0),
     ("database.purge_txn_s", false, 0.12),
+    // Footprint moves in steps, not in percent, so it gets a looser band than
+    // wall clock: a 10% commit swing is ordinary allocator behaviour, and a
+    // real regression clears it easily.
+    ("memory.peak_private_bytes", false, 0.15),
+    ("memory.retained_private_bytes", false, 0.15),
+    ("memory.growth_private_bytes", false, 0.5),
 ];
 const COUNTERS: &[&str] = &[
     "summary.downloaded_bytes",

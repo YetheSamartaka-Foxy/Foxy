@@ -97,6 +97,24 @@ populated profile rather than a first-run bootstrap; the source is read-only and
 Read `startup` rows through the app's line, not the runner's `elapsed_s`: the
 latter includes the driver's readiness polling and is quantized to it.
 
+## Measuring memory
+
+Every operation is bracketed by a process memory sampler, so a footprint
+regression lands on a download row as readily as on a memory case's. Read
+`memory.peak_private_bytes` and `memory.retained_private_bytes` from the row;
+`memory-<iteration>-<operation>.json` in the run directory has the raw series,
+which is what distinguishes a one-time cache fill from a leak.
+
+`perf-memory-arma3-live` is the dedicated case: startup, a recheck of the
+largest repository, a `ui-walk` through the views a user actually opens, and a
+no-change sync, all against a seeded live configuration.
+
+Private commit is the number, not working set: the OS trims resident pages under
+pressure. To separate Foxy's own state from the renderer floor, launch once
+against an empty `--config-dir` and subtract; that floor is eframe, wgpu and the
+graphics driver, and it moves when they do.
+`conventions/SPEED_OF_LIGHT.md` M1 carries the equation and the levers.
+
 ## The local origin
 
 `testkit/origin/data/` holds repository mirrors served on loopback so a perf case

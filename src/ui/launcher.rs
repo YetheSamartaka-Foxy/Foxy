@@ -2,7 +2,8 @@ use super::app::Foxy;
 use super::app::agent_driver::AgentGuiLaunchConfig;
 use super::app::debug_modals::DebugModal;
 use crate::core::utils::renderer_fallback::{
-    renderer_fallback_notice_path, wgpu_crash_marker_path,
+    forget_graphics_backend, remembered_graphics_backend, renderer_fallback_notice_path,
+    wgpu_crash_marker_path,
 };
 use crate::ui::types::{SettingsViewState, UiRendererPreference};
 use eframe::NativeOptions;
@@ -37,20 +38,52 @@ pub(crate) fn main(
     let (icon_width, icon_height) = image.dimensions();
     let viewport = build_root_viewport(image.into_raw(), icon_width, icon_height);
 
-    let options = build_native_options(viewport);
+    // Whether eframe got as far as constructing the app. A narrowed launch that
+    // fails does so while creating the instance, adapter or device - before this
+    // is set - so it is what separates "never started" from "ran and then
+    // returned an error", and it is why a retry can never open a second window
+    // over a session the user already used.
+    let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let run = |viewport: ViewportBuilder, pin_backend: bool| {
+        let (options, pinned) = build_native_options(viewport, pin_backend);
+        let debug_modals = debug_modals.clone();
+        let agent_gui = agent_gui.clone();
+        let started = started.clone();
+        let result = eframe::run_native(
+            "Foxy",
+            options,
+            Box::new(move |cc| {
+                started.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(Box::new(Foxy::new(
+                    cc,
+                    debug_mode,
+                    agent_gui.clone(),
+                    debug_modals.clone(),
+                )))
+            }),
+        );
+        (result, pinned)
+    };
 
-    if let Err(err) = eframe::run_native(
-        "Foxy",
-        options,
-        Box::new(move |cc| {
-            Ok(Box::new(Foxy::new(
-                cc,
-                debug_mode,
-                agent_gui.clone(),
-                debug_modals.clone(),
-            )))
-        }),
-    ) {
+    let (result, pinned) = run(viewport.clone(), true);
+    let result = match result {
+        Err(err) if pinned && !started.load(std::sync::atomic::Ordering::SeqCst) => {
+            // The remembered backend no longer resolves to an adapter - a driver
+            // change, a swapped GPU, a remote session. Re-enumerating every
+            // backend is exactly what the record is a shortcut for, so drop it
+            // and take the slow path rather than failing a launch that would
+            // have worked.
+            log::warn!(
+                "Failed to start Foxy UI on the remembered graphics backend ({}); retrying with every supported backend",
+                err
+            );
+            forget_graphics_backend();
+            run(viewport, false).0
+        }
+        other => other,
+    };
+
+    if let Err(err) = result {
         log::error!("Failed to start Foxy UI: {}", err);
         eprintln!("FATAL: Failed to start Foxy UI: {}", err);
         eprintln!("This may be caused by graphics driver issues.");
@@ -131,14 +164,38 @@ fn build_root_viewport(icon_rgba: Vec<u8>, icon_width: u32, icon_height: u32) ->
     viewport
 }
 
-fn build_native_options(viewport: ViewportBuilder) -> NativeOptions {
+/// Build the eframe options, optionally narrowing wgpu to the backend a previous
+/// launch proved. Returns whether the narrowing was actually applied, which is
+/// what makes a failed launch retryable rather than fatal.
+fn build_native_options(viewport: ViewportBuilder, pin_backend: bool) -> (NativeOptions, bool) {
     let mut options = NativeOptions {
         viewport,
         ..Default::default()
     };
     configure_renderer_fallback(&mut options);
-    configure_native_graphics(&mut options);
-    options
+    let pinned = configure_native_graphics(&mut options, pin_backend);
+    configure_graphics_memory_hints(&mut options);
+    (options, pinned)
+}
+
+/// Ask wgpu's allocators to size for footprint rather than for throughput.
+///
+/// wgpu defaults to [`wgpu::MemoryHints::Performance`], which sizes its
+/// suballocation blocks for a renderer streaming large resources. Foxy uploads
+/// a font atlas and a handful of repository images, so those blocks are commit
+/// that never holds a Foxy texture.
+fn configure_graphics_memory_hints(options: &mut NativeOptions) {
+    use eframe::egui_wgpu::WgpuSetup;
+    use eframe::wgpu;
+
+    let WgpuSetup::CreateNew(create_new) = &mut options.wgpu_options.wgpu_setup else {
+        return;
+    };
+    let base = create_new.device_descriptor.clone();
+    create_new.device_descriptor = std::sync::Arc::new(move |adapter| wgpu::DeviceDescriptor {
+        memory_hints: wgpu::MemoryHints::MemoryUsage,
+        ..base(adapter)
+    });
 }
 
 fn configure_renderer_fallback(options: &mut NativeOptions) {
@@ -228,6 +285,9 @@ fn consume_wgpu_crash_marker() -> bool {
     }
 
     switch_renderer_setting_to_glow();
+    // The remembered backend is the one that just crashed. Clear it so a later
+    // return to wgpu re-enumerates instead of pinning the failure.
+    forget_graphics_backend();
 
     let notice_path = renderer_fallback_notice_path();
     let notice_contents =
@@ -307,40 +367,66 @@ fn switch_renderer_setting_to_glow() {
     }
 }
 
+/// Backends this platform is willing to run on, in preference order.
 #[cfg(target_os = "windows")]
-fn configure_native_graphics(options: &mut NativeOptions) {
-    use eframe::egui_wgpu::WgpuSetup;
-    use eframe::wgpu;
-
-    let WgpuSetup::CreateNew(create_new) = &mut options.wgpu_options.wgpu_setup else {
-        return;
-    };
-
-    if wgpu::Backends::from_env().is_none() {
-        create_new.instance_descriptor.backends =
-            wgpu::Backends::DX12 | wgpu::Backends::VULKAN | wgpu::Backends::GL;
-        log::info!(
-            "Configured Windows graphics backends: DirectX 12 > Vulkan > OpenGL. Set WGPU_BACKEND to override."
-        );
-    }
+fn platform_backends() -> eframe::wgpu::Backends {
+    use eframe::wgpu::Backends;
+    Backends::DX12 | Backends::VULKAN | Backends::GL
 }
 
 #[cfg(target_os = "linux")]
-fn configure_native_graphics(options: &mut NativeOptions) {
+fn platform_backends() -> eframe::wgpu::Backends {
+    use eframe::wgpu::Backends;
+    Backends::VULKAN | Backends::GL
+}
+
+/// Map a recorded backend name onto its single-backend bit.
+///
+/// The names are wgpu's own (`Backend::to_str`), which is also what
+/// `WGPU_BACKEND` accepts, so a record and an override are spelled the same way
+/// and an unrecognized name degrades to a full enumeration rather than to a
+/// wrong backend.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn named_backend(name: &str) -> Option<eframe::wgpu::Backends> {
+    eframe::wgpu::Backend::ALL
+        .into_iter()
+        .find(|backend| backend.to_str() == name)
+        .map(eframe::wgpu::Backends::from)
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn configure_native_graphics(options: &mut NativeOptions, pin_backend: bool) -> bool {
     use eframe::egui_wgpu::WgpuSetup;
     use eframe::wgpu;
 
     let WgpuSetup::CreateNew(create_new) = &mut options.wgpu_options.wgpu_setup else {
-        return;
+        return false;
     };
-
-    if wgpu::Backends::from_env().is_none() {
-        create_new.instance_descriptor.backends = wgpu::Backends::VULKAN | wgpu::Backends::GL;
-        log::info!(
-            "Configured Linux graphics backends: Vulkan > OpenGL. Set WGPU_BACKEND to override."
-        );
+    if wgpu::Backends::from_env().is_some() {
+        return false;
     }
+
+    let supported = platform_backends();
+    let pinned = pin_backend
+        .then(remembered_graphics_backend)
+        .flatten()
+        .and_then(|name| named_backend(&name))
+        .filter(|backend| supported.contains(*backend));
+    create_new.instance_descriptor.backends = pinned.unwrap_or(supported);
+    match pinned {
+        Some(backend) => log::info!(
+            "Configured graphics backend {:?} from the last successful launch. Set WGPU_BACKEND to override.",
+            backend
+        ),
+        None => log::info!(
+            "Configured graphics backends: {:?}. Set WGPU_BACKEND to override.",
+            supported
+        ),
+    }
+    pinned.is_some()
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-fn configure_native_graphics(_options: &mut NativeOptions) {}
+fn configure_native_graphics(_options: &mut NativeOptions, _pin_backend: bool) -> bool {
+    false
+}

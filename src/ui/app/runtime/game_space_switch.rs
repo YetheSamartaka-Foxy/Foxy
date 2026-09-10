@@ -236,6 +236,8 @@ impl Foxy {
         self.pending_repository_space_bulk_action = None;
         self.repository_space_bulk_progress = None;
         self.repository_space_import_in_flight = false;
+        self.repository_space_freshness_rx = None;
+        self.repository_space_remote_changes.clear();
         self.repository_selection = None;
         self.selected_repository_for_settings = None;
         self.current_repository_settings_tab = RepositorySettingsTab::Configuration;

@@ -6,6 +6,7 @@ mod maintenance;
 mod media;
 mod reorder;
 mod space_actions;
+pub(crate) mod space_freshness;
 mod space_selection;
 mod space_settings;
 mod startup_layout;

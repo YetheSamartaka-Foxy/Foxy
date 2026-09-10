@@ -244,6 +244,7 @@ impl Foxy {
             }
             self.queue_startup_rechecks();
             self.start_startup_ts3_plugin_scan();
+            self.start_repository_space_freshness_probe();
             self.maybe_auto_fill_app_update_url_from_metadata();
             // A real check would overwrite the seeded preview status.
             if !self.previewing_debug_modal(DebugModal::AppUpdate)
@@ -255,6 +256,10 @@ impl Foxy {
             }
         }
 
+        if self.startup_tasks_started {
+            self.maybe_recheck_app_update();
+        }
+        self.poll_repository_space_freshness_results();
         self.poll_startup_diagnostics();
         self.poll_mission_scan();
         self.poll_restore_pending_updates();

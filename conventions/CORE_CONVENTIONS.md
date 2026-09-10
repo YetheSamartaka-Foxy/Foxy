@@ -2,7 +2,7 @@
 
 \### Data access
 
-\- Persistence is the **Turso** engine (pure-Rust, async-native, SQLite-compatible). There is **no SeaORM/sqlx and no `entities/`** - all DB access goes through the seam in `src/core/db/` (`FoxyDb`, `DbTxn`, `OwnedDbTxn`, `DbRow`, `DbValue`, `params!`, `DbErr`). Get a handle with `context.db()`; read with `query_one`/`query_all` + `DbRow` getters; write with `execute`/`execute_retry`/`transaction`. Never reach for the raw `turso` API outside `db/` and `tasks/db_turso.rs`.
+\- Persistence is the **Turso** engine (pure-Rust, async-native, SQLite-compatible). There is **no SeaORM/sqlx and no `entities/`** - all DB access goes through the seam in `src/core/db/` (`FoxyDb`, `DbTxn`, `OwnedDbTxn`, `DbRow`, `DbValue`, `params!`, `DbErr`). Get a handle with `context.db()`; read with `query_one`/`query_all` + `DbRow` getters, or `DbTxn::query_each` when the caller builds its own structs from the rows (`query_all` holds every `DbRow` while the caller builds a second representation of the same data; the model tree's part rows are the largest such read Foxy performs, and streaming them halves that peak); write with `execute`/`execute_retry`/`transaction`. Never reach for the raw `turso` API outside `db/` and `tasks/db_turso.rs`.
 
 \- The database is **per game space**. `db_turso::database_file_path()` resolves `database.db` from `spaces::active_game_space_dir()`, and the process-wide handle is a slot keyed by that path so a runtime space switch opens the target space's database. Anything cached per database (the shared background context, one-time maintenance passes) must be keyed the same way - never a bare `OnceLock`. See `conventions/GAME_SPACES_CONVENTIONS.md`.
 

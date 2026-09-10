@@ -134,8 +134,23 @@ impl Drop for Job {
 }
 
 pub fn process(command: &mut Command, timeout: Duration) -> Result<Output> {
+    tracked_process(command, timeout, None)
+}
+
+/// Run a command to completion, optionally publishing its pid so a memory watch
+/// can follow it. The CLI harness measures a `Foxy.exe` invocation rather than a
+/// live window, so without this the database lane - where the largest reads
+/// happen - would record no footprint at all.
+pub fn tracked_process(
+    command: &mut Command,
+    timeout: Duration,
+    pid: Option<&crate::collect::memory::Target>,
+) -> Result<Output> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut process = ManagedChild::spawn(command)?;
+    if let Some(pid) = pid {
+        crate::collect::memory::set(pid, Some(process.child.id()));
+    }
     let mut stdout = process
         .child
         .stdout
@@ -200,6 +215,17 @@ pub fn foxy(
     env: &Environment,
     timeout: Duration,
 ) -> Result<Value> {
+    tracked_foxy(exe, config, arguments, env, timeout, None)
+}
+
+pub fn tracked_foxy(
+    exe: &Path,
+    config: &Path,
+    arguments: &[String],
+    env: &Environment,
+    timeout: Duration,
+    pid: Option<&crate::collect::memory::Target>,
+) -> Result<Value> {
     let mut command = Command::new(exe);
     command
         .arg("--config-dir")
@@ -207,7 +233,7 @@ pub fn foxy(
         .arg("--json")
         .args(arguments);
     environment(&mut command, env);
-    let result = process(&mut command, timeout)?;
+    let result = tracked_process(&mut command, timeout, pid)?;
     if !result.status.success() {
         bail!(
             "Foxy exited {}: {} {}",
@@ -219,12 +245,15 @@ pub fn foxy(
     serde_json::from_slice(&result.stdout).context("Foxy returned invalid JSON")
 }
 
+/// Start the GUI and publish its pid before waiting for readiness, so a memory
+/// watch sees the launch ramp rather than only the settled process.
 pub fn start_gui(
     exe: &Path,
     config: &Path,
     run: &Path,
     env: &Environment,
     timeout: Duration,
+    pid: &crate::collect::memory::Target,
 ) -> Result<ManagedChild> {
     // Append rather than truncate: a `startup` operation restarts the app inside
     // one run, and truncating would drop every earlier launch's output.
@@ -243,6 +272,7 @@ pub fn start_gui(
         .stderr(append(run.join("app.log"))?);
     environment(&mut command, env);
     let mut process = ManagedChild::spawn(&mut command)?;
+    crate::collect::memory::set(pid, Some(process.child.id()));
     let deadline = Instant::now() + timeout.min(Duration::from_secs(120));
     while Instant::now() < deadline {
         anyhow::ensure!(

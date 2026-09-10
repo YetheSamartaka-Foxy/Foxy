@@ -479,6 +479,42 @@ Early exits:
 - `repo_json.checksum == local_checksum` and content baseline ready: quick scan
   can finish in the addon-folder layer without tree work.
 
+The probe has three answers, not two: **changed**, **unchanged**, and
+**unknown**. Unknown is not unchanged. A server that is unreachable, a probe that
+times out, an empty published checksum, and a checksum that cannot be compared
+against local state all mean the same thing - nothing was learned - and
+collapsing them into "unchanged" is how a real remote update goes unnoticed
+until the user rechecks by hand. An unknown repository still runs its local quick
+scan, but it is never *prevalidated*: prevalidation is the claim "nothing to
+check here", and an unanswered probe does not earn it.
+
+Compare **remote against the last remote**, not remote against local. The
+`repositories.remote_checksum` column holds the value `repo.json` published the
+last time this instance was refreshed, so it is always the remote's own
+algorithm and a difference means the published repository moved. The local
+rollup is a fallback for an instance that has never completed a refresh, and it
+is comparable only when both sides are the same width: a FoxyMode repository
+stores a BLAKE3 rollup locally while `repo.json` may publish a SHA-1, and
+comparing across algorithms can only ever produce a false verdict. Before this
+rule the probe compared against `local_checksum` alone and skipped every
+hybrid-checksum repository outright, which made those repositories permanently
+unprobed rather than merely unknown.
+
+Repository **spaces** have their own remote freshness, and it is not any
+repository's. A server that adds, drops or re-flags an entry in
+`repository_space.json` changes what the user is supposed to have, and no
+`repo.json` reports that. Foxy probes each configured space's manifest once per
+launch, off the paint path, and reports how the published membership differs
+from the local copy (`ui/app/repository/space_freshness.rs`). The probe reports;
+it never applies. Adding or removing repositories on the user's disk from a
+manifest they have not looked at is a change to their installation, not a
+notification.
+
+The **app's own** update is remote freshness too. A launch-only check leaves a
+long-running session unaware of a release, so the check repeats while the
+session runs: every 6 hours after an answer, every 15 minutes after a failure,
+and never while a check, a download, or a staged installer is in flight.
+
 The probe stage carries a whole-stage budget as well as a per-request timeout,
 as a backstop for a probe that outlives its own timeout. The budget must stay
 longer than the per-request timeout: cutting the stage first would abandon

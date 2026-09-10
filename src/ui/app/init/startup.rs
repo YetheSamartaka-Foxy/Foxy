@@ -305,6 +305,8 @@ impl Foxy {
             repository_space_import_result_rx,
             repository_space_import_result_tx,
             repository_space_import_in_flight: false,
+            repository_space_freshness_rx: None,
+            repository_space_remote_changes: Default::default(),
             addon_hash_recalc_result_rx,
             addon_hash_recalc_result_tx,
             addon_hash_recalc_in_flight: false,
@@ -574,7 +576,12 @@ impl Foxy {
         app.apply_runtime_ui_scale(&cc.egui_ctx);
         // Capture the renderer eframe actually created so `health` can report
         // it (wgpu vs the glow fallback path).
-        let active_renderer = if cc.wgpu_render_state.is_some() {
+        let active_renderer = if let Some(render_state) = cc.wgpu_render_state.as_ref() {
+            // Reaching here means the instance, adapter and device all came up on
+            // this backend, so it is safe to pin the next launch to it.
+            crate::core::utils::renderer_fallback::remember_graphics_backend(
+                render_state.adapter.get_info().backend.to_str(),
+            );
             "wgpu"
         } else {
             "glow"

@@ -1,5 +1,6 @@
 pub mod expect;
 pub mod logs;
+pub mod memory;
 pub mod metrics;
 pub mod profile;
 pub mod sol;

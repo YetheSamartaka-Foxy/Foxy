@@ -305,6 +305,19 @@ impl DbTxn<'_> {
             .into_iter()
             .next())
     }
+
+    /// Stream a query's rows through `visit` instead of collecting them.
+    pub(crate) async fn query_each<F>(
+        &self,
+        sql: &str,
+        params: Vec<DbValue>,
+        visit: F,
+    ) -> Result<u64, DbErr>
+    where
+        F: FnMut(&DbRow) -> Result<(), DbErr>,
+    {
+        turso_query_each(self.0, sql, params, visit).await
+    }
 }
 
 /// An owned transaction handle returned by [`FoxyDb::begin`]. The caller drives
@@ -423,6 +436,42 @@ async fn turso_query_all(
     }
     profiled.stop_db("read", sql, out.len() as u64);
     Ok(out)
+}
+
+/// Run a query and hand each row to `visit` as it arrives.
+///
+/// The engine streams rows; [`turso_query_all`] then holds every one of them in
+/// a `Vec<DbRow>` while the caller builds its own structs from them, so a large
+/// read pays for both representations at once. A read that only needs to build
+/// something per row - the model tree's part rows are the largest such read
+/// Foxy performs - streams instead and never materializes the second copy.
+async fn turso_query_each<F>(
+    conn: &TunedConnection,
+    sql: &str,
+    params: Vec<DbValue>,
+    mut visit: F,
+) -> Result<u64, DbErr>
+where
+    F: FnMut(&DbRow) -> Result<(), DbErr>,
+{
+    let values: Vec<turso::Value> = params.into_iter().map(DbValue::into_turso_value).collect();
+    let profiled = crate::core::utils::profiling::FsTimer::start();
+    let mut rows = conn.query(sql, values).await.map_err(map_turso_err)?;
+    let columns = Arc::new(rows.column_names());
+    let mut seen = 0u64;
+    while let Some(row) = rows.next().await.map_err(map_turso_err)? {
+        let mut vals = Vec::with_capacity(columns.len());
+        for i in 0..columns.len() {
+            vals.push(turso_value_to_db(row.get_value(i).map_err(map_turso_err)?));
+        }
+        visit(&DbRow {
+            columns: columns.clone(),
+            values: vals,
+        })?;
+        seen += 1;
+    }
+    profiled.stop_db("read", sql, seen);
+    Ok(seen)
 }
 
 fn dberr_is_retryable(e: &DbErr) -> bool {

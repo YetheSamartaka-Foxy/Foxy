@@ -1906,12 +1906,18 @@ impl Foxy {
                 started_at,
                 self.agent_gui_app_update_value(),
             ),
-            AgentGuiCommand::Memory { history, textures } => AgentGuiResponse::ok(
-                &command,
-                &view,
-                started_at,
-                self.agent_gui_memory_value(*history, *textures),
-            ),
+            AgentGuiCommand::Memory { history, textures } => {
+                // Diagnostics sample only during a sync or with the diagnostics
+                // window open, so a driver read would otherwise report an empty
+                // history to the one caller that explicitly asked for a number.
+                self.capture_memory_diagnostics_snapshot("agent-gui memory", false);
+                AgentGuiResponse::ok(
+                    &command,
+                    &view,
+                    started_at,
+                    self.agent_gui_memory_value(*history, *textures),
+                )
+            }
             AgentGuiCommand::ArmaProfiles => AgentGuiResponse::ok(
                 &command,
                 &view,
@@ -3129,6 +3135,12 @@ impl Foxy {
                 "manifest_entry_count": space.entries.len(),
                 "required_entry_count": required_entries,
                 "attached_repository_count": attached,
+                "remote_changes": self.repository_space_remote_delta(&space.id).map(|delta| json!({
+                    "added": delta.added,
+                    "removed": delta.removed,
+                    "required_changed": delta.required_changed,
+                    "total": delta.total(),
+                })),
             }));
         }
 
@@ -4076,6 +4088,19 @@ impl Foxy {
             "repo_image_texture_count": self.tracked_repo_image_texture_bytes.len(),
             "app_icon_texture_bytes": self.app_icon_texture_bytes,
             "default_repo_image_texture_bytes": self.default_repo_image_texture_bytes,
+            // egui rasterizes lazily, so the atlas grows as views introduce new
+            // sizes and glyphs. Without it the memory lane sees the growth but
+            // cannot name it, and the app's own buckets never will: the atlas
+            // belongs to epaint, not to Foxy state.
+            "font_atlas": self.repaint_ctx.as_ref().map(|ctx| {
+                let [width, height] = ctx.fonts(|fonts| fonts.font_image_size());
+                json!({
+                    "width": width,
+                    "height": height,
+                    "bytes": width * height * std::mem::size_of::<f32>(),
+                    "fill_ratio": ctx.fonts(|fonts| fonts.font_atlas_fill_ratio()),
+                })
+            }),
         });
         if history && let Value::Object(map) = &mut value {
             map.insert(

@@ -1,4 +1,12 @@
 use super::*;
+use crate::ui::app::debug_modals::DebugModal;
+
+/// How long a successful app update answer stays good.
+const APP_UPDATE_RECHECK_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(6 * 60 * 60);
+/// How soon a failed check is retried. Shorter than the success interval: a
+/// failure means the answer is unknown, and unknown is the state worth leaving.
+const APP_UPDATE_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 impl Foxy {
     pub(in crate::ui) fn app_update_source_configured(&self) -> bool {
@@ -63,6 +71,10 @@ impl Foxy {
                 AppUpdateEvent::Error(msg) => {
                     log::warn!("Update check failed: {}", msg);
                     self.app_update_status = UpdateCheckStatus::Failed(msg);
+                    // Record the attempt, not just the answer: the retry timer
+                    // reads this, and without it a failed check would restart on
+                    // the next frame.
+                    self.app_update_last_check = Some(std::time::Instant::now());
                     self.app_update_prompt_armed = false;
                     self.needs_repaint = true;
                 }
@@ -141,6 +153,45 @@ impl Foxy {
     // -----------------------------------------------------------------------
     // Actions
     // -----------------------------------------------------------------------
+
+    /// Re-check for an app update while the session is still running.
+    ///
+    /// The launch check is the only one Foxy used to perform, so a session left
+    /// open across a release never learned about it. A background re-check costs
+    /// one request against a manifest that is already fetched at every launch.
+    pub(in crate::ui) fn maybe_recheck_app_update(&mut self) {
+        if !self.settings_view_state.app_update_auto_check || !self.app_update_source_configured() {
+            return;
+        }
+        // A real check would overwrite the seeded preview status, which is the
+        // same reason the launch check skips it.
+        if self.previewing_debug_modal(DebugModal::AppUpdate) {
+            return;
+        }
+        // Never interrupt a check in flight, a download, or a staged installer:
+        // restarting the check would discard state the user is about to act on.
+        // `Available` stops the timer too - the answer is already on screen.
+        let interval = match &self.app_update_status {
+            UpdateCheckStatus::Idle | UpdateCheckStatus::UpToDate(_) => APP_UPDATE_RECHECK_INTERVAL,
+            UpdateCheckStatus::Failed(_) => APP_UPDATE_RETRY_INTERVAL,
+            _ => return,
+        };
+        if self
+            .app_update_last_check
+            .is_some_and(|last| last.elapsed() < interval)
+        {
+            return;
+        }
+        log::info!(
+            "Re-checking for an app update: no answer in the last {} minutes",
+            interval.as_secs() / 60
+        );
+        // Deliberately not arming the prompt. That modal is the launch prompt;
+        // opening it over a session in progress interrupts whatever the user is
+        // doing. The status still becomes `Available`, and the prompt returns on
+        // the next launch.
+        self.start_update_check();
+    }
 
     pub fn start_update_check(&mut self) {
         let mode = self.settings_view_state.app_update_mode;

@@ -224,6 +224,13 @@ pub struct Foxy {
     /// duplicate dispatches (e.g. repeated dialog submits) while it runs.
     /// Read from view code to show progress; only mutated within app modules.
     pub(crate) repository_space_import_in_flight: bool,
+    /// Startup probe of each space's published manifest. Runtime only: it says
+    /// what the server publishes now, not what the user has agreed to.
+    pub(crate) repository_space_freshness_rx: Option<
+        StdReceiver<crate::ui::app::repository::space_freshness::RepositorySpaceFreshnessResult>,
+    >,
+    pub(crate) repository_space_remote_changes:
+        crate::ui::app::repository::space_freshness::RepositorySpaceRemoteChanges,
     /// Background addon hash recalculation (file hashing off the UI thread).
     /// Results are applied by `poll_addon_hash_recalc_results`.
     addon_hash_recalc_result_rx: StdReceiver<AddonHashRecalcResult>,

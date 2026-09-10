@@ -1,6 +1,6 @@
 use crate::{
     case,
-    collect::{expect, logs, metrics, profile, sol},
+    collect::{expect, logs, memory, metrics, profile, sol},
     driver,
     fixture::{self, write_json},
     guards,
@@ -41,6 +41,8 @@ struct ContextRun<'a> {
     /// The live GUI child, when the case runs on the GUI harness. The `startup`
     /// operation replaces it, so it cannot be owned by `execute` alone.
     gui: &'a RefCell<Option<launch::ManagedChild>>,
+    /// The pid the memory sampler follows, kept in step with `gui`.
+    pid: &'a memory::Target,
 }
 
 impl ContextRun<'_> {
@@ -55,9 +57,26 @@ impl ContextRun<'_> {
             )?
             .data)
     }
+    /// Run one operation with the memory sampler bracketing it.
+    ///
+    /// Every operation is sampled, not only the ones in a memory case: the
+    /// counters cost a handle open per tick, and a footprint regression that
+    /// only shows up under a download is exactly the one no dedicated case
+    /// would have caught.
     fn operation(&self, operation: &Value) -> Result<Value> {
-        if operation["op"].as_str() == Some("startup") {
-            return self.startup_operation(operation);
+        let settle = operation["memory_settle_ms"]
+            .as_u64()
+            .map_or(memory::SETTLE, Duration::from_millis);
+        let watch = memory::Watch::start(self.pid, memory::INTERVAL, settle);
+        let mut collected = self.dispatch(operation)?;
+        collected["summary"]["memory"] = watch.finish();
+        Ok(collected)
+    }
+    fn dispatch(&self, operation: &Value) -> Result<Value> {
+        match operation["op"].as_str() {
+            Some("startup") => return self.startup_operation(operation),
+            Some("ui-walk") => return self.ui_walk_operation(operation),
+            _ => {}
         }
         if self.case["harness"].as_str().unwrap_or("gui") == "cli" {
             self.cli_operation(operation)
@@ -81,6 +100,10 @@ impl ContextRun<'_> {
         if let Some(gui) = self.gui.borrow_mut().as_mut() {
             launch::stop_gui(gui, self.exe, self.config, self.env);
         }
+        // Clear the sampler target before the handle goes away: Windows reuses
+        // pids, and a stale one would attribute another process's footprint to
+        // this run.
+        memory::set(self.pid, None);
         drop(self.gui.borrow_mut().take());
         let offsets = logs::offsets(self.run, self.config)?;
         let wait = operation["wait_timeout_s"]
@@ -93,6 +116,7 @@ impl ContextRun<'_> {
             self.run,
             self.env,
             Duration::from_secs(wait),
+            self.pid,
         )?;
         let driver_ready = started.elapsed();
         *self.gui.borrow_mut() = Some(child);
@@ -135,6 +159,71 @@ impl ContextRun<'_> {
             json!({"elapsed_s":elapsed,"summary":summary,"progress":progress,"snapshot":snapshot,"logs":null,"log_text":log,"database_profile":profile}),
         )
     }
+    /// Drive a scripted click-through and measure what the UI holds afterwards.
+    ///
+    /// A UX case answers "did the scenario pass"; this answers "what did walking
+    /// the app cost", which is a perf question and belongs on a perf row. The
+    /// steps are the same driver commands a UX case uses, so a walk can be
+    /// lifted straight out of one.
+    fn ui_walk_operation(&self, operation: &Value) -> Result<Value> {
+        ensure!(
+            self.case["harness"].as_str().unwrap_or("gui") == "gui",
+            "The ui-walk operation requires the gui harness"
+        );
+        let steps = operation["steps"]
+            .as_array()
+            .context("A ui-walk operation needs a steps array")?;
+        ensure!(
+            !steps.is_empty(),
+            "A ui-walk operation needs at least one step"
+        );
+        let offsets = logs::offsets(self.run, self.config)?;
+        let path = self.run.join("ui-walk-steps.json");
+        write_json(&path, &Value::Array(steps.clone()))?;
+        let started = Instant::now();
+        let response = launch::foxy(
+            self.exe,
+            self.config,
+            &[
+                "agent-gui".into(),
+                "scenario".into(),
+                path.to_string_lossy().into_owned(),
+            ],
+            self.env,
+            Duration::from_secs(
+                operation["wait_timeout_s"]
+                    .as_u64()
+                    .unwrap_or(self.timeout.as_secs()),
+            ),
+        )?;
+        let elapsed = started.elapsed().as_secs_f64();
+        let data = &response["data"];
+        // Written before the checks below: a failed walk is exactly when the
+        // transcript is worth having.
+        write_json(&self.run.join("ui-walk-transcript.json"), data)?;
+        ensure!(
+            data["ok"].as_bool().unwrap_or(false),
+            "ui-walk scenario failed; see ui-walk-transcript.json"
+        );
+        let executed = data["steps"].as_array().map_or(0, Vec::len);
+        ensure!(
+            executed == steps.len(),
+            "ui-walk executed {executed} of {} steps",
+            steps.len()
+        );
+        // No `database_profile`: a walk never restarts the app, so its log slice
+        // carries no startup mode line to confirm against.
+        let log = logs::delta(&offsets, self.run, self.config)?;
+        let progress = self.data(&["progress"])?;
+        let snapshot = self.data(&["snapshot"])?;
+        let summary = json!({
+            "total_ms": (elapsed * 1000.0).round(),
+            "steps": executed,
+        });
+        Ok(
+            json!({"elapsed_s":elapsed,"summary":summary,"progress":progress,"snapshot":snapshot,"logs":null,"log_text":log,"database_profile":null}),
+        )
+    }
     fn cli_operation(&self, operation: &Value) -> Result<Value> {
         let name = operation["op"].as_str().context("Missing operation name")?;
         let repository = self.case["repository"]["name"]
@@ -165,7 +254,7 @@ impl ContextRun<'_> {
         };
         let offsets = logs::offsets(self.run, self.config)?;
         let started = Instant::now();
-        let response = launch::foxy(
+        let response = launch::tracked_foxy(
             self.exe,
             self.config,
             &args.into_iter().map(String::from).collect::<Vec<_>>(),
@@ -175,8 +264,11 @@ impl ContextRun<'_> {
                     .as_u64()
                     .unwrap_or(self.timeout.as_secs()),
             ),
+            Some(self.pid),
         )?;
         let elapsed = started.elapsed().as_secs_f64();
+        // The measured process is gone; stop the watch from following a reused pid.
+        memory::set(self.pid, None);
         let log = logs::delta(&offsets, self.run, self.config)?;
         let profile = launch::assert_database_mode(&log, self.mode, self.gate)?;
         let mut summary = response["data"].clone();
@@ -541,8 +633,9 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
     } else {
         None
     };
+    let pid = memory::target();
     let gui: RefCell<Option<launch::ManagedChild>> = RefCell::new(if harness == "gui" {
-        Some(launch::start_gui(&exe, &config, &run, &env, timeout)?)
+        Some(launch::start_gui(&exe, &config, &run, &env, timeout, &pid)?)
     } else {
         None
     });
@@ -557,6 +650,7 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
             mode: &options.database_mode,
             gate: options.db_write_gate,
             gui: &gui,
+            pid: &pid,
         };
         let mut effective_gate = options.db_write_gate;
         // FOXY_DB_POOL_IDLE is inherited by the app, so a row recorded under an
@@ -642,6 +736,10 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                     &collected["summary"],
                 )?;
                 write_json(&run.join(format!("breakdown-{stem}.json")), &breakdown)?;
+                write_json(
+                    &run.join(format!("memory-{stem}.json")),
+                    &collected["summary"]["memory"],
+                )?;
                 write_json(
                     &run.join(format!("profile-{stem}.json")),
                     &profile::parse(text),

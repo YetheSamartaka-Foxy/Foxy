@@ -44,6 +44,7 @@ used by the cross-check algorithms below. `W` = work, `R` = rate, `T` = time.
 | E8 | `T = N_miss × C_miss + N_hit × C_hit` | Cache law (quick scan): cost is dominated by misses; a "fast" path with a broken cache key is a slow path. |
 | E9 | `R_agg = min(R_link, C × R_conn)` | Per-connection law: when a server shapes each connection to `R_conn`, aggregate is bought with concurrency `C` and nothing else, until the path ceiling `R_link` binds. Tuning a single stream is wasted work. |
 | E10 | `T_tail ≈ chunk_bytes / R_conn` | Tail law: once the work queue is empty the link is carried by whatever chunks are still in flight, and the last one runs alone at one connection's rate. The largest chunk size, not the scheduler, bounds the tail. |
+| E11 | `M_ideal = M_renderer_floor + M_state + M_op` | Footprint law (M1): the memory an operation is entitled to is the renderer floor plus the state the app must hold plus the one operation's working set. Everything above that is reserve, duplicate representations, or caches nothing reads. |
 
 ### E0 - Unit rules (read first, errors here invalidate every ratio)
 
@@ -85,7 +86,7 @@ Currently emitted lines:
 | `SOL op=hash` | every part-hash run (`calculate_hashes/scheduling.rs`) | `label`, `files`, `parts`, `compute_s`, `wait_s` |
 | `SOL op=quick_scan` | every quick scan, clean or dirty (`quick_scan/diff.rs`) | `repo`, `addons_total`, `addons_hashed`, `cache_hits_shared`, `cache_hits_persistent`, `deep_scan_files`, `addons_per_s`, `outcome` |
 | `SOL op=startup` | once per launch, when the last repository has a sync verdict (`ui/app/runtime/startup_sync.rs`) | `repos`, `quick_scan_repos`, `eligible`, `prevalidated`, `remote_changed`, `rechecks`, `first_frame_s`, `dispatch_s`, `eligibility_s`, `verdict_s` |
-| `SOL op=startup_probe` | the startup `repo.json` probe stage (`quick_scan/worker.rs`) | `repos`, `answered`, `changed` |
+| `SOL op=startup_probe` | the startup `repo.json` probe stage (`quick_scan/worker.rs`) | `repos`, `answered`, `changed`, `unknown` |
 | `SOL op=app_update_check` | every app update check (`tasks/app_update/spawn.rs`) | `op_id`, `mode`, `outcome` |
 
 Logs live in `%APPDATA%\Foxy\logs\foxy_rCURRENT.log` (rotated files alongside).
@@ -121,6 +122,7 @@ Ratios computed against someone else's baseline are meaningless.
 | B4 | RTT to repo server `RTT` | `ping <repo-host>`, or debug `Fetched response body for .../repo.json (... download=...)` - for a tiny payload, download ≈ RTT | **40 ms** to the reference origin (2026-09-10, dependency-free `TcpStream` connect, median of 7: 39.2-50.0 ms). A `repo.json` GET costs 83 ms on a fresh connection (2 x RTT: handshake + request) and 42 ms on a kept-alive one (1 x RTT); the body is 1 062 bytes, so payload is not a term. ICMP to this host times out - measure with a TCP connect, not `ping` |
 | B5 | Quick-scan stat rate (entries/s) | `addons_per_s` from `SOL op=quick_scan` on a clean, warm-cache run - record best ever as the light | 2,462 addons/s, from 2026-06-13 best clean scan; re-record after persistent-cache fix |
 | B7 | Per-connection rate `R_conn` (bytes/s) | Fetch one large range over a single connection and divide; repeat at several concurrency levels to confirm it is flat. Needed for E7, E9 and E10 | ~1.6 MB/s at C=1, ~1.15 at C=48, ~0.88 at C=96 against the reference origin (2026-09-09). Server-imposed, not a client property |
+| B8 | Renderer memory floor `M_renderer_floor` | Launch against an empty `--config-dir` and read private commit once it settles; that is the whole app with none of Foxy's own state in it | 221-239 MB private / 175-216 MB working set (wgpu, Vulkan, backend pinned, `MemoryHints::MemoryUsage`); 290 MB / 237 MB before pinning; 468 MB / 237 MB before both; 133 MB / 103 MB on the glow renderer. Pinning to DX12 instead measures 210 MB / 163 MB and to GL 215 MB / 172 MB, so the floor moves with the backend as well as the machine. Re-measure after any eframe, wgpu or driver change |
 | B6 | Hash compute rate `R_hash` | `work_bytes / compute_s` from `SOL op=hash` (pure aggregated hash time, I/O excluded); BLAKE3 is multi-GB/s multicore, MD5 ≈ 0.5–0.7 GB/s per stream | ≈1,234,800,000 bytes/s (1.15 GiB/s), warm 2026-06-13 hash run; re-measure cold |
 
 Reference physics, for sanity checks: NVMe read 2–7 GB/s, SATA SSD ≈ 550 MB/s,
@@ -404,12 +406,104 @@ looking at the window while it runs.
    stage would trade a rare hang for routinely abandoning slow-but-live
    servers, and remote freshness lost is worse than a slow launch.
 
-**Not a lever**: `T_paint`. Restricting the graphics backend would cut adapter
-enumeration, but that trades a startup fraction for a compatibility risk on
-other people's machines, and it is not Foxy code.
+**`T_paint`, revisited (2026-09-10).** This used to be listed as "not a lever"
+because restricting the graphics backend trades a startup fraction for a
+compatibility risk on other people's machines. It is a lever once the risk is
+removed rather than accepted: Foxy records the backend a launch actually reached
+a window on and asks for that one alone next time, and a launch that fails while
+narrowed drops the record and retries with the full list (`ui/launcher.rs`). The
+first launch on a machine still enumerates everything, so no backend is lost.
+Measured on this machine: first frame 561-575 ms enumerating three backends,
+393-397 ms pinned to the one that won.
 
 **Invariant**: startup work must not block first paint. A frame stall during
 probes is a regression regardless of ratios.
+
+---
+
+## M1 - Resident footprint (the memory lane)
+
+Time is not the only physical budget. Foxy holds a game space open for as long
+as the user leaves the window up, so its footprint is a cost paid continuously,
+and the same speed-of-light discipline applies: name the work the memory is
+*for*, and treat everything above that as headroom.
+
+- **Work**: the state an operation genuinely has to hold - the repository list
+  and settings, the rows an in-flight read is building into structs, the glyph
+  atlas for the text on screen, and the renderer's own device objects.
+- **Light** (E11): `M_ideal = M_renderer_floor + M_state + M_working_set_of_one_operation`.
+  - `M_renderer_floor` is measured, not assumed, and it is not Foxy code: an
+    empty configuration is the whole floor with none of Foxy's own state in it.
+  - `M_state` scales with repositories and spaces, not with parts: the app's own
+    buckets total single-digit megabytes on an 11-repository profile.
+  - The operation term is the only one an optimization can move without
+    changing what Foxy can do.
+- **Measured**: `foxy-testkit` samples the process from outside every 100 ms and
+  reduces the series per operation. Private commit (`PrivateUsage`) is the
+  gated metric; working set is recorded alongside because the OS trims it and it
+  is what Task Manager shows.
+
+| Metric | Meaning |
+| --- | --- |
+| `memory.peak_private_bytes` | highest private commit during the operation |
+| `memory.retained_private_bytes` | lowest commit in the quiet window after it |
+| `memory.growth_private_bytes` | retained minus the operation's starting commit |
+| `memory.transient_private_bytes` | peak minus retained - what the operation borrowed |
+
+**Cross-check (A9):**
+
+1. Read `memory.retained_private_bytes` for `startup`. Subtract the renderer
+   floor (measure it: launch against an empty `--config-dir`). What is left is
+   Foxy's own state, and it should track repository count, not part count.
+2. `memory.growth_private_bytes` on a repeated operation is the leak test. Run
+   the same walk three times and eight times: a one-time cache fill saturates,
+   a leak scales with the repetition count.
+3. `memory.transient_private_bytes` on a database-heavy operation is the read
+   path. A read that materializes rows and then builds structs from them shows
+   up here as roughly twice the size of the result it returns.
+4. The app's own attributed buckets come from `agent-gui memory --textures`,
+   which takes a fresh sample on demand and reports the epaint font atlas
+   alongside them. Anything the buckets and the atlas do not explain is
+   renderer, allocator, or engine - and on this profile that is most of it, so
+   read those two before assuming a Foxy-side cause.
+
+**Levers**, in the order they paid on 2026-09-10 (empty configuration, so this
+is the floor rather than one profile's numbers):
+
+1. **Tell wgpu to size for footprint.** wgpu defaults to
+   `MemoryHints::Performance`, which sizes suballocation blocks for a renderer
+   streaming large resources. Foxy uploads a font atlas and a few repository
+   images. `MemoryHints::MemoryUsage` took the floor from 468 MB to 290 MB of
+   private commit with no change to working set - pure reserve that never held a
+   Foxy texture.
+2. **Do not enumerate every graphics backend on every launch.** Each backend in
+   the instance descriptor loads its own driver stack. Remembering the one that
+   worked (see `T_paint` above) took 290 MB to 221-239 MB and working set 237 MB
+   to 175-216 MB.
+3. **Stream a large read instead of collecting it.** `query_all` holds every
+   `DbRow` while the caller builds its own structs from the same data;
+   `DbTxn::query_each` hands rows over one at a time. The model tree's part rows
+   are the largest such read Foxy performs, and the pair list, id map and re-sort
+   that used to sit on top of them cost more than the rows they indexed. This one
+   is a structural saving, not a measured one: on the metadata-refresh lane the
+   run-to-run spread is wider than the difference, and elapsed moved (-15%) where
+   footprint did not.
+4. **Do not size a bucket map by the pairs going into it.** Three
+   `HashMap::with_capacity(pairs.len())` calls reserved capacity for every part
+   in the repository to hold one entry per file.
+
+**Open, not yet attributed**: the first walk through every view costs about
++44 MB of commit that is never given back, and the same walk repeated three or
+eight times costs the same 44 MB, so it is a one-time fill rather than a leak.
+Foxy's own buckets do not explain it (2.5 MB total on this profile) and neither
+does the glyph atlas, which `agent-gui memory` reports at 8192x128 and one
+percent full after the whole walk. That leaves the renderer and the allocator.
+Do not guess at it in a changelog: measure it with the series in
+`memory-<iteration>-ui-walk.json` before claiming a cause.
+
+**Invariant**: a memory improvement that moves fewer bytes, files or parts is
+not an improvement. The ledger's counter metrics are what catch that, exactly as
+they do for wall clock.
 
 ---
 
@@ -464,6 +558,19 @@ numbers straight from the logs.
 | 2026-09-10 | 1.2.0 post-startup-work | 9950X3D NVMe | startup_probe | 10 repo.json | 0.092 s | 10 probes | 0.080 s (2 x B4) | 0.87 | RTT | all probes at one depth; 12 ms client overhead |
 | 2026-09-10 | probe (no Foxy code) | 9950X3D NVMe | repo.json GET | 1 062 B | 0.083 s | fresh conn | 0.080 s (2 x B4) | 0.96 | RTT | keep-alive repeat 0.042 s = 1 x RTT; payload is not a term |
 | 2026-09-10 | 1.2.0 | 9950X3D NVMe | app_update_check | 1 manifest | 0.085 s | 1 check | 0.080 s (2 x B4) | 0.94 | RTT | `SOL op=app_update_check`, outcome=up_to_date |
+| 2026-09-10 | 1.2.0 pre-memory-work | 9950X3D NVMe | footprint empty config | launch, no repositories | n/a | 468 MB commit / 237 MB WS | 133 MB (glow floor) | na | wgpu reserve | three backends enumerated, `MemoryHints::Performance` |
+| 2026-09-10 | 1.2.0 post-memory-work | 9950X3D NVMe | footprint empty config | launch, no repositories | n/a | 221 MB commit / 175 MB WS | 133 MB (glow floor) | na | wgpu device | `MemoryHints::MemoryUsage` + pinned backend; -53% commit, -26% WS |
+| 2026-09-10 | 1.2.0 pre-memory-work | 9950X3D NVMe | footprint startup | 11 repos, live arma3 space | n/a | 680 MB peak / 581 MB retained | 468 MB (B8 then) | na | renderer floor | perf-memory-arma3-live |
+| 2026-09-10 | 1.2.0 post-memory-work | 9950X3D NVMe | footprint startup | 11 repos, live arma3 space | n/a | 438 MB peak / 343 MB retained | 221-239 MB (B8) | na | renderer floor | same case; -36% peak, -41% retained |
+| 2026-09-10 | 1.2.0 pre-memory-work | 9950X3D NVMe | footprint recheck | largest configured repository, clean | n/a | 595 MB peak / 593 MB retained | 468 MB (B8 then) | na | renderer floor | warm median of three |
+| 2026-09-10 | 1.2.0 post-memory-work | 9950X3D NVMe | footprint recheck | largest configured repository, clean | n/a | 346 MB peak / 344 MB retained | 221-239 MB (B8) | na | renderer floor | same case; -42% retained |
+| 2026-09-10 | 1.2.0 pre-memory-work | 9950X3D NVMe | footprint ui-walk | 133 view steps, 3 passes | n/a | 620 MB peak / 614 MB retained | 468 MB (B8 then) | na | unattributed | growth +21 MB |
+| 2026-09-10 | 1.2.0 post-memory-work | 9950X3D NVMe | footprint ui-walk | 134 view steps, 3 passes | n/a | 393 MB peak / 390 MB retained | 221-239 MB (B8) | na | unattributed | same case; growth +45 MB, identical at 8 passes; buckets 2.5 MB, atlas 1% full |
+| 2026-09-10 | 1.2.0 pre-memory-work | 9950X3D NVMe | footprint remote-refresh (CLI) | 96 mods, 433k parts | 1.78-1.93 s | 373 MB peak (median of 3) | no renderer in a CLI run | na | manifest parse + part upsert | perf-db-refresh-main, same binary minus the app changes |
+| 2026-09-10 | 1.2.0 post-memory-work | 9950X3D NVMe | footprint remote-refresh (CLI) | 96 mods, 433k parts | 1.50-1.53 s | 345-370 MB peak (two runs, medians of 3) | no renderer in a CLI run | na | manifest parse + part upsert | same case. Elapsed is a real -15% and reproduced twice; **memory is not** - the within-run spread is 330-425 MB either side, so the streamed read shows no measurable footprint change on this lane |
+| 2026-09-10 | 1.2.0 pre-memory-work | 9950X3D NVMe | footprint force-redownload | 4.33 GB / 217 files | 40.8-41.0 s | 727 MB peak / 521 MB retained (medians) | 468 MB (B8 then) | na | renderer floor | perf-redownload-small-ssd |
+| 2026-09-10 | 1.2.0 post-memory-work | 9950X3D NVMe | footprint force-redownload | 4.33 GB / 217 files | 40.4-40.9 s | 563 MB peak / 339 MB retained (medians) | 221-239 MB (B8) | na | download buffers | same case, same 217 files and 4 331 121 846 bytes; -23% peak, -35% retained, elapsed and working-set peak unchanged; payload content-verified by `foxy-testkit-oracle` (3 744 parts, 0 problems) |
+| 2026-09-10 | 1.2.0 post-memory-work | 9950X3D NVMe | startup | 11 repos, 10 probed | 0.523-0.533 s | 1 verdict | 0.34 s (paint 0.39 measured, 2 x RTT overlapped) | 0.74 | renderer init | same case as the O8 rows above; pinned backend cut first frame 0.56 s -> 0.39 s |
 | | | | | | | | | | | |
 
 Workflow rules:
