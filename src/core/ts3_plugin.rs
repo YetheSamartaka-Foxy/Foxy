@@ -971,12 +971,12 @@ mod tests {
     #[test]
     fn repository_path_key_collapses_separator_case_and_trailing_slash() {
         assert_eq!(
-            repository_path_key("S:/Swifty/TFR_Repository"),
-            repository_path_key("s:\\swifty\\tfr_repository\\")
+            repository_path_key("R:/Mods/MainRepo"),
+            repository_path_key("r:\\mods\\mainrepo\\")
         );
         assert_ne!(
-            repository_path_key("S:/Swifty/TFR_Repository"),
-            repository_path_key("S:/Swifty/Other_Repository")
+            repository_path_key("R:/Mods/MainRepo"),
+            repository_path_key("R:/Mods/OtherRepo")
         );
     }
 

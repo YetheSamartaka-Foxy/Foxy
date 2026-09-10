@@ -820,14 +820,8 @@ mod tests {
     #[test]
     fn file_identity_key_keeps_same_remote_under_different_local_roots_separate() {
         let remote_path = "https://repo.example/@ace/addons/ace_main.pbo";
-        let old_key = file_identity_key(
-            remote_path,
-            "S:/Swifty/TFR_Repository/@ace/addons/ace_main.pbo",
-        );
-        let new_key = file_identity_key(
-            remote_path,
-            "S:/Swifty/foxy_test/40k/@ace/addons/ace_main.pbo",
-        );
+        let old_key = file_identity_key(remote_path, "R:/Mods/MainRepo/@ace/addons/ace_main.pbo");
+        let new_key = file_identity_key(remote_path, "R:/Mods/other/@ace/addons/ace_main.pbo");
 
         assert_ne!(old_key, new_key);
     }
@@ -835,9 +829,8 @@ mod tests {
     #[test]
     fn file_identity_key_normalizes_equivalent_local_paths() {
         let remote_path = "https://repo.example/@ace/addons/ace_main.pbo";
-        let forward = file_identity_key(remote_path, "S:/Swifty/Repo/@ace/addons/ace_main.pbo/");
-        let backward =
-            file_identity_key(remote_path, "S:\\Swifty\\Repo\\@ace\\addons\\ace_main.pbo");
+        let forward = file_identity_key(remote_path, "R:/Mods/Repo/@ace/addons/ace_main.pbo/");
+        let backward = file_identity_key(remote_path, "R:\\Mods\\Repo\\@ace\\addons\\ace_main.pbo");
 
         assert_eq!(forward, backward);
     }

@@ -1000,7 +1000,7 @@ mod tests {
         payload.extend_from_slice(b"Advanced Combat Environment 3.21.0");
         payload.extend_from_slice(&[0x11, 0x22, 0x33, 0x44]);
         payload.push(8);
-        payload.extend_from_slice(b"TFR Core");
+        payload.extend_from_slice(b"Test Mod");
 
         let raw_rules = vec![
             (vec![1, 2], payload[..24].to_vec()),
@@ -1015,7 +1015,7 @@ mod tests {
         assert!(
             requirements
                 .iter()
-                .any(|requirement| requirement.display_name == "TFR Core")
+                .any(|requirement| requirement.display_name == "Test Mod")
         );
     }
 

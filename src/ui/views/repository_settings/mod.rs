@@ -1164,8 +1164,8 @@ mod tests {
     #[test]
     fn normalize_local_path_for_compare_uses_windows_case_rules() {
         assert_eq!(
-            normalize_local_path_for_compare("C:\\Mods\\TFR\\"),
-            normalize_local_path_for_compare("c:/mods/tfr")
+            normalize_local_path_for_compare("C:\\Mods\\Alpha\\"),
+            normalize_local_path_for_compare("c:/mods/alpha")
         );
     }
 

@@ -1650,7 +1650,7 @@ async fn run_repository_pipeline(
             // baseline we hash here is discarded and recomputed during the download.
             // On a missing baseline (after a schema wipe or first sync over a
             // pre-populated dir) this branch otherwise hashes all on-disk files
-            // (~13.5s on TFR_40K) purely to throw the result away.
+            // (~13.5s on a 1500-file repository) purely to throw the result away.
             info!(
                 "Skipping tree hash bootstrap for force-redownload repo={} (baseline discarded; rehashed during download)",
                 normalized_repo_url

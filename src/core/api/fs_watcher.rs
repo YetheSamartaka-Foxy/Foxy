@@ -364,26 +364,23 @@ mod tests {
     #[test]
     fn repo_urls_for_changed_paths_prefers_matching_repository_root() {
         let mod_index = vec![ModPathEntry {
-            local_path: normalize_path_for_match("S:/Swifty/TFR_Repository/@diwako_anomalies"),
+            local_path: normalize_path_for_match("R:/Mods/MainRepo/@diwako_anomalies"),
             linked_repos: vec![
                 linked_repo(
-                    "http://a3.tfrod.cz:8080/mody/TFR_40K/",
-                    "S:/Swifty/TFR_Repository",
+                    "http://repo.example.invalid:8080/mody/RepoAlpha/",
+                    "R:/Mods/MainRepo",
                 ),
-                linked_repo(
-                    "http://example.invalid/other_repo/",
-                    "S:/Swifty/Other_Repository",
-                ),
+                linked_repo("http://example.invalid/other_repo/", "R:/Mods/OtherRepo"),
             ],
         }];
         let changed_paths = HashSet::from([normalize_path_for_match(
-            "S:/Swifty/TFR_Repository/@diwako_anomalies/addons/file.pbo",
+            "R:/Mods/MainRepo/@diwako_anomalies/addons/file.pbo",
         )]);
 
         let repo_urls = repo_urls_for_changed_paths(&mod_index, &changed_paths);
 
         assert_eq!(repo_urls.len(), 1);
-        assert!(repo_urls.contains("http://a3.tfrod.cz:8080/mody/TFR_40K/"));
+        assert!(repo_urls.contains("http://repo.example.invalid:8080/mody/RepoAlpha/"));
         assert!(!repo_urls.contains("http://example.invalid/other_repo/"));
     }
 
@@ -392,8 +389,8 @@ mod tests {
         let mod_index = vec![ModPathEntry {
             local_path: normalize_path_for_match("D:/SharedMods/@ace"),
             linked_repos: vec![
-                linked_repo("http://example.invalid/repo_a/", "S:/Swifty/RepoA"),
-                linked_repo("http://example.invalid/repo_b/", "S:/Swifty/RepoB"),
+                linked_repo("http://example.invalid/repo_a/", "R:/Mods/RepoA"),
+                linked_repo("http://example.invalid/repo_b/", "R:/Mods/RepoB"),
             ],
         }];
         let changed_paths = HashSet::from([normalize_path_for_match(

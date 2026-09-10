@@ -1970,32 +1970,24 @@ mod tests {
     #[test]
     fn external_addon_scope_keeps_unrelated_standalone_repositories_separate() {
         let repositories = vec![
-            repo(
-                "https://example.test/alpha",
-                "S:/Swifty/foxy_test/40k",
-                None,
-            ),
-            repo(
-                "https://example.test/bravo",
-                "S:/Swifty/TFR_Repository",
-                None,
-            ),
+            repo("https://example.test/alpha", "R:/Mods/other", None),
+            repo("https://example.test/bravo", "R:/Mods/MainRepo", None),
         ];
 
         assert!(!repository_external_addon_visible_for_repo(
             &repositories,
             0,
-            "S:/Swifty/TFR_Repository/@ace"
+            "R:/Mods/MainRepo/@ace"
         ));
     }
 
     #[test]
     fn external_addon_scope_allows_standalone_physical_overlap() {
         let repositories = vec![
-            repo("https://example.test/alpha", "S:/Swifty/shared", None),
+            repo("https://example.test/alpha", "R:/Mods/shared", None),
             repo(
                 "https://example.test/bravo",
-                "S:/Swifty/shared",
+                "R:/Mods/shared",
                 Some("space"),
             ),
         ];
@@ -2003,17 +1995,13 @@ mod tests {
         assert!(repository_external_addon_visible_for_repo(
             &repositories,
             0,
-            "S:/Swifty/shared/@ace"
+            "R:/Mods/shared/@ace"
         ));
     }
 
     #[test]
     fn external_addon_scope_allows_non_repository_inventory_sources() {
-        let repositories = vec![repo(
-            "https://example.test/alpha",
-            "S:/Swifty/foxy_test/40k",
-            None,
-        )];
+        let repositories = vec![repo("https://example.test/alpha", "R:/Mods/other", None)];
 
         assert!(repository_external_addon_visible_for_repo(
             &repositories,

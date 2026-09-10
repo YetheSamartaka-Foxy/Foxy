@@ -835,19 +835,17 @@ fn swifty_required_dlcs_enable_creator_dlc_flags() {
 #[test]
 fn normalize_loaded_repository_trims_address_whitespace() {
     let mut repo = Repository {
-        address: "  http://example.invalid/mody/TFR_Immers/  ".to_string(),
-        repository_space_entry_address: Some(
-            " http://example.invalid/mody/TFR_Immers ".to_string(),
-        ),
+        address: "  http://example.invalid/mody/DemoRepo/  ".to_string(),
+        repository_space_entry_address: Some(" http://example.invalid/mody/DemoRepo ".to_string()),
         ..Repository::default()
     };
 
     normalize_loaded_repository(&mut repo);
 
-    assert_eq!(repo.address, "http://example.invalid/mody/TFR_Immers/");
+    assert_eq!(repo.address, "http://example.invalid/mody/DemoRepo/");
     assert_eq!(
         repo.repository_space_entry_address.as_deref(),
-        Some("http://example.invalid/mody/TFR_Immers")
+        Some("http://example.invalid/mody/DemoRepo")
     );
 }
 

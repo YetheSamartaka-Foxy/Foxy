@@ -1138,9 +1138,9 @@ mod tests {
     #[test]
     fn local_path_identity_uses_windows_case_rules() {
         let mut repo = make_repo("ABC", "DEF");
-        repo.local_path = "C:/Mods/TFR/".to_string();
+        repo.local_path = "C:/Mods/Alpha/".to_string();
 
-        assert!(local_path_identity_unchanged(&repo, "c:\\mods\\tfr\\"));
+        assert!(local_path_identity_unchanged(&repo, "c:\\mods\\alpha\\"));
     }
 
     fn addon_state(name: &str) -> RepositoryAddonRemoteState {

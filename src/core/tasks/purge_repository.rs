@@ -675,7 +675,7 @@ async fn purge_repository_internal(
                 ] {
                     if table == "subfiles" {
                         // P0-a (after_turso_regression_analysis5.md): a 66k-row
-                        // `DELETE FROM subfiles` costs ~9s on TFR_40K even on a
+                        // `DELETE FROM subfiles` costs ~9s at that scale even on a
                         // freshly-compacted file - intrinsic Turso ~0.14ms/row over
                         // 4 B-trees. Since a whole wipe is dropping every repo, the
                         // table can be DROPped (O(1) page dealloc) and recreated
@@ -1790,7 +1790,7 @@ mod tests {
     }
 
     /// Full-scale reproducer for the force-redownload purge hang. Seeds the
-    /// complete graph at the real TFR_40K scale (1515 files / 66,336 subfiles /
+    /// complete graph at a real large-repository scale (1515 files / 66,336 subfiles /
     /// parts) and runs the purge's exact statement sequence inside one
     /// transaction with per-statement timing, to pinpoint which delete wedges on
     /// Turso's beta planner. Run:
