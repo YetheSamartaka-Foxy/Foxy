@@ -21,6 +21,7 @@ pub(crate) struct DownloadMetrics {
     range_events: Mutex<Vec<RangeMetric>>,
     phase_events: Mutex<Vec<PhaseMetric>>,
     sampler_stop: AtomicBool,
+    sampler_wake: tokio::sync::Notify,
 }
 
 #[derive(Clone, Debug)]
@@ -149,6 +150,7 @@ impl DownloadMetrics {
             range_events: Mutex::new(Vec::new()),
             phase_events: Mutex::new(Vec::new()),
             sampler_stop: AtomicBool::new(false),
+            sampler_wake: tokio::sync::Notify::new(),
         }
     }
 
@@ -220,7 +222,10 @@ impl DownloadMetrics {
             let mut last_bytes = 0_u64;
             let mut last_disk_bytes = 0_u64;
             loop {
-                interval.tick().await;
+                tokio::select! {
+                    _ = interval.tick() => {}
+                    _ = me.sampler_wake.notified() => {}
+                }
                 if me.sampler_stop.load(Ordering::Relaxed) {
                     break;
                 }
@@ -276,6 +281,7 @@ impl DownloadMetrics {
     /// Signal the sampler task to stop.
     pub(super) fn stop_sampler(&self) {
         self.sampler_stop.store(true, Ordering::Relaxed);
+        self.sampler_wake.notify_one();
     }
 
     /// Build a structured summary of the entire download run.
@@ -653,6 +659,9 @@ pub(super) struct DownloadSchedulerState {
     pub(super) queued_large_files: AtomicUsize,
     /// Global semaphore capping total concurrent HTTP range requests.
     pub(super) range_permits: std::sync::Arc<Semaphore>,
+    /// Raised when a large file finishes, so range workers parked above the
+    /// old fair-share cap wake on the event instead of on their poll interval.
+    pub(super) range_cap_changed: tokio::sync::Notify,
     pub(super) limits: DownloadResourceLimits,
 }
 
@@ -662,6 +671,7 @@ impl DownloadSchedulerState {
             active_large_files: AtomicUsize::new(0),
             queued_large_files: AtomicUsize::new(0),
             range_permits: std::sync::Arc::new(Semaphore::new(limits.max_active_range_requests)),
+            range_cap_changed: tokio::sync::Notify::new(),
             limits,
         }
     }

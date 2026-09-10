@@ -205,6 +205,7 @@ async fn download_single_file(
         .fetch_sub(1, Ordering::Relaxed);
     if is_large {
         scheduler.active_large_files.fetch_sub(1, Ordering::Relaxed);
+        scheduler.range_cap_changed.notify_waiters();
     }
 
     match &result {
@@ -373,10 +374,12 @@ pub(super) async fn process_mod_batch(
     let mut attempt = 0usize;
 
     let progress_stop = Arc::new(AtomicBool::new(false));
+    let progress_wake = Arc::new(tokio::sync::Notify::new());
     let progress_handle = if let Some(tx) = progress_tx.clone() {
         let mod_name = mod_name_arc.clone();
         let entries = progress_entries.clone();
         let stop_signal = progress_stop.clone();
+        let wake_signal = progress_wake.clone();
         Some(tokio::spawn(async move {
             let mut last_sent: Option<(usize, u64)> = None;
             loop {
@@ -402,7 +405,8 @@ pub(super) async fn process_mod_batch(
                     });
                     last_sent = Some(snapshot);
                 }
-                sleep(MOD_PROGRESS_TICK_INTERVAL).await;
+                let _ =
+                    tokio::time::timeout(MOD_PROGRESS_TICK_INTERVAL, wake_signal.notified()).await;
             }
             let (files_done, bytes_done) = summarize_mod_progress(&entries);
             let effective_total = mod_bytes_total.max(bytes_done as usize);
@@ -438,14 +442,18 @@ pub(super) async fn process_mod_batch(
         attempt += 1;
 
         let mut small_queue: VecDeque<DownloadTargetFile> = VecDeque::new();
-        let mut large_queue: VecDeque<DownloadTargetFile> = VecDeque::new();
+        let mut large_files: Vec<DownloadTargetFile> = Vec::new();
         for file in remaining.drain(..) {
             if file.size > LARGE_FILE_THRESHOLD {
-                large_queue.push_back(file);
+                large_files.push(file);
             } else {
                 small_queue.push_back(file);
             }
         }
+        // Longest-processing-time first: the biggest file claims a permit
+        // earliest, so it is not left transferring alone at the end of the run.
+        large_files.sort_by_key(|file| std::cmp::Reverse(file.size));
+        let mut large_queue: VecDeque<DownloadTargetFile> = VecDeque::from(large_files);
 
         let mut running_total = 0usize;
         let mut inflight: FuturesUnordered<_> = FuturesUnordered::new();
@@ -725,6 +733,7 @@ pub(super) async fn process_mod_batch(
 
     if let Some(handle) = progress_handle {
         progress_stop.store(true, Ordering::SeqCst);
+        progress_wake.notify_one();
         let _ = handle.await;
     }
 

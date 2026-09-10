@@ -42,6 +42,8 @@ used by the cross-check algorithms below. `W` = work, `R` = rate, `T` = time.
 | E6 | `T_ideal = D × RTT + W / R_net` | Latency-bound request chains: `D` = depth of *dependent* (sequential) round trips. Requests at the same depth are free to run in parallel. |
 | E7 | `C_min = R_target × RTT / chunk_bytes` | Concurrency needed to saturate a link (bandwidth-delay product / Little's law). Below `C_min` parallel ranges, the link physically cannot be filled. |
 | E8 | `T = N_miss × C_miss + N_hit × C_hit` | Cache law (quick scan): cost is dominated by misses; a "fast" path with a broken cache key is a slow path. |
+| E9 | `R_agg = min(R_link, C × R_conn)` | Per-connection law: when a server shapes each connection to `R_conn`, aggregate is bought with concurrency `C` and nothing else, until the path ceiling `R_link` binds. Tuning a single stream is wasted work. |
+| E10 | `T_tail ≈ chunk_bytes / R_conn` | Tail law: once the work queue is empty the link is carried by whatever chunks are still in flight, and the last one runs alone at one connection's rate. The largest chunk size, not the scheduler, bounds the tail. |
 
 ### E0 - Unit rules (read first, errors here invalidate every ratio)
 
@@ -110,11 +112,12 @@ Ratios computed against someone else's baseline are meaningless.
 
 | # | Baseline | How to measure | Value (this machine) |
 | --- | --- | --- | --- |
-| B1 | Network downlink `R_net` (bytes/s) | Speedtest/iperf3, or `peak_1s_bps` from a large unthrottled download run | 115,099,474 bytes/s (109.8 MiB/s), from 2026-06-13 `peak_1s_bps` |
+| B1 | Network downlink `R_net` (bytes/s) | Speedtest/iperf3, or `peak_1s_bps` from a large unthrottled download run | 118,387,677 bytes/s (112.9 MiB/s), from 2026-09-10 `peak_1s_bps` against the reference origin; six consecutive runs land inside 118.07-118.39 MB/s, so this is the path ceiling, not a lucky sample |
 | B2 | Disk sequential read `R_disk_r` | `winsat disk -seq -read -drive C`, or max `throughput` among `Hash profile auto benchmark sample:` lines | _fill in_ |
 | B3 | Disk sequential write `R_disk_w` | `winsat disk -seq -write -drive C`, or `disk: ... p95` from `-- DOWNLOAD REPORT --` | _fill in_ |
 | B4 | RTT to repo server `RTT` | `ping <repo-host>`, or debug `Fetched response body for .../repo.json (... download=...)` - for a tiny payload, download ≈ RTT | _fill in_ (ICMP to the repo host timed out on 2026-06-13; use debug fetch timing) |
 | B5 | Quick-scan stat rate (entries/s) | `addons_per_s` from `SOL op=quick_scan` on a clean, warm-cache run - record best ever as the light | 2,462 addons/s, from 2026-06-13 best clean scan; re-record after persistent-cache fix |
+| B7 | Per-connection rate `R_conn` (bytes/s) | Fetch one large range over a single connection and divide; repeat at several concurrency levels to confirm it is flat. Needed for E7, E9 and E10 | ~1.6 MB/s at C=1, ~1.15 at C=48, ~0.88 at C=96 against the reference origin (2026-09-09). Server-imposed, not a client property |
 | B6 | Hash compute rate `R_hash` | `work_bytes / compute_s` from `SOL op=hash` (pure aggregated hash time, I/O excluded); BLAKE3 is multi-GB/s multicore, MD5 ≈ 0.5–0.7 GB/s per stream | ≈1,234,800,000 bytes/s (1.15 GiB/s), warm 2026-06-13 hash run; re-measure cold |
 
 Reference physics, for sanity checks: NVMe read 2–7 GB/s, SATA SSD ≈ 550 MB/s,
@@ -153,11 +156,57 @@ algorithm (exact log lines to read), and the levers that close the gap.
 3. `peak_1s_bps ≪ B1 × ~0.9` → bottleneck is upstream (server egress or
    per-connection limits); more local tuning cannot help (that *is* the light).
 4. Tail behavior: `Download avg speed over last 30s` rolling samples dropping
-   at the end of a run → queue drain starvation; check fair-share range cap
-   growth (`metrics.rs::current_per_file_range_cap`).
+   at the end of a run → the run is tail-bound. Read `max_range` from
+   `-- DOWNLOAD REPORT --` and apply E10: the tail cannot be shorter than
+   `max_range / R_conn` (B7) no matter what the scheduler does.
 
-**Levers**: per-file range count and global range budget, range size vs RTT
-(E7), write coalescing, TLS connection reuse, limiter ramp parameters.
+**Split the deficit before touching anything.** Integrate the per-second
+telemetry (`summary-N-<op>.json` in a test kit run, or the debug `Download
+sample:` lines) against B1 and separate it into three buckets. They have
+different owners and only one of them is ours:
+
+| bucket | signature | owner |
+| --- | --- | --- |
+| ramp | first ~3 samples climbing to the ceiling | the path. Congestion control, identical with 96 or 192 pre-established connections. Not client-addressable |
+| plateau | samples between ramp and tail | ours, but it has been at the ceiling since 2026-09-10; a dip here is a real regression |
+| tail | last samples decaying to zero | ours, and bounded by E10 |
+
+A run whose plateau sits on B1 has no throughput problem, whatever its `sol`
+says. Chasing `sol` without this split leads to tuning the steady state, which
+on this path is already at the speed of light.
+
+**Levers**, in the order they actually pay:
+
+1. **Chunk ceiling** (E10). The single largest lever once the plateau is at the
+   ceiling. `RANGE_CHUNK_TARGET` 8 MiB -> 2 MiB took the tail deficit from
+   1.1-2.1 s to 0.25-0.54 s.
+2. **Concurrency to the last byte** (E9). Keep the global range budget busy
+   until the run ends: a wave-aligned chunk grid, a per-file ceiling equal to
+   the global budget, largest-file-first ordering, and few enough concurrent
+   large files that the budget is not oversubscribed.
+3. **Range size vs RTT** (E7), write coalescing, TLS connection reuse, limiter
+   ramp parameters.
+
+**Not a lever**: raising `MAX_ACTIVE_RANGE_REQUESTS` past the point where
+`C × R_conn` reaches `R_link` (E9). Against this origin 96 connections already
+reach 118 MB/s and 192 plateau at the same rate.
+
+**Measuring the light directly.** When it matters whether the client or the
+path is at fault, measure the path with something that shares no code with
+Foxy: a dependency-free `TcpStream` range reader at several concurrency levels
+and chunk sizes. That is how B1 and B7 above were established, and how "chunk
+size is free at high concurrency" (117.5-117.6 MB/s at 1, 2 and 8 MiB chunks
+with 96 connections) was settled before the chunk ceiling was lowered. The
+build recipe is in `testkit/ledger/perf-redownload-small-ssd.notes.md`.
+
+**Stage timers are not download time.** `download_stage_ms` includes joining
+the background progress-checkpoint, mod-progress and telemetry-sampler tasks.
+Any of those that sleeps on a timer and only then reads its stop flag quantizes
+the whole stage to its own period, which reads as download cost and is not.
+Before 2026-09-10 this contributed a fixed 5 s and 1 s quantum. New background
+tasks in the download path must wait on an interruptible primitive
+(`timeout(delay, notify.notified())` or a `watch` change), never a bare
+`sleep`.
 
 ### O2 - Delta patch (download less than the file)
 
@@ -354,6 +403,11 @@ numbers straight from the logs.
 | 2026-09-09 | 1.2.0 Turso 0.7.2 gate 4 MVCC | 9950X3D NVMe | force-redownload | 92.2 GB / 3738 files | 805 s | 115.4 MB/s | peak_1s | 0.97 | network | same case; db_write 37.4 s (~3x); elapsed no-difference |
 | 2026-09-09 | 1.2.0 Turso 0.7.2 gate 4 WAL | 9950X3D NVMe | recheck | large repo after redownload | 0.44 s | 1 clean | self_baseline | na | RTT + quick verify | big-ssd cold recheck |
 | 2026-09-09 | 1.2.0 Turso 0.7.2 gate 4 MVCC | 9950X3D NVMe | recheck | large repo after redownload | 0.45 s | 1 clean | self_baseline | na | RTT + quick verify | same; not faster than WAL |
+| 2026-09-09 | 1.2.0 pre-tail-work | 9950X3D NVMe | download | 4.33 GB / 217 files | 45.11 s | 96.0 MB/s | 117.8 MB/s (peak_1s) | 0.815 | tail | perf-redownload-small-ssd warm. Plateau already at the ceiling; 2.1 s ramp + 10-12 s tail |
+| 2026-09-10 | 1.2.0 post-tail-work | 9950X3D NVMe | download | 4.33 GB / 217 files | 39.79 s | 108.8 MB/s | 118.4 MB/s (peak_1s) | 0.922 | ramp | same case, same bytes/files. Tail deficit 0.25-0.54 s; run is now ramp-bound |
+| 2026-09-09 | 1.2.0 pre-tail-work | 9950X3D HDD | download | 4.33 GB / 217 files | 65.12 s | 66.5 MB/s | peak_1s | 0.563 | tail | perf-redownload-small-hdd warm median 67.6 s |
+| 2026-09-10 | 1.2.0 post-tail-work | 9950X3D HDD | download | 4.33 GB / 217 files | 44.45 s | 97.4 MB/s | peak_1s | 0.825 | tail + disk | same case; warm median 48.4 s. Spinning media is noisy, read medians |
+| 2026-09-10 | probe (no Foxy code) | 9950X3D NVMe | path ceiling | 96 conns, 1/2/8 MiB chunks | 20 s each | 117.5-117.6 MB/s | 118.4 MB/s | ~0.99 | path | chunk size is free at full concurrency; 192 conns plateau identically |
 | | | | | | | | | | | |
 
 Workflow rules:
@@ -368,6 +422,9 @@ Workflow rules:
 5. **Alert thresholds**: investigate `sol < 0.85` for limiter-capped downloads,
    `< 0.6` for mixed-resource ops (hash), and any `self_baseline` rate below
    half its recorded best.
+6. **Split before you tune (O1).** For downloads, decompose the deficit into
+   ramp, plateau and tail (A1) before proposing a change. A plateau at B1 with
+   a bad `sol` is a tail problem, and the fix is E10, not scheduler tuning.
 
 ## Logging requirements for new code
 

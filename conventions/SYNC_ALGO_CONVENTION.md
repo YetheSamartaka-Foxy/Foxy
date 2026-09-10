@@ -725,25 +725,40 @@ Full download is the correctness fallback for every file.
    session-level range check failed). Sequential parts resume from the part
    file length.
 3. Use the ranged work queue for large files when the range check passed:
-   the file is split into a fixed chunk grid, downloaded by parallel range
+   the file is split into a uniform chunk grid, downloaded by parallel range
    workers, and completed chunks are recorded in a `*.foxy.part.meta` sidecar
    after their bytes are on disk. Ranged parts are pre-allocated to full
    length, so resume state comes only from the sidecar, never the part length.
+   The grid is uniform per file but not fixed across files: `range_chunk_size_for`
+   picks equal chunks whose count fills whole waves of the per-file worker
+   ceiling, clamped to `[min_range_chunk, range_chunk_target]`. A file must
+   never end on a partly populated wave.
 4. Per-file range concurrency is a fair share of the global range budget:
    it grows as the queue drains so tail files and single-file downloads can
    use the full budget, and every range worker goes through the bandwidth
-   limiter.
-5. Validate `Content-Range` for ranged responses.
-6. Validate final byte count (resumed chunks count toward it).
-7. Remove the sidecar, then rename the live file aside to a sibling `*.foxy.bak`
+   limiter. The per-file ceiling equals the global budget, so the last file in
+   a run can use all of it. A file that finishes wakes parked workers on
+   `range_cap_changed` rather than leaving them on their poll interval.
+5. Within a mod, queue large files longest-first, and keep the count of
+   concurrently transferring large files at or below
+   `max_active_range_requests / min_ranges_per_file` so the range budget is
+   not oversubscribed. Oversubscription makes every file progress slowly and
+   finish together, which is the worst possible shape for the tail.
+6. Validate `Content-Range` for ranged responses.
+7. Validate final byte count (resumed chunks count toward it).
+8. Remove the sidecar, then rename the live file aside to a sibling `*.foxy.bak`
    (same volume, no byte copy) and promote `*.foxy.part` onto the final path.
    Success deletes the aside file; failure renames it back. Do not copy the
    original into the config or temp directory.
-8. Update in-memory and persisted progress at coarse intervals.
+9. Update in-memory and persisted progress at coarse intervals.
 
 Never write directly to the final file path during transfer. Never trust a
 full-length part file without either a valid sidecar or complete persisted
 progress.
+
+Changing the grid rule is resume-safe by construction: `plan_part_init` resumes
+on the `chunk_size` recorded in an existing sidecar, never on the current one,
+so a part file written by an older grid finishes on that older grid.
 
 ## Post-Download Hash Finalization
 
@@ -946,6 +961,27 @@ Expected remote single-addon change path:
    files.
 5. Reuse existing local checksums and content hashes for all untouched addons.
 
+Expected full-download throughput path:
+
+The steady state of a download has been at the path ceiling since 2026-09-10,
+so the only remaining costs are the two ends of the run. Hold these, and see
+`conventions/SPEED_OF_LIGHT.md` O1 for the equations and how to measure:
+
+1. Keep the global range budget busy until the last byte. A run whose
+   throughput decays over its final seconds is tail-bound, not slow.
+2. Bound the tail with the chunk ceiling. Once the queue is empty the link is
+   carried by chunks still in flight, and the last one runs alone at one
+   connection's rate, so the tail cannot be shorter than
+   `range_chunk_target / R_conn`.
+3. Buy aggregate throughput with concurrency, not with per-stream tuning. The
+   server shapes each connection; the client's lever is how many are busy.
+4. Do not raise the global range budget past the point where it reaches the
+   path ceiling. Beyond that, extra connections only add per-connection
+   overhead.
+5. Keep background download tasks off bare timers. The download stage joins
+   them, so a task that sleeps and only then reads its stop flag quantizes the
+   whole stage to its own period and charges it to download time.
+
 Expected retry-after-failure path:
 
 1. Read pending scope from the previous failed or cancelled run.
@@ -1033,6 +1069,13 @@ The logs should make it possible to answer:
   fallback.
 - Do not let a clean scoped pending-cache check clear updates without full quick
   verification when cached targets exist.
+- Do not size a ranged file's chunk grid so its chunk count leaves a partly
+  populated final wave; that straggler wave is the tail of the whole run.
+- Do not let a background task in the download path wait on a bare `sleep` and
+  read its stop flag afterwards. Use an interruptible wait, or the stage pays
+  the full period on every download.
+- Do not read a resuming ranged download on the current chunk grid; use the
+  grid recorded in its sidecar.
 
 ## Diagnosing False Redownloads
 
@@ -1067,6 +1110,8 @@ The current code already contains pieces of this design:
 - `delta_patch` validates plan coverage and falls back to full download.
 - `download_files` adjusts expected transfer bytes for patchable files and uses
   patch-first execution.
+- `download_files::range_scheduler::range_chunk_size_for` sizes the per-file
+  chunk grid into whole waves of the per-file worker ceiling.
 
 Known risk areas to keep aligned with this document:
 

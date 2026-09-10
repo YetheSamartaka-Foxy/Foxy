@@ -15,7 +15,8 @@ use super::SharedRollbackSession;
 use super::bandwidth::AdaptiveBandwidthLimiter;
 use super::metrics::{DownloadMetrics, DownloadSchedulerState};
 use super::range_scheduler::{
-    download_large_file_with_range_queue, range_part_meta_path, remove_range_meta,
+    download_large_file_with_range_queue, range_chunk_size_for, range_part_meta_path,
+    remove_range_meta,
 };
 use super::{ATTEMPT_DELAY_MS, ATTEMPT_LIMIT, BUFFERED_WRITE_CAPACITY, LARGE_FILE_THRESHOLD};
 
@@ -366,7 +367,12 @@ pub(super) async fn download_file_ranges(
     // completed chunks tracked in a .foxy.part.meta sidecar so interrupted
     // downloads resume in the next session.
     let split_count = total_size
-        .div_ceil(scheduler.limits.range_chunk_target)
+        .div_ceil(range_chunk_size_for(
+            total_size as u64,
+            scheduler.limits.max_ranges_per_file,
+            scheduler.limits.min_range_chunk as u64,
+            scheduler.limits.range_chunk_target as u64,
+        ) as usize)
         .max(1);
     let part_path = format!("{}.foxy.part", path);
     let bytes = download_large_file_with_range_queue(

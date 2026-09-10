@@ -885,8 +885,12 @@ pub(crate) async fn download_files(
     // When SQLite reports contention or a slow checkpoint, progress persistence backs off
     // until several clean flushes complete. The final flush remains authoritative.
     let checkpoint_stop = Arc::new(AtomicBool::new(false));
+    // Woken on shutdown so the stage does not wait out the current delay; without
+    // it the download stage is quantized to the checkpoint period.
+    let checkpoint_wake = Arc::new(tokio::sync::Notify::new());
     let checkpoint_handle = {
         let stop_signal = checkpoint_stop.clone();
+        let wake_signal = checkpoint_wake.clone();
         let ctx = context.clone();
         let refs = all_download_refs.clone();
         let checkpoint_metrics = metrics.clone();
@@ -897,7 +901,7 @@ pub(crate) async fn download_files(
             let mut dirty_threshold = PROGRESS_CHECKPOINT_NORMAL_BYTES;
             let mut clean_pressure_flushes = 0usize;
             loop {
-                tokio::time::sleep(delay).await;
+                let _ = tokio::time::timeout(delay, wake_signal.notified()).await;
                 if stop_signal.load(Ordering::SeqCst) {
                     break;
                 }
@@ -1108,6 +1112,7 @@ pub(crate) async fn download_files(
 
     // Stop the checkpoint task and do a final progress flush (only files with progress)
     checkpoint_stop.store(true, Ordering::SeqCst);
+    checkpoint_wake.notify_one();
     let _ = checkpoint_handle.await;
     {
         let _phase = metrics.phase("final_progress_flush");

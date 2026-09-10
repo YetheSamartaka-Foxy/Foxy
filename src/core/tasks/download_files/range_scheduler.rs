@@ -17,8 +17,9 @@ use super::transfer::{
 };
 use super::{ATTEMPT_LIMIT, BUFFERED_WRITE_CAPACITY};
 
-/// How often a worker parked above the current per-file range cap re-checks
-/// whether the cap has grown (queue drained) or work remains.
+/// Fallback re-check for a worker parked above the current per-file range cap.
+/// Cap growth itself arrives on `range_cap_changed`; this only covers a worker
+/// that was not yet waiting when the notification fired.
 const WORKER_GATE_RECHECK: Duration = Duration::from_millis(250);
 
 const RANGE_PART_META_VERSION: u32 = 1;
@@ -183,6 +184,32 @@ fn plan_part_init(
     }
 }
 
+/// Chunk size for one ranged file.
+///
+/// Equal-size chunks whose count fills whole waves of `workers`, so a file
+/// never ends on a partly populated wave: with a fixed 8 MiB grid a 424 MiB
+/// file runs 48 chunks in parallel and then 5 alone, and that straggler wave
+/// is the tail of a download run.
+pub(super) fn range_chunk_size_for(
+    total_size: u64,
+    workers: usize,
+    min_chunk: u64,
+    max_chunk: u64,
+) -> u64 {
+    let min_chunk = min_chunk.max(1);
+    let max_chunk = max_chunk.max(min_chunk);
+    let workers = workers.max(1) as u64;
+    if total_size <= min_chunk {
+        return min_chunk;
+    }
+    let waves = total_size
+        .div_ceil(workers.saturating_mul(max_chunk))
+        .max(1);
+    total_size
+        .div_ceil(workers.saturating_mul(waves))
+        .clamp(min_chunk, max_chunk)
+}
+
 /// A single HTTP range request job for a portion of a file.
 struct RangeJob {
     /// Index of this chunk in the fixed chunk grid.
@@ -313,7 +340,12 @@ pub(super) async fn download_large_file_with_range_queue(
     download_pause_rx: watch::Receiver<bool>,
     cancel_rx: watch::Receiver<bool>,
 ) -> anyhow::Result<u64> {
-    let chunk_target = scheduler.limits.range_chunk_target as u64;
+    let chunk_target = range_chunk_size_for(
+        total_size as u64,
+        scheduler.limits.max_ranges_per_file,
+        scheduler.limits.min_range_chunk as u64,
+        scheduler.limits.range_chunk_target as u64,
+    );
     let part_path = format!("{}.foxy.part", path);
     let meta_path = range_part_meta_path(&path);
 
@@ -547,6 +579,7 @@ async fn range_worker(
                 return Ok(());
             }
             tokio::select! {
+                _ = scheduler.range_cap_changed.notified() => {}
                 _ = sleep(WORKER_GATE_RECHECK) => {}
                 changed = cancel_rx.changed() => {
                     if changed.is_err() {
@@ -663,7 +696,7 @@ async fn download_one_range(
     }
 
     let mut response = resp;
-    let mut write_buf = Vec::with_capacity(BUFFERED_WRITE_CAPACITY);
+    let mut write_buf = Vec::with_capacity(BUFFERED_WRITE_CAPACITY.min(expected_bytes as usize));
     let mut buf_offset = start;
     let mut bytes_received = 0_u64;
     let mut attempt = 0u8;
@@ -997,6 +1030,59 @@ mod tests {
     fn plan_fresh_for_oversized_part() {
         let (plan, _) = plan_part_init(Some(2000), None, 1000, 100, 0);
         assert_eq!(plan, PartInitPlan::Fresh);
+    }
+
+    const MIN: u64 = 1024 * 1024;
+    const MAX: u64 = 8 * 1024 * 1024;
+
+    fn chunk_count(total: u64, workers: usize) -> u64 {
+        total.div_ceil(range_chunk_size_for(total, workers, MIN, MAX))
+    }
+
+    #[test]
+    fn chunk_grid_fills_one_whole_wave_when_the_file_fits_in_one() {
+        let total = 424_345_531;
+        assert_eq!(chunk_count(total, 96), 96);
+        assert!(range_chunk_size_for(total, 96, MIN, MAX) <= MAX);
+    }
+
+    #[test]
+    fn chunk_grid_fills_whole_waves_for_a_file_larger_than_one_wave() {
+        let total = 4 * 1024 * 1024 * 1024_u64;
+        let count = chunk_count(total, 96);
+        assert_eq!(count % 96, 0);
+        assert_eq!(count / 96, 6);
+    }
+
+    #[test]
+    fn chunk_grid_never_goes_below_the_floor() {
+        let total = 12 * 1024 * 1024;
+        assert_eq!(range_chunk_size_for(total, 96, MIN, MAX), MIN);
+        assert_eq!(chunk_count(total, 96), 12);
+    }
+
+    #[test]
+    fn chunk_grid_never_goes_above_the_ceiling() {
+        let total = 64 * 1024 * 1024 * 1024_u64;
+        let chunk = range_chunk_size_for(total, 96, MIN, MAX);
+        assert!(chunk <= MAX, "{chunk} > {MAX}");
+        assert_eq!(chunk_count(total, 96) % 96, 0);
+    }
+
+    #[test]
+    fn chunk_grid_handles_a_file_at_or_below_the_floor() {
+        assert_eq!(range_chunk_size_for(MIN, 96, MIN, MAX), MIN);
+        assert_eq!(range_chunk_size_for(1, 96, MIN, MAX), MIN);
+        assert_eq!(chunk_count(MIN, 96), 1);
+    }
+
+    #[test]
+    fn chunk_grid_tolerates_a_zero_worker_ceiling() {
+        let chunk = range_chunk_size_for(100 * MIN, 0, MIN, MAX);
+        assert!(
+            (MIN..=MAX).contains(&chunk),
+            "{chunk} outside the grid bounds"
+        );
     }
 
     #[test]

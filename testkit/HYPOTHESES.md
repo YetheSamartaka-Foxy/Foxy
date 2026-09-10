@@ -5,6 +5,11 @@ row; do not delete rejected ideas.
 
 | Status | Claim | Primary metric | Expected direction | Cheapest case |
 | --- | --- | --- | --- | --- |
+| accepted | A wave-aligned range grid plus a per-file ceiling equal to the global budget removes the straggler wave that is the download tail | `download.sol` | higher | `perf-redownload-small-ssd` |
+| accepted | The download stage waits out the checkpoint and sampler sleeps before reading their stop flags | `summary.download_stage_ms` | lower | `perf-redownload-small-ssd` |
+| accepted | Largest-file-first within a mod, and half as many concurrent large files, shorten the makespan tail | `download.sol` | higher | `perf-redownload-small-ssd` |
+| accepted | The largest range chunk bounds the download tail, because a chunk in flight when the queue empties runs alone at one connection's rate | `download.sol` | higher | `perf-redownload-small-ssd` |
+| rejected | More than 96 concurrent range requests buys aggregate throughput | `download.sol` | higher | probe against the reference origin |
 | open | Tune per-file range count and global range budget against RTT | `download.sol` | lower | delta scattered |
 | open | Coalesce small writes without increasing retries | `download.sol`, `breakdown.disk` | lower | delta scattered |
 | open | Reuse TLS connections more effectively | `breakdown.network.permit_wait_s` | lower | force redownload |
@@ -33,6 +38,28 @@ row; do not delete rejected ideas.
 | open | Extend filesystem profiling to stat, exists, read_dir and buffered flush | profile `neither` column | shrink | `perf-db-parts-bulk-profiled` |
 
 ## Closed entries
+
+### accepted: kill the download tail (grid, ceiling, ordering, stage quanta)
+
+The steady state was already at the link ceiling; every lost second was a ramp
+the client cannot influence and a 10-12 s straggler tail it can. Five changes,
+warm download 45.11 s -> 40.40-40.60 s on NVMe and 67.6 s -> 53.8 s on spinning
+media, same bytes and files in every row, independent oracle clean. A sixth
+change then took `RANGE_CHUNK_TARGET` from 8 MiB to 2 MiB, which cut the
+remaining tail deficit from 1.1-2.1 s to 0.25-0.54 s and left the run
+ramp-bound at 39.8 s on NVMe and 48.4 s on spinning media. Full
+write-up, per-step ledger table, and the probe numbers behind
+"chunk size is free, connections are not" in
+`ledger/perf-redownload-small-ssd.notes.md`.
+
+### rejected: more than 96 concurrent range requests
+
+The reference origin gives ~1.2-1.6 MB/s per connection, so aggregate is bought
+with connections - but only up to the path ceiling of 118 MB/s, which 96
+connections already reach. 192 pre-established connections plateau at the same
+117.5 MB/s and ramp on the same curve. `MAX_ACTIVE_RANGE_REQUESTS` stays 96;
+the per-file ceiling was raised to meet it instead.
+
 
 ### rejected: hand the in-memory tree to the incremental hasher
 

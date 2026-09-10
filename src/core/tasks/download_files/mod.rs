@@ -19,7 +19,7 @@ pub(super) const LARGE_FILE_THRESHOLD: usize = 10 * 1024 * 1024;
 pub(super) const ATTEMPT_DELAY_MS: u64 = 25;
 pub(super) const ATTEMPT_LIMIT: u8 = 50;
 pub(super) const BUFFERED_WRITE_CAPACITY: usize = 4 * 1024 * 1024;
-pub(super) const MAXIMUM_LARGE_FILES: usize = 24;
+pub(super) const MAXIMUM_LARGE_FILES: usize = 12;
 pub(super) const MAXIMUM_SMALL_FILES: usize = 48;
 pub(super) const MAX_FILE_RETRIES: usize = 3;
 pub(super) const BYTES_PER_MEGABIT: u64 = 125_000;
@@ -42,10 +42,16 @@ pub(super) const MAX_ACTIVE_RANGE_REQUESTS: usize = 96;
 pub(super) const MIN_RANGES_PER_FILE: usize = 8;
 /// Per-file range ceiling: parallel ranges a large file may use when it has
 /// the global range budget mostly to itself (tail of a run, single-file jobs).
-pub(super) const MAX_RANGES_PER_FILE: usize = 48;
-/// Target chunk size per range request. Small enough that the tail of a run
-/// and single-file downloads can spread one file across many connections.
-pub(super) const RANGE_CHUNK_TARGET: usize = 8 * 1024 * 1024;
+/// Matches the global budget so the last file in a run can use all of it.
+pub(super) const MAX_RANGES_PER_FILE: usize = MAX_ACTIVE_RANGE_REQUESTS;
+/// Largest chunk size per range request. This bounds the tail of a run: when
+/// the queue is empty the link is carried by whatever chunks are still in
+/// flight, and a lone chunk moves at one connection's ~1.6 MB/s.
+pub(super) const RANGE_CHUNK_TARGET: usize = 2 * 1024 * 1024;
+/// Smallest chunk size per range request. The grid shrinks towards this so a
+/// file still has one chunk per worker; measured against the reference origin,
+/// the extra round trips cost under 2% even at low concurrency.
+pub(super) const MIN_RANGE_CHUNK: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct DownloadResourceLimits {
@@ -55,6 +61,7 @@ pub(super) struct DownloadResourceLimits {
     pub(super) min_ranges_per_file: usize,
     pub(super) max_ranges_per_file: usize,
     pub(super) range_chunk_target: usize,
+    pub(super) min_range_chunk: usize,
 }
 
 impl DownloadResourceLimits {
@@ -66,6 +73,7 @@ impl DownloadResourceLimits {
             min_ranges_per_file: MIN_RANGES_PER_FILE,
             max_ranges_per_file: MAX_RANGES_PER_FILE,
             range_chunk_target: RANGE_CHUNK_TARGET,
+            min_range_chunk: MIN_RANGE_CHUNK,
         }
     }
 
@@ -77,6 +85,7 @@ impl DownloadResourceLimits {
             min_ranges_per_file: 4,
             max_ranges_per_file: 8,
             range_chunk_target: 16 * 1024 * 1024,
+            min_range_chunk: 4 * 1024 * 1024,
         }
     }
 
@@ -88,6 +97,7 @@ impl DownloadResourceLimits {
             min_ranges_per_file: 2,
             max_ranges_per_file: 4,
             range_chunk_target: 64 * 1024 * 1024,
+            min_range_chunk: 16 * 1024 * 1024,
         }
     }
 }
