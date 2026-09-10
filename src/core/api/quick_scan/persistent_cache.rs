@@ -191,15 +191,34 @@ pub(super) fn save_persistent_addon_hash_cache(
     );
 }
 
-pub(super) fn addon_root_fingerprint(path: &str) -> AddonRootFingerprint {
+/// Root fingerprint plus the addon content hash from the same walk.
+///
+/// The two digests read identical metadata, so computing them together turns a
+/// persistent-cache miss from two recursive directory walks into one
+/// (`conventions/SPEED_OF_LIGHT.md` O4). `content_hash` is `None` only when the
+/// folder is missing, is not a directory, or could not be walked.
+pub(super) struct AddonRootProbe {
+    pub(super) fingerprint: AddonRootFingerprint,
+    pub(super) content_hash: Option<String>,
+}
+
+pub(super) fn addon_root_fingerprint(path: &str) -> AddonRootProbe {
     let trimmed = path.trim();
     if trimmed.is_empty() {
-        return AddonRootFingerprint::default();
+        return AddonRootProbe {
+            fingerprint: AddonRootFingerprint::default(),
+            content_hash: None,
+        };
     }
     let root = Path::new(trimmed);
     let metadata = match std::fs::metadata(root) {
         Ok(metadata) => metadata,
-        Err(_) => return AddonRootFingerprint::default(),
+        Err(_) => {
+            return AddonRootProbe {
+                fingerprint: AddonRootFingerprint::default(),
+                content_hash: None,
+            };
+        }
     };
     let mut fingerprint = AddonRootFingerprint {
         exists: true,
@@ -213,9 +232,13 @@ pub(super) fn addon_root_fingerprint(path: &str) -> AddonRootFingerprint {
     };
 
     if !metadata.is_dir() {
-        return fingerprint;
+        return AddonRootProbe {
+            fingerprint,
+            content_hash: None,
+        };
     }
 
+    let mut content_hash = None;
     match collect_addon_root_fingerprint_stats(root) {
         Ok(stats) => {
             fingerprint.content_fingerprint_ready = true;
@@ -224,6 +247,7 @@ pub(super) fn addon_root_fingerprint(path: &str) -> AddonRootFingerprint {
             fingerprint.aggregate_file_size = stats.aggregate_file_size;
             fingerprint.newest_relevant_file_modified_ns = stats.newest_relevant_file_modified_ns;
             fingerprint.layout_hash = stats.layout_hash;
+            content_hash = Some(stats.content_hash);
         }
         Err(err) => {
             debug!(
@@ -233,7 +257,10 @@ pub(super) fn addon_root_fingerprint(path: &str) -> AddonRootFingerprint {
         }
     }
 
-    fingerprint
+    AddonRootProbe {
+        fingerprint,
+        content_hash,
+    }
 }
 
 #[derive(Default)]
@@ -243,56 +270,24 @@ struct AddonRootFingerprintStats {
     aggregate_file_size: u64,
     newest_relevant_file_modified_ns: u128,
     layout_hash: String,
+    content_hash: String,
 }
 
 fn collect_addon_root_fingerprint_stats(root: &Path) -> std::io::Result<AddonRootFingerprintStats> {
-    let mut dir_entries: Vec<String> = Vec::new();
-    let mut file_entries: Vec<(String, u64, u128)> = Vec::new();
-    let mut pending_dirs: Vec<PathBuf> = vec![root.to_path_buf()];
-
-    while let Some(dir_path) = pending_dirs.pop() {
-        for entry in std::fs::read_dir(&dir_path)? {
-            let entry = entry?;
-            let entry_path = entry.path();
-            let file_type = entry.file_type()?;
-            let entry_meta = entry.metadata()?;
-            let relative_path = match entry_path.strip_prefix(root) {
-                Ok(relative) => {
-                    crate::core::utils::content_hash::normalize_path(&relative.to_string_lossy())
-                }
-                Err(_) => continue,
-            };
-
-            if file_type.is_dir() {
-                pending_dirs.push(entry_path);
-                dir_entries.push(relative_path);
-            } else if file_type.is_file()
-                && !crate::core::utils::content_hash::is_foxy_temp_artifact_path(&relative_path)
-            {
-                file_entries.push((
-                    relative_path,
-                    entry_meta.len(),
-                    system_time_unix_ns(entry_meta.modified().ok()),
-                ));
-            }
-        }
-    }
-
-    dir_entries.sort();
-    file_entries.sort_by(|a, b| a.0.cmp(&b.0));
+    let scan = crate::core::utils::content_hash::scan_addon_folder(root)?;
 
     let mut aggregate_file_size = 0u64;
     let mut newest_relevant_file_modified_ns = 0u128;
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"FOXY_ADDON_ROOT_FINGERPRINT_V2");
 
-    hasher.update(&(dir_entries.len() as u64).to_le_bytes());
-    for relative_path in &dir_entries {
+    hasher.update(&(scan.dir_entries.len() as u64).to_le_bytes());
+    for relative_path in &scan.dir_entries {
         hasher.update(relative_path.as_bytes());
     }
 
-    hasher.update(&(file_entries.len() as u64).to_le_bytes());
-    for (relative_path, len, modified_ns) in &file_entries {
+    hasher.update(&(scan.file_entries.len() as u64).to_le_bytes());
+    for (relative_path, len, modified_ns) in &scan.file_entries {
         aggregate_file_size = aggregate_file_size.saturating_add(*len);
         newest_relevant_file_modified_ns = newest_relevant_file_modified_ns.max(*modified_ns);
         hasher.update(relative_path.as_bytes());
@@ -301,11 +296,12 @@ fn collect_addon_root_fingerprint_stats(root: &Path) -> std::io::Result<AddonRoo
     }
 
     Ok(AddonRootFingerprintStats {
-        relevant_file_count: file_entries.len() as u64,
-        relevant_dir_count: dir_entries.len() as u64,
+        relevant_file_count: scan.file_entries.len() as u64,
+        relevant_dir_count: scan.dir_entries.len() as u64,
         aggregate_file_size,
         newest_relevant_file_modified_ns,
         layout_hash: crate::core::utils::content_hash::blake3_hex(hasher),
+        content_hash: scan.content_hash(root),
     })
 }
 
@@ -573,15 +569,48 @@ mod tests {
 
     #[test]
     fn addon_root_fingerprint_empty_path_returns_default() {
-        let fp = addon_root_fingerprint("");
-        assert!(!fp.exists);
-        assert!(!fp.is_dir);
+        let probe = addon_root_fingerprint("");
+        assert!(!probe.fingerprint.exists);
+        assert!(!probe.fingerprint.is_dir);
+        assert!(probe.content_hash.is_none());
     }
 
     #[test]
     fn addon_root_fingerprint_whitespace_only_returns_default() {
-        let fp = addon_root_fingerprint("   ");
-        assert!(!fp.exists);
+        let probe = addon_root_fingerprint("   ");
+        assert!(!probe.fingerprint.exists);
+        assert!(probe.content_hash.is_none());
+    }
+
+    /// The content hash mixes in the folder path, and the probe walks the
+    /// trimmed one, so a padded stored path must still produce the digest its
+    /// clean form does. The blocking fallback stats the path as given, which
+    /// Windows rejects outright, so trimming here is what keeps a padded path
+    /// hashable at all rather than permanently unequal to its stored value.
+    #[test]
+    fn addon_root_fingerprint_content_hash_ignores_surrounding_whitespace() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("one.pbo"), b"one").unwrap();
+
+        let clean = addon_root_fingerprint(&dir.path().to_string_lossy());
+        let padded = addon_root_fingerprint(&format!(" {} ", dir.path().to_string_lossy()));
+        assert!(clean.content_hash.is_some());
+        assert_eq!(clean.content_hash, padded.content_hash);
+    }
+
+    #[test]
+    fn addon_root_fingerprint_content_hash_matches_a_standalone_walk() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("addons")).unwrap();
+        std::fs::write(dir.path().join("addons/one.pbo"), b"one").unwrap();
+        std::fs::write(dir.path().join("two.pbo"), b"two").unwrap();
+
+        let probe = addon_root_fingerprint(&dir.path().to_string_lossy());
+        let standalone =
+            crate::core::utils::content_hash::calculate_addon_folder_content_hash(dir.path())
+                .unwrap();
+        assert_eq!(probe.content_hash.as_deref(), Some(standalone.as_str()));
+        assert!(probe.fingerprint.content_fingerprint_ready);
     }
 
     #[test]

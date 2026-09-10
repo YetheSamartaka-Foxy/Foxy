@@ -408,7 +408,7 @@ impl Foxy {
                             let profile_name = self
                                 .resolve_arma3_profile_for_repo(selected_idx)
                                 .unwrap_or_default();
-                            let missions = self.get_or_scan_missions(&profile_name);
+                            let missions = self.missions_for_render(&profile_name);
                             let valid = *idx < missions.len();
 
                             let btn_fg = if valid {

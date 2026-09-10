@@ -313,53 +313,51 @@ async fn quick_scan_preflight_combined_inner(
         });
     }
 
+    // Part rows only ever contribute two booleans here, and both are already
+    // decided whenever a higher level is missing. Probing with `LIMIT 1` stops
+    // at the first row that settles the question; the aggregate this replaced
+    // had to read every part row in the repository to reach the same answer,
+    // which cost over a second on a repository with 141k parts and gated the
+    // whole startup verdict (`conventions/SPEED_OF_LIGHT.md` O8).
     let part_stats_started = Instant::now();
-    let (part_count, missing_part_remote, missing_part_local) = match db
-        .query_one(
-            r#"SELECT
-                COUNT(*) AS total,
-                SUM(CASE WHEN sf.remote_checksum = '' THEN 1 ELSE 0 END) AS missing_remote,
-                SUM(CASE
-                    WHEN f.local_checksum IS NOT NULL
-                         AND f.local_checksum != ''
-                         AND f.local_checksum = f.remote_checksum
-                         AND f.remote_checksum != ''
-                    THEN 0
-                    WHEN sf.local_checksum IS NULL OR sf.local_checksum = ''
-                    THEN 1
-                    ELSE 0
-                END) AS missing_local
-            FROM subfiles sf
-            JOIN files f ON f.id = sf.file_id
-            WHERE sf.file_id IN (
-                SELECT af.file_id
-                FROM addon_files af
-                JOIN repository_addons ra ON ra.addon_id = af.addon_id
-                JOIN addons a ON a.id = ra.addon_id
-                WHERE ra.repository_id = ? AND a.enabled = 1
-            )"#,
-            params![repository.id as i64],
+    let deferred_parts = context.deferred_part_count() > 0;
+    let part_rows_exist = if deferred_parts {
+        true
+    } else {
+        scoped_part_exists(&db, repository.id as i64, repo_url, None).await?
+    };
+    // `None` means "not probed because a higher level already decided", which
+    // the log must not render as a proven absence.
+    let missing_part_remote = if missing_mod_remote > 0 || missing_file_remote > 0 {
+        None
+    } else {
+        Some(
+            scoped_part_exists(
+                &db,
+                repository.id as i64,
+                repo_url,
+                Some(PART_MISSING_REMOTE_CHECKSUM),
+            )
+            .await?,
         )
-        .await
+    };
+    let missing_part_local = if repo_missing_tree || missing_mod_local > 0 || missing_file_local > 0
     {
-        Ok(Some(row)) => {
-            let total: i64 = row.get_i64("total").unwrap_or(0);
-            let mr: i64 = row.get_i64("missing_remote").unwrap_or(0);
-            let ml: i64 = row.get_i64("missing_local").unwrap_or(0);
-            (total, mr, ml)
-        }
-        Ok(None) => (0i64, 0i64, 0i64),
-        Err(err) => {
-            warn!(
-                "Failed to query part stats for preflight {}: {}",
-                repo_url, err
-            );
-            return None;
-        }
+        None
+    } else {
+        Some(
+            scoped_part_exists(
+                &db,
+                repository.id as i64,
+                repo_url,
+                Some(PART_MISSING_LOCAL_CHECKSUM),
+            )
+            .await?,
+        )
     };
     let part_stats_elapsed = part_stats_started.elapsed();
 
-    let parts_metadata_available = part_count > 0 || context.deferred_part_count() > 0;
+    let parts_metadata_available = part_rows_exist;
     if !parts_metadata_available {
         info!(
             "Quick scan preflight for repo {}: part metadata is missing (files={} parts=0, no deferred rows); remote metadata refresh required before local hashing",
@@ -368,13 +366,13 @@ async fn quick_scan_preflight_combined_inner(
     }
     let remote_ready = missing_mod_remote == 0
         && missing_file_remote == 0
-        && missing_part_remote == 0
+        && !missing_part_remote.unwrap_or(false)
         && parts_metadata_available;
 
     let tree_missing = repo_missing_tree
         || missing_mod_local > 0
         || missing_file_local > 0
-        || missing_part_local > 0;
+        || missing_part_local.unwrap_or(false);
     let content_ready =
         !repo_missing_content && missing_mod_content == 0 && missing_file_content == 0;
     let content_missing_all = repo_missing_content
@@ -393,7 +391,7 @@ async fn quick_scan_preflight_combined_inner(
     };
 
     info!(
-        "Quick scan preflight timings: repo={} outcome=full bootstrap_plan={:?} repository_query={:.2?} mod_stats={:.2?} file_stats={:.2?} part_stats={:.2?} total={:.2?} addons={} files={} parts={} missing_remote={}/{}/{} missing_local={}/{}/{} missing_content={}/{}",
+        "Quick scan preflight timings: repo={} outcome=full bootstrap_plan={:?} repository_query={:.2?} mod_stats={:.2?} file_stats={:.2?} part_stats={:.2?} total={:.2?} addons={} files={} parts_present={} missing_remote={}/{}/{} missing_local={}/{}/{} missing_content={}/{}",
         repo_url,
         bootstrap_plan,
         repository_query_elapsed,
@@ -403,13 +401,13 @@ async fn quick_scan_preflight_combined_inner(
         preflight_started.elapsed(),
         mod_count,
         file_count,
-        part_count,
+        part_rows_exist,
         missing_mod_remote,
         missing_file_remote,
-        missing_part_remote,
+        probe_log_value(missing_part_remote),
         missing_mod_local,
         missing_file_local,
-        missing_part_local,
+        probe_log_value(missing_part_local),
         missing_mod_content,
         missing_file_content
     );
@@ -418,6 +416,70 @@ async fn quick_scan_preflight_combined_inner(
         remote_ready,
         bootstrap_plan,
     })
+}
+
+/// A part row the server never published a checksum for.
+const PART_MISSING_REMOTE_CHECKSUM: &str = "sf.remote_checksum = ''";
+
+/// A part row that has never been hashed locally, unless its file is already
+/// proven clean at the file level, in which case its parts do not need one.
+const PART_MISSING_LOCAL_CHECKSUM: &str = "(sf.local_checksum IS NULL OR sf.local_checksum = '') \
+     AND NOT (f.local_checksum IS NOT NULL AND f.local_checksum != '' \
+     AND f.local_checksum = f.remote_checksum AND f.remote_checksum != '')";
+
+/// Existence probe over one repository's enabled-addon part rows.
+///
+/// `predicate` is a constant SQL fragment chosen by the caller, never user
+/// input. `LIMIT 1` is the point: the preflight needs booleans, and a scan that
+/// stops at the first qualifying row is what keeps a large repository from
+/// paying a full part-table read on every launch.
+///
+/// `None` on a query error, never `false`: a failed probe must not be read as
+/// "nothing is missing", which would let the preflight report remote metadata
+/// ready or the local tree complete on no evidence at all. Every caller
+/// propagates it into the conservative preflight fallback.
+async fn scoped_part_exists(
+    db: &FoxyDb,
+    repository_id: i64,
+    repo_url: &str,
+    predicate: Option<&str>,
+) -> Option<bool> {
+    let filter = predicate
+        .map(|predicate| format!("AND {predicate}"))
+        .unwrap_or_default();
+    let sql = format!(
+        r#"SELECT 1 FROM subfiles sf
+            JOIN files f ON f.id = sf.file_id
+            WHERE sf.file_id IN (
+                SELECT af.file_id
+                FROM addon_files af
+                JOIN repository_addons ra ON ra.addon_id = af.addon_id
+                JOIN addons a ON a.id = ra.addon_id
+                WHERE ra.repository_id = ? AND a.enabled = 1
+            )
+            {filter}
+            LIMIT 1"#
+    );
+    match db.query_one(&sql, params![repository_id]).await {
+        Ok(row) => Some(row.is_some()),
+        Err(err) => {
+            warn!(
+                "Failed to probe part rows for preflight {}: {}",
+                repo_url, err
+            );
+            None
+        }
+    }
+}
+
+/// How a part probe reads in the preflight log: its answer, or that a higher
+/// level already decided and it never ran.
+fn probe_log_value(probed: Option<bool>) -> &'static str {
+    match probed {
+        Some(true) => "true",
+        Some(false) => "false",
+        None => "skipped",
+    }
 }
 
 /// Indexed existence probe for repository part metadata.

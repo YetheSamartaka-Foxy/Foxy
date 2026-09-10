@@ -226,13 +226,21 @@ pub fn start_gui(
     env: &Environment,
     timeout: Duration,
 ) -> Result<ManagedChild> {
+    // Append rather than truncate: a `startup` operation restarts the app inside
+    // one run, and truncating would drop every earlier launch's output.
+    let append = |path: PathBuf| -> Result<File> {
+        Ok(std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?)
+    };
     let mut command = Command::new(exe);
     command
         .arg("--config-dir")
         .arg(config)
         .args(["ui", "--agent-gui", "--agent-port", "0"])
-        .stdout(File::create(run.join("app.out"))?)
-        .stderr(File::create(run.join("app.log"))?);
+        .stdout(append(run.join("app.out"))?)
+        .stderr(append(run.join("app.log"))?);
     environment(&mut command, env);
     let mut process = ManagedChild::spawn(&mut command)?;
     let deadline = Instant::now() + timeout.min(Duration::from_secs(120));

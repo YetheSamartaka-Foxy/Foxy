@@ -146,6 +146,12 @@ pub struct Foxy {
     pub pending_arma3_profile_action: Option<crate::ui::views::settings::Arma3ProfileAction>,
     /// Cached editor missions for the currently viewed repository.
     pub cached_missions: Option<CachedMissionList>,
+    /// In-flight background editor-mission scan. A profile with hundreds of
+    /// missions takes hundreds of milliseconds to walk, and the repository view
+    /// renders on the first frame, so the scan must never run on the UI thread.
+    pub(crate) mission_scan_rx: Option<StdReceiver<CachedMissionList>>,
+    /// Profile name the in-flight scan is for, so repeated frames coalesce.
+    pub(crate) mission_scan_in_flight: Option<String>,
     pub previous_debug_mode: bool,
     pub stored_settings: Option<SettingsViewState>,
     pub stored_repositories: Option<RepositoryViewState>,
@@ -387,6 +393,18 @@ pub struct Foxy {
     pub pending_repository_visual_folder_delete: Option<RepositoryVisualFolderDeleteState>,
     pub startup_frame_rendered: bool,
     pub startup_tasks_started: bool,
+    /// Result of the background startup system summary: `true` when a drive
+    /// Foxy writes through is critically full. Building the summary costs
+    /// hundreds of milliseconds, so it never gates the first frame.
+    pub(crate) startup_diagnostics_rx: Option<StdReceiver<bool>>,
+    /// Process start to first painted frame; `None` until that frame lands.
+    pub(crate) startup_first_frame_at: Option<Duration>,
+    /// Repositories the startup quick-scan plan was asked to consider. Held on
+    /// `Foxy` rather than in the tracker because the plan starts during
+    /// `Foxy::new`, before the tracker exists.
+    pub(crate) startup_quick_scan_requested: usize,
+    /// O8 timeline for this launch; `None` until startup work is dispatched.
+    pub(crate) startup_sync: Option<runtime::StartupSyncTracker>,
     pub close_requested_at: Option<Instant>,
     pub update_modal_sorted_mod_indices: Vec<usize>,
     pub update_modal_mod_name_lowers: Vec<String>,

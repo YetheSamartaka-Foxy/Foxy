@@ -229,9 +229,15 @@ impl Foxy {
 
         if self.startup_frame_rendered && !self.startup_tasks_started {
             self.startup_tasks_started = true;
+            self.begin_startup_sync_tracking(self.startup_first_frame_at.unwrap_or_default());
             if !self.settings_view_state.debug_mode {
                 self.restore_pending_updates();
-                if self.settings_view_state.auto_quick_scan_on_launch {
+                // `Foxy::new` already starts this plan when the database is
+                // safe to open; only launches that skipped it start one here.
+                if self.settings_view_state.auto_quick_scan_on_launch
+                    && self.startup_quick_scan_filter_worker.is_none()
+                    && self.startup_quick_scan_filter_rx.is_none()
+                {
                     self.start_quick_local_scan();
                 }
                 self.start_fs_watcher();
@@ -249,6 +255,8 @@ impl Foxy {
             }
         }
 
+        self.poll_startup_diagnostics();
+        self.poll_mission_scan();
         self.poll_restore_pending_updates();
         self.poll_startup_quick_scan_filter_results();
         if self.startup_tasks_started {
@@ -291,6 +299,7 @@ impl Foxy {
         self.process_scheduled_jobs(&ctx);
         self.process_addon_hash_recalc_queue();
         self.maybe_sample_memory_diagnostics();
+        self.maybe_emit_startup_sol();
         self.handle_tray_events(&ctx);
 
         while let Ok((address, port, status)) = self.server_updates.try_recv() {
@@ -436,6 +445,7 @@ impl Foxy {
 
         if !self.startup_frame_rendered {
             self.startup_frame_rendered = true;
+            self.startup_first_frame_at = Some(crate::core::api::process_start_elapsed());
             ctx.request_repaint();
         }
     }

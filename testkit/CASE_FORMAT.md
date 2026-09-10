@@ -18,6 +18,7 @@ the ignored run directory.
 | `harness` | no | `gui` | `gui` or `cli` |
 | `timeout_s` | no | `3600` | positive integer |
 | `config_dir` | no | run-local `config` | isolated path, never the live Foxy root |
+| `config_seed` | no | none | directory copied into `config_dir` before the fixture |
 | `fixture` | no | generated from `repository` | agent-gui fixture object |
 | `origin` | no | none | `{root, port}` local origin served for the run |
 | `profile` | no | `false` | boolean; sets `FOXY_PROFILE=1` for the run |
@@ -29,6 +30,18 @@ written straight into the isolated config directory in the legacy flat layout
 so Foxy's one-shot game-space migration converts it on first start. Supply
 `fixture.files` to use an exact fixture instead; only `settings.json`,
 `repositories.json`, and `repository_spaces.json` are accepted.
+
+`config_seed` copies a real Foxy configuration directory into the isolated
+config directory, so a case can measure an already-populated profile - real
+repositories, real spaces, a warm database - instead of a bootstrap. The source
+is only read; `database.lock`, `database.owner`, `logs/` and `backups/` are
+skipped because they belong to whichever app instance is running, and
+`guards.require_no_other_foxy` is what keeps the copy from being torn by a live
+app writing into it. A seeded case needs no fixture: supplying one anyway would
+write the flat legacy layout over the seed and trigger the game-space migration
+on the very state the case is measuring, so fixture generation is skipped unless
+the case sets `fixture.files` explicitly. The copied byte count is recorded in
+`config-seed.json` in the run directory.
 
 When `origin` is present the runner serves `origin.root` on `origin.port`
 (loopback, byte-range capable) for the duration of the case, and a perf case
@@ -85,11 +98,31 @@ no unallowlisted WARN or ERROR entries.
 | `thresholds` | no | `{}` | Per-metric `{min,max}` hard gates |
 | `guards` | no | defaults below | Precondition object |
 
-Supported operations are `remote-refresh`, `quick-check`, `recheck`,
+Supported operations are `startup`, `remote-refresh`, `quick-check`, `recheck`,
 `recheck-integrity`, `force-redownload`, `download`, `wipe-db`, `mutate`, and
 `restore`. Each operation may contain `wait_timeout_s` and `expect`. GUI cannot
 express remote-refresh-only or quick-check, so those operations require the CLI
 harness. Setup operations are not ledgered.
+
+`startup` measures O8, launch to sync verdict. It stops the running app, starts
+a fresh one, and waits for the `startup-sync` busy reason to clear, which the app
+holds from the moment startup work is dispatched until the last repository has a
+verdict. It requires the GUI harness, and it fails when the run produced no
+`SOL op=startup` line, because that means the app never reached a verdict. The
+app's own line is the authoritative timeline; the runner's `elapsed_s` is only
+the outer bracket and includes the driver's readiness polling. The row carries:
+
+| field | meaning |
+| --- | --- |
+| `startup_total_ms` | process start to the last repository's verdict |
+| `first_frame_ms` | process start to the first painted frame |
+| `dispatch_ms` | process start to startup work being dispatched |
+| `eligibility_ms` | dispatch to the eligibility plan landing |
+| `verdict_ms` | dispatch to the last repository's verdict |
+
+Because the operation restarts the app, the config directory persists across
+iterations: iteration 0 is the cold pass and later iterations are warm, exactly
+as for every other perf case.
 
 An expectation is `{path, equals}`, `{path, min}`, `{path, max}`, or
 `{path, between:[low,high]}`. Dotted paths resolve against the collected result.

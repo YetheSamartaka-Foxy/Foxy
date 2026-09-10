@@ -85,6 +85,18 @@ response corpus in `tests/driver-corpus/`.
   `threshold-failed`, `assertion-failed`). `breakdown-*.json` localizes a
   regression to network, disk, database, hash, scan, or patch.
 
+## Measuring startup
+
+`"op": "startup"` restarts the app inside the run and waits for the
+`startup-sync` busy reason to clear, then reads the app's `SOL op=startup` line
+for the timeline (first frame, dispatch, eligibility, verdict). Give the case a
+`config_seed` pointing at a real Foxy configuration directory so it measures a
+populated profile rather than a first-run bootstrap; the source is read-only and
+`require_no_other_foxy` is what keeps the copy consistent, so close Foxy first.
+
+Read `startup` rows through the app's line, not the runner's `elapsed_s`: the
+latter includes the driver's readiness polling and is quantized to it.
+
 ## The local origin
 
 `testkit/origin/data/` holds repository mirrors served on loopback so a perf case

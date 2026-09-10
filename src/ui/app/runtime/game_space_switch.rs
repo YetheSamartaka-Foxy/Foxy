@@ -271,6 +271,8 @@ impl Foxy {
         // Addon inventory, missions, and per-repository caches.
         self.invalidate_addon_inventory_cache();
         self.cached_missions = None;
+        self.mission_scan_rx = None;
+        self.mission_scan_in_flight = None;
         self.mission_row_galleys = Default::default();
         self.repository_list_galleys = Default::default();
         self.update_detail_file_galleys = Default::default();
@@ -364,6 +366,10 @@ impl Foxy {
         self.startup_pending_restore_rx = None;
         self.startup_pending_restore_worker = None;
         self.startup_repository_layout_logged = false;
+        // O8 covers a launch, not a space switch; a live tracker here would
+        // never settle and would pin the `startup-sync` busy reason.
+        self.startup_sync = None;
+        self.startup_quick_scan_requested = 0;
         self.prelaunch_recheck_at = None;
 
         // Sync/download progress and results.
@@ -473,6 +479,10 @@ const APP_GLOBAL_FOXY_FIELDS: &[&str] = &[
     "needs_repaint",
     "startup_frame_rendered",
     "startup_tasks_started",
+    "startup_first_frame_at",
+    // The machine summary describes the host, not a game space, and is built
+    // once per launch.
+    "startup_diagnostics_rx",
     "close_requested_at",
     "current_view",
     "last_view",

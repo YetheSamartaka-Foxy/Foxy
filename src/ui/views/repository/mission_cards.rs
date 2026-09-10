@@ -37,6 +37,7 @@ const MISSION_ROW_INNER_HEIGHT: f32 = 42.0;
 const MISSION_ROW_SPACING: f32 = 2.0;
 const MISSION_ROW_HEIGHT: f32 = MISSION_ROW_INNER_HEIGHT + MISSION_ROW_SPACING;
 const MISSION_SECTION_BOTTOM_MARGIN: f32 = 8.0;
+const MISSION_CACHE_TTL: Duration = Duration::from_secs(30);
 
 impl Foxy {
     pub(super) fn visible_editor_mission_entry_count(
@@ -44,7 +45,7 @@ impl Foxy {
         selected_idx: usize,
     ) -> Option<usize> {
         let profile_name = self.resolve_arma3_profile_for_repo(selected_idx)?;
-        let missions = self.get_or_scan_missions(&profile_name);
+        let missions = self.missions_for_render(&profile_name);
 
         if missions.is_empty() {
             return Some(0);
@@ -103,13 +104,17 @@ impl Foxy {
             profile_display_name
         ));
 
-        let missions = self.get_or_scan_missions(&profile_name);
+        let missions = self.missions_for_render(&profile_name);
 
         if missions.is_empty() {
-            ui.label(tr_fmt(
-                "No editor missions found for profile \"{profile}\".",
-                &[("profile", profile_display_name)],
-            ));
+            if self.mission_scan_in_flight.is_some() {
+                ui.label(tr("Loading..."));
+            } else {
+                ui.label(tr_fmt(
+                    "No editor missions found for profile \"{profile}\".",
+                    &[("profile", profile_display_name)],
+                ));
+            }
             return;
         }
 
@@ -560,13 +565,86 @@ impl Foxy {
             .map(|p| p.name.clone())
     }
 
-    /// Get cached missions or scan the profile directory.
-    pub(crate) fn get_or_scan_missions(&mut self, profile_name: &str) -> Vec<EditorMission> {
-        let cache_ttl = Duration::from_secs(30);
+    /// Missions to render for `profile_name`, never blocking the frame.
+    ///
+    /// A fresh cache is served directly. Otherwise a background scan starts and
+    /// the previous list for the same profile is served while it runs, because
+    /// walking a profile with hundreds of missions costs hundreds of
+    /// milliseconds and this runs on the first painted frame
+    /// (`conventions/SPEED_OF_LIGHT.md` O8).
+    pub(crate) fn missions_for_render(&mut self, profile_name: &str) -> Vec<EditorMission> {
+        if let Some(cache) = self.cached_missions.as_ref()
+            && cache.profile_name == profile_name
+            && cache.scanned_at.elapsed() < MISSION_CACHE_TTL
+        {
+            return cache.missions.clone();
+        }
+        self.request_mission_scan(profile_name);
+        self.cached_missions
+            .as_ref()
+            .filter(|cache| cache.profile_name == profile_name)
+            .map(|cache| cache.missions.clone())
+            .unwrap_or_default()
+    }
 
+    fn request_mission_scan(&mut self, profile_name: &str) {
+        if self.mission_scan_in_flight.as_deref() == Some(profile_name) {
+            return;
+        }
+        let Some(profile_path) = self
+            .detected_arma3_profiles
+            .iter()
+            .find(|profile| profile.name == profile_name)
+            .map(|profile| profile.path.clone())
+        else {
+            self.cached_missions = Some(CachedMissionList {
+                profile_name: profile_name.to_string(),
+                missions: Vec::new(),
+                scanned_at: Instant::now(),
+            });
+            return;
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.mission_scan_rx = Some(rx);
+        self.mission_scan_in_flight = Some(profile_name.to_string());
+        let profile_name = profile_name.to_string();
+        let repaint_ctx = self.repaint_ctx.clone();
+        std::thread::spawn(move || {
+            let missions = crate::core::arma3_missions::scan_profile_missions(&profile_path);
+            let _ = tx.send(CachedMissionList {
+                profile_name,
+                missions,
+                scanned_at: Instant::now(),
+            });
+            Self::request_background_repaint(repaint_ctx.as_ref());
+        });
+    }
+
+    pub(crate) fn poll_mission_scan(&mut self) {
+        let Some(rx) = self.mission_scan_rx.as_ref() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(cache) => {
+                self.cached_missions = Some(cache);
+                self.mission_scan_rx = None;
+                self.mission_scan_in_flight = None;
+                self.needs_repaint = true;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.mission_scan_rx = None;
+                self.mission_scan_in_flight = None;
+            }
+        }
+    }
+
+    /// Get cached missions or scan the profile directory. Blocking; only for
+    /// user-initiated mission actions that need the current on-disk list.
+    pub(crate) fn get_or_scan_missions(&mut self, profile_name: &str) -> Vec<EditorMission> {
         if let Some(ref cache) = self.cached_missions
             && cache.profile_name == profile_name
-            && cache.scanned_at.elapsed() < cache_ttl
+            && cache.scanned_at.elapsed() < MISSION_CACHE_TTL
         {
             return cache.missions.clone();
         }

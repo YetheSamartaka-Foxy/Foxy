@@ -11,6 +11,7 @@ use crate::{
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 use std::{
+    cell::RefCell,
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -37,6 +38,9 @@ struct ContextRun<'a> {
     timeout: Duration,
     mode: &'a str,
     gate: u32,
+    /// The live GUI child, when the case runs on the GUI harness. The `startup`
+    /// operation replaces it, so it cannot be owned by `execute` alone.
+    gui: &'a RefCell<Option<launch::ManagedChild>>,
 }
 
 impl ContextRun<'_> {
@@ -52,11 +56,84 @@ impl ContextRun<'_> {
             .data)
     }
     fn operation(&self, operation: &Value) -> Result<Value> {
+        if operation["op"].as_str() == Some("startup") {
+            return self.startup_operation(operation);
+        }
         if self.case["harness"].as_str().unwrap_or("gui") == "cli" {
             self.cli_operation(operation)
         } else {
             self.gui_operation(operation)
         }
+    }
+
+    /// Restart the app and measure launch to sync verdict (O8).
+    ///
+    /// The app brackets its own timeline with the `startup-sync` busy reason and
+    /// publishes it as one `SOL op=startup` line, so the runner only has to
+    /// restart the process, wait for that flag to clear, and slice the log.
+    fn startup_operation(&self, operation: &Value) -> Result<Value> {
+        ensure!(
+            self.case["harness"].as_str().unwrap_or("gui") == "gui",
+            "The startup operation requires the gui harness"
+        );
+        // A measured startup must begin from a stopped app, and the previous
+        // instance has to release the game-space database lock first.
+        if let Some(gui) = self.gui.borrow_mut().as_mut() {
+            launch::stop_gui(gui, self.exe, self.config, self.env);
+        }
+        drop(self.gui.borrow_mut().take());
+        let offsets = logs::offsets(self.run, self.config)?;
+        let wait = operation["wait_timeout_s"]
+            .as_u64()
+            .unwrap_or(self.timeout.as_secs());
+        let started = Instant::now();
+        let child = launch::start_gui(
+            self.exe,
+            self.config,
+            self.run,
+            self.env,
+            Duration::from_secs(wait),
+        )?;
+        let driver_ready = started.elapsed();
+        *self.gui.borrow_mut() = Some(child);
+        self.driver(
+            &[
+                "wait".into(),
+                "--busy-reason-cleared".into(),
+                "startup-sync".into(),
+                "--timeout-ms".into(),
+                (wait * 1000).to_string(),
+            ],
+            Duration::from_secs(wait + 10),
+        )?;
+        let elapsed = started.elapsed().as_secs_f64();
+        let progress = self.data(&["progress"])?;
+        let snapshot = self.data(&["snapshot"])?;
+        let log = logs::delta(&offsets, self.run, self.config)?;
+        let profile = launch::assert_database_mode(&log, self.mode, self.gate)?;
+        let record = sol::operation(&sol::parse(&log), "startup");
+        ensure!(
+            !record.is_null(),
+            "Startup operation produced no `SOL op=startup` line; the app did not reach a sync verdict"
+        );
+        let summary = json!({
+            "total_ms": (elapsed * 1000.0).round(),
+            "driver_ready_ms": (driver_ready.as_secs_f64() * 1000.0).round(),
+            "startup_total_ms": record["actual_s"].as_f64().map(|v| (v * 1000.0).round()),
+            "first_frame_ms": record["first_frame_s"].as_f64().map(|v| (v * 1000.0).round()),
+            "dispatch_ms": record["dispatch_s"].as_f64().map(|v| (v * 1000.0).round()),
+            "eligibility_ms": record["eligibility_s"].as_f64().map(|v| (v * 1000.0).round()),
+            "verdict_ms": record["verdict_s"].as_f64().map(|v| (v * 1000.0).round()),
+            "repos": record["repos"],
+            "quick_scan_repos": record["quick_scan_repos"],
+            "eligible": record["eligible"],
+            "prevalidated": record["prevalidated"],
+            "remote_changed": record["remote_changed"],
+            "rechecks": record["rechecks"],
+        });
+        Ok(
+            json!({"elapsed_s":elapsed,"summary":summary,"progress":progress,"snapshot":snapshot,"logs":null,"log_text":log,"database_profile":profile}),
+        )
     }
     fn cli_operation(&self, operation: &Value) -> Result<Value> {
         let name = operation["op"].as_str().context("Missing operation name")?;
@@ -435,6 +512,13 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
             &json!({"url":address,"mods":fixture::mod_count(&manifest)}),
         )?;
     }
+    if let Some(source) = resolved.get("config_seed").and_then(Value::as_str) {
+        let bytes = fixture::seed(Path::new(source), &config)?;
+        write_json(
+            &run.join("config-seed.json"),
+            &json!({"source":source,"bytes":bytes}),
+        )?;
+    }
     fixture::install(&resolved, &config, &run)?;
     let operations = resolved["operations"]
         .as_array()
@@ -457,11 +541,11 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
     } else {
         None
     };
-    let mut gui = if harness == "gui" {
+    let gui: RefCell<Option<launch::ManagedChild>> = RefCell::new(if harness == "gui" {
         Some(launch::start_gui(&exe, &config, &run, &env, timeout)?)
     } else {
         None
-    };
+    });
     let result = (|| -> Result<Value> {
         let context = ContextRun {
             case: &resolved,
@@ -472,6 +556,7 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
             timeout,
             mode: &options.database_mode,
             gate: options.db_write_gate,
+            gui: &gui,
         };
         let mut effective_gate = options.db_write_gate;
         // FOXY_DB_POOL_IDLE is inherited by the app, so a row recorded under an
@@ -479,7 +564,7 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
         let pool_idle = std::env::var("FOXY_DB_POOL_IDLE")
             .ok()
             .and_then(|value| value.trim().parse::<u32>().ok());
-        if gui.is_some() {
+        if gui.borrow().is_some() {
             let deadline =
                 Instant::now() + Duration::from_secs(if kind == "perf" { 60 } else { 5 });
             loop {
@@ -675,7 +760,7 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
             json!({"status":"pass","case_id":id,"run_id":run_id,"run_dir":run,"database_mode":options.database_mode,"db_write_gate":effective_gate,"comparison":comparison}),
         )
     })();
-    if let Some(gui) = &mut gui {
+    if let Some(gui) = gui.borrow_mut().as_mut() {
         launch::stop_gui(gui, &exe, &config, &env);
     }
     if let Some(mutation) = &mutation {

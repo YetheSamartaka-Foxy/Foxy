@@ -77,11 +77,23 @@ pub fn build_row(
         ("download", "download"),
         ("hash", "hash"),
         ("quick_scan", "quick_scan"),
+        ("startup", "startup"),
+        ("startup_probe", "startup_probe"),
+        ("app_update_check", "app_update_check"),
     ] {
         metadata[field] = sol::operation(sol, op);
     }
     let mut sums = json!({"delta_savings_percent":round(delta_savings(summary),4)});
-    for key in ["download_stage_ms", "hash_stage_ms", "total_ms"] {
+    for key in [
+        "download_stage_ms",
+        "hash_stage_ms",
+        "total_ms",
+        "startup_total_ms",
+        "first_frame_ms",
+        "dispatch_ms",
+        "eligibility_ms",
+        "verdict_ms",
+    ] {
         sums[key] = summary[key].clone();
     }
     for (key, metric) in [("files_updated", "files"), ("downloaded_bytes", "bytes")] {

@@ -52,6 +52,7 @@ pub use fs_watcher::spawn_repo_fs_watcher;
 pub(crate) use logging::send_progress_event;
 pub use logging::{
     activity_log_generation, activity_log_snapshot, logger_health, next_operation_id,
+    process_start_elapsed,
 };
 pub(crate) use logging::{ensure_logger, ensure_logger_with_terminal};
 pub use quick_scan::{
@@ -59,8 +60,8 @@ pub use quick_scan::{
     recalculate_hashes_for_addon_by_name, spawn_quick_local_scan, spawn_quick_local_scan_instances,
 };
 pub use startup_diagnostics::{
-    StartupStoragePath, all_storage_devices_lines, log_startup_system_diagnostics,
-    low_space_warning_lines, startup_system_diagnostics_lines,
+    StartupStoragePath, all_storage_devices_lines, spawn_startup_system_diagnostics,
+    startup_system_diagnostics_lines,
 };
 pub use sync_pipeline::spawn_repository_sync;
 pub use types::{

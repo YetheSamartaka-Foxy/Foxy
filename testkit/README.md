@@ -98,6 +98,24 @@ Foxy is spawned inside a Windows job object with
 first, so a normal run exercises Foxy's real shutdown path, but no orphan can
 outlive the runner even if the runner itself is killed.
 
+## Measuring startup
+
+A case whose operation is `startup` restarts the app and reads the app's own
+`SOL op=startup` timeline (`conventions/SPEED_OF_LIGHT.md` O8). Pair it with
+`config_seed` so the launch it measures is one against a populated profile:
+
+```json
+{
+  "config_seed": "C:/Users/<you>/AppData/Roaming/Foxy",
+  "operations": [{ "op": "startup", "wait_timeout_s": 600 }]
+}
+```
+
+The seed is copied into the run's isolated config directory once, before the app
+starts, and the live directory is only ever read. Close Foxy first: the copy is
+protected by `require_no_other_foxy`, not by a lock. See
+[`examples/perf-startup.example.json`](examples/perf-startup.example.json).
+
 ## Deep profiling
 
 A case with `"profile": true` runs Foxy with `FOXY_PROFILE=1`, and the run gains

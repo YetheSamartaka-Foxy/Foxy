@@ -140,9 +140,51 @@ fn generated(case: &Value) -> Result<Value> {
     }}))
 }
 
+/// Process-owned state that belongs to whichever app instance is running, not
+/// to the profile being measured. Copying it would hand the run a stale
+/// database claim or another session's logs.
+const SEED_EXCLUDED: &[&str] = &["database.lock", "database.owner", "logs", "backups"];
+
+/// Copy a real Foxy configuration directory into the isolated config directory
+/// so a case can measure an already-populated profile (a warm database, real
+/// repositories, real spaces) instead of bootstrapping one.
+///
+/// The source is only read. `guards.require_no_other_foxy` is what keeps the
+/// copy from being torn by a live app writing into it.
+pub fn seed(source: &Path, config: &Path) -> Result<u64> {
+    ensure!(
+        source.is_dir(),
+        "config_seed {} is not a directory",
+        source.display()
+    );
+    let mut copied = 0;
+    for entry in walkdir::WalkDir::new(source)
+        .into_iter()
+        .filter_entry(|entry| {
+            !SEED_EXCLUDED.contains(&entry.file_name().to_string_lossy().as_ref())
+        })
+    {
+        let entry = entry?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let target = config.join(entry.path().strip_prefix(source)?);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        copied += fs::copy(entry.path(), &target)?;
+    }
+    Ok(copied)
+}
+
 pub fn install(case: &Value, config: &Path, run: &Path) -> Result<()> {
+    let seeded = case.get("config_seed").and_then(Value::as_str).is_some();
     let fixture = match case.get("fixture").filter(|v| v["files"].is_object()) {
         Some(value) => value.clone(),
+        // A seeded config directory already carries the profile; generating a
+        // flat legacy fixture over it would trigger the game-space migration
+        // and replace the very state the case is measuring.
+        None if seeded => return Ok(()),
         None => generated(case)?,
     };
     let files = fixture["files"]

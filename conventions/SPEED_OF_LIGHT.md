@@ -84,6 +84,9 @@ Currently emitted lines:
 | `SOL op=download` | end of every download run (`download_files/orchestrator.rs`) | `files`, `peak_1s_bps`, `delta_savings_percent` |
 | `SOL op=hash` | every part-hash run (`calculate_hashes/scheduling.rs`) | `label`, `files`, `parts`, `compute_s`, `wait_s` |
 | `SOL op=quick_scan` | every quick scan, clean or dirty (`quick_scan/diff.rs`) | `repo`, `addons_total`, `addons_hashed`, `cache_hits_shared`, `cache_hits_persistent`, `deep_scan_files`, `addons_per_s`, `outcome` |
+| `SOL op=startup` | once per launch, when the last repository has a sync verdict (`ui/app/runtime/startup_sync.rs`) | `repos`, `quick_scan_repos`, `eligible`, `prevalidated`, `remote_changed`, `rechecks`, `first_frame_s`, `dispatch_s`, `eligibility_s`, `verdict_s` |
+| `SOL op=startup_probe` | the startup `repo.json` probe stage (`quick_scan/worker.rs`) | `repos`, `answered`, `changed` |
+| `SOL op=app_update_check` | every app update check (`tasks/app_update/spawn.rs`) | `op_id`, `mode`, `outcome` |
 
 Logs live in `%APPDATA%\Foxy\logs\foxy_rCURRENT.log` (rotated files alongside).
 Default file level is info. Debug-only cross-check lines (1 Hz `Download
@@ -115,7 +118,7 @@ Ratios computed against someone else's baseline are meaningless.
 | B1 | Network downlink `R_net` (bytes/s) | Speedtest/iperf3, or `peak_1s_bps` from a large unthrottled download run | 118,387,677 bytes/s (112.9 MiB/s), from 2026-09-10 `peak_1s_bps` against the reference origin; six consecutive runs land inside 118.07-118.39 MB/s, so this is the path ceiling, not a lucky sample |
 | B2 | Disk sequential read `R_disk_r` | `winsat disk -seq -read -drive C`, or max `throughput` among `Hash profile auto benchmark sample:` lines | _fill in_ |
 | B3 | Disk sequential write `R_disk_w` | `winsat disk -seq -write -drive C`, or `disk: ... p95` from `-- DOWNLOAD REPORT --` | _fill in_ |
-| B4 | RTT to repo server `RTT` | `ping <repo-host>`, or debug `Fetched response body for .../repo.json (... download=...)` - for a tiny payload, download ≈ RTT | _fill in_ (ICMP to the repo host timed out on 2026-06-13; use debug fetch timing) |
+| B4 | RTT to repo server `RTT` | `ping <repo-host>`, or debug `Fetched response body for .../repo.json (... download=...)` - for a tiny payload, download ≈ RTT | **40 ms** to the reference origin (2026-09-10, dependency-free `TcpStream` connect, median of 7: 39.2-50.0 ms). A `repo.json` GET costs 83 ms on a fresh connection (2 x RTT: handshake + request) and 42 ms on a kept-alive one (1 x RTT); the body is 1 062 bytes, so payload is not a term. ICMP to this host times out - measure with a TCP connect, not `ping` |
 | B5 | Quick-scan stat rate (entries/s) | `addons_per_s` from `SOL op=quick_scan` on a clean, warm-cache run - record best ever as the light | 2,462 addons/s, from 2026-06-13 best clean scan; re-record after persistent-cache fix |
 | B7 | Per-connection rate `R_conn` (bytes/s) | Fetch one large range over a single connection and divide; repeat at several concurrency levels to confirm it is flat. Needed for E7, E9 and E10 | ~1.6 MB/s at C=1, ~1.15 at C=48, ~0.88 at C=96 against the reference origin (2026-09-09). Server-imposed, not a client property |
 | B6 | Hash compute rate `R_hash` | `work_bytes / compute_s` from `SOL op=hash` (pure aggregated hash time, I/O excluded); BLAKE3 is multi-GB/s multicore, MD5 ≈ 0.5–0.7 GB/s per stream | ≈1,234,800,000 bytes/s (1.15 GiB/s), warm 2026-06-13 hash run; re-measure cold |
@@ -349,15 +352,63 @@ not show up in these sync ratios. Full matrix and how to re-run:
 
 ### O8 - Startup to first sync verdict
 
-- **Work**: first frame (UI) + per-repo remote probe + quick scan (O4/O6 per repo).
-- **Light** (E5): first frame is render-bound (~tens of ms); the sync verdict
-  light is `max` over repos of O6 light (probes run concurrently) - startup
-  must not serialize per-repo work.
+The second flagship latency path after O6: every launch pays it, and the user is
+looking at the window while it runs.
 
-**Cross-check (A8):** startup logs carry `Startup remote checksum probe ...`
-lines and the per-repo pipeline summaries; wall time from `Logger initialized`
-to the last repo's clean verdict, compared against `max(O6 light)`. The sync
-convention requires startup work after first paint - any frame stall during
+- **Work**: reach a painted window, then answer "is anything out of date?" for
+  every configured repository.
+- **Light** (E5, two serial stages that cannot overlap):
+  `T_ideal = T_paint + max_repos(2 x RTT + repo_json_bytes / R_net)`.
+  - `T_paint` is the platform's window + graphics-device creation. It is not
+    Foxy code and is measured, not assumed: 520-540 ms on this machine
+    (eframe/wgpu enumerating 8 adapters across Vulkan, DX12 and GL).
+  - The verdict term is O6's light per repository, and `max` rather than `sum`
+    because probes run at the same depth (E6). It is `2 x RTT`, not `1 x RTT`:
+    a cold repository connection pays a TCP handshake before the GET.
+- **Computed in-app**: `SOL op=startup` carries the whole timeline, so the ratio
+  is recomputable from one line.
+
+**Cross-check (A8):**
+
+1. Read `SOL op=startup`: `first_frame_s`, `dispatch_s`, `eligibility_s`,
+   `verdict_s`, `actual_s`.
+2. `first_frame_s` minus the renderer floor is Foxy's own pre-paint cost. It
+   must be near zero. Anything else there is work that does not gate the first
+   frame and belongs on a thread.
+3. `verdict_s` against `2 x RTT` (B4) is the verdict ratio.
+   `SOL op=startup_probe` isolates the network leg; `answered < repos` means the
+   probe budget elapsed and those repositories' remote freshness is unknown.
+4. `Quick scan preflight timings:` localizes a slow eligibility stage to a
+   specific repository and a specific query.
+
+**Levers**, in the order they paid on 2026-09-10:
+
+1. **Nothing blocking on the paint path.** The startup system summary
+   (sysinfo + drive + GPU + antivirus enumeration, 466 ms) and the editor
+   mission scan (267 ms, 3.7 s cold) both ran inside `Foxy::new` and the first
+   frame. Neither gates the window. Moving both to threads took first frame from
+   1 259-1 342 ms to 530-561 ms.
+2. **Start the network probe before the window exists.** The probe is two round
+   trips of pure latency and touches no UI. Running it after first paint stacks
+   it on top of renderer initialization; starting it in `Foxy::new` hides it
+   underneath, and the verdict lands almost as soon as the frame does.
+   `verdict_s` 128-142 ms -> 49-51 ms.
+3. **No aggregate where a boolean is wanted.** The preflight decided two
+   booleans with a `COUNT`/`SUM` over every part row in the repository - 1.03 s
+   on a 141k-part repository, and it gated all eleven repositories' verdicts
+   because the plan waits for the slowest. `LIMIT 1` probes, skipped entirely
+   when a higher level already decided the answer, give the same verdicts.
+4. **Bound the probe stage, not just each request.** A probe that outlives its
+   own timeout would otherwise hold every other repository indefinitely. The
+   stage budget sits above the per-request timeout, never below it: a shorter
+   stage would trade a rare hang for routinely abandoning slow-but-live
+   servers, and remote freshness lost is worse than a slow launch.
+
+**Not a lever**: `T_paint`. Restricting the graphics backend would cut adapter
+enumeration, but that trades a startup fraction for a compatibility risk on
+other people's machines, and it is not Foxy code.
+
+**Invariant**: startup work must not block first paint. A frame stall during
 probes is a regression regardless of ratios.
 
 ---
@@ -408,6 +459,11 @@ numbers straight from the logs.
 | 2026-09-09 | 1.2.0 pre-tail-work | 9950X3D HDD | download | 4.33 GB / 217 files | 65.12 s | 66.5 MB/s | peak_1s | 0.563 | tail | perf-redownload-small-hdd warm median 67.6 s |
 | 2026-09-10 | 1.2.0 post-tail-work | 9950X3D HDD | download | 4.33 GB / 217 files | 44.45 s | 97.4 MB/s | peak_1s | 0.825 | tail + disk | same case; warm median 48.4 s. Spinning media is noisy, read medians |
 | 2026-09-10 | probe (no Foxy code) | 9950X3D NVMe | path ceiling | 96 conns, 1/2/8 MiB chunks | 20 s each | 117.5-117.6 MB/s | 118.4 MB/s | ~0.99 | path | chunk size is free at full concurrency; 192 conns plateau identically |
+| 2026-09-10 | 1.2.0 pre-startup-work | 9950X3D NVMe | startup | 11 repos, 10 probed | 1.500 s | 1 verdict | 0.62 s (paint 0.54 + 2xRTT 0.08) | 0.41 | pre-paint blocking work | perf-startup-arma3-live warm median. first_frame 1.30 s, verdict 0.135 s |
+| 2026-09-10 | 1.2.0 post-startup-work | 9950X3D NVMe | startup | 11 repos, 10 probed | 0.660 s | 1 verdict | 0.59 s (paint 0.54 + 2xRTT 0.08 overlapped) | 0.89 | renderer init | same case. first_frame 0.54 s, verdict 0.050 s; probe now overlaps paint |
+| 2026-09-10 | 1.2.0 post-startup-work | 9950X3D NVMe | startup_probe | 10 repo.json | 0.092 s | 10 probes | 0.080 s (2 x B4) | 0.87 | RTT | all probes at one depth; 12 ms client overhead |
+| 2026-09-10 | probe (no Foxy code) | 9950X3D NVMe | repo.json GET | 1 062 B | 0.083 s | fresh conn | 0.080 s (2 x B4) | 0.96 | RTT | keep-alive repeat 0.042 s = 1 x RTT; payload is not a term |
+| 2026-09-10 | 1.2.0 | 9950X3D NVMe | app_update_check | 1 manifest | 0.085 s | 1 check | 0.080 s (2 x B4) | 0.94 | RTT | `SOL op=app_update_check`, outcome=up_to_date |
 | | | | | | | | | | | |
 
 Workflow rules:
@@ -416,8 +472,9 @@ Workflow rules:
    table) for before/after; "feels faster" doesn't merge.
 2. **Fix the largest `1/sol` first.** Sort by headroom × frequency of the
    operation, not by what is fun to optimize.
-3. **Never regress the flagships silently.** O1 (download throughput) and
-   O6 (no-change latency) ratios may only drop with a written rationale here.
+3. **Never regress the flagships silently.** O1 (download throughput), O6
+   (no-change latency) and O8 (startup) ratios may only drop with a written
+   rationale here.
 4. **Re-baseline on hardware/ISP/server changes** - old lights are lies.
 5. **Alert thresholds**: investigate `sol < 0.85` for limiter-capped downloads,
    `< 0.6` for mixed-resource ops (hash), and any `self_baseline` rate below

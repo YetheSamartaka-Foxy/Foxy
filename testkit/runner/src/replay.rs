@@ -63,7 +63,14 @@ pub fn run(dir: &Path) -> Result<Value> {
             sol::parse(&log)
         } else {
             let mut records = Vec::new();
-            for field in ["download", "hash", "quick_scan"] {
+            for field in [
+                "download",
+                "hash",
+                "quick_scan",
+                "startup",
+                "startup_probe",
+                "app_update_check",
+            ] {
                 if let Some(raw) = original[field]["raw"].as_str() {
                     records.extend(sol::parse(raw));
                 }

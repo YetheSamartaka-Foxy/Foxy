@@ -22,6 +22,18 @@ use crate::core::models::repository::{REPOSITORY_COLUMNS, repository_from_row};
 use crate::core::utils::fetch_json::fetch_json;
 
 const STARTUP_REMOTE_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
+/// Whole-stage budget for the startup remote probe.
+///
+/// A backstop for a probe that outlives its own per-request timeout, not a
+/// shorter deadline than it: cutting the stage before
+/// [`STARTUP_REMOTE_CHECK_TIMEOUT`] would abandon repositories whose server is
+/// merely slow, and a slow server that is about to answer "changed" is exactly
+/// the answer startup must not lose. Past this budget the outstanding
+/// repositories are reported as unknown remote freshness, which is what
+/// `conventions/SYNC_ALGO_CONVENTION.md` prescribes for a `repo.json` probe
+/// timeout: fall back to the local quick scan and say so in the logs.
+const STARTUP_REMOTE_PROBE_BUDGET: Duration =
+    Duration::from_secs(STARTUP_REMOTE_CHECK_TIMEOUT.as_secs() + 2);
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct StartupRepositoryInstance {
@@ -311,6 +323,7 @@ async fn startup_remote_changed_repositories(
     if repositories.is_empty() {
         return HashSet::new();
     }
+    let started = Instant::now();
 
     let normalized_urls = repositories
         .iter()
@@ -413,18 +426,49 @@ async fn startup_remote_changed_repositories(
         });
     }
 
+    let probed = join_set.len();
     let mut changed = HashSet::new();
-    while let Some(joined) = join_set.join_next().await {
-        match joined {
-            Ok((repository, true)) => {
-                changed.insert(repository);
+    let mut answered = 0usize;
+    let deadline = tokio::time::Instant::now() + STARTUP_REMOTE_PROBE_BUDGET;
+    loop {
+        match tokio::time::timeout_at(deadline, join_set.join_next()).await {
+            Ok(None) => break,
+            Ok(Some(Ok((repository, is_changed)))) => {
+                answered += 1;
+                if is_changed {
+                    changed.insert(repository);
+                }
             }
-            Ok((_repo_url, false)) => {}
-            Err(err) => {
+            Ok(Some(Err(err))) => {
+                answered += 1;
                 warn!("Startup remote checksum probe task failed: {}", err);
+            }
+            Err(_) => {
+                warn!(
+                    "Startup remote checksum probe budget of {:?} elapsed with {} of {} repositories unanswered; their remote freshness is unknown and the local quick scan decides",
+                    STARTUP_REMOTE_PROBE_BUDGET,
+                    probed.saturating_sub(answered),
+                    probed
+                );
+                break;
             }
         }
     }
+
+    info!(
+        "{}",
+        crate::core::utils::speed_of_light::sol_line(
+            "startup_probe",
+            0,
+            started.elapsed(),
+            &crate::core::utils::speed_of_light::SolLight::SelfBaseline,
+            &[
+                ("repos", probed.to_string()),
+                ("answered", answered.to_string()),
+                ("changed", changed.len().to_string()),
+            ],
+        )
+    );
     changed
 }
 

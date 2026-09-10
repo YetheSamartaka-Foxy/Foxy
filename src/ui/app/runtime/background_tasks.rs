@@ -163,6 +163,7 @@ impl Foxy {
             "Startup rechecks queued: {} (incomplete_skipped={} no_db_entry_skipped={} quick_scan_skipped={})",
             queued, skipped_incomplete, skipped_no_db, skipped_quick_scan
         );
+        self.note_startup_rechecks_queued(queued);
     }
 
     fn queue_startup_remote_refreshes(
@@ -207,6 +208,26 @@ impl Foxy {
         if queued > 0 {
             info!("Startup remote refreshes queued: {}", queued);
         }
+        self.note_startup_rechecks_queued(queued);
+    }
+
+    /// Start the startup eligibility plan before the first frame.
+    ///
+    /// The plan is a database preflight plus one `repo.json` probe per
+    /// repository, and the probe is two round trips of pure network latency.
+    /// Running it only after first paint left that latency stacked on top of
+    /// renderer initialization instead of hidden underneath it
+    /// (`conventions/SPEED_OF_LIGHT.md` O8). It never touches the UI, and it is
+    /// skipped when the database must not be opened at all.
+    pub(in crate::ui::app) fn start_startup_quick_scan_planning(&mut self) {
+        if self.settings_view_state.debug_mode
+            || !self.settings_view_state.auto_quick_scan_on_launch
+            || self.db_lock_conflict.is_some()
+            || self.pending_db_schema_wipe.is_some()
+        {
+            return;
+        }
+        self.start_quick_local_scan();
     }
 
     pub fn start_quick_local_scan(&mut self) {
@@ -247,6 +268,7 @@ impl Foxy {
         }
 
         let requested = normalized_requested_repositories.len();
+        self.startup_quick_scan_requested = requested;
         if requested == 0 {
             info!("Scheduling startup quick scan for 0 of 0 repositories");
             return;
@@ -324,6 +346,11 @@ impl Foxy {
         }
 
         if let Some(payload) = result {
+            self.note_startup_eligibility_plan(
+                payload.eligible_repositories.len(),
+                payload.prevalidated_repositories.len(),
+                payload.remote_changed_repositories.len(),
+            );
             if !payload.remote_changed_repositories.is_empty() {
                 info!(
                     "Scheduling startup remote refresh for {} repositories with changed remote checksums",

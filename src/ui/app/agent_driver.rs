@@ -2812,6 +2812,7 @@ impl Foxy {
             }
         };
         push(self.backend_worker.is_some(), "core-sync");
+        push(self.startup_sync_in_progress(), "startup-sync");
         push(self.quick_scan_worker.is_some(), "quick-scan");
         push(self.direct_download_worker.is_some(), "direct-download");
         push(

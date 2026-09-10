@@ -164,6 +164,11 @@ fn set_logger_health(file_logging_active: bool, detail: impl Into<String>) {
     health.detail = detail.into();
 }
 
+/// Wall-clock elapsed since process start, the origin of the O8 startup timeline.
+pub fn process_start_elapsed() -> Duration {
+    PROCESS_START.elapsed()
+}
+
 pub fn logger_health() -> LoggerHealth {
     match LOGGER_HEALTH.lock() {
         Ok(guard) => guard.clone(),

@@ -861,6 +861,162 @@ async fn startup_eligibility_requires_part_metadata() {
     );
 }
 
+/// The preflight decides two things from part rows - "is any remote part
+/// checksum missing" and "is any part still unhashed" - and answers both with
+/// `LIMIT 1` probes rather than an aggregate over every part in the repository.
+/// A part whose file is not already proven clean must still hold the repository
+/// out of the fast path.
+#[tokio::test]
+async fn startup_eligibility_detects_a_part_missing_its_local_checksum() {
+    let db = create_test_db().await;
+    let fdb = FoxyDb::from_turso(db.clone());
+
+    let repo_url = "https://example.invalid/unhashed-part/";
+
+    seed_repository(
+        &fdb,
+        1,
+        "Unhashed part",
+        repo_url,
+        "",
+        "REPO_LOCAL",
+        "REPO_REMOTE",
+        "REPO_CONTENT",
+    )
+    .await;
+    // Blank addon content hash keeps the addon fast path from short-circuiting
+    // before the file and part levels are consulted.
+    seed_addon(
+        &fdb,
+        1,
+        "@unhashed",
+        "",
+        "",
+        "MOD_LOCAL",
+        "MOD_REMOTE",
+        "",
+        false,
+    )
+    .await;
+    seed_file(
+        &fdb,
+        1,
+        "data.pbo",
+        "",
+        "",
+        "FILE_LOCAL",
+        "FILE_REMOTE",
+        "FILE_CONTENT",
+        1024,
+        0,
+    )
+    .await;
+    seed_repository_addon(&fdb, 1, 1).await;
+    seed_addon_file(&fdb, 1, 1).await;
+    seed_subfile(&fdb, 1, 1, "", "PART_REMOTE").await;
+
+    let context = Arc::new(FoxyContext::new(db.clone(), reqwest::Client::new()));
+    assert_eq!(
+        launch_quick_scan_repo_startup_eligibility(context.clone(), repo_url).await,
+        StartupQuickScanEligibility::Ineligible
+    );
+
+    // A part with no remote checksum is a metadata gap, not a local one, and
+    // must also keep the repository out of the local-only path.
+    fdb.execute(
+        "UPDATE subfiles SET local_checksum = 'PART_LOCAL', remote_checksum = '' WHERE id = 1",
+        params![],
+    )
+    .await
+    .expect("clear part remote checksum");
+    assert_eq!(
+        launch_quick_scan_repo_startup_eligibility(context.clone(), repo_url).await,
+        StartupQuickScanEligibility::Ineligible
+    );
+
+    // Both part checksums present: only the blank addon content hash is left,
+    // which is a baseline refresh rather than a tree repair.
+    fdb.execute(
+        "UPDATE subfiles SET remote_checksum = 'PART_REMOTE' WHERE id = 1",
+        params![],
+    )
+    .await
+    .expect("restore part remote checksum");
+    assert_eq!(
+        launch_quick_scan_repo_startup_eligibility(context, repo_url).await,
+        StartupQuickScanEligibility::NeedsBootstrap
+    );
+}
+
+/// A part probe that cannot run answers nothing, not "nothing is missing". The
+/// preflight has no evidence either way, so the repository must fall back to the
+/// conservative verdict instead of being reported ready from a failed query.
+#[tokio::test]
+async fn startup_eligibility_is_conservative_when_a_part_probe_fails() {
+    let db = create_test_db().await;
+    let fdb = FoxyDb::from_turso(db.clone());
+
+    let repo_url = "https://example.invalid/broken-parts/";
+
+    seed_repository(
+        &fdb,
+        1,
+        "Broken parts",
+        repo_url,
+        "",
+        "REPO_LOCAL",
+        "REPO_REMOTE",
+        "REPO_CONTENT",
+    )
+    .await;
+    // Blank addon content hash keeps the addon fast path from short-circuiting
+    // before the part level is consulted.
+    seed_addon(
+        &fdb,
+        1,
+        "@broken",
+        "",
+        "",
+        "MOD_LOCAL",
+        "MOD_REMOTE",
+        "",
+        false,
+    )
+    .await;
+    seed_file(
+        &fdb,
+        1,
+        "data.pbo",
+        "",
+        "",
+        "FILE_LOCAL",
+        "FILE_REMOTE",
+        "FILE_CONTENT",
+        1024,
+        0,
+    )
+    .await;
+    seed_repository_addon(&fdb, 1, 1).await;
+    seed_addon_file(&fdb, 1, 1).await;
+    seed_subfile(&fdb, 1, 1, "PART_LOCAL", "PART_REMOTE").await;
+
+    let context = Arc::new(FoxyContext::new(db.clone(), reqwest::Client::new()));
+    assert_eq!(
+        launch_quick_scan_repo_startup_eligibility(context.clone(), repo_url).await,
+        StartupQuickScanEligibility::NeedsBootstrap
+    );
+
+    fdb.execute("DROP TABLE subfiles", params![])
+        .await
+        .expect("drop subfiles");
+
+    assert_eq!(
+        launch_quick_scan_repo_startup_eligibility(context, repo_url).await,
+        StartupQuickScanEligibility::Ineligible,
+        "a failed part probe must not be read as a clean repository"
+    );
+}
+
 /// A deselected optional addon is never downloaded, so its files can never earn
 /// local tree checksums, part checksums or content hashes. Counting it in the
 /// startup preflight left the repository `unknown` on every launch and forced a

@@ -182,7 +182,7 @@ impl Foxy {
         let mut app = Self {
             app_icon: None,
             default_repo_image: None,
-            repaint_ctx: None,
+            repaint_ctx: Some(cc.egui_ctx.clone()),
             agent_gui: None,
             show_debug_windows: false,
             show_delete_confirmation: false,
@@ -269,6 +269,8 @@ impl Foxy {
             detected_active_arma3_profile: None,
             pending_arma3_profile_action: None,
             cached_missions: None,
+            mission_scan_rx: None,
+            mission_scan_in_flight: None,
             selected_repository_for_settings: None,
             current_repository_settings_tab: RepositorySettingsTab::Configuration,
             current_help_tab: HelpTab::Overview,
@@ -443,6 +445,10 @@ impl Foxy {
             pending_repository_visual_folder_delete: None,
             startup_frame_rendered: false,
             startup_tasks_started: false,
+            startup_diagnostics_rx: None,
+            startup_first_frame_at: None,
+            startup_quick_scan_requested: 0,
+            startup_sync: None,
             close_requested_at: None,
             update_modal_sorted_mod_indices: Vec::new(),
             update_modal_mod_name_lowers: Vec::new(),
@@ -580,8 +586,7 @@ impl Foxy {
         app.reconcile_repository_space_paths();
         app.load_repository_visual_folders();
         let storage_paths = app.startup_storage_paths();
-        api::log_startup_system_diagnostics(&storage_paths);
-        app.pending_low_space_notice = !api::low_space_warning_lines(&storage_paths).is_empty();
+        app.startup_diagnostics_rx = Some(api::spawn_startup_system_diagnostics(storage_paths));
         info!(
             "Startup state loaded: repositories={} repository_spaces={} debug_mode={}",
             app.repository_view_state.repositories.len(),
@@ -590,6 +595,7 @@ impl Foxy {
         );
         app.update_debug_mode();
         app.previous_debug_mode = app.settings_view_state.debug_mode;
+        app.start_startup_quick_scan_planning();
         let icon_bytes = include_bytes!("../../icons/foxy_256.png");
         if let Ok(image) = image::load_from_memory(icon_bytes).map(|img| img.to_rgba8()) {
             let (icon_width, icon_height) = image.dimensions();

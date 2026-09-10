@@ -44,13 +44,29 @@ pub fn role_space_is_critical(role: &str, available: u64) -> bool {
     SPACE_CRITICAL_ROLES.contains(&role) && available < CRITICAL_FREE_BYTES
 }
 
-pub fn log_startup_system_diagnostics(storage_paths: &[StartupStoragePath]) {
-    for line in startup_system_diagnostics_lines(storage_paths) {
-        info!("{line}");
-    }
-    for line in low_space_warning_lines(storage_paths) {
-        log::warn!("{line}");
-    }
+/// Log the startup system summary off the launch path.
+///
+/// Building it refreshes every sysinfo subsystem and enumerates drives, network
+/// interfaces and GPUs, which costs a few hundred milliseconds of pure wall
+/// clock. None of it gates the first frame, so it runs on its own thread and
+/// reports back only the one bit the UI needs: whether a drive Foxy writes
+/// through is critically full (`conventions/SPEED_OF_LIGHT.md` O8).
+pub fn spawn_startup_system_diagnostics(
+    storage_paths: Vec<StartupStoragePath>,
+) -> std::sync::mpsc::Receiver<bool> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in startup_system_diagnostics_lines(&storage_paths) {
+            info!("{line}");
+        }
+        let low_space = low_space_warning_lines(&storage_paths);
+        let critical = !low_space.is_empty();
+        for line in low_space {
+            log::warn!("{line}");
+        }
+        let _ = tx.send(critical);
+    });
+    rx
 }
 
 /// One `low_space:` line per role whose drive is below [`CRITICAL_FREE_BYTES`].

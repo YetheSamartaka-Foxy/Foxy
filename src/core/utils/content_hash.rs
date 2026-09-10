@@ -197,14 +197,23 @@ fn path_string_is_network_share(raw: &str) -> bool {
     normalized.starts_with(r"\\")
 }
 
-// Do not include creation time: it changes on copies/restores while content does not.
-pub fn calculate_addon_folder_content_hash(path: &Path) -> Result<String, std::io::Error> {
-    let profiled = crate::core::utils::profiling::FsTimer::start();
-    let metadata = std::fs::metadata(path)?;
-    if !metadata.is_dir() {
-        return Ok(String::new());
-    }
+/// One recursive walk of an addon folder: every subdirectory and every file
+/// that is not a Foxy temp artifact, both sorted by relative path.
+///
+/// The quick-scan layer derives two different digests from an addon folder -
+/// the persistent cache's root fingerprint and the addon content hash - and
+/// they read exactly the same metadata. Walking once and folding twice keeps a
+/// cache miss at one traversal instead of two
+/// (`conventions/SPEED_OF_LIGHT.md` O4).
+pub struct AddonFolderScan {
+    /// Relative paths of every subdirectory, sorted.
+    pub dir_entries: Vec<String>,
+    /// Relative path, length and mtime of every relevant file, sorted by path.
+    pub file_entries: Vec<(String, u64, u128)>,
+}
 
+pub fn scan_addon_folder(path: &Path) -> Result<AddonFolderScan, std::io::Error> {
+    let profiled = crate::core::utils::profiling::FsTimer::start();
     let mut file_entries: Vec<(String, u64, u128)> = Vec::new();
     let mut dir_entries: Vec<String> = Vec::new();
     let mut pending_dirs: Vec<PathBuf> = vec![path.to_path_buf()];
@@ -237,27 +246,47 @@ pub fn calculate_addon_folder_content_hash(path: &Path) -> Result<String, std::i
 
     dir_entries.sort();
     file_entries.sort_by(|a, b| a.0.cmp(&b.0));
+    profiled.stop("dir_scan", (dir_entries.len() + file_entries.len()) as u64);
+    Ok(AddonFolderScan {
+        dir_entries,
+        file_entries,
+    })
+}
 
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"FOXY_ADDON_FOLDER_HASH_V3");
-    hasher.update(normalize_path(&path.to_string_lossy()).as_bytes());
+impl AddonFolderScan {
+    /// The addon folder content hash for a folder at `path`.
+    ///
+    /// Do not include creation time: it changes on copies/restores while
+    /// content does not. The domain prefix is part of the stored value in
+    /// `addons.local_content_hash`, so changing this changes the content-hash
+    /// format generation.
+    pub fn content_hash(&self, path: &Path) -> String {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"FOXY_ADDON_FOLDER_HASH_V3");
+        hasher.update(normalize_path(&path.to_string_lossy()).as_bytes());
 
-    let scanned = (dir_entries.len() + file_entries.len()) as u64;
+        hasher.update(&(self.dir_entries.len() as u64).to_le_bytes());
+        for relative_path in &self.dir_entries {
+            hasher.update(relative_path.as_bytes());
+        }
 
-    hasher.update(&(dir_entries.len() as u64).to_le_bytes());
-    for relative_path in dir_entries {
-        hasher.update(relative_path.as_bytes());
+        hasher.update(&(self.file_entries.len() as u64).to_le_bytes());
+        for (relative_path, len, modified_ns) in &self.file_entries {
+            hasher.update(relative_path.as_bytes());
+            hasher.update(&len.to_le_bytes());
+            hasher.update(&modified_ns.to_le_bytes());
+        }
+
+        blake3_hex(hasher)
     }
+}
 
-    hasher.update(&(file_entries.len() as u64).to_le_bytes());
-    for (relative_path, len, modified_ns) in file_entries {
-        hasher.update(relative_path.as_bytes());
-        hasher.update(&len.to_le_bytes());
-        hasher.update(&modified_ns.to_le_bytes());
+pub fn calculate_addon_folder_content_hash(path: &Path) -> Result<String, std::io::Error> {
+    let metadata = std::fs::metadata(path)?;
+    if !metadata.is_dir() {
+        return Ok(String::new());
     }
-
-    profiled.stop("dir_scan", scanned);
-    Ok(blake3_hex(hasher))
+    Ok(scan_addon_folder(path)?.content_hash(path))
 }
 
 #[cfg(test)]

@@ -266,6 +266,14 @@ Validity rules:
 
 Purpose: decide whether quick local checks are even meaningful.
 
+Readiness answers booleans, so it must be computed with queries that can stop at
+the first row that settles one. Part-level readiness in particular contributes
+only "is any remote part checksum missing" and "is any part still unhashed", and
+both are already decided whenever the addon or file level is missing. Counting
+every part row to reach those two answers is a full-table read on the launch
+path; probe with `LIMIT 1`, and skip the probe when a higher level has already
+decided.
+
 Every readiness check in this layer is scoped to the repository's **enabled**
 addons, exactly like the diff it gates. A deselected optional addon is never
 downloaded, so its files can never earn local tree checksums, part checksums or
@@ -386,6 +394,12 @@ Cache correctness rule: a cache hit is valid only when the root fingerprint
 matches the current folder state. A volatile or ambiguous fingerprint must miss,
 not produce a false clean result.
 
+Cache cost rule: the persistent cache's root fingerprint and the addon content
+hash read exactly the same directory metadata, so they come from one recursive
+walk. Validating the cache must never cost a second traversal, or a hit is only
+half as cheap as a miss and the cache stops paying for itself
+(`conventions/SPEED_OF_LIGHT.md` E8).
+
 ### Layer 3: Targeted Tree Hash Verification
 
 Purpose: identify the exact files and parts that do not match the remote tree.
@@ -421,7 +435,19 @@ Escalation to full tree hash is allowed only when:
 
 ## Startup Algorithm
 
-Startup runs after the first rendered frame. It must not block first paint.
+Startup must not block first paint. Work that touches the UI runs after the
+first rendered frame; work that does not - the database preflight and the
+`repo.json` probe - starts as soon as the repository list is loaded, so its
+latency hides under window and graphics-device creation instead of stacking on
+top of it. See `conventions/SPEED_OF_LIGHT.md` O8 for the equation and the
+measured split.
+
+Two rules keep that safe:
+
+- The early plan is skipped entirely when the database must not be opened: a
+  process-lock conflict, or a schema generation that needs the wipe prompt.
+- Only one plan runs per launch. The post-first-frame dispatch starts one only
+  when the early plan did not.
 
 For each configured repository:
 
@@ -452,6 +478,23 @@ Early exits:
   unknown.
 - `repo_json.checksum == local_checksum` and content baseline ready: quick scan
   can finish in the addon-folder layer without tree work.
+
+The probe stage carries a whole-stage budget as well as a per-request timeout,
+as a backstop for a probe that outlives its own timeout. The budget must stay
+longer than the per-request timeout: cutting the stage first would abandon
+repositories whose server is merely slow, and a slow server about to answer
+"changed" is exactly the answer startup must not lose. Repositories still
+unanswered when the budget elapses are treated exactly like a per-request
+timeout: remote freshness unknown, the local quick scan decides, and the log
+names how many were left.
+
+A probe throws its `repo.json` body away once it has the checksum, and the
+refresh it may schedule fetches the document again. That second round trip is
+deliberate. Handing the probed body to the refresh would put a cached document
+behind a general refresh entry point that a user-initiated recheck also calls,
+so the one action a user takes when they distrust the automatic answer could be
+served bytes fetched before they asked. Never let a startup-probe body answer a
+later "is there an update now?" question.
 
 ## Manual Recheck Algorithm
 
@@ -1076,6 +1119,11 @@ The logs should make it possible to answer:
   the full period on every download.
 - Do not read a resuming ranged download on the current chunk grid; use the
   grid recorded in its sidecar.
+- Do not aggregate over part rows to answer a readiness boolean, and do not run
+  a readiness probe whose answer a higher level has already decided.
+- Do not walk an addon folder twice to produce two digests of the same metadata.
+- Do not let one repository's remote probe gate every other repository's startup
+  verdict.
 
 ## Diagnosing False Redownloads
 
