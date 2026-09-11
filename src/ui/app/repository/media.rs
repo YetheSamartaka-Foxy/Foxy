@@ -20,12 +20,25 @@ static IMAGE_HTTP_CLIENT: std::sync::LazyLock<Client> = std::sync::LazyLock::new
 });
 
 impl Foxy {
-    pub fn query_steam_a2s_info(address: &str, port: &str) -> Result<u32, std::io::Error> {
+    /// Resolve the A2S query port for a listed game port through the active
+    /// game module (Arma 3: game port + 1; Reforger: the default a2s port).
+    pub fn server_query_port(port: &str) -> Result<u16, std::io::Error> {
         let port_number: u16 = port
             .parse()
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-        let new_port_number = port_number + 1;
-        let socket_addr = format!("{}:{}", address, new_port_number);
+        crate::core::game::registry()
+            .active()
+            .server_query_port(port_number)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "no query port for game port",
+                )
+            })
+    }
+
+    pub fn query_steam_a2s_info(address: &str, query_port: u16) -> Result<u32, std::io::Error> {
+        let socket_addr = format!("{}:{}", address, query_port);
 
         let resolved = socket_addr.to_socket_addrs()?.next().ok_or_else(|| {
             std::io::Error::new(
@@ -165,9 +178,13 @@ impl Foxy {
         }
         let tx = self.updates_sender.clone();
         let repaint_ctx = self.repaint_ctx.clone();
+        // Resolved here: the module registry belongs to the UI thread's space.
+        let query_port = Self::server_query_port(&port);
 
         let handle = std::thread::spawn(move || {
-            let new_status = match Self::query_steam_a2s_info(&address, &port) {
+            let new_status = match query_port
+                .and_then(|query_port| Self::query_steam_a2s_info(&address, query_port))
+            {
                 Ok(players) => ServerOnlineStatus::Online { players },
                 Err(_) => ServerOnlineStatus::Offline,
             };

@@ -330,7 +330,11 @@ impl Foxy {
                     "Join server status online for repository {} server {}:{}",
                     repo_name, server.address, server.port
                 );
-                if self.repo_check_server_addons_before_join(effective) {
+                let preflight_supported = crate::core::game::registry()
+                    .active()
+                    .capabilities()
+                    .join_addon_preflight;
+                if preflight_supported && self.repo_check_server_addons_before_join(effective) {
                     info!(
                         "Join addon preflight enabled for repository {} server {}:{}",
                         repo_name, server.address, server.port

@@ -89,14 +89,31 @@ write `module.id() == "arma3"`.
   `GameModule::build_repository_launch_plan`; both the GUI Launch button and
   `foxy launch` go through that method, so no caller builds an Arma-shaped plan
   for another game. Reforger sets it and turns each enabled repository folder
-  into an `-addons` mod id plus an `-addonsDir` root; its `reforger_addons.json`
-  GUID store stays a separate launch path behind `foxy game launch`.
+  into an `-addons` mod id plus an `-addonsDir` root, and a selected server into
+  `-client <address>:<port>` (the game has no password parameter); its
+  `reforger_addons.json` GUID store stays a separate launch path behind
+  `foxy game launch`.
 - `client_side_addons` gates the client-side addon marking (the row button, the
   Client-side only filter, the repository `clientSide` manifest flag, and the
   join-preflight exemption for addons the server did not report). Arma 3 servers
   report their addon list and tolerate extra client-only mods; a Reforger server
   activates exactly its own mod set on join, so the marking has nothing to mean
   there and no surface offers it.
+- `creator_dlc` gates the Creator DLC checkboxes in a repository's launch
+  settings (Arma 3 only). The other launch checkboxes come from
+  `GameModule::repository_launch_flags`: Arma 3's map to dedicated `Repository`
+  fields, every other game's toggle a token in `additional_params`, which is
+  also where a `repo.json` `clientParameters` string lands.
+- `join_addon_preflight` gates the pre-join Steam rules query for a server's
+  addon list. Only Arma 3 servers publish one; a game without it goes straight
+  from the online check to the launch.
+- `GameModule::server_query_port` maps a listed game port to its A2S query port
+  for the server cards and the join online check. The default is the Source
+  convention (game port + 1, Arma 3); Reforger's query port is independent of
+  the game port, so it answers with the default `a2sPort` 17777.
+- Per-repository override combos in Repository Settings appear only when the
+  active module's `settings_schema()` has the matching global toggle id, so a
+  game never shows overrides for another game's settings.
 - `steam_workshop`, `direct_download`, `extra_files`, `profiles`,
   `foxy_config_export`, `teamspeak3_plugins` gate their own surfaces.
 

@@ -126,6 +126,9 @@ pub fn load_space_config(path: &Path) -> Result<LoadedSpace> {
         let repo_config_path = resolve_from(&config_dir, &repo_ref.config);
         let (repo_config, mods) = config::load_config(&repo_config_path)
             .with_context(|| format!("Repository config {}", repo_config_path.display()))?;
+        for warning in mod_line::game_config_warnings(&repo_config, &mods) {
+            log::warn!("{}: {}", repo_config_path.display(), warning);
+        }
 
         let folder = match repo_ref.folder.as_deref().map(str::trim) {
             Some(folder) if !folder.is_empty() => folder.to_string(),
@@ -950,9 +953,10 @@ pub fn cmd_create_space(
         println!("{}:", repo.folder);
         println!(
             "{}",
-            mod_line::build_mod_line(
-                repo.config.dlc_content.as_ref(),
+            mod_line::build_server_launch_line(
+                &repo.config,
                 &built.repo_mods[r],
+                &repo.mods,
                 mod_line_options,
             )
         );

@@ -219,6 +219,13 @@ Creator DLC codes from `dlcContent` come first, then the enabled required mods.
 Client-side mods are always excluded; add `--mod-line-include-optional` to append
 the optional mods as well.
 
+A config with `"game": "reforger"` (`new --game reforger` writes one) hashes the
+unpacked addon folders the same way, including the `.pak` entries inside them, and
+prints an Arma Reforger server line instead: `-addonsDir <prefix or .> -addons
+<id,...>`, where each id is the mod's `.gproj` GUID (project ID, `ServerData.json`
+id, then folder name as fallbacks). `dlcContent` and `clientSide` are warned about
+and ignored for Reforger; the generated `repo.json` carries `"game": "reforger"`.
+
 `--collect-keys` copies every `.bikey` found in the generated mods into a single
 flat folder (`<output>/keys` by default) so a wrapper script can push it to a
 server in one step:

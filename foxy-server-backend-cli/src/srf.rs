@@ -5,7 +5,7 @@ use crate::cli::GenerationMode;
 use crate::hash;
 use crate::types::{
     FoxyAddonFile, FoxyAddonJson, FoxyAddonPart, FoxyAddonsJson, ModEntry, ProcessedMod,
-    RepoConfig, RepoJson, SrfFile, SrfManifest, SrfPart,
+    RepoConfig, RepoGame, RepoJson, SrfFile, SrfManifest, SrfPart,
 };
 
 pub const FOXY_MODE_VERSION: &str = "FoxyModeV1";
@@ -208,6 +208,7 @@ pub fn write_repo_json(
 
     let repo = RepoJson {
         repo_name: config.repo_name.clone(),
+        game: (config.game != RepoGame::Arma3).then_some(config.game),
         checksum: repo_checksum.to_string(),
         foxy_mode,
         required_mods,
@@ -355,6 +356,7 @@ mod tests {
     #[test]
     fn repo_json_serializes_swifty_compatibility_fields() {
         let repo = RepoJson {
+            game: None,
             repo_name: "Repo".to_string(),
             checksum: "REPOCHECKSUM".to_string(),
             foxy_mode: None,
@@ -413,6 +415,7 @@ mod tests {
     #[test]
     fn repo_json_includes_foxy_mode_when_set() {
         let repo = RepoJson {
+            game: None,
             repo_name: "FoxyRepo".to_string(),
             checksum: "CHECK".to_string(),
             foxy_mode: Some("FoxyModeV1".to_string()),

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 
-use crate::types::{RepoConfig, ResolvedMod};
+use crate::types::{RepoConfig, RepoGame, ResolvedMod};
 
 /// Read and validate the config JSON, expanding any wildcard mod references.
 pub fn load_config(config_path: &Path) -> Result<(RepoConfig, Vec<ResolvedMod>)> {
@@ -141,56 +141,113 @@ fn expand_mod_ref(
     }])
 }
 
-/// Generate a blank config JSON template.
-pub fn generate_template_config(output: &Path) -> Result<()> {
-    let template = serde_json::json!({
-        "repoName": "My Repository",
-        "basePath": ".",
-        "appUpdateUrl": "",
-        "requiredMods": [
-            { "modName": "@example_mod", "enabled": true }
-        ],
-        "optionalMods": [
-            { "modName": "@client_side_sound", "enabled": false, "clientSide": true }
-        ],
-        "iconImagePath": "icon.png",
-        "repoImagePath": "repo.png",
-        "clientParameters": "",
-        "dlcContent": {
-            "csla": false,
-            "ef": false,
-            "gm": false,
-            "rf": false,
-            "spe": false,
-            "vn": false,
-            "ws": false
-        },
-        "repoBasicAuthentication": {
-            "username": "",
-            "password": ""
-        },
-        "version": "3.2.0.0",
-        "servers": [
-            {
-                "name": "Main Server",
-                "address": "127.0.0.1",
-                "port": "2302",
-                "password": "",
-                "battleEye": true
-            }
-        ]
-    });
-
+/// Generate a blank config JSON template for the given game.
+pub fn generate_template_config(output: &Path, game: RepoGame) -> Result<()> {
+    let template = template_config_value(game);
     let json =
         serde_json::to_string_pretty(&template).context("Failed to serialize template config")?;
     std::fs::write(output, json).context("Failed to write config file")?;
     Ok(())
 }
 
+/// Arma 3 keeps the historical template. Reforger drops the keys the game
+/// has no use for (Creator DLCs, client-side mods, BattlEye) and uses the
+/// game's default port; mod folders are the unpacked addon directories that
+/// hold the `.gproj` and `addons/*.pak`.
+pub fn template_config_value(game: RepoGame) -> serde_json::Value {
+    match game {
+        RepoGame::Arma3 => serde_json::json!({
+            "repoName": "My Repository",
+            "game": "arma3",
+            "basePath": ".",
+            "appUpdateUrl": "",
+            "requiredMods": [
+                { "modName": "@example_mod", "enabled": true }
+            ],
+            "optionalMods": [
+                { "modName": "@client_side_sound", "enabled": false, "clientSide": true }
+            ],
+            "iconImagePath": "icon.png",
+            "repoImagePath": "repo.png",
+            "clientParameters": "",
+            "dlcContent": {
+                "csla": false,
+                "ef": false,
+                "gm": false,
+                "rf": false,
+                "spe": false,
+                "vn": false,
+                "ws": false
+            },
+            "repoBasicAuthentication": {
+                "username": "",
+                "password": ""
+            },
+            "version": "3.2.0.0",
+            "servers": [
+                {
+                    "name": "Main Server",
+                    "address": "127.0.0.1",
+                    "port": "2302",
+                    "password": "",
+                    "battleEye": true
+                }
+            ]
+        }),
+        RepoGame::Reforger => serde_json::json!({
+            "repoName": "My Reforger Repository",
+            "game": "reforger",
+            "basePath": ".",
+            "appUpdateUrl": "",
+            "requiredMods": [
+                { "modName": "MyReforgerMod", "enabled": true }
+            ],
+            "optionalMods": [
+                { "modName": "OptionalReforgerMod", "enabled": false }
+            ],
+            "iconImagePath": "icon.png",
+            "repoImagePath": "repo.png",
+            "clientParameters": "-noSplash",
+            "repoBasicAuthentication": {
+                "username": "",
+                "password": ""
+            },
+            "version": "1.0.0.0",
+            "servers": [
+                {
+                    "name": "Main Server",
+                    "address": "127.0.0.1",
+                    "port": "2001",
+                    "password": "",
+                    "battleEye": false
+                }
+            ]
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn template_configs_round_trip_through_the_config_parser() {
+        for game in [RepoGame::Arma3, RepoGame::Reforger] {
+            let value = template_config_value(game);
+            let parsed: RepoConfig =
+                serde_json::from_value(value.clone()).expect("template parses as RepoConfig");
+            assert_eq!(parsed.game, game);
+            assert_eq!(
+                value["game"],
+                serde_json::to_value(game).expect("game serializes")
+            );
+        }
+        let reforger = template_config_value(RepoGame::Reforger);
+        assert!(reforger.get("dlcContent").is_none());
+        assert_eq!(reforger["servers"][0]["port"], "2001");
+        assert_eq!(reforger["clientParameters"], "-noSplash");
+    }
 
     fn temp_dir(name: &str) -> PathBuf {
         let unique = SystemTime::now()

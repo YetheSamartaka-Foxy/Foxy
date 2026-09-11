@@ -54,6 +54,8 @@ const TWWH3_CONFIG: GenericRunScriptConfig = GenericRunScriptConfig {
         profiles: false,
         foxy_config_export: true,
         teamspeak3_plugins: false,
+        creator_dlc: false,
+        join_addon_preflight: false,
     },
     manifest: Some(TWWH3_MANIFEST),
     arg_templates: &["{manifest_name};"],

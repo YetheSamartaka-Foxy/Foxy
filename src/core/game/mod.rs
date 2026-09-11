@@ -48,10 +48,17 @@ pub struct GameCapabilities {
     pub foxy_config_export: bool,
     /// TeamSpeak 3 plugin discovery/installation and the join-time TS3 gate.
     pub teamspeak3_plugins: bool,
+    /// Creator DLC selection on a repository (the `-mod=` codes the game
+    /// resolves from its own install) and the `dlcContent` manifest key.
+    pub creator_dlc: bool,
+    /// Querying a server's addon list over the Steam rules protocol before a
+    /// join, so disabled local addons can be offered for enabling. Only Arma 3
+    /// servers publish that list.
+    pub join_addon_preflight: bool,
 }
 
 impl GameCapabilities {
-    fn flags(&self) -> [(&'static str, bool); 9] {
+    fn flags(&self) -> [(&'static str, bool); 11] {
         [
             ("repository_sync", self.repository_sync),
             ("repository_launch", self.repository_launch),
@@ -62,6 +69,8 @@ impl GameCapabilities {
             ("profiles", self.profiles),
             ("foxy_config_export", self.foxy_config_export),
             ("teamspeak3_plugins", self.teamspeak3_plugins),
+            ("creator_dlc", self.creator_dlc),
+            ("join_addon_preflight", self.join_addon_preflight),
         ]
     }
 
@@ -111,6 +120,30 @@ pub struct TextSetting {
     pub placeholder: &'static str,
 }
 
+/// Which `Repository` value a repository launch checkbox toggles. Arma 3's
+/// historical flags have dedicated fields; every other game stores its flags
+/// as tokens in `additional_params`, which is also where a repository's
+/// `clientParameters` string lands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LaunchFlagField {
+    SkipIntro,
+    NoSplash,
+    WorldEmpty,
+    LoadMissionToMemory,
+    EnableHt,
+    HugePages,
+    NoLogs,
+    AdditionalParamToken,
+}
+
+/// A boolean startup flag the repository settings screen offers as a checkbox.
+pub struct RepositoryLaunchFlag {
+    /// The exact token the game accepts, also used as the checkbox label.
+    pub flag: &'static str,
+    pub help: &'static str,
+    pub field: LaunchFlagField,
+}
+
 pub trait GameModule: Send + Sync {
     fn id(&self) -> &'static str;
     fn display_name(&self) -> &str;
@@ -134,6 +167,19 @@ pub trait GameModule: Send + Sync {
         _server: Option<&RepositoryServer>,
     ) -> Result<LaunchPlan, LaunchError> {
         Err(LaunchError::RepositoryLaunchUnsupported)
+    }
+
+    /// Boolean startup flags offered as checkboxes in a repository's launch
+    /// settings. Only meaningful for a module that declares `repository_launch`.
+    fn repository_launch_flags(&self) -> Vec<RepositoryLaunchFlag> {
+        Vec::new()
+    }
+
+    /// UDP port answering Steam A2S_INFO for a server listed in a repository.
+    /// The Source convention (game port + 1) is the default; a game whose
+    /// query port is independent of the game port overrides it.
+    fn server_query_port(&self, game_port: u16) -> Option<u16> {
+        game_port.checked_add(1)
     }
 
     fn install_dir_from_settings<'a>(&self, _settings: &'a SettingsViewState) -> &'a str {

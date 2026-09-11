@@ -9,8 +9,8 @@ use crate::ui::types::{
 
 use super::{
     DirectorySetting, GameCapabilities, GameDetectCtx, GameLaunchCtx, GameModule,
-    GameSettingsSchema, LaunchCommand, LaunchError, LaunchPlan, ResolvedMod, ServerTarget,
-    ToggleSetting,
+    GameSettingsSchema, LaunchCommand, LaunchError, LaunchFlagField, LaunchPlan,
+    RepositoryLaunchFlag, ResolvedMod, ServerTarget, ToggleSetting,
 };
 
 pub const ARMA3_GAME_ID: &str = "arma3";
@@ -42,7 +42,49 @@ impl GameModule for Arma3Module {
             profiles: true,
             foxy_config_export: true,
             teamspeak3_plugins: true,
+            creator_dlc: true,
+            join_addon_preflight: true,
         }
+    }
+
+    fn repository_launch_flags(&self) -> Vec<RepositoryLaunchFlag> {
+        vec![
+            RepositoryLaunchFlag {
+                flag: "-skipIntro",
+                help: "Skip world intros in the main menu for faster startup.",
+                field: LaunchFlagField::SkipIntro,
+            },
+            RepositoryLaunchFlag {
+                flag: "-noSplash",
+                help: "Bypass startup splash screens.",
+                field: LaunchFlagField::NoSplash,
+            },
+            RepositoryLaunchFlag {
+                flag: "-world=empty",
+                help: "Load no default world in main menu to reduce startup load.",
+                field: LaunchFlagField::WorldEmpty,
+            },
+            RepositoryLaunchFlag {
+                flag: "-loadMissionToMemory",
+                help: "Server: keep first-downloaded mission preloaded in RAM for next clients.",
+                field: LaunchFlagField::LoadMissionToMemory,
+            },
+            RepositoryLaunchFlag {
+                flag: "-enableHT",
+                help: "Allow Arma to use logical CPU cores (SMT/Hyper-Threading).",
+                field: LaunchFlagField::EnableHt,
+            },
+            RepositoryLaunchFlag {
+                flag: "-hugePages",
+                help: "Enable huge pages with the default allocator (client and server).",
+                field: LaunchFlagField::HugePages,
+            },
+            RepositoryLaunchFlag {
+                flag: "-noLogs",
+                help: "Disable RPT logging (crash fault block info is still saved).",
+                field: LaunchFlagField::NoLogs,
+            },
+        ]
     }
 
     fn detect_install_dir(&self, ctx: &GameDetectCtx) -> Option<PathBuf> {

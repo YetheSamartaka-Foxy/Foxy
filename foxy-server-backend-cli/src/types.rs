@@ -73,10 +73,34 @@ pub struct ProcessedMod {
 
 // --- Config types (input JSON) ---
 
+/// The game a repository is published for. It selects the server launch
+/// line `create` prints and which manifest keys make sense; the mod folders
+/// are hashed the same way for every game.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum RepoGame {
+    /// Arma 3: `-mod=` line, Creator DLC codes, `.bikey` keys, client-side mods.
+    #[default]
+    Arma3,
+    /// Arma Reforger: `-addonsDir`/`-addons` line built from each mod's `.gproj` GUID.
+    Reforger,
+}
+
+impl RepoGame {
+    pub fn display_name(self) -> &'static str {
+        match self {
+            RepoGame::Arma3 => "Arma 3",
+            RepoGame::Reforger => "Arma Reforger",
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct RepoConfig {
     #[serde(rename = "repoName")]
     pub repo_name: String,
+    #[serde(default)]
+    pub game: RepoGame,
     #[serde(rename = "basePath")]
     pub base_path: String,
     #[serde(rename = "appUpdateUrl", default)]
@@ -226,6 +250,9 @@ pub struct RepoBasicAuthentication {
 pub struct RepoJson {
     #[serde(rename = "repoName")]
     pub repo_name: String,
+    /// Written for every game except Arma 3, whose manifests predate the key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub game: Option<RepoGame>,
     pub checksum: String,
     /// Present when FoxyMode or HybridMode is used. Indicates the Foxy protocol version.
     #[serde(rename = "foxyMode", skip_serializing_if = "Option::is_none")]
@@ -591,6 +618,7 @@ mod tests {
     fn repo_json_skips_none_foxy_mode() {
         let repo = RepoJson {
             repo_name: "Test".to_string(),
+            game: None,
             checksum: "CS".to_string(),
             foxy_mode: None,
             required_mods: vec![],
@@ -615,6 +643,7 @@ mod tests {
     fn repo_json_includes_dlc_content_when_present() {
         let repo = RepoJson {
             repo_name: "Test".to_string(),
+            game: None,
             checksum: "CS".to_string(),
             foxy_mode: None,
             required_mods: vec![],
@@ -642,6 +671,7 @@ mod tests {
     fn repo_json_includes_foxy_mode_when_present() {
         let repo = RepoJson {
             repo_name: "Test".to_string(),
+            game: None,
             checksum: "CS".to_string(),
             foxy_mode: Some("FoxyModeV1".to_string()),
             required_mods: vec![],
@@ -660,5 +690,54 @@ mod tests {
         let json = serde_json::to_string(&repo).unwrap();
         assert!(json.contains("FoxyModeV1"));
         assert!(json.contains("appUpdateUrl"));
+    }
+
+    #[test]
+    fn repo_config_game_defaults_to_arma3_and_parses_reforger() {
+        let default: RepoConfig = serde_json::from_str(r#"{"repoName":"Test","basePath":"."}"#)
+            .expect("config without game parses");
+        assert_eq!(default.game, RepoGame::Arma3);
+
+        let reforger: RepoConfig =
+            serde_json::from_str(r#"{"repoName":"Test","basePath":".","game":"reforger"}"#)
+                .expect("reforger config parses");
+        assert_eq!(reforger.game, RepoGame::Reforger);
+
+        assert!(
+            serde_json::from_str::<RepoConfig>(
+                r#"{"repoName":"Test","basePath":".","game":"dayz"}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn repo_json_writes_game_only_when_set() {
+        let mut repo = RepoJson {
+            repo_name: "Test".to_string(),
+            game: None,
+            checksum: "CS".to_string(),
+            foxy_mode: None,
+            required_mods: vec![],
+            optional_mods: vec![],
+            icon_image_path: String::new(),
+            icon_image_checksum: String::new(),
+            repo_image_path: String::new(),
+            repo_image_checksum: String::new(),
+            app_update_url: None,
+            client_parameters: String::new(),
+            repo_basic_authentication: RepoBasicAuthentication::default(),
+            version: "3.2.0.0".to_string(),
+            servers: vec![],
+            dlc_content: None,
+        };
+        assert!(!serde_json::to_string(&repo).unwrap().contains("\"game\""));
+
+        repo.game = Some(RepoGame::Reforger);
+        assert!(
+            serde_json::to_string(&repo)
+                .unwrap()
+                .contains(r#""game":"reforger""#)
+        );
     }
 }

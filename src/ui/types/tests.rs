@@ -1,10 +1,11 @@
 use super::{
     AppUpdateMode, DownloadSummary, DownloadTelemetrySample, Repository, RepositoryProfile,
     RepositorySpace, RepositorySpaceEntry, SettingsViewState, additional_folder_alias_key,
-    apply_repo_client_parameters, apply_repo_dlc_content_from_repo_json, merge_remote_addon_list,
-    normalize_loaded_repository, push_arma3_profile_launch_args, repo_json_dlc_content_value,
-    sanitize_external_addons, sanitize_repository_space_paths, sanitize_settings_paths,
-    selected_creator_dlc_codes, split_additional_launch_params,
+    apply_repo_client_parameters, apply_repo_dlc_content_from_repo_json, has_launch_param_token,
+    merge_remote_addon_list, normalize_loaded_repository, push_arma3_profile_launch_args,
+    repo_json_dlc_content_value, sanitize_external_addons, sanitize_repository_space_paths,
+    sanitize_settings_paths, selected_creator_dlc_codes, set_launch_param_token,
+    split_additional_launch_params,
 };
 use crate::core::arma3_profiles::Arma3Profile;
 use serde_json::json;
@@ -404,6 +405,28 @@ fn push_arma3_profile_launch_args_ignores_vanilla_profiles_directory() {
     push_arma3_profile_launch_args(&settings, &repo, &launch_arg_profiles(), &mut args);
 
     assert!(args.is_empty());
+}
+
+#[test]
+fn launch_param_token_helpers_toggle_flags_case_insensitively() {
+    let params = r#"-maxFPS 120 "-profile=C:\My Games\Foxy" -Window"#;
+
+    assert!(has_launch_param_token(params, "-window"));
+    assert!(!has_launch_param_token(params, "-noFocus"));
+
+    let removed = set_launch_param_token(params, "-window", false);
+    assert_eq!(removed, r#"-maxFPS 120 "-profile=C:\My Games\Foxy""#);
+    assert!(!has_launch_param_token(&removed, "-window"));
+
+    let added = set_launch_param_token(&removed, "-noFocus", true);
+    assert_eq!(
+        split_additional_launch_params(&added),
+        vec!["-maxFPS", "120", r"-profile=C:\My Games\Foxy", "-noFocus"]
+    );
+    // Enabling an already present flag never duplicates it.
+    assert_eq!(set_launch_param_token(&added, "-NOFOCUS", true), added);
+    assert_eq!(set_launch_param_token("", "-window", true), "-window");
+    assert_eq!(set_launch_param_token("-window", "-window", false), "");
 }
 
 #[test]

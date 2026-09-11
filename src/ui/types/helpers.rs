@@ -57,6 +57,37 @@ pub fn split_additional_launch_params(params: &str) -> Vec<String> {
     args
 }
 
+/// Whether `params` already carries `token` as a standalone argument. Flags
+/// are case-insensitive for the games Foxy launches.
+pub fn has_launch_param_token(params: &str, token: &str) -> bool {
+    split_additional_launch_params(params)
+        .iter()
+        .any(|arg| arg.eq_ignore_ascii_case(token))
+}
+
+/// Add or remove a standalone flag in an additional-parameters string,
+/// keeping every other argument. Arguments containing whitespace are quoted
+/// again so the string splits back to the same argument list.
+pub fn set_launch_param_token(params: &str, token: &str, enabled: bool) -> String {
+    let mut args = split_additional_launch_params(params);
+    let present = args.iter().any(|arg| arg.eq_ignore_ascii_case(token));
+    if enabled && !present {
+        args.push(token.to_string());
+    } else if !enabled {
+        args.retain(|arg| !arg.eq_ignore_ascii_case(token));
+    }
+    args.iter()
+        .map(|arg| {
+            if arg.chars().any(char::is_whitespace) {
+                format!("\"{}\"", arg)
+            } else {
+                arg.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 pub fn apply_repo_client_parameters(repo: &mut Repository, params: &str) {
     repo.skip_intro = false;
     repo.no_splash = false;

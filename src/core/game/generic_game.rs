@@ -63,6 +63,8 @@ impl GameModule for GenericGameModule {
             profiles: false,
             foxy_config_export: true,
             teamspeak3_plugins: false,
+            creator_dlc: false,
+            join_addon_preflight: false,
         }
     }
 

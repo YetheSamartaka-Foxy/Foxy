@@ -17,7 +17,8 @@ use crate::ui::types::{
 
 use super::{
     DirectorySetting, GameCapabilities, GameDetectCtx, GameLaunchCtx, GameModule,
-    GameSettingsSchema, LaunchCommand, LaunchError, LaunchPlan, ResolvedMod, ToggleSetting,
+    GameSettingsSchema, LaunchCommand, LaunchError, LaunchFlagField, LaunchPlan,
+    RepositoryLaunchFlag, ResolvedMod, ServerTarget, ToggleSetting,
 };
 
 pub const REFORGER_GAME_ID: &str = "reforger";
@@ -27,6 +28,10 @@ pub const REFORGER_FALLBACK_EXECUTABLE: &str = "ArmaReforger.exe";
 pub const REFORGER_INSTALL_DIR_SETTING_ID: &str = "reforger_directory";
 pub const REFORGER_ADDONS_FILE: &str = "reforger_addons.json";
 pub const REFORGER_SOURCE: &str = "reforger";
+/// Default `a2sPort` of a Reforger dedicated server. Unlike Arma 3 the query
+/// port is independent of the game port, so a server listing without its own
+/// query port can only be probed at the default.
+pub const REFORGER_DEFAULT_QUERY_PORT: u16 = 17777;
 
 const REFORGER_DIR: &str = "reforger";
 const MANAGED_ADDONS_DIR: &str = "addons";
@@ -62,6 +67,9 @@ impl GameModule for ReforgerModule {
             profiles: false,
             foxy_config_export: true,
             teamspeak3_plugins: false,
+            creator_dlc: false,
+            // Reforger servers do not publish an addon list over Steam rules.
+            join_addon_preflight: false,
         }
     }
 
@@ -119,6 +127,10 @@ impl GameModule for ReforgerModule {
                 game_args.push(addon_dirs.join(","));
             }
         }
+        if let Some(server) = &plan.server {
+            game_args.push("-client".to_string());
+            game_args.push(client_join_target(&server.address, &server.port));
+        }
 
         let mut args = launch.args;
         args.extend(game_args);
@@ -141,12 +153,58 @@ impl GameModule for ReforgerModule {
                 is_install_dir: true,
             }],
             texts: Vec::new(),
-            toggles: vec![ToggleSetting {
-                id: "check_steam_running_before_launch",
-                label: "Check Steam is running before launching",
-                help: "Before launching, warn if Steam is not running and offer to launch it.",
-            }],
+            toggles: vec![
+                ToggleSetting {
+                    id: "apply_repo_json_client_parameters",
+                    label: "Auto apply repo.json launch parameters",
+                    help: "Automatically apply launch parameters from the repository's repo.json when launching Arma Reforger.",
+                },
+                ToggleSetting {
+                    id: "enable_server_list",
+                    label: "Show Servers list",
+                    help: "Show the Servers section in the repository view. Can be overridden per repository.",
+                },
+                ToggleSetting {
+                    id: "check_steam_running_before_launch",
+                    label: "Check Steam is running before launching",
+                    help: "Before launching, warn if Steam is not running and offer to launch it.",
+                },
+            ],
         }
+    }
+
+    fn repository_launch_flags(&self) -> Vec<RepositoryLaunchFlag> {
+        vec![
+            RepositoryLaunchFlag {
+                flag: "-noSplash",
+                help: "Skip the splash screens on game load.",
+                field: LaunchFlagField::NoSplash,
+            },
+            RepositoryLaunchFlag {
+                flag: "-window",
+                help: "Start the game windowed instead of fullscreen.",
+                field: LaunchFlagField::AdditionalParamToken,
+            },
+            RepositoryLaunchFlag {
+                flag: "-forceUpdate",
+                help: "Keep rendering and updating while the game window is out of focus.",
+                field: LaunchFlagField::AdditionalParamToken,
+            },
+            RepositoryLaunchFlag {
+                flag: "-noFocus",
+                help: "Do not steal window focus while the game starts.",
+                field: LaunchFlagField::AdditionalParamToken,
+            },
+            RepositoryLaunchFlag {
+                flag: "-disableCrashReporter",
+                help: "Do not open or send the crash reporter automatically.",
+                field: LaunchFlagField::AdditionalParamToken,
+            },
+        ]
+    }
+
+    fn server_query_port(&self, _game_port: u16) -> Option<u16> {
+        Some(REFORGER_DEFAULT_QUERY_PORT)
     }
 
     fn build_repository_launch_plan(
@@ -676,14 +734,14 @@ pub fn build_workshop_launch_plan(
 ///
 /// Reforger loads mods by the id in their `.gproj` and finds them through the
 /// roots passed with `-addonsDir`, so a repository folder is launchable as-is:
-/// every enabled subfolder contributes its mod id and its parent root. There is
-/// no documented client-side join parameter, so a selected server never reaches
-/// the command line; the player joins from the in-game server browser with the
-/// repository's mods already loaded.
+/// every enabled subfolder contributes its mod id and its parent root. A
+/// selected server becomes `-client <address>:<port>`, the direct-connect
+/// parameter of the game executable; the game has no password parameter, so a
+/// listed password is left for the in-game prompt.
 pub fn build_repository_launch_plan(
     _settings: &SettingsViewState,
     repo: &Repository,
-    _server: Option<&RepositoryServer>,
+    server: Option<&RepositoryServer>,
 ) -> Result<LaunchPlan, LaunchError> {
     let mut launch_args = Vec::new();
     if repo.no_splash {
@@ -692,11 +750,36 @@ pub fn build_repository_launch_plan(
     if !repo.additional_params.trim().is_empty() {
         launch_args.extend(split_additional_launch_params(&repo.additional_params));
     }
+    let server = server.map(|server| {
+        if !server.password.trim().is_empty() {
+            log::info!(
+                "Arma Reforger has no password launch parameter; the password for server {} must be entered in game",
+                server.name
+            );
+        }
+        ServerTarget {
+            address: server.address.clone(),
+            port: server.port.clone(),
+            password: String::new(),
+        }
+    });
     Ok(LaunchPlan {
         launch_args,
         mods: resolve_repository_mods(repo),
-        server: None,
+        server,
     })
+}
+
+/// The `-client` value: `address:port`, or the bare address when the listing
+/// has no port so the game falls back to its default.
+pub fn client_join_target(address: &str, port: &str) -> String {
+    let address = address.trim();
+    let port = port.trim();
+    if port.is_empty() {
+        address.to_string()
+    } else {
+        format!("{}:{}", address, port)
+    }
 }
 
 fn resolve_repository_mods(repo: &Repository) -> Vec<ResolvedMod> {
@@ -879,7 +962,7 @@ pub fn normalize_reforger_guid(value: &str) -> Option<String> {
     let trimmed = value.trim().trim_matches(|ch: char| {
         matches!(
             ch,
-            '"' | '\'' | ',' | ';' | ')' | '(' | '[' | ']' | '<' | '>' | '.'
+            '"' | '\'' | ',' | ';' | ')' | '(' | '[' | ']' | '{' | '}' | '<' | '>' | '.'
         )
     });
     let candidate = candidate_guid_from_token(trimmed).unwrap_or_else(|| trimmed.to_string());
@@ -1300,7 +1383,11 @@ mod tests {
                 id: "596ABCDEF0123456".to_string(),
                 path: Some(addon.display().to_string()),
             }],
-            server: None,
+            server: Some(ServerTarget {
+                address: "203.0.113.10".to_string(),
+                port: "2001".to_string(),
+                password: String::new(),
+            }),
         };
         let install_dir = install.path().display().to_string();
         let ctx = GameLaunchCtx {
@@ -1321,6 +1408,8 @@ mod tests {
                 "596ABCDEF0123456".to_string(),
                 "-addonsDir".to_string(),
                 addon_root.path().display().to_string(),
+                "-client".to_string(),
+                "203.0.113.10:2001".to_string(),
             ]
         );
         assert_eq!(command.cwd, Some(install.path().to_path_buf()));
@@ -1428,9 +1517,51 @@ mod tests {
             launch_addons_dirs(&plan.mods),
             vec![repo_root.path().display().to_string()]
         );
-        // Reforger has no documented client-side join parameter; the player
-        // connects from the in-game server browser.
-        assert!(plan.server.is_none());
+        assert_eq!(
+            plan.server,
+            Some(ServerTarget {
+                address: "203.0.113.10".to_string(),
+                port: "2001".to_string(),
+                password: String::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn client_join_target_omits_a_missing_port() {
+        assert_eq!(
+            client_join_target("203.0.113.10", "2001"),
+            "203.0.113.10:2001"
+        );
+        assert_eq!(client_join_target(" 203.0.113.10 ", ""), "203.0.113.10");
+    }
+
+    #[test]
+    fn repository_launch_flags_map_to_dedicated_fields_or_tokens() {
+        let flags = ReforgerModule.repository_launch_flags();
+        let no_splash = flags
+            .iter()
+            .find(|flag| flag.flag == "-noSplash")
+            .expect("noSplash flag");
+        assert_eq!(no_splash.field, LaunchFlagField::NoSplash);
+        assert!(
+            flags
+                .iter()
+                .filter(|flag| flag.field == LaunchFlagField::AdditionalParamToken)
+                .all(|flag| flag.flag.starts_with('-'))
+        );
+        assert_eq!(
+            ReforgerModule.server_query_port(2001),
+            Some(REFORGER_DEFAULT_QUERY_PORT)
+        );
+    }
+
+    #[test]
+    fn normalize_reforger_guid_strips_braces() {
+        assert_eq!(
+            normalize_reforger_guid("{596ABCDEF0123456}").as_deref(),
+            Some("596ABCDEF0123456")
+        );
     }
 
     #[test]

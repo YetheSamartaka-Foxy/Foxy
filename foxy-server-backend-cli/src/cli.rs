@@ -35,7 +35,9 @@ impl SpaceLayout {
 
 #[derive(Parser)]
 #[command(name = "foxy-server-backend-cli")]
-#[command(about = "Generate Foxy-compatible repository structures for Arma 3 mod hosting")]
+#[command(
+    about = "Generate Foxy-compatible repository structures for Arma 3 and Arma Reforger mod hosting"
+)]
 #[command(version = crate::build_info::clap_version())]
 pub struct Cli {
     #[arg(
@@ -65,10 +67,10 @@ pub enum Command {
         /// Generation mode: foxy (BLAKE3, default), swifty (MD5, legacy), hybrid (both)
         #[arg(long, value_enum, default_value_t = GenerationMode::Foxy)]
         mode: GenerationMode,
-        /// Path prefix for each mod folder in the printed -mod= line (e.g. "mods")
+        /// Path prefix for each mod folder in the printed server launch line (e.g. "mods"); the -addonsDir root for Arma Reforger
         #[arg(long, default_value = "")]
         mod_line_prefix: String,
-        /// Include optional mods in the printed -mod= line
+        /// Include optional mods in the printed server launch line
         #[arg(long)]
         mod_line_include_optional: bool,
         /// Copy every .bikey from the generated mods into a combined keys folder
@@ -86,6 +88,9 @@ pub enum Command {
         /// Output path for the config file
         #[arg(default_value = "config.json")]
         output: PathBuf,
+        /// Game the template is for: arma3 (default) or reforger
+        #[arg(long, value_enum, default_value_t = crate::types::RepoGame::Arma3)]
+        game: crate::types::RepoGame,
     },
     /// Create every repository of a repository space plus its repository_space.json in one pass
     CreateSpace {
@@ -111,10 +116,10 @@ pub enum Command {
         /// Generation mode: foxy (BLAKE3, default), swifty (MD5, legacy), hybrid (both)
         #[arg(long, value_enum, default_value_t = GenerationMode::Foxy)]
         mode: GenerationMode,
-        /// Path prefix for each mod folder in the printed -mod= lines (e.g. "mods")
+        /// Path prefix for each mod folder in the printed server launch lines (e.g. "mods"); the -addonsDir root for Arma Reforger
         #[arg(long, default_value = "")]
         mod_line_prefix: String,
-        /// Include optional mods in the printed -mod= lines
+        /// Include optional mods in the printed server launch lines
         #[arg(long)]
         mod_line_include_optional: bool,
         /// Copy every .bikey from all generated repositories into one combined keys folder

@@ -92,7 +92,7 @@ fn main() -> Result<()> {
                 },
             },
         ),
-        cli::Command::New { output } => cmd_new(&output),
+        cli::Command::New { output, game } => cmd_new(&output, game),
         cli::Command::NewSpace { output } => space::cmd_new_space(&output),
         cli::Command::SetupAppUpdater {
             version,
@@ -168,11 +168,15 @@ fn cmd_create(
     let (config, resolved_mods) = config::load_config(config_path)?;
 
     println!(
-        "Repository: {} ({} required, {} optional mods)",
+        "Repository: {} for {} ({} required, {} optional mods)",
         config.repo_name,
+        config.game.display_name(),
         resolved_mods.iter().filter(|m| m.is_required).count(),
         resolved_mods.iter().filter(|m| !m.is_required).count(),
     );
+    for warning in mod_line::game_config_warnings(&config, &resolved_mods) {
+        log::warn!("{}", warning);
+    }
 
     for m in &resolved_mods {
         println!(
@@ -276,9 +280,10 @@ fn cmd_create(
     println!("Server mod line:");
     println!(
         "{}",
-        mod_line::build_mod_line(
-            config.dlc_content.as_ref(),
+        mod_line::build_server_launch_line(
+            &config,
             &processed_mods,
+            &resolved_mods,
             mod_line_options,
         )
     );
@@ -307,14 +312,14 @@ pub(crate) fn progress_bar(no_progress: bool) -> ProgressBar {
     progress
 }
 
-fn cmd_new(output: &std::path::Path) -> Result<()> {
+fn cmd_new(output: &std::path::Path, game: types::RepoGame) -> Result<()> {
     if output.exists() {
         anyhow::bail!(
             "File already exists: {}. Remove it first or choose a different path.",
             output.display()
         );
     }
-    config::generate_template_config(output)?;
+    config::generate_template_config(output, game)?;
     println!("Config template written to: {}", output.display());
     println!("Edit this file, then run:");
     println!(

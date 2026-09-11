@@ -1,0 +1,29 @@
+{
+  "repoName": "Example Reforger Repository",
+  "game": "reforger",
+  "basePath": ".",
+  "appUpdateUrl": "",
+  "requiredMods": [
+    { "modName": "GlobalConflictsUnits", "enabled": true }
+  ],
+  "optionalMods": [
+    { "modName": "OptionalReforgerMod", "enabled": false }
+  ],
+  "iconImagePath": "icon.png",
+  "repoImagePath": "repo.png",
+  "clientParameters": "-noSplash",
+  "repoBasicAuthentication": {
+    "username": "",
+    "password": ""
+  },
+  "version": "1.0.0.0",
+  "servers": [
+    {
+      "name": "Main Server",
+      "address": "203.0.113.10",
+      "port": "2001",
+      "password": "",
+      "battleEye": false
+    }
+  ]
+}
