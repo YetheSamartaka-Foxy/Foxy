@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Holds the checksum(s) for a hashed item, depending on generation mode.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Checksums {
     /// Placeholder before checksums are computed. Panics if accessed.
     #[default]

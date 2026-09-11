@@ -78,7 +78,16 @@ pub fn collect_keys(
     mods: &[ProcessedMod],
     options: &KeyCollectionOptions<'_>,
 ) -> Result<KeyCollectionReport> {
-    let mut sources = generated_key_paths(output_dir, mods);
+    collect_key_paths(generated_key_paths(output_dir, mods), options)
+}
+
+/// [`collect_keys`] over an explicit list of generated key files, for callers
+/// whose mods live in several output directories.
+pub fn collect_key_paths(
+    generated: Vec<PathBuf>,
+    options: &KeyCollectionOptions<'_>,
+) -> Result<KeyCollectionReport> {
+    let mut sources = generated;
     for extra in options.additional_sources {
         sources.extend(additional_key_paths(extra)?);
     }

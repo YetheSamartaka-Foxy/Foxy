@@ -4,6 +4,7 @@ use std::path::PathBuf;
 #[derive(Parser, Debug)]
 #[command(name = "foxy")]
 #[command(about = "Foxy command line interface")]
+#[command(version = crate::build_info::clap_version())]
 pub struct CliArgs {
     #[arg(
         long,

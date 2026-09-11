@@ -1,3 +1,5 @@
+mod artifacts;
+mod build_info;
 mod changelog_parser;
 mod cli;
 mod config;
@@ -5,6 +7,7 @@ mod discover;
 mod hash;
 mod keys;
 mod mod_line;
+mod space;
 mod srf;
 mod types;
 mod update_manifest;
@@ -53,7 +56,44 @@ fn main() -> Result<()> {
                 },
             },
         ),
+        cli::Command::CreateSpace {
+            config,
+            output,
+            layout,
+            pool_dir,
+            yes,
+            app_update_url,
+            threads,
+            mode,
+            mod_line_prefix,
+            mod_line_include_optional,
+            collect_keys,
+            keys_output,
+            additional_keys,
+        } => space::cmd_create_space(
+            &config,
+            &output,
+            space::CreateSpaceOptions {
+                layout,
+                pool_dir,
+                yes,
+                app_update_url: app_update_url.as_deref(),
+                threads,
+                mode,
+                no_progress: cli.no_progress,
+                mod_line: mod_line::ModLineOptions {
+                    prefix: &mod_line_prefix,
+                    include_optional: mod_line_include_optional,
+                },
+                keys: KeyCollectionRequest {
+                    enabled: collect_keys || keys_output.is_some() || !additional_keys.is_empty(),
+                    dest: keys_output,
+                    additional_sources: additional_keys,
+                },
+            },
+        ),
         cli::Command::New { output } => cmd_new(&output),
+        cli::Command::NewSpace { output } => space::cmd_new_space(&output),
         cli::Command::SetupAppUpdater {
             version,
             windows_installer,
@@ -97,11 +137,11 @@ struct CreateOptions<'a> {
     keys: KeyCollectionRequest,
 }
 
-/// How `create` was asked to build the combined keys folder.
-struct KeyCollectionRequest {
-    enabled: bool,
-    dest: Option<std::path::PathBuf>,
-    additional_sources: Vec<std::path::PathBuf>,
+/// How `create` / `create-space` was asked to build the combined keys folder.
+pub(crate) struct KeyCollectionRequest {
+    pub enabled: bool,
+    pub dest: Option<std::path::PathBuf>,
+    pub additional_sources: Vec<std::path::PathBuf>,
 }
 
 fn cmd_create(
@@ -119,18 +159,10 @@ fn cmd_create(
     } = options;
     let started = Instant::now();
 
-    let mode_label = match mode {
-        GenerationMode::Foxy => "FoxyMode (BLAKE3)",
-        GenerationMode::Swifty => "SwiftyMode (MD5, legacy)",
-        GenerationMode::Hybrid => "HybridMode (BLAKE3 + MD5)",
-    };
+    let mode_label = artifacts::mode_label(mode);
     println!("Mode: {}", mode_label);
 
-    // Configure rayon thread pool
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
-        .build_global()
-        .context("Failed to configure thread pool")?;
+    configure_thread_pool(threads)?;
 
     println!("Loading config from: {}", config_path.display());
     let (config, resolved_mods) = config::load_config(config_path)?;
@@ -158,76 +190,21 @@ fn cmd_create(
     std::fs::create_dir_all(output_dir)
         .with_context(|| format!("Failed to create output dir: {}", output_dir.display()))?;
 
-    // Process all mods (copy + hash)
-    let progress = if no_progress {
-        ProgressBar::hidden()
-    } else {
-        let progress = ProgressBar::new(0);
-        progress.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} files ({per_sec})")
-                .unwrap_or_else(|_| ProgressStyle::default_bar())
-                .progress_chars("=> "),
-        );
-        progress
-    };
-
+    let progress = progress_bar(no_progress);
     println!("Processing files with {} threads...", threads);
-    let processed_mods = hash::process_mods(&resolved_mods, output_dir, &progress, mode)?;
+    let processed_mods = hash::process_mods(&resolved_mods, Some(output_dir), &progress, mode)?;
     progress.finish_and_clear();
 
-    // --- Write output artifacts based on mode ---
+    println!("Writing mod manifests...");
+    artifacts::write_mod_manifests(&processed_mods, output_dir, mode)?;
 
-    let use_swifty = matches!(mode, GenerationMode::Swifty | GenerationMode::Hybrid);
-    let use_foxy = matches!(mode, GenerationMode::Foxy | GenerationMode::Hybrid);
-
-    // SwiftyMode artifacts: mod.srf + MD5 checksums in repo.json
-    if use_swifty {
-        println!("Writing mod.srf files...");
-        for m in &processed_mods {
-            srf::write_mod_srf(m, output_dir)?;
-        }
-    }
-
-    // Compute foxy repo checksum once (used by foxy_addons.json and repo.json in FoxyMode)
-    let foxy_repo_checksum = if use_foxy {
-        Some(hash::compute_foxy_repo_checksum(&processed_mods))
-    } else {
-        None
-    };
-
-    // FoxyMode artifacts: foxy_addon.json + foxy_addons.json
-    if use_foxy {
-        println!("Writing foxy_addon.json files...");
-        for m in &processed_mods {
-            srf::write_foxy_addon_json(m, output_dir)?;
-        }
-
-        println!("Writing foxy_addons.json...");
-        srf::write_foxy_addons_json(
-            &processed_mods,
-            foxy_repo_checksum.as_deref().unwrap(),
-            output_dir,
-        )?;
-    }
-
-    let repo_checksum = match mode {
-        GenerationMode::Foxy => foxy_repo_checksum.unwrap(),
-        GenerationMode::Swifty | GenerationMode::Hybrid => {
-            hash::compute_repo_checksum(&processed_mods)
-        }
-    };
-    let effective_app_update_url = app_update_url.or(config.app_update_url.as_deref());
-
-    // Write repo.json
     println!("Writing repo.json...");
-    srf::write_repo_json(
+    let repo_checksum = artifacts::write_repo_manifests(
         &config,
         &processed_mods,
-        &repo_checksum,
         output_dir,
         mode,
-        effective_app_update_url,
+        app_update_url,
     )?;
 
     let key_report = if key_collection.enabled {
@@ -278,11 +255,8 @@ fn cmd_create(
     println!("  Checksum:   {}", repo_checksum);
     println!("  Output:     {}", output_dir.display());
 
-    if use_foxy {
-        println!("  Artifacts:  foxy_addon.json (per mod), foxy_addons.json, repo.json");
-    }
-    if use_swifty {
-        println!("  Artifacts:  mod.srf (per mod), repo.json");
+    for line in artifacts::artifact_lines(mode) {
+        println!("  Artifacts:  {}", line);
     }
     if let Some((dest, report)) = &key_report {
         println!("  Keys:       {} in {}", report.copied, dest.display());
@@ -310,6 +284,27 @@ fn cmd_create(
     );
 
     Ok(())
+}
+
+pub(crate) fn configure_thread_pool(threads: usize) -> Result<()> {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build_global()
+        .context("Failed to configure thread pool")
+}
+
+pub(crate) fn progress_bar(no_progress: bool) -> ProgressBar {
+    if no_progress {
+        return ProgressBar::hidden();
+    }
+    let progress = ProgressBar::new(0);
+    progress.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} files ({per_sec})")
+            .unwrap_or_else(|_| ProgressStyle::default_bar())
+            .progress_chars("=> "),
+    );
+    progress
 }
 
 fn cmd_new(output: &std::path::Path) -> Result<()> {

@@ -12,10 +12,31 @@ pub enum GenerationMode {
     Hybrid,
 }
 
+/// How `create-space` materializes the mod folders of each repository.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum SpaceLayout {
+    /// Copy every mod into every repository that lists it, exactly like running `create` per repository.
+    Copy,
+    /// Copy each distinct mod once into a shared pool folder and symlink it from every repository. Recommended: deduplicated on disk, and the output tree stays self-contained.
+    Pool,
+    /// Symlink each repository mod straight to its source folder without copying anything. Requires --yes: manifests are written into the source folders and any later change there silently breaks the published checksums.
+    Link,
+}
+
+impl SpaceLayout {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SpaceLayout::Copy => "copy",
+            SpaceLayout::Pool => "pool",
+            SpaceLayout::Link => "link",
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "foxy-server-backend-cli")]
 #[command(about = "Generate Foxy-compatible repository structures for Arma 3 mod hosting")]
-#[command(version)]
+#[command(version = crate::build_info::clap_version())]
 pub struct Cli {
     #[arg(
         long,
@@ -64,6 +85,52 @@ pub enum Command {
     New {
         /// Output path for the config file
         #[arg(default_value = "config.json")]
+        output: PathBuf,
+    },
+    /// Create every repository of a repository space plus its repository_space.json in one pass
+    CreateSpace {
+        /// Path to the repository space config JSON (see `new-space`)
+        config: PathBuf,
+        /// Output directory for the whole space; each repository lands in its own subfolder
+        output: PathBuf,
+        /// How mod folders are stored: copy (per repository), pool (shared folder + symlinks, recommended), link (symlinks to the sources)
+        #[arg(long, value_enum, default_value_t = SpaceLayout::Copy)]
+        layout: SpaceLayout,
+        /// Shared mod folder for --layout pool (default: <output>/pool)
+        #[arg(long, value_name = "DIR")]
+        pool_dir: Option<PathBuf>,
+        /// Accept that --layout link writes manifests into the source mod folders
+        #[arg(long)]
+        yes: bool,
+        /// Optional Foxy app update source URL for every generated repo.json (wins over config values)
+        #[arg(long)]
+        app_update_url: Option<String>,
+        /// Number of threads for parallel operations
+        #[arg(long, default_value_t = default_threads())]
+        threads: usize,
+        /// Generation mode: foxy (BLAKE3, default), swifty (MD5, legacy), hybrid (both)
+        #[arg(long, value_enum, default_value_t = GenerationMode::Foxy)]
+        mode: GenerationMode,
+        /// Path prefix for each mod folder in the printed -mod= lines (e.g. "mods")
+        #[arg(long, default_value = "")]
+        mod_line_prefix: String,
+        /// Include optional mods in the printed -mod= lines
+        #[arg(long)]
+        mod_line_include_optional: bool,
+        /// Copy every .bikey from all generated repositories into one combined keys folder
+        #[arg(long)]
+        collect_keys: bool,
+        /// Destination for the combined keys folder (default: <output>/keys, implies --collect-keys)
+        #[arg(long, value_name = "DIR")]
+        keys_output: Option<PathBuf>,
+        /// Extra key file or directory to add to the combined keys folder (repeatable, implies --collect-keys)
+        #[arg(long, value_name = "PATH")]
+        additional_keys: Vec<PathBuf>,
+    },
+    /// Generate a blank repository space config file
+    NewSpace {
+        /// Output path for the space config file
+        #[arg(default_value = "space.json")]
         output: PathBuf,
     },
     /// Create a fresh update manifest with changelog JSONs from a CHANGELOG.md

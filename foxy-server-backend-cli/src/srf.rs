@@ -238,7 +238,9 @@ fn process_images(config: &RepoConfig, base: &Path, output_dir: &Path) -> Result
     Ok((repo_image_checksum, icon_image_checksum))
 }
 
-fn copy_and_hash_image(image_path: &str, base: &Path, output_dir: &Path) -> Result<String> {
+/// Copy an image referenced by a config next to the generated manifest and
+/// return its SHA-1, or an empty string when the path is unset or missing.
+pub fn copy_and_hash_image(image_path: &str, base: &Path, output_dir: &Path) -> Result<String> {
     if image_path.is_empty() {
         return Ok(String::new());
     }

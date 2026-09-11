@@ -133,7 +133,7 @@ Behavior:
 | Command | Description |
 |---------|-------------|
 | `ui` | Launch desktop UI |
-| `version` | Print Foxy version |
+| `version` | Print Foxy version, build kind, and source commit (`--version` prints the same label) |
 | `settings show\|set\|reset` | Inspect/modify settings |
 | `repo list\|add\|remove\|clone\|sync\|wipe-db\|force-redownload` | Repository operations |
 | `sync` | Alias of `repo sync` |
@@ -232,6 +232,54 @@ a directory of keys (repeatable) for things Foxy does not generate, such as
 `a3.bikey` and the Creator DLC keys. Both imply `--collect-keys`. Keys are flattened
 by file name: byte-identical duplicates are skipped, and a name clash between two
 different keys keeps the first one and is reported.
+
+### Repository spaces in one command
+
+`create-space` generates every repository of a repository space plus the
+`repository_space.json` that links them. The space config only points at the
+per-repository config files `create` already uses:
+
+```bash
+foxy-server-backend-cli new-space space.json
+foxy-server-backend-cli create-space space.json ./www --layout pool
+```
+
+```json
+{
+  "name": "My Repository Space",
+  "baseUrl": "https://example.com/repos/",
+  "appUpdateUrl": "",
+  "iconImagePath": "icon.png",
+  "repoImagePath": "space.png",
+  "repositories": [
+    { "config": "modern/config.json", "folder": "modern", "required": true },
+    { "config": "ww2/config.json", "folder": "ww2", "required": false }
+  ]
+}
+```
+
+Each repository lands in `<output>/<folder>/` and is published as
+`<baseUrl>/<folder>/` unless the entry sets its own `address`; `folder` defaults
+to the config file name and `name` to the repository's `repoName`. `config`
+paths resolve from the space config file; each repository's `basePath` keeps the
+`create` semantics and resolves from the working directory.
+
+`--layout` decides how the mod folders are stored:
+
+| Layout | What happens | When to use |
+|--------|--------------|-------------|
+| `copy` (default) | Every repository gets a full copy of every mod, exactly like running `create` per repository. | No symlink support on the server or web host. |
+| `pool` (recommended) | Each distinct mod is copied once into `<output>/pool` (`--pool-dir` to move it) and every repository holds a relative symlink to it. Mods shared between repositories take disk space once and the output tree can be moved as a whole. | Everywhere symlinks work: Linux hosts, or Windows with Developer Mode / an elevated shell. |
+| `link` | Every repository symlinks straight to the source mod folder; nothing is copied. Requires `--yes`: the per-mod manifests are written into the source folders, and any later change there silently breaks the published checksums until `create-space` runs again. | Only when the sources are already the served copy and never edited in place. |
+
+The web server must follow symlinks for `pool` and `link` (nginx does by
+default; Apache needs `Options FollowSymLinks`). A mod name that appears in
+several repositories must hash identically in all of them, because the desktop
+app downloads every repository of a space into one shared folder; `create-space`
+refuses otherwise. `--mode`, `--threads`, `--app-update-url`, the `-mod=` line
+options and key collection work as for `create`, applied to every repository
+(`--collect-keys` gathers the keys of the whole space into `<output>/keys`, and
+`-mod=` lines are printed per repository folder).
 
 App update manifest flow:
 ```bash

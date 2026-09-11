@@ -82,13 +82,15 @@ struct FileWorkItem {
     file: DiscoveredFile,
     mod_index: usize,
     file_data_order: usize,
-    output_path: std::path::PathBuf,
+    /// `None` when the mod is hashed in place and nothing is copied.
+    output_path: Option<std::path::PathBuf>,
 }
 
-/// Process all mods: copy files to output, hash parts, compute checksums.
+/// Process all mods: hash parts and compute checksums, copying every file into
+/// `<output_dir>/<mod>/` when an output directory is given.
 pub fn process_mods(
     resolved_mods: &[ResolvedMod],
-    output_dir: &Path,
+    output_dir: Option<&Path>,
     progress: &ProgressBar,
     mode: GenerationMode,
 ) -> Result<Vec<ProcessedMod>> {
@@ -98,9 +100,8 @@ pub fn process_mods(
         let files = crate::discover::discover_files(&resolved.source_path)?;
 
         for (file_data_order, file) in files.into_iter().enumerate() {
-            let output_path = output_dir
-                .join(&resolved.mod_name)
-                .join(&file.relative_path);
+            let output_path =
+                output_dir.map(|dir| dir.join(&resolved.mod_name).join(&file.relative_path));
             work_items.push(FileWorkItem {
                 file,
                 mod_index,
@@ -114,7 +115,7 @@ pub fn process_mods(
 
     let dirs: std::collections::HashSet<_> = work_items
         .iter()
-        .filter_map(|w| w.output_path.parent().map(|p| p.to_path_buf()))
+        .filter_map(|w| w.output_path.as_ref()?.parent().map(|p| p.to_path_buf()))
         .collect();
     for dir in &dirs {
         std::fs::create_dir_all(dir)
@@ -127,7 +128,7 @@ pub fn process_mods(
         .map(|item| {
             let mod_file = copy_and_hash_file(
                 &item.file.absolute_path,
-                &item.output_path,
+                item.output_path.as_deref(),
                 &item.file,
                 item.file_data_order,
                 mode,
@@ -228,11 +229,11 @@ pub fn hash_file_sha1(path: &Path) -> Result<String> {
     Ok(hex::encode(hasher.finalize()).to_uppercase())
 }
 
-/// Copy a file from source to destination while simultaneously hashing its parts.
-/// In HybridMode, computes both MD5 and BLAKE3 in a single I/O pass.
+/// Hash a file's parts in a single I/O pass, copying it to `dest` when given.
+/// In HybridMode, computes both MD5 and BLAKE3 from the same read.
 fn copy_and_hash_file(
     source: &Path,
-    dest: &Path,
+    dest: Option<&Path>,
     discovered: &DiscoveredFile,
     data_order: usize,
     mode: GenerationMode,
@@ -263,9 +264,14 @@ fn copy_and_hash_file(
 
     let mut src_file = std::fs::File::open(source)
         .with_context(|| format!("Failed to open source: {}", source.display()))?;
-    let dst_file = std::fs::File::create(dest)
-        .with_context(|| format!("Failed to create destination: {}", dest.display()))?;
-    let mut writer = BufWriter::with_capacity(buf_size, dst_file);
+    let mut writer = match dest {
+        Some(dest) => {
+            let dst_file = std::fs::File::create(dest)
+                .with_context(|| format!("Failed to create destination: {}", dest.display()))?;
+            Sink::File(BufWriter::with_capacity(buf_size, dst_file))
+        }
+        None => Sink::Discard,
+    };
 
     let mut buf = vec![0u8; buf_size];
     let mut file_position: u64 = 0;
@@ -373,10 +379,33 @@ fn compute_file_checksums(parts: &[FilePart], mode: GenerationMode) -> Checksums
     assemble_checksums(md5, blake3, mode)
 }
 
+/// Destination of the bytes read while hashing: the copied file, or nothing
+/// when a mod is hashed in place.
+enum Sink {
+    File(BufWriter<std::fs::File>),
+    Discard,
+}
+
+impl Sink {
+    fn write_all(&mut self, data: &[u8]) -> std::io::Result<()> {
+        match self {
+            Sink::File(writer) => writer.write_all(data),
+            Sink::Discard => Ok(()),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Sink::File(writer) => writer.flush(),
+            Sink::Discard => Ok(()),
+        }
+    }
+}
+
 /// Copy exactly `count` bytes from reader to writer without hashing.
 fn copy_bytes(
     reader: &mut std::fs::File,
-    writer: &mut BufWriter<std::fs::File>,
+    writer: &mut Sink,
     buf: &mut [u8],
     mut count: u64,
 ) -> Result<()> {
@@ -955,8 +984,8 @@ mod tests {
             file_size,
         };
 
-        let file =
-            copy_and_hash_file(&source, &dest, &discovered, 7, GenerationMode::Swifty).unwrap();
+        let file = copy_and_hash_file(&source, Some(&dest), &discovered, 7, GenerationMode::Swifty)
+            .unwrap();
         let header_len = 22 + "Data\\Thing.bin".len() as u64 + 1 + 20 + 21;
 
         assert_eq!(file.data_order, 7);
@@ -992,7 +1021,7 @@ mod tests {
         };
 
         let file =
-            copy_and_hash_file(&source, &dest, &discovered, 8, GenerationMode::Foxy).unwrap();
+            copy_and_hash_file(&source, Some(&dest), &discovered, 8, GenerationMode::Foxy).unwrap();
 
         assert_eq!(file.data_order, 8);
         assert_eq!(
@@ -1041,7 +1070,7 @@ mod tests {
         }];
         let processed = process_mods(
             &resolved,
-            &output,
+            Some(&output),
             &ProgressBar::hidden(),
             GenerationMode::Foxy,
         )

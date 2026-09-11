@@ -3,6 +3,11 @@ use std::path::Path;
 
 use crate::types::DiscoveredFile;
 
+/// Manifest this tool writes into a mod folder; skipped on discovery so a
+/// folder published in place (or a previous output reused as a source) does
+/// not hash its own manifest.
+const GENERATED_MOD_MANIFEST: &str = "foxy_addon.json";
+
 /// Recursively discover all files within a mod directory.
 /// Preserves traversal order so generated checksums align with legacy-style manifests.
 pub fn discover_files(mod_source: &Path) -> Result<Vec<DiscoveredFile>> {
@@ -38,6 +43,10 @@ fn walk_dir(root: &Path, current: &Path, files: &mut Vec<DiscoveredFile>) -> Res
                 .to_str()
                 .unwrap_or("")
                 .to_string();
+
+            if relative == GENERATED_MOD_MANIFEST {
+                continue;
+            }
 
             if !relative.is_empty() {
                 files.push(DiscoveredFile {
@@ -99,6 +108,23 @@ mod tests {
         let files = discover_files(dir.path()).unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].relative_path, "data.pbo");
+    }
+
+    #[test]
+    fn discover_files_excludes_generated_mod_manifest_at_root_only() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("foxy_addon.json"), b"{}").unwrap();
+        let nested = dir.path().join("addons");
+        fs::create_dir(&nested).unwrap();
+        fs::write(nested.join("foxy_addon.json"), b"{}").unwrap();
+        fs::write(dir.path().join("data.pbo"), b"pbo data").unwrap();
+
+        let files = discover_files(dir.path()).unwrap();
+        let mut names: Vec<&str> = files.iter().map(|f| f.relative_path.as_str()).collect();
+        names.sort();
+        assert_eq!(names.len(), 2);
+        assert!(names[0].ends_with("foxy_addon.json"));
+        assert_eq!(names[1], "data.pbo");
     }
 
     #[test]
