@@ -12,3 +12,4 @@ pub mod profiling;
 pub mod renderer_fallback;
 pub mod resource_profile;
 pub mod speed_of_light;
+pub mod storage_compat;

@@ -169,6 +169,11 @@ pub struct SettingsViewState {
     /// Whether the Swifty migration wizard has been offered to the user.
     #[serde(default)]
     pub swifty_migration_offered: bool,
+    /// Fingerprint of the storage-check findings the user chose not to see
+    /// again. The startup notice stays hidden only while the findings match
+    /// exactly; a new path, drive or filesystem raises it again.
+    #[serde(default)]
+    pub storage_notice_acknowledged: String,
     /// User-defined scheduled jobs (Settings -> Scheduling). Each runs an opt-in
     /// recheck/download pipeline and optional post-action while Foxy is open.
     #[serde(default)]
@@ -329,6 +334,7 @@ impl Default for SettingsViewState {
             ts3_installed_plugin_hashes: HashMap::new(),
             ts3_plugin_statuses: Vec::new(),
             swifty_migration_offered: false,
+            storage_notice_acknowledged: String::new(),
             scheduled_jobs: Vec::new(),
             additional_folders_filter: String::new(),
             cleanup_folders_filter: String::new(),

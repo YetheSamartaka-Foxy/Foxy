@@ -20,6 +20,9 @@ pub(crate) struct DownloadMetrics {
     file_events: Mutex<Vec<FileMetric>>,
     range_events: Mutex<Vec<RangeMetric>>,
     phase_events: Mutex<Vec<PhaseMetric>>,
+    /// One `root=.. fs=..` description per volume the run writes to, so the
+    /// final report says where the bytes went.
+    destinations: Mutex<Vec<String>>,
     sampler_stop: AtomicBool,
     sampler_wake: tokio::sync::Notify,
 }
@@ -149,8 +152,15 @@ impl DownloadMetrics {
             file_events: Mutex::new(Vec::new()),
             range_events: Mutex::new(Vec::new()),
             phase_events: Mutex::new(Vec::new()),
+            destinations: Mutex::new(Vec::new()),
             sampler_stop: AtomicBool::new(false),
             sampler_wake: tokio::sync::Notify::new(),
+        }
+    }
+
+    pub(super) fn record_destination(&self, description: String) {
+        if let Ok(mut destinations) = self.destinations.lock() {
+            destinations.push(description);
         }
     }
 
@@ -330,6 +340,12 @@ impl DownloadMetrics {
                 db_rows as f64 / db_batches as f64,
                 db_statements as f64 / db_batches as f64
             ));
+        }
+
+        if let Ok(destinations) = self.destinations.lock() {
+            for destination in destinations.iter() {
+                lines.push(format!("destination: {destination}"));
+            }
         }
 
         if let Ok(phases) = self.phase_events.lock()

@@ -549,6 +549,131 @@ fn check_disk_space(targets: &[DownloadTargetWithModName]) -> Result<(), String>
     }
 }
 
+/// Refuse to start when the destination filesystem cannot take the planned
+/// files: a FAT volume and a file of 4 GiB or more, a read-only volume, a name
+/// Windows cannot create, or two files that differ only by letter case on a
+/// case-insensitive volume. Those fail deep inside the transfer otherwise, or
+/// worse, overwrite each other and re-flag the addon on every check. One volume
+/// probe per addon and pure string work per file; nothing is opened.
+///
+/// Findings that are survivable (a path at the Windows `MAX_PATH` limit) are
+/// logged and do not block.
+fn check_destination_filesystem(
+    targets: &[DownloadTargetWithModName],
+    metrics: &DownloadMetrics,
+) -> Result<(), String> {
+    use crate::core::utils::storage_compat::{
+        PathLimitReport, StorageIssueCode, StorageIssueSeverity, VolumeInfo, VolumeProber,
+        evaluate_volume,
+    };
+
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let prober = VolumeProber::new();
+    let mut mod_volume: HashMap<u64, Option<PathBuf>> = HashMap::new();
+    let mut volumes: HashMap<PathBuf, VolumeInfo> = HashMap::new();
+    let mut files_by_volume: HashMap<PathBuf, Vec<(&str, u64)>> = HashMap::new();
+
+    for target in targets {
+        let root = mod_volume
+            .entry(target.mod_id)
+            .or_insert_with(|| {
+                let path = Path::new(target.download.download_local_path.as_ref());
+                let anchor = path.parent().unwrap_or(path);
+                let volume = prober.probe(anchor)?;
+                let root = volume.root.clone();
+                volumes.entry(root.clone()).or_insert(volume);
+                Some(root)
+            })
+            .clone();
+        if let Some(root) = root {
+            files_by_volume.entry(root).or_default().push((
+                target.download.download_local_path.as_ref(),
+                target.download.size as u64,
+            ));
+        }
+    }
+
+    let mut blocking = Vec::new();
+    let mut roots: Vec<&PathBuf> = files_by_volume.keys().collect();
+    roots.sort();
+    for root in roots {
+        let volume = &volumes[root];
+        let files = &files_by_volume[root];
+        let report = PathLimitReport::from_files(files.iter().copied(), volume);
+        let description = format!(
+            "root=\"{}\" fs=\"{}\" family={} journaled={} removable={} remote={} read_only={} files={} largest_file_bytes={} longest_path_chars={}",
+            sanitize_log_path(root),
+            volume.filesystem,
+            volume.family.as_str(),
+            volume.journaled(),
+            volume.removable,
+            volume.remote,
+            volume.read_only,
+            report.file_count,
+            report.largest_file_bytes,
+            report.longest_path_chars
+        );
+        info!("download_destination: {description}");
+        metrics.record_destination(description);
+        let mut issues = evaluate_volume("repository", root, volume);
+        issues.extend(report.issues("repository", root, volume));
+        for issue in issues {
+            if issue.severity >= StorageIssueSeverity::Warning {
+                warn!("{}", issue.log_line());
+            }
+            if issue.severity != StorageIssueSeverity::Blocking {
+                continue;
+            }
+            let drive = root.display();
+            let fs = &issue.filesystem;
+            blocking.push(match issue.code {
+                StorageIssueCode::FileExceedsFilesystemLimit => format!(
+                    "{} of the files are larger than the 4 GiB file size limit of {} ({}); largest is {}. Move the repository to an NTFS or exFAT drive.",
+                    issue.affected_files,
+                    drive,
+                    fs,
+                    metrics_format_bytes(issue.largest_file_bytes)
+                ),
+                StorageIssueCode::ReadOnlyVolume => {
+                    format!("{drive} is read-only.")
+                }
+                StorageIssueCode::InvalidWindowsName => format!(
+                    "{} of the files have names Windows cannot create (for example \"{}\"). The repository maintainer has to rename them.",
+                    issue.affected_files, issue.example
+                ),
+                StorageIssueCode::CaseCollision => format!(
+                    "two files differ only by letter case ({}) and cannot coexist on {} ({}).",
+                    issue.example, drive, fs
+                ),
+                _ => continue,
+            });
+        }
+    }
+
+    if blocking.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Cannot download to this location: {}",
+            blocking.join(" ")
+        ))
+    }
+}
+
+fn metrics_format_bytes(bytes: u64) -> String {
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    const MIB: f64 = 1024.0 * 1024.0;
+    if bytes as f64 >= GIB {
+        format!("{:.2} GiB", bytes as f64 / GIB)
+    } else if bytes as f64 >= MIB {
+        format!("{:.2} MiB", bytes as f64 / MIB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 /// Check whether the download server supports HTTP Range requests.
 /// Sends a single HEAD request with a Range header; returns `true` if the server
 /// responds with 206 Partial Content. This is called once per download session
@@ -810,6 +935,13 @@ pub(crate) async fn download_files(
                 send_progress_event(tx, ProgressEvent::Failed(space_err.clone()), &operation_id);
             }
             return Err(anyhow!(space_err));
+        }
+        if let Err(fs_err) = check_destination_filesystem(&targets, &metrics) {
+            error!("{}", fs_err);
+            if let Some(tx) = progress_tx.as_ref() {
+                send_progress_event(tx, ProgressEvent::Failed(fs_err.clone()), &operation_id);
+            }
+            return Err(anyhow!(fs_err));
         }
     }
     if cancellation_requested(&cancel_rx) {

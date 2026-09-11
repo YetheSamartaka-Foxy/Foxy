@@ -145,6 +145,11 @@ impl Foxy {
         }
         self.queue_startup_rechecks();
         self.start_startup_ts3_plugin_scan();
+        self.storage_compat_notice = None;
+        self.startup_diagnostics_rx = Some(crate::core::api::spawn_storage_compat_check(
+            self.startup_storage_paths(),
+            self.storage_check_repositories(),
+        ));
     }
 
     pub(in crate::ui::app) fn detect_arma3_profiles_now(&mut self) {
@@ -513,6 +518,7 @@ const APP_GLOBAL_FOXY_FIELDS: &[&str] = &[
     "pending_db_schema_wipe",
     "db_lock_conflict",
     "pending_low_space_notice",
+    "storage_compat_notice",
     "game_spaces_view_state",
     "pending_game_space_switch",
     // Worker channel endpoints; the view state they feed is reset above.

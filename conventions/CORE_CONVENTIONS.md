@@ -64,3 +64,11 @@
 
 \- Every `local_path` used as a key must funnel through `content_hash::normalize_path` (idempotent) so core-emitted paths, the saved `pending_updates` key, and the UI's `repo.path` canonicalize identically.
 
+
+\### Filesystem compatibility
+
+\- `utils/storage_compat.rs` owns the filesystem rules: the family classification (`classify_filesystem_name`), the per-path volume probe (`VolumeProber`: `GetVolumePathNameW` + `GetVolumeInformationW` + `GetDriveTypeW` on Windows, the sysinfo mount table elsewhere), the role-based verdicts (`evaluate_volume`), and the per-file limits (`PathLimitReport`: FAT 4 GiB ceiling, Windows `MAX_PATH` including the `.foxy.part.meta.tmp` sidecar reserve, reserved names, case collisions). A mapped share reports the *remote* filesystem name, so `VolumeInfo::remote` (not the family) identifies network storage. Add a new filesystem or rule there, with a unit test; never string-match filesystem names at call sites.
+
+\- The rules run in three places and must stay consistent: the startup diagnostics thread (`api/startup_diagnostics.rs`, volume verdicts plus one aggregate query per repository via `models/repository_limits.rs` for largest file and longest path), the download orchestrator gate next to the disk-space check (`check_destination_filesystem`, refuses before any file is written), and the direct-download worker. Blocking findings refuse the write; warnings are logged and surfaced once at startup through the UI "Storage check" notice (`foxy ui --debug-modal storage-check` previews it).
+
+\- Keep the checks cheap: no tree load, no file reads, one probe per addon or path. The startup pass costs milliseconds and runs off the launch path; it must never gate the first frame.

@@ -109,8 +109,14 @@ impl Foxy {
             return;
         };
         match rx.try_recv() {
-            Ok(low_space) => {
-                self.pending_low_space_notice = low_space;
+            Ok(report) => {
+                self.pending_low_space_notice = report.low_space;
+                if !self
+                    .previewing_debug_modal(crate::ui::app::debug_modals::DebugModal::StorageCheck)
+                {
+                    self.storage_compat_notice =
+                        self.build_storage_compat_notice(report.storage_issues);
+                }
                 self.startup_diagnostics_rx = None;
                 self.needs_repaint = true;
             }

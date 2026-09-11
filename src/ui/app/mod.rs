@@ -135,6 +135,10 @@ pub struct Foxy {
     /// floor. Raised once per launch as a toast; a drive that fills mid-sync
     /// leaves partially written state rather than failing cleanly.
     pub pending_low_space_notice: bool,
+    /// Storage-check findings waiting to be shown (paths on a filesystem Foxy
+    /// cannot use safely, files the destination cannot hold). Built from the
+    /// background startup report; `None` once dismissed or acknowledged.
+    pub storage_compat_notice: Option<runtime::StorageCompatNotice>,
     /// Unified selection: either a server or an editor mission in the repository view.
     pub repository_selection: Option<RepositorySelection>,
     /// Cached list of detected Arma 3 profiles.
@@ -403,7 +407,7 @@ pub struct Foxy {
     /// Result of the background startup system summary: `true` when a drive
     /// Foxy writes through is critically full. Building the summary costs
     /// hundreds of milliseconds, so it never gates the first frame.
-    pub(crate) startup_diagnostics_rx: Option<StdReceiver<bool>>,
+    pub(crate) startup_diagnostics_rx: Option<StdReceiver<api::StartupDiagnosticsReport>>,
     /// Process start to first painted frame; `None` until that frame lands.
     pub(crate) startup_first_frame_at: Option<Duration>,
     /// Repositories the startup quick-scan plan was asked to consider. Held on

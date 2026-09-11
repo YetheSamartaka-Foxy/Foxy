@@ -3416,6 +3416,10 @@ impl Foxy {
             self.pending_renderer_fallback_notice,
             "renderer-fallback-notice",
         );
+        push(
+            self.storage_compat_notice.is_some(),
+            "storage-compat-notice",
+        );
         push(self.pending_db_schema_wipe.is_some(), "db-schema-wipe");
         push(self.pending_app_update_prompt, "app-update-available");
         push(self.show_add_profile_window, "add-profile");

@@ -9,4 +9,5 @@ pub mod modification_file_part;
 pub mod pending_update;
 pub mod recheck_level;
 pub mod repository;
+pub mod repository_limits;
 pub mod trait_has_local_checksum;

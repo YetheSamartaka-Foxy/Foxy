@@ -194,6 +194,7 @@ impl Foxy {
             pending_db_schema_wipe: None,
             db_lock_conflict: None,
             pending_low_space_notice: false,
+            storage_compat_notice: None,
             current_view: FoxyView::RepositoryList,
             last_view: FoxyView::None,
             main_view_state: MainViewState {
@@ -593,7 +594,11 @@ impl Foxy {
         app.reconcile_repository_space_paths();
         app.load_repository_visual_folders();
         let storage_paths = app.startup_storage_paths();
-        app.startup_diagnostics_rx = Some(api::spawn_startup_system_diagnostics(storage_paths));
+        let storage_check_repositories = app.storage_check_repositories();
+        app.startup_diagnostics_rx = Some(api::spawn_startup_system_diagnostics(
+            storage_paths,
+            storage_check_repositories,
+        ));
         info!(
             "Startup state loaded: repositories={} repository_spaces={} debug_mode={}",
             app.repository_view_state.repositories.len(),

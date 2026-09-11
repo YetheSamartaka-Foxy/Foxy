@@ -97,6 +97,11 @@ impl Foxy {
                 info!("Closed join addon preflight from Escape shortcut");
                 return;
             }
+            if self.storage_compat_notice.is_some() {
+                self.dismiss_storage_compat_notice();
+                info!("Closed storage check notice from Escape shortcut");
+                return;
+            }
             if self.pending_join_preflight_query.is_some() {
                 self.pending_join_preflight_query = None;
                 info!("Canceled join addon preflight query from Escape shortcut");

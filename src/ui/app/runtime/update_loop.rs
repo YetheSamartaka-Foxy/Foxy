@@ -444,6 +444,7 @@ impl Foxy {
 
         self.render_ui_toast(&ctx);
         self.render_renderer_fallback_notice(&ctx);
+        self.render_storage_compat_notice(&ctx);
         self.render_db_lock_conflict_prompt(&ctx);
         self.render_db_schema_wipe_prompt(&ctx);
         self.render_app_update_prompt(&ctx);

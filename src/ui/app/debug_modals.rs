@@ -20,6 +20,8 @@ pub enum DebugModal {
     AppUpdate,
     /// "Database update required" schema wipe prompt.
     DbSchemaWipe,
+    /// "Storage check" filesystem findings window.
+    StorageCheck,
 }
 
 impl DebugModal {
@@ -28,6 +30,7 @@ impl DebugModal {
         match self {
             DebugModal::AppUpdate => "app-update",
             DebugModal::DbSchemaWipe => "db-schema-wipe",
+            DebugModal::StorageCheck => "storage-check",
         }
     }
 
@@ -60,7 +63,65 @@ impl DebugModal {
                         blocking: false,
                     });
             }
+            DebugModal::StorageCheck => {
+                app.storage_compat_notice = Some(preview_storage_notice());
+            }
         }
+    }
+}
+
+/// Placeholder findings covering every row style: a blocking per-repository
+/// limit, a blocking volume finding, and a warning shared by two folders.
+fn preview_storage_notice() -> crate::ui::app::runtime::StorageCompatNotice {
+    use crate::core::utils::storage_compat::{
+        FAT_MAX_FILE_BYTES, FilesystemFamily, PathLimitReport, VolumeInfo, evaluate_volume,
+    };
+    use crate::ui::app::runtime::{storage_notice_fingerprint, storage_notice_rows};
+    use std::path::{Path, PathBuf};
+
+    let fat = VolumeInfo {
+        root: PathBuf::from("E:\\"),
+        filesystem: "FAT32".to_string(),
+        family: FilesystemFamily::Fat,
+        removable: true,
+        remote: false,
+        read_only: false,
+    };
+    let share = VolumeInfo {
+        root: PathBuf::from("\\\\nas\\foxy\\"),
+        filesystem: "NTFS".to_string(),
+        family: FilesystemFamily::Ntfs,
+        removable: false,
+        remote: true,
+        read_only: false,
+    };
+    let repo = Path::new("E:\\Mods\\Main Repository");
+    let mut issues = evaluate_volume("repository", repo, &fat);
+    issues.extend(evaluate_volume("temp", Path::new("E:\\Foxy Temp"), &fat));
+    issues.extend(evaluate_volume(
+        "database",
+        Path::new("\\\\nas\\foxy\\games\\arma3\\database.db"),
+        &share,
+    ));
+    let files = [
+        (
+            "E:\\Mods\\Main Repository\\@map\\addons\\terrain.pbo",
+            FAT_MAX_FILE_BYTES + 1,
+        ),
+        (
+            "E:\\Mods\\Main Repository\\@map\\addons\\world.pbo",
+            6_442_450_944,
+        ),
+    ];
+    issues.extend(
+        PathLimitReport::from_files(files.iter().copied(), &fat).issues("repository", repo, &fat),
+    );
+    let rows = storage_notice_rows(issues);
+    let fingerprint = storage_notice_fingerprint(&rows);
+    crate::ui::app::runtime::StorageCompatNotice {
+        rows,
+        fingerprint,
+        suppress_future: false,
     }
 }
 
@@ -118,5 +179,27 @@ mod tests {
     fn debug_modal_names_are_stable() {
         assert_eq!(DebugModal::AppUpdate.as_str(), "app-update");
         assert_eq!(DebugModal::DbSchemaWipe.as_str(), "db-schema-wipe");
+        assert_eq!(DebugModal::StorageCheck.as_str(), "storage-check");
+    }
+
+    #[test]
+    fn storage_check_preview_covers_blocking_and_warning_rows() {
+        use crate::core::utils::storage_compat::{StorageIssueCode, StorageIssueSeverity};
+        let notice = preview_storage_notice();
+        let codes: Vec<_> = notice.rows.iter().map(|row| row.issue.code).collect();
+        assert!(codes.contains(&StorageIssueCode::FileExceedsFilesystemLimit));
+        assert!(codes.contains(&StorageIssueCode::DatabaseOnNetworkShare));
+        assert!(codes.contains(&StorageIssueCode::FatFileSizeLimit));
+        assert_eq!(
+            notice.rows[0].issue.severity,
+            StorageIssueSeverity::Blocking
+        );
+        let fat_row = notice
+            .rows
+            .iter()
+            .find(|row| row.issue.code == StorageIssueCode::FatFileSizeLimit)
+            .expect("fat row");
+        assert_eq!(fat_row.locations.len(), 2);
+        assert!(!notice.fingerprint.is_empty());
     }
 }

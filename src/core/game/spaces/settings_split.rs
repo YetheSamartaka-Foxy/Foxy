@@ -35,6 +35,8 @@ pub const GAME_SPACE_SETTINGS_KEYS: &[&str] = &[
     "ts3_installed_plugin_hashes",
     "ts3_plugin_statuses",
     "swifty_migration_offered",
+    // Acknowledged storage findings name the space's repositories and drives.
+    "storage_notice_acknowledged",
     // Additional search folders point at game-specific addon sources, so each
     // game space keeps its own list.
     "additional_folders",

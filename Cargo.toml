@@ -105,5 +105,5 @@ foxy-formats = { path = "foxy-formats" }
 tempfile = "3.27.0"
 
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3.9", features = ["consoleapi", "handleapi", "libloaderapi", "memoryapi", "processthreadsapi", "psapi", "securitybaseapi", "shellapi", "sysinfoapi", "winbase", "wincon", "winnls", "winnt", "winuser"] }
+winapi = { version = "0.3.9", features = ["consoleapi", "fileapi", "handleapi", "libloaderapi", "memoryapi", "processthreadsapi", "psapi", "securitybaseapi", "shellapi", "sysinfoapi", "winbase", "wincon", "winnls", "winnt", "winuser"] }
 wmi = "0.18.4"

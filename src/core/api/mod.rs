@@ -60,8 +60,8 @@ pub use quick_scan::{
     recalculate_hashes_for_addon_by_name, spawn_quick_local_scan, spawn_quick_local_scan_instances,
 };
 pub use startup_diagnostics::{
-    StartupStoragePath, all_storage_devices_lines, spawn_startup_system_diagnostics,
-    startup_system_diagnostics_lines,
+    StartupDiagnosticsReport, StartupStoragePath, all_storage_devices_lines,
+    spawn_startup_system_diagnostics, spawn_storage_compat_check, startup_system_diagnostics_lines,
 };
 pub use sync_pipeline::spawn_repository_sync;
 pub use types::{
