@@ -35,6 +35,7 @@ impl Foxy {
             || self.addon_hash_recalc_in_flight
             || !self.pending_repository_db_wipes.is_empty()
             || !self.pending_addon_deletes.is_empty()
+            || !self.pending_addon_force_redownloads.is_empty()
             || self.scheduler_active_run.is_some();
         busy.then_some("Finish downloads and scans before switching game spaces.")
     }
@@ -364,6 +365,7 @@ impl Foxy {
         self.pending_repository_force_redownloads.clear();
         self.pending_repository_db_wipe_started_at.clear();
         self.pending_addon_deletes.clear();
+        self.pending_addon_force_redownloads.clear();
         self.pending_cached_update_loads.clear();
         self.addon_hash_recalc_in_flight = false;
         self.addon_hash_recalc_queue.clear();
@@ -609,6 +611,8 @@ const APP_GLOBAL_FOXY_FIELDS: &[&str] = &[
     "addon_hash_recalc_result_tx",
     "addon_delete_result_rx",
     "addon_delete_result_tx",
+    "addon_force_redownload_result_rx",
+    "addon_force_redownload_result_tx",
     "cached_update_load_result_rx",
     "cached_update_load_result_tx",
     "quick_scan_rx",

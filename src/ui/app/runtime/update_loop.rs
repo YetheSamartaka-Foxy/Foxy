@@ -273,6 +273,7 @@ impl Foxy {
         self.poll_repository_db_wipe_results();
         self.poll_database_wipe_result();
         self.poll_addon_delete_results();
+        self.poll_addon_force_redownload_results();
         self.poll_addon_backup_results();
         self.poll_repository_settings_addon_preload_results();
         self.maybe_warm_addon_inventory();

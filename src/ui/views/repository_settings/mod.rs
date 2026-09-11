@@ -509,6 +509,14 @@ impl Foxy {
                                 }
                             });
                             ui.separator();
+                        } else if self.is_addon_force_redownload_pending_for_repo(&repo.path) {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label(tr(
+                                    "Checking repository connection before force redownload",
+                                ));
+                            });
+                            ui.separator();
                         }
                     }
 

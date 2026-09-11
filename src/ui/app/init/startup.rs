@@ -6,12 +6,13 @@ use log::info;
 
 use crate::core::api::{self, QuickScanProgressEvent, QuickScanResult};
 use crate::ui::app::{
-    AddonBackupTaskResult, AddonDeleteResult, AddonHashRecalcResult, AddonInventoryViewCache,
-    CachedUpdateLoadResult, Foxy, ImageLoadResult, JoinPreflightQueryResult, ListGalleyCache,
-    MissionRowGalleyCache, PersistenceRequest, PersistenceResult, RepoMetadataFetchResult,
-    RepositoryAddonListCache, RepositoryAddonSizeLoadResult, RepositoryDbWipeResult,
-    RepositoryExternalAddonsListCache, RepositoryListCache, RepositorySettingsAddonPreloadResult,
-    RepositorySpaceImportResult, agent_driver::AgentGuiLaunchConfig,
+    AddonBackupTaskResult, AddonDeleteResult, AddonForceRedownloadProbeResult,
+    AddonHashRecalcResult, AddonInventoryViewCache, CachedUpdateLoadResult, Foxy, ImageLoadResult,
+    JoinPreflightQueryResult, ListGalleyCache, MissionRowGalleyCache, PersistenceRequest,
+    PersistenceResult, RepoMetadataFetchResult, RepositoryAddonListCache,
+    RepositoryAddonSizeLoadResult, RepositoryDbWipeResult, RepositoryExternalAddonsListCache,
+    RepositoryListCache, RepositorySettingsAddonPreloadResult, RepositorySpaceImportResult,
+    agent_driver::AgentGuiLaunchConfig,
 };
 use crate::ui::i18n::I18n;
 use crate::ui::palette;
@@ -155,6 +156,8 @@ impl Foxy {
             std::sync::mpsc::channel::<AddonHashRecalcResult>();
         let (addon_delete_result_tx, addon_delete_result_rx) =
             std::sync::mpsc::channel::<AddonDeleteResult>();
+        let (addon_force_redownload_result_tx, addon_force_redownload_result_rx) =
+            std::sync::mpsc::channel::<AddonForceRedownloadProbeResult>();
         let (cached_update_load_result_tx, cached_update_load_result_rx) =
             std::sync::mpsc::channel::<CachedUpdateLoadResult>();
         let (quick_scan_tx, quick_scan_rx) = std::sync::mpsc::channel::<QuickScanResult>();
@@ -314,6 +317,9 @@ impl Foxy {
             addon_delete_result_rx,
             addon_delete_result_tx,
             pending_addon_deletes: HashSet::new(),
+            addon_force_redownload_result_rx,
+            addon_force_redownload_result_tx,
+            pending_addon_force_redownloads: HashSet::new(),
             cached_update_load_result_rx,
             cached_update_load_result_tx,
             pending_cached_update_loads: HashSet::new(),

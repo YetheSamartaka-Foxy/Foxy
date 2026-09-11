@@ -182,6 +182,35 @@ impl Foxy {
         }
     }
 
+    /// A failed download (including a force redownload that stopped before
+    /// touching local files) has no modal left open to show the error, so it is
+    /// surfaced as a toast plus the selected repository's completion banner.
+    fn report_download_failure(
+        &mut self,
+        repo_index: Option<usize>,
+        message: &str,
+        elapsed: Option<Duration>,
+    ) {
+        let repo_name = repo_index
+            .and_then(|idx| self.repository_view_state.repositories.get(idx))
+            .map(|repo| repo.name.clone())
+            .unwrap_or_default();
+        self.show_error_toast(self.t_fmt("Update failed for {name}", &[("name", repo_name)]));
+        if repo_index.is_some() && repo_index == self.repository_view_state.selected_repository {
+            self.completed_repository_check_banner =
+                repo_index.map(|repo_index| RepositoryCheckCompletionState {
+                    repo_index,
+                    mode: SyncMode::Download,
+                    success: false,
+                    had_updates: false,
+                    update_count: 0,
+                    elapsed,
+                    error_message: Some(message.to_string()),
+                });
+        }
+        self.needs_repaint = true;
+    }
+
     pub(in crate::ui::app) fn poll_addon_delete_results(&mut self) {
         loop {
             match self.addon_delete_result_rx.try_recv() {
@@ -755,8 +784,12 @@ impl Foxy {
                                 self.check_ts3_plugin_updates_for_repo(repo_idx);
                             }
                         } else {
+                            self.download_progress = None;
                             self.download_finished = false;
                             self.download_finished_repo = None;
+                            if let ProgressEvent::Failed(message) = &evt {
+                                self.report_download_failure(last_repo, message, sync_elapsed);
+                            }
                         }
                     }
                     if last_mode == Some(SyncMode::RecheckOnly)
@@ -838,7 +871,10 @@ impl Foxy {
                             self.open_update_after_sync = false;
                         }
                     } else if last_mode == Some(SyncMode::Download) {
-                        self.completed_repository_check_banner = None;
+                        // A failed download just set its own failure banner.
+                        if !matches!(evt, ProgressEvent::Failed(_)) {
+                            self.completed_repository_check_banner = None;
+                        }
                         self.update_ready_repo = if finished_successfully || update_count == 0 {
                             None
                         } else {

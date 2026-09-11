@@ -1,6 +1,7 @@
 use super::{
-    AppState, CommandError, CommandSuccess, ensure_backend_ready, find_repository_index,
-    progress_output_muted, run_repository_sync,
+    AppState, CommandError, CommandSuccess, ensure_backend_ready,
+    ensure_remote_reachable_before_destructive, find_repository_index, progress_output_muted,
+    run_repository_sync,
 };
 use crate::cli::args::{
     CliArgs, RepoAddArgs, RepoCloneArgs, RepoCommand, RepoForceRedownloadArgs, RepoRemoveArgs,
@@ -291,6 +292,7 @@ fn cmd_repo_force_redownload(
         });
     }
 
+    ensure_remote_reachable_before_destructive("repo.force-redownload", &normalized)?;
     ensure_backend_ready();
     let runtime = Runtime::new().map_err(|e| {
         CommandError::operation("repo.force-redownload", format!("Runtime error: {}", e))

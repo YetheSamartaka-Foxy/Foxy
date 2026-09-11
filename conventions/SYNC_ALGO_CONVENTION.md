@@ -982,6 +982,11 @@ Keep or refresh pending cache when:
 - full download fallback
 - incremental final hash
 - clear queue and pending cache only after clean final state
+- with `force_redownload`, a bounded `repo.json` reachability probe
+  (`tasks/remote_reachability.rs`) runs before the local purge; an unreachable
+  repository fails the sync with no local files removed. The CLI
+  `repo force-redownload` / `addon force-redownload` and the GUI addon force
+  redownload run the same probe before deleting anything
 
 ## Performance Requirements
 

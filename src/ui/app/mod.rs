@@ -245,6 +245,12 @@ pub struct Foxy {
     addon_delete_result_rx: StdReceiver<AddonDeleteResult>,
     addon_delete_result_tx: StdSender<AddonDeleteResult>,
     pending_addon_deletes: HashSet<String>,
+    /// Background remote reachability probe that precedes an addon force
+    /// redownload. Results are applied by `poll_addon_force_redownload_results`.
+    addon_force_redownload_result_rx: StdReceiver<AddonForceRedownloadProbeResult>,
+    addon_force_redownload_result_tx: StdSender<AddonForceRedownloadProbeResult>,
+    /// Normalized addon folders with a probe in flight.
+    pending_addon_force_redownloads: HashSet<String>,
     /// Background load of a repository's cached pending-update payload from the
     /// database. Results are applied by `poll_cached_update_load_results`.
     cached_update_load_result_rx: StdReceiver<CachedUpdateLoadResult>,

@@ -332,6 +332,19 @@ pub struct AddonDeleteResult {
     pub outcome: Result<usize, String>,
 }
 
+/// Result of the remote reachability probe that guards an addon force
+/// redownload. The probe runs off the UI thread; the local folder is removed
+/// on the UI thread only after `outcome` is `Ok`.
+#[derive(Debug)]
+pub struct AddonForceRedownloadProbeResult {
+    pub repo_address: String,
+    pub repo_path: String,
+    pub repo_name: String,
+    pub addon_name: String,
+    pub target_path: std::path::PathBuf,
+    pub outcome: Result<(), String>,
+}
+
 /// Disposition of a background cached pending-update load. Mirrors the branches
 /// of the previous synchronous loader so UI-thread state transitions are
 /// preserved exactly.

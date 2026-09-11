@@ -200,6 +200,28 @@ fn ensure_backend_ready() {
     crate::core::tasks::init_database::check_and_wipe_database();
 }
 
+/// Gate for commands that delete local data and then re-download it: refuse
+/// to touch the disk while the repository cannot serve its manifest.
+fn ensure_remote_reachable_before_destructive(
+    action: &str,
+    repository_url: &str,
+) -> Result<(), CommandError> {
+    let runtime = tokio::runtime::Runtime::new()
+        .map_err(|e| CommandError::operation(action, format!("Runtime error: {}", e)))?;
+    runtime
+        .block_on(async {
+            let client = crate::core::tasks::create_web_client::create_web_client().await;
+            crate::core::tasks::remote_reachability::ensure_remote_repository_reachable(
+                &client,
+                repository_url,
+            )
+            .await
+        })
+        .map_err(|err| {
+            CommandError::operation(action, format!("{}. Local files were not removed", err))
+        })
+}
+
 pub fn run_command(cli: &CliArgs, command: CliCommand) -> Result<CommandSuccess, CommandError> {
     crate::core::game::spaces::ensure_game_spaces_layout();
     let started = Instant::now();

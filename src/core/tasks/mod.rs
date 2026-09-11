@@ -13,6 +13,7 @@ pub mod purge_repository;
 pub mod remote_file_parts;
 pub mod remote_files;
 pub mod remote_mods;
+pub mod remote_reachability;
 pub mod remote_repository;
 pub mod truncate_download_targets;
 // Turso data layer (plan.md) - the live persistence engine after the Phase-4

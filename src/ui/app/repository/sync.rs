@@ -8,7 +8,9 @@ use tokio::sync::broadcast;
 use tokio::sync::watch;
 
 use crate::core::api::{self, ModDiffSummary, SyncMode};
-use crate::ui::app::{AddonHashRecalcResult, Foxy};
+use crate::core::tasks::create_web_client::create_web_client;
+use crate::core::tasks::remote_reachability::ensure_remote_repository_reachable;
+use crate::ui::app::{AddonForceRedownloadProbeResult, AddonHashRecalcResult, Foxy};
 use crate::ui::types::{DownloadSummary, RepoState, Repository, sanitize_user_path};
 
 impl Foxy {
@@ -668,6 +670,11 @@ impl Foxy {
         }
     }
 
+    /// Force redownload of one addon. The local folder is removed only after a
+    /// background probe confirms the repository can serve `repo.json`; the
+    /// removal and the follow-up recheck happen in
+    /// [`Self::poll_addon_force_redownload_results`]. Returns `false` when the
+    /// request was rejected up front.
     pub fn force_redownload_addon(
         &mut self,
         repo_idx: usize,
@@ -741,35 +748,161 @@ impl Foxy {
             return false;
         }
 
-        if target_path.exists() {
-            if target_path.is_dir() {
-                if let Err(err) = fs::remove_dir_all(&target_path) {
-                    warn!(
-                        "Failed to remove addon directory for {} in {}: {}",
-                        addon_name, repo.name, err
-                    );
-                    return false;
-                }
-                info!(
-                    "Removed addon directory for {} in {} before recheck",
-                    addon_name, repo.name
-                );
+        if target_path.exists() && !target_path.is_dir() {
+            warn!(
+                "Addon force redownload ignored: target path is not a directory for {} in {}",
+                addon_name, repo.name
+            );
+            return false;
+        }
+
+        let pending_key = Self::normalize_path_for_addon_match(&target_path.to_string_lossy());
+        if !self.pending_addon_force_redownloads.insert(pending_key) {
+            warn!(
+                "Addon force redownload ignored: already checking the repository connection for {} in {}",
+                addon_name, repo.name
+            );
+            return false;
+        }
+
+        info!(
+            "Checking repository connection before force redownload of {} in {}",
+            addon_name, repo.name
+        );
+        self.needs_repaint = true;
+
+        let tx = self.addon_force_redownload_result_tx.clone();
+        let repaint_ctx = self.repaint_ctx.clone();
+        let result = AddonForceRedownloadProbeResult {
+            repo_address: repo.address.clone(),
+            repo_path: repo.path.clone(),
+            repo_name: repo.name.clone(),
+            addon_name: addon_name.to_string(),
+            target_path,
+            outcome: Ok(()),
+        };
+        std::thread::spawn(move || {
+            let outcome = match Runtime::new() {
+                Ok(rt) => rt.block_on(async {
+                    let client = create_web_client().await;
+                    ensure_remote_repository_reachable(&client, &result.repo_address).await
+                }),
+                Err(err) => Err(err.to_string()),
+            };
+            if tx
+                .send(AddonForceRedownloadProbeResult { outcome, ..result })
+                .is_ok()
+            {
+                Self::request_background_repaint(repaint_ctx.as_ref());
             } else {
+                warn!("Failed to report addon force redownload probe completion");
+            }
+        });
+        true
+    }
+
+    /// True while a force redownload of any addon under `repo_path` is still
+    /// waiting on its remote reachability probe.
+    pub fn is_addon_force_redownload_pending_for_repo(&self, repo_path: &str) -> bool {
+        if self.pending_addon_force_redownloads.is_empty() || repo_path.trim().is_empty() {
+            return false;
+        }
+        let prefix = format!(
+            "{}/",
+            Self::normalize_path_for_addon_match(repo_path.trim())
+        );
+        self.pending_addon_force_redownloads
+            .iter()
+            .any(|key| key.starts_with(&prefix))
+    }
+
+    pub(in crate::ui::app) fn poll_addon_force_redownload_results(&mut self) {
+        while let Ok(result) = self.addon_force_redownload_result_rx.try_recv() {
+            let pending_key =
+                Self::normalize_path_for_addon_match(&result.target_path.to_string_lossy());
+            self.pending_addon_force_redownloads.remove(&pending_key);
+            self.needs_repaint = true;
+            self.complete_addon_force_redownload(result);
+        }
+    }
+
+    fn complete_addon_force_redownload(&mut self, result: AddonForceRedownloadProbeResult) {
+        let AddonForceRedownloadProbeResult {
+            repo_address,
+            repo_path,
+            repo_name,
+            addon_name,
+            target_path,
+            outcome,
+        } = result;
+
+        if let Err(err) = outcome {
+            warn!(
+                "Addon force redownload cancelled for {} in {}, local files were not removed: {}",
+                addon_name, repo_name, err
+            );
+            let message = self.t_fmt(
+                "Force redownload of {name} cancelled: the repository is not reachable. Local files were not removed.",
+                &[("name", addon_name)],
+            );
+            self.show_error_toast(message);
+            return;
+        }
+
+        // The repository list may have changed while the probe was in flight.
+        let Some(repo_idx) = self
+            .repository_view_state
+            .repositories
+            .iter()
+            .position(|repo| repo.address == repo_address && repo.path == repo_path)
+        else {
+            warn!(
+                "Addon force redownload cancelled for {}: repository {} is no longer configured",
+                addon_name, repo_name
+            );
+            return;
+        };
+
+        if self.repository_sync_active() || self.is_direct_download_running() {
+            warn!(
+                "Addon force redownload cancelled for {} in {}: sync worker became active during the connection check",
+                addon_name, repo_name
+            );
+            self.show_error_toast(self.t("Operation cancelled"));
+            return;
+        }
+
+        if target_path.exists() {
+            if !target_path.is_dir() {
                 warn!(
                     "Addon force redownload ignored: target path is not a directory for {} in {}",
-                    addon_name, repo.name
+                    addon_name, repo_name
                 );
-                return false;
+                return;
             }
+            if let Err(err) = fs::remove_dir_all(&target_path) {
+                warn!(
+                    "Failed to remove addon directory for {} in {}: {}",
+                    addon_name, repo_name, err
+                );
+                self.show_error_toast(self.t_fmt(
+                    "Failed to remove addon {name}: {error}",
+                    &[("name", addon_name), ("error", err.to_string())],
+                ));
+                return;
+            }
+            info!(
+                "Removed addon directory for {} in {} before recheck",
+                addon_name, repo_name
+            );
         } else {
             info!(
                 "Addon directory already missing for {} in {}; continuing with recheck",
-                addon_name, repo.name
+                addon_name, repo_name
             );
         }
 
         self.update_modal_open = false;
         self.prepare_update_confirmation(repo_idx);
-        self.syncing_repository.is_some()
     }
 }

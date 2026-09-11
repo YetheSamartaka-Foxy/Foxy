@@ -36,6 +36,7 @@ use crate::core::tasks::download_files::{
 };
 use crate::core::tasks::purge_repository::purge_repository_instance;
 use crate::core::tasks::remote_file_parts::flush_deferred_part_inserts;
+use crate::core::tasks::remote_reachability::ensure_remote_repository_reachable;
 use crate::core::tasks::remote_repository::{probe_remote_repository_checksum, remote_repository};
 use crate::core::tasks::truncate_download_targets::truncate_all_download_tables;
 use crate::core::utils::app_paths;
@@ -896,6 +897,37 @@ async fn run_repository_pipeline(
     }
 
     if mode == SyncMode::Download && force_redownload {
+        // The purge below deletes the local files; never start it unless the
+        // remote can actually serve the replacement.
+        send_progress_event(
+            &progress_tx,
+            ProgressEvent::Stage {
+                label: "Checking repository connection".into(),
+                percent: 0.05,
+            },
+            &operation_id,
+        );
+        if let Err(err) =
+            ensure_remote_repository_reachable(&context.client, &normalized_repo_url).await
+        {
+            let message = format!(
+                "Force redownload cancelled, local files were not removed: {}",
+                err
+            );
+            error!("{}", message);
+            summary.push(StageEntry::new(
+                "force_redownload_reachability",
+                stage.elapsed(),
+            ));
+            summary.log_table("failed-force-redownload-reachability");
+            emit_progress!(ProgressEvent::Failed(message));
+            return;
+        }
+        summary.push(StageEntry::new(
+            "force_redownload_reachability",
+            stage.elapsed(),
+        ));
+        stage = std::time::Instant::now();
         send_progress_event(
             &progress_tx,
             ProgressEvent::Stage {
