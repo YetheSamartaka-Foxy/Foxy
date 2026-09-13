@@ -70,9 +70,17 @@ impl Foxy {
             self.t("Steam is not running")
         } else if !has_addon_actions && ts3_attention {
             self.t("TeamSpeak 3 is not running")
-        } else if !has_addon_actions {
+        } else if !has_addon_actions && !pending.unavailable_enabled.is_empty() {
             // Opened solely to warn about enabled addons that can't be found.
             self.t("Some enabled addons are missing")
+        } else if !has_addon_actions {
+            // Every warning this modal opened for has cleared (the TeamSpeak/Steam
+            // re-check flipped it), so it now only waits for the user to proceed.
+            if pending.launch_only {
+                self.t("Ready to launch")
+            } else {
+                self.t("Ready to join")
+            }
         } else if pending.extra_enabled.is_empty()
             || !pending.suggestions.is_empty()
             || !pending.ambiguous.is_empty()
@@ -141,6 +149,32 @@ impl Foxy {
                         if launch_steam_btn.clicked() {
                             launch_steam = true;
                         }
+                    });
+                }
+
+                if !has_addon_actions
+                    && pending.unavailable_enabled.is_empty()
+                    && !steam_attention
+                    && !ts3_attention
+                {
+                    ui.add_space(10.0);
+                    self.join_preflight_section(ui, |ui| {
+                        if pending.steam_required {
+                            ui.label(
+                                RichText::new(self.t("Steam is running"))
+                                    .strong()
+                                    .color(self.color_success()),
+                            );
+                        }
+                        if pending.ts3_required {
+                            ui.label(
+                                RichText::new(self.t("TeamSpeak 3 is running"))
+                                    .strong()
+                                    .color(self.color_success()),
+                            );
+                        }
+                        ui.add_space(4.0);
+                        ui.label(self.t("All pre-launch checks passed. You can continue."));
                     });
                 }
 
