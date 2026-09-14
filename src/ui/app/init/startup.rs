@@ -35,6 +35,11 @@ impl Foxy {
         let mut visuals = Visuals::dark();
         visuals.override_text_color = Some(palette::TEXT_NORMAL);
         cc.egui_ctx.set_theme(egui::Theme::Dark);
+        // egui 0.36 would otherwise push the theme into the native window after
+        // the first frame (SetWindowTheme + SetWindowCompositionAttribute on
+        // Windows). Foxy draws its own chrome, and that call has left the glow
+        // surface black on some hybrid-GPU machines.
+        cc.egui_ctx.options_mut(|o| o.sync_window_theme = false);
         cc.egui_ctx.set_visuals(visuals);
 
         // Use Roboto as the default proportional typeface. It is inserted at
