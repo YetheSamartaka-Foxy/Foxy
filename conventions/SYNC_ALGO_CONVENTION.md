@@ -76,7 +76,14 @@ The fast local-only drift detector. It lives in `local_content_hash` on
 repositories, addons, and files.
 
 It is never compared to a server value. It only answers: "Does the local disk
-state still look like the last verified local disk state?"
+state still look like it did the last time this entity was tree-hashed?"
+
+It is stored for every file and addon that was just tree-hashed, including
+those whose tree checksum differs from remote. An outdated-but-untouched file
+is a confirmed pending update; its stored part state stays a true description
+of the local file until the fingerprint drifts, so re-reading it on every
+quick scan buys nothing. Update detection never reads the content hash: it is
+decided by `local_checksum != remote_checksum` and by file presence and size.
 
 Local content hashes must be file and folder based, not part based:
 
@@ -114,11 +121,14 @@ to a full-file download.
 4. If `repo.json.checksum != repositories.remote_checksum`, the remote metadata
    graph may have changed. Fetch remote addon/file/part metadata only for the
    changed or forced scope.
-5. `local_content_hash` is valid only for entities whose local tree checksum is
-   clean or intentionally baseline-initialized from a clean tree.
-6. If a file or addon has a tree mismatch, its content hash must not be refreshed
-   to the mismatched disk state. Clear it or leave it stale so quick scan keeps
-   routing that item to tree verification.
+5. `local_content_hash` is valid for any entity whose tree checksum was
+   computed from the disk state the fingerprint describes, clean or not.
+6. A file is tree-verified again only when its current fingerprint differs from
+   the stored one (disk drift) or its `local_checksum` is empty (a hash that
+   never ran or failed). A tree mismatch with an unchanged fingerprint is
+   reported from the stored checksums with no disk read. Patch preflight and
+   per-op checksum verification still catch a stale local part hash and degrade
+   that file to a range download, never to a wrong file.
 7. Quick scan must never read part ranges. It can read addon folders and file
    metadata/content samples only.
 8. Tree hash verification must be targeted to suspicious files whenever
@@ -334,6 +344,15 @@ Important rule: remote recheck must not fetch every `mod.srf`,
 `foxy_addon.json`, or part list merely because the user clicked recheck. The
 repository-level checksum decides whether deeper remote fetches are needed.
 
+"DB graph incomplete" uses the same definition as Layer 0: enabled addons with
+file rows but no part rows at all, and no deferred part rows buffered in the
+running process, is an incomplete graph even when every file carries a remote
+checksum. A deferred rebuild writes file rows inline and holds the part rows in
+memory until the hash bootstrap persists them, so a process exit or a skipped
+hash pass can leave exactly that shape behind; the gate must rebuild it, or a
+local tree hash can never be produced and every sync re-reads the whole
+repository for nothing (Layer 3 hashes whole files against part rollups).
+
 ### Layer 2: Quick Local Content Check
 
 Purpose: detect local disk drift cheaply and decide which addons/files deserve
@@ -400,6 +419,12 @@ walk. Validating the cache must never cost a second traversal, or a hit is only
 half as cheap as a miss and the cache stops paying for itself
 (`conventions/SPEED_OF_LIGHT.md` E8).
 
+A tree-hash init the sync pipeline ran earlier in the same run is handed to
+the quick scan as its pre-hashed set (`PreHashedFiles`), so the files it just
+hashed are not verified a second time before they are reported. Files absent
+on disk are excluded from the targeted init: they can never earn a tree hash
+and are reported through the `!exists` path instead.
+
 ### Layer 3: Targeted Tree Hash Verification
 
 Purpose: identify the exact files and parts that do not match the remote tree.
@@ -418,10 +443,13 @@ Algorithm for a targeted file set:
 6. Recompute affected addon checksums from ordered files.
 7. Recompute affected repository checksums from ordered addons only when all
    addon rows required for the ordered rollup are available.
-8. Refresh content hashes only for entities whose tree checksum now matches
-   remote.
+8. Refresh content hashes only for the files that were just hashed and the
+   addons that contain them. The unscoped full refresh survives only after the
+   one-time full baseline init and the integrity recheck.
 9. For a scoped content-hash refresh, persist scoped file/addon content hashes
-   and leave repository `local_content_hash` untouched unless the tree is full.
+   and recompute the repository `local_content_hash` only when every addon row
+   is present (a file-scoped tree carries all addon headers; a mod-scoped tree
+   does not).
 10. Build or update download targets for files whose file or part tree checksums
    still differ.
 
@@ -716,6 +744,15 @@ Part stage:
    mismatch.
 7. Build delta patch plans for queued files when possible.
 
+Deferred part rows:
+
+- A rebuild into an empty `subfiles` may buffer the part rows in memory and let
+  the tree hash bootstrap insert them in one pass. The rows are remote metadata,
+  not hash state: every path that skips the hash pass (repository already
+  complete, no hashable file on disk, first refresh before any download) must
+  still flush them before the pipeline ends, and the flush must not depend on
+  local files existing.
+
 Scope rule:
 
 - A remote repository checksum change does not grant permission to recalculate
@@ -780,7 +817,12 @@ For each download target:
 8. Preflight copy sources by sampling or checking copy op ranges.
 9. If preflight fails, mark fallback and perform full download.
 10. Download all insert-remote ranges into the patch blob.
-11. Apply copy and insert ops into a temp output file.
+11. Apply copy and insert ops into a temp output file. Adjacent copy ops that
+    are contiguous in both source and output are streamed as one sequential
+    run on a blocking thread with positional I/O; every part boundary is still
+    hashed inside the stream, a part whose streamed hash misses its target is
+    overwritten in place by the range download, and pause/cancel are checked
+    per chunk. On a rotational destination at most two applies run at once.
 12. Promote temp file atomically with rollback protection.
 13. Verify final tree checksum from applied segment checksums.
 14. On success:
@@ -843,7 +885,13 @@ so a part file written by an older grid finishes on that older grid.
 
 After patch or full download succeeds:
 
-1. Hash only downloaded/touched files.
+1. Hash only downloaded/touched files. A delta-patched file hands its
+   per-part checksums from the apply to the hash stage (`hash_source=segments`);
+   they are accepted only when every part sits at the remote offset with the
+   remote length and checksum and the ordered rollup equals the file's remote
+   checksum, otherwise the file is re-read (`hash_source=reread`). A full
+   download of at least 32 MiB is hashed as soon as it lands, while its bytes
+   are still in the page cache.
 2. Persist updated part checksums.
 3. Roll up file checksums from ordered parts.
 4. Roll up addon checksums from ordered files.
@@ -929,6 +977,10 @@ Keep or refresh pending cache when:
 - uses quick content layer first
 - targeted tree verification only when requested by mode
 - updates pending cache from final result
+- the one escalation (file rows without part rows) turns it into a
+  `RemoteRefreshOnly` that also prepares the download plan, so the following
+  `Download` reuses the queue instead of re-running the prepare pipeline; a
+  plain quick check never builds a plan
 
 ### `RemoteRefreshOnly`
 
@@ -961,6 +1013,11 @@ Keep or refresh pending cache when:
 - the plan is prepared up front during the recheck the user already triggered,
   so opening the confirmation modal is instant and a following `Download` reuses
   the prepared queue instead of running a second redundant recheck
+- a filesystem-watcher change under the repository folder after the queue was
+  prepared marks it stale (`discard_prepared_queue`), and the next `Download`
+  rebuilds instead of reusing it; the watcher is suppressed while a sync that
+  writes into the repository folder runs, so Foxy's own cleanup is not read as
+  a user edit
 - backup and network transfer still begin only after the user confirms; the
   reuse fast path re-probes `repo.json` and re-validates every file, so a stale
   queue degrades to a rebuild, never silent corruption
@@ -1044,6 +1101,13 @@ Expected remote single-addon change path:
 4. Build patch plans and download targets only for that addon's mismatched
    files.
 5. Reuse existing local checksums and content hashes for all untouched addons.
+
+Rotational destinations use their own download profile (few concurrent large
+files, 32 MiB range chunks, two concurrent patch applies) chosen from the
+destination path's storage class; memory pressure keeps its conservative
+profile on any disk. The `SOL op=download` line then also reports a disk light
+(`disk_bytes`, `disk_light_bps`, `disk_sol`) so a low network ratio is not
+misread as a slow link.
 
 Expected full-download throughput path:
 
@@ -1137,7 +1201,9 @@ The logs should make it possible to answer:
 ## Forbidden Behaviors
 
 - Do not compare `local_content_hash` to remote checksums.
-- Do not refresh content hashes for known tree-mismatched entities.
+- Do not clear or withhold the content hash of a tree-mismatched file or addon;
+  that forces a full re-hash of every outdated file on every scan.
+- Do not run an unscoped content-hash refresh after a targeted hash pass.
 - Do not use stale download target rows as proof that a file still needs update.
 - Do not fetch all mod manifests when `repo.json.checksum == local_checksum`.
 - Do not run full tree hashing for ordinary no-change startup.

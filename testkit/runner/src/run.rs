@@ -293,7 +293,16 @@ impl ContextRun<'_> {
             "force-redownload" => "force-redownload",
             "recheck" => "recheck-repo",
             "recheck-integrity" => "recheck-integrity",
+            "quick-check" => "quick-check",
+            "remote-refresh" => "remote-recheck",
+            "wipe-db" => "wipe-repo-db",
             _ => bail!("Operation {name} is not available through the GUI harness"),
+        };
+        // A DB wipe runs on its own worker and never raises `core-sync`.
+        let busy_reason = if name == "wipe-db" {
+            "repository-db-wipe"
+        } else {
+            "core-sync"
         };
         let generation = self.data(&["logs", "--limit", "1"])?["generation"]
             .as_u64()
@@ -303,33 +312,44 @@ impl ContextRun<'_> {
         self.data(&["invoke", action, "--repo-index", "0", "--allow-destructive"])?;
         let busy_deadline = Instant::now() + Duration::from_secs(30);
         let mut observed_busy = false;
+        let mut finished_between_polls = false;
         while Instant::now() < busy_deadline {
             let progress = self.data(&["progress"])?;
             if progress["busy_reasons"]
                 .as_array()
-                .is_some_and(|reasons| reasons.iter().any(|v| v == "core-sync"))
+                .is_some_and(|reasons| reasons.iter().any(|v| v == busy_reason))
             {
                 observed_busy = true;
                 break;
             }
+            // A clean quick check finishes in milliseconds, between two polls;
+            // its pipeline summary is then the only evidence it ran.
+            if busy_reason == "core-sync"
+                && self.logged_since(generation, "Pipeline summary: op=")?
+            {
+                finished_between_polls = true;
+                break;
+            }
             thread::sleep(Duration::from_millis(200));
         }
-        if !observed_busy {
+        if !observed_busy && !finished_between_polls {
             eprintln!(
-                "Operation never reported busy reason 'core-sync'; timing may not cover the real work"
+                "Operation never reported busy reason '{busy_reason}'; timing may not cover the real work"
             );
         }
-        let wait = operation["wait_timeout_s"]
-            .as_u64()
-            .unwrap_or(self.timeout.as_secs());
-        let mut args: Vec<String> = vec!["wait".into()];
-        if matches!(name, "download" | "force-redownload") {
-            args.push("--download-complete".into());
-        } else {
-            args.extend(["--busy-reason-cleared".into(), "core-sync".into()]);
+        if !finished_between_polls {
+            let wait = operation["wait_timeout_s"]
+                .as_u64()
+                .unwrap_or(self.timeout.as_secs());
+            let mut args: Vec<String> = vec!["wait".into()];
+            if matches!(name, "download" | "force-redownload") {
+                args.push("--download-complete".into());
+            } else {
+                args.extend(["--busy-reason-cleared".into(), busy_reason.into()]);
+            }
+            args.extend(["--timeout-ms".into(), (wait * 1000).to_string()]);
+            self.driver(&args, Duration::from_secs(wait + 10))?;
         }
-        args.extend(["--timeout-ms".into(), (wait * 1000).to_string()]);
-        self.driver(&args, Duration::from_secs(wait + 10))?;
         let elapsed = started.elapsed().as_secs_f64();
         let summary = self.data(&["download-summary", "--include-telemetry"])?;
         let progress = self.data(&["progress"])?;
@@ -355,6 +375,21 @@ impl ContextRun<'_> {
         Ok(
             json!({"elapsed_s":elapsed,"summary":summary,"progress":progress,"snapshot":snapshot,"logs":captured,"log_text":log}),
         )
+    }
+    fn logged_since(&self, generation: u64, needle: &str) -> Result<bool> {
+        let captured = self.data(&[
+            "logs",
+            "--since-generation",
+            &generation.to_string(),
+            "--limit",
+            "2000",
+        ])?;
+        Ok(captured["entries"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v["message"].as_str())
+            .any(|message| message.contains(needle)))
     }
     fn ux(&self) -> Result<Value> {
         let generation = self.data(&["logs", "--limit", "1"])?["generation"]
@@ -729,7 +764,10 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                     .context("Missing operation log")?;
                 let sol = sol::parse(text);
                 let breakdown = metrics::breakdown(text);
-                let stem = format!("{iteration}-{name}");
+                // Two operations of one kind in an iteration (a check repeated
+                // to prove the second one is free) need distinct artifacts.
+                let label = operation["label"].as_str().unwrap_or(name);
+                let stem = format!("{iteration}-{label}");
                 write_json(&run.join(format!("collected-{stem}.json")), &collected)?;
                 write_json(
                     &run.join(format!("summary-{stem}.json")),
@@ -794,10 +832,18 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                 {
                     flags.push("incomplete-payload");
                 }
-                if !oracle(&resolved, root, &run, timeout)? {
+                // The oracle verifies a synced payload, so it runs only after
+                // the operations that produce one; a check between a
+                // mutation and its repair sees the mutated bytes on purpose.
+                if matches!(name, "download" | "force-redownload")
+                    && !oracle(&resolved, root, &run, timeout)?
+                {
                     flags.push("oracle-failed");
                 }
-                let metadata = json!({"run_id":run_id,"iteration":iteration,"started_utc":chrono::Utc::now().to_rfc3339(),"elapsed_s":collected["elapsed_s"],"git_sha":guard["git"]["sha"],"git_dirty":guard["git"]["dirty"],"build_kind":profile,"case_id":id,"case_hash":hash,"harness":harness,"op":name,"storage_class":guard["storage_class"],"cache_state":if warmup || iteration > 0 {"warm"} else {"cold"},"database_mode":options.database_mode,"db_write_gate":effective_gate,"db_pool_idle":pool_idle,"flags":flags,"verdict":if flags.is_empty() {"ok"} else {"invalid"}});
+                let mut metadata = json!({"run_id":run_id,"iteration":iteration,"started_utc":chrono::Utc::now().to_rfc3339(),"elapsed_s":collected["elapsed_s"],"git_sha":guard["git"]["sha"],"git_dirty":guard["git"]["dirty"],"build_kind":profile,"case_id":id,"case_hash":hash,"harness":harness,"op":name,"storage_class":guard["storage_class"],"cache_state":if warmup || iteration > 0 {"warm"} else {"cold"},"database_mode":options.database_mode,"db_write_gate":effective_gate,"db_pool_idle":pool_idle,"flags":flags,"verdict":if flags.is_empty() {"ok"} else {"invalid"}});
+                if label != name {
+                    metadata["label"] = label.into();
+                }
                 write_json(
                     &run.join(format!("metadata-{stem}.json")),
                     &json!({"metadata":metadata,"mutation":mutation_info}),

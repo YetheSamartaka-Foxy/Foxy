@@ -13,7 +13,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs::{self, OpenOptions};
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 use tokio::sync::watch;
 
 use super::types::{
@@ -113,55 +113,6 @@ pub(super) async fn hash_file_segment(
                 )
             })?;
         hasher.update(&buffer[..read_len]);
-        remaining -= read_len as u64;
-    }
-    Ok(hasher.finalize_hex())
-}
-
-pub(super) async fn copy_range_with_hash(
-    source: &mut tokio::fs::File,
-    source_start: u64,
-    target: &mut tokio::io::BufWriter<tokio::fs::File>,
-    target_start: u64,
-    length: u64,
-    buffer: &mut Vec<u8>,
-    expected_checksum: &str,
-) -> anyhow::Result<String> {
-    source
-        .seek(SeekFrom::Start(source_start))
-        .await
-        .with_context(|| format!("failed to seek source to {}", source_start))?;
-    target
-        .seek(SeekFrom::Start(target_start))
-        .await
-        .with_context(|| format!("failed to seek target to {}", target_start))?;
-
-    buffer.resize(COPY_BUFFER_SIZE, 0);
-    let mut hasher = FlexHasher::from_checksum(expected_checksum);
-    let mut remaining = length;
-    while remaining > 0 {
-        let read_len = remaining.min(buffer.len() as u64) as usize;
-        source
-            .read_exact(&mut buffer[..read_len])
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to read source range {}..{}",
-                    source_start,
-                    source_start.saturating_add(length)
-                )
-            })?;
-        hasher.update(&buffer[..read_len]);
-        target
-            .write_all(&buffer[..read_len])
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to write target range {}..{}",
-                    target_start,
-                    target_start.saturating_add(length)
-                )
-            })?;
         remaining -= read_len as u64;
     }
     Ok(hasher.finalize_hex())
@@ -298,7 +249,7 @@ pub(super) async fn download_range_to_output(
     dest_start: u64,
     length: u64,
     target_checksum: &str,
-    output_file: &mut tokio::io::BufWriter<tokio::fs::File>,
+    output_file: Arc<std::fs::File>,
     download_pause_rx: &mut watch::Receiver<bool>,
     cancel_rx: &mut watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
@@ -330,7 +281,7 @@ pub(super) async fn download_range_to_output(
             dest_start,
             length,
             target_checksum,
-            output_file,
+            output_file.clone(),
             download_pause_rx,
             cancel_rx,
         )
@@ -353,6 +304,25 @@ pub(super) async fn download_range_to_output(
     Err(last_error.unwrap_or_else(|| anyhow!("fallback range download failed after retries")))
 }
 
+/// Network chunks are buffered up to this size before one positional write,
+/// so a fallback range does not cost a blocking-pool hop per TCP segment.
+const RANGE_WRITE_BUFFER_SIZE: usize = 1024 * 1024;
+
+async fn write_buffered_range(
+    output_file: &Arc<std::fs::File>,
+    offset: u64,
+    data: Vec<u8>,
+) -> anyhow::Result<()> {
+    if data.is_empty() {
+        return Ok(());
+    }
+    let file = output_file.clone();
+    tokio::task::spawn_blocking(move || write_at(&file, offset, &data))
+        .await
+        .context("failed to join fallback range write")?
+        .context("failed to write fallback range chunk")
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn download_range_to_output_once(
     context: Arc<FoxyContext>,
@@ -360,7 +330,7 @@ async fn download_range_to_output_once(
     dest_start: u64,
     length: u64,
     target_checksum: &str,
-    output_file: &mut tokio::io::BufWriter<tokio::fs::File>,
+    output_file: Arc<std::fs::File>,
     download_pause_rx: &mut watch::Receiver<bool>,
     cancel_rx: &mut watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
@@ -370,14 +340,10 @@ async fn download_range_to_output_once(
     let range_end = dest_start + length - 1;
     let mut response = request_exact_range(context, remote_url, dest_start, range_end).await?;
 
-    // Seek to correct position - critical for retries after partial writes
-    output_file
-        .seek(SeekFrom::Start(dest_start))
-        .await
-        .with_context(|| format!("failed to seek output file to {}", dest_start))?;
-
     let mut hasher = FlexHasher::from_checksum(target_checksum);
     let mut written = 0_u64;
+    let mut pending: Vec<u8> = Vec::with_capacity(RANGE_WRITE_BUFFER_SIZE);
+    let mut pending_offset = dest_start;
     while let Some(chunk) = {
         wait_for_download_resume(download_pause_rx, cancel_rx).await?;
         tokio::time::timeout(PATCH_CHUNK_TIMEOUT, response.chunk())
@@ -385,13 +351,24 @@ async fn download_range_to_output_once(
             .map_err(|_| anyhow!("delta fallback range chunk read timed out"))?
             .context("failed to read range chunk")?
     } {
-        output_file
-            .write_all(&chunk)
-            .await
-            .context("failed to write fallback range chunk")?;
         hasher.update(&chunk);
         written = written.saturating_add(chunk.len() as u64);
+        if written > length {
+            return Err(anyhow!(
+                "fallback range download length mismatch: expected {}, got at least {}",
+                length,
+                written
+            ));
+        }
+        pending.extend_from_slice(&chunk);
+        if pending.len() >= RANGE_WRITE_BUFFER_SIZE {
+            let flushed = std::mem::take(&mut pending);
+            let flushed_len = flushed.len() as u64;
+            write_buffered_range(&output_file, pending_offset, flushed).await?;
+            pending_offset = pending_offset.saturating_add(flushed_len);
+        }
     }
+    write_buffered_range(&output_file, pending_offset, pending).await?;
 
     if written != length {
         return Err(anyhow!(

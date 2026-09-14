@@ -145,6 +145,7 @@ impl Foxy {
             return match spawn_launch_process(&executable, &args, cwd.as_deref()) {
                 Ok(pid) => {
                     info!("Launched Arma 3 for repository {} (pid={})", repo_name, pid);
+                    self.mark_repository_launched(&effective.address, &effective.path);
                     LaunchDispatchResult::Launched
                 }
                 Err(err) => {
@@ -163,6 +164,7 @@ impl Foxy {
             launch_label, repo_name
         );
 
+        self.mark_repository_launched(&effective.address, &effective.path);
         let steam_directory = self.settings_view_state.steam_directory.clone();
         let repo_name_owned = repo_name.to_string();
         let launch_label_owned = launch_label.to_string();

@@ -4,7 +4,9 @@ use crate::ui::app::Foxy;
 
 impl Foxy {
     pub(super) fn tracked_texture_bytes_total(&self) -> usize {
-        let mut total = self.app_icon_texture_bytes + self.default_repo_image_texture_bytes;
+        let mut total = self.app_icon_texture_bytes
+            + self.default_repo_image_texture_bytes
+            + self.game_logo_textures.texture_bytes();
         let mut seen_checksums: HashSet<&str> = HashSet::new();
 
         for (checksum, bytes) in &self.tracked_icon_texture_bytes {

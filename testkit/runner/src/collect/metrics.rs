@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 
 pub fn run_metrics(text: &str) -> Value {
-    let mut result = json!({"files":null,"bytes":null,"db_write_time_ms":null,"lock_retries":null,"total_backoff_ms":null,"elapsed_ms":null,"permit_wait_ms_total":null,"write_calls_total":null,"write_failures_total":null,"write_retries_total":null,"checkpoint_total_s":null});
+    let mut result = json!({"files":null,"bytes":null,"db_write_time_ms":null,"lock_retries":null,"total_backoff_ms":null,"elapsed_ms":null,"permit_wait_ms_total":null,"write_calls_total":null,"write_failures_total":null,"write_retries_total":null,"checkpoint_total_s":null,"hash_work_bytes":0,"tree_verify_runs":0,"fs_watcher_starts":0,"prepared_queue_reuses":0});
     let pattern =
         regex::Regex::new(r"TOTAL DOWNLOAD total:\s*files=(\d+)\s+bytes=([\d.]+)\s*([KMGT]?i?B)")
             .unwrap();
@@ -59,7 +59,43 @@ pub fn run_metrics(text: &str) -> Value {
     if let Some(c) = pattern.captures(text) {
         result["checkpoint_total_s"] = c[1].parse::<f64>().unwrap().into();
     }
+    // Bytes the operation actually read to hash, summed over every hash run,
+    // and the redundant-work counters the sync-path cases assert on. These
+    // are counts, so an operation that hashed nothing reports 0, not null.
+    let pattern =
+        regex::Regex::new(r"SOL op=hash work_bytes=(\d+)|SOL op=hash [^\n]*? work_bytes=(\d+)")
+            .unwrap();
+    let hash_work_bytes: u64 = event_lines(text)
+        .filter_map(|line| pattern.captures(line))
+        .filter_map(|c| c.get(1).or_else(|| c.get(2)))
+        .map(|m| m.as_str().parse::<u64>().unwrap_or(0))
+        .sum();
+    result["hash_work_bytes"] = hash_work_bytes.into();
+    result["tree_verify_runs"] =
+        count_lines(text, "Quick scan triggering targeted tree-hash verify").into();
+    result["fs_watcher_starts"] = count_lines(text, "Starting filesystem watcher").into();
+    result["prepared_queue_reuses"] =
+        count_lines(text, "Reusing confirmation-prepared download queue").into();
     result
+}
+
+/// One line per app event. A GUI-harness slice appends the driver's captured
+/// messages (no timestamp) after the file delta, so every event is present
+/// twice; when timestamped lines exist, only those are counted.
+fn event_lines(text: &str) -> impl Iterator<Item = &str> {
+    let timestamped = text.lines().any(is_timestamped);
+    text.lines()
+        .filter(move |line| !timestamped || is_timestamped(line))
+}
+
+fn is_timestamped(line: &str) -> bool {
+    line.starts_with('[') && line.get(1..3) == Some("20")
+}
+
+fn count_lines(text: &str, needle: &str) -> u64 {
+    event_lines(text)
+        .filter(|line| line.contains(needle))
+        .count() as u64
 }
 
 pub fn breakdown(text: &str) -> Value {
@@ -115,6 +151,33 @@ mod tests {
         assert_eq!(metrics["permit_wait_ms_total"], 3.5);
         assert_eq!(metrics["elapsed_ms"], 12.0);
     }
+    #[test]
+    fn redundant_work_counters_sum_hash_bytes_and_count_lines() {
+        let metrics = run_metrics(
+            "x SOL op=hash actual_s=1 work_bytes=100 actual_bps=1 sol=na light_src=self_baseline label=a
+SOL op=hash actual_s=1 work_bytes=250 label=b
+INFO Quick scan triggering targeted tree-hash verify for repo=r files=3
+INFO Starting filesystem watcher for 2 paths
+INFO Starting filesystem watcher for 2 paths",
+        );
+        assert_eq!(metrics["hash_work_bytes"], 350);
+        assert_eq!(metrics["tree_verify_runs"], 1);
+        assert_eq!(metrics["fs_watcher_starts"], 2);
+        assert_eq!(metrics["prepared_queue_reuses"], 0);
+    }
+
+    #[test]
+    fn redundant_work_counters_ignore_the_driver_echo_of_timestamped_lines() {
+        let metrics = run_metrics(
+            "[2026-09-14 08:00:00.000000 +02:00] INFO  [m] SOL op=hash actual_s=1 work_bytes=100 label=a\n[2026-09-14 08:00:01.000000 +02:00] INFO  [m] Quick scan triggering targeted tree-hash verify for repo=r files=3\nSOL op=hash actual_s=1 work_bytes=100 label=a\nQuick scan triggering targeted tree-hash verify for repo=r files=3",
+        );
+        assert_eq!(metrics["hash_work_bytes"], 100);
+        assert_eq!(metrics["tree_verify_runs"], 1);
+        let none = run_metrics("unrelated");
+        assert_eq!(none["hash_work_bytes"], 0);
+        assert_eq!(none["tree_verify_runs"], 0);
+    }
+
     #[test]
     fn missing_metrics_are_null() {
         assert!(run_metrics("unrelated")["files"].is_null());

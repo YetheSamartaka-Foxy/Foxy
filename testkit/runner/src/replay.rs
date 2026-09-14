@@ -10,6 +10,12 @@ fn differences(expected: &Value, actual: &Value, path: &str, out: &mut Vec<Value
     if let (Some(a), Some(b)) = (expected.as_object(), actual.as_object()) {
         let keys: std::collections::BTreeSet<_> = a.keys().chain(b.keys()).collect();
         for key in keys {
+            // A key the recorded row never had is a metric that was added to
+            // the kit after the run was recorded, not a derivation change; a
+            // key the rebuilt row lost is still a difference.
+            if !a.contains_key(key) && path.starts_with("breakdown.run_metrics") {
+                continue;
+            }
             differences(
                 a.get(key).unwrap_or(&Value::Null),
                 b.get(key).unwrap_or(&Value::Null),
@@ -52,7 +58,10 @@ pub fn run(dir: &Path) -> Result<Value> {
         let stem = format!(
             "{}-{}",
             original["iteration"].as_u64().unwrap_or(0),
-            original["op"].as_str().unwrap_or("")
+            original["label"]
+                .as_str()
+                .or(original["op"].as_str())
+                .unwrap_or("")
         );
         let summary = case::read_json(&dir.join(format!("summary-{stem}.json")))?;
         let mut breakdown = case::read_json(&dir.join(format!("breakdown-{stem}.json")))?;
@@ -294,6 +303,25 @@ pub fn migrate_ledger(mapping_path: &Path, ledger_dir: &Path) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn metrics_added_after_a_run_was_recorded_are_not_differences() {
+        let mut diff = Vec::new();
+        differences(
+            &json!({"breakdown":{"run_metrics":{"files":1}}}),
+            &json!({"breakdown":{"run_metrics":{"files":1,"hash_work_bytes":0}}}),
+            "",
+            &mut diff,
+        );
+        assert!(diff.is_empty());
+        differences(
+            &json!({"breakdown":{"run_metrics":{"files":1,"bytes":2}}}),
+            &json!({"breakdown":{"run_metrics":{"files":1}}}),
+            "",
+            &mut diff,
+        );
+        assert_eq!(diff.len(), 1);
+    }
+
     #[test]
     fn numeric_equality_and_real_difference() {
         let mut diff = Vec::new();

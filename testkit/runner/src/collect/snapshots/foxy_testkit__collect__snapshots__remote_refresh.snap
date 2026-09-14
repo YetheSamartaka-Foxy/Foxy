@@ -14,7 +14,11 @@ expression: "digest(&corpus(\"remote-refresh\"))"
     "write_calls_total": 395.0,
     "write_failures_total": 0.0,
     "write_retries_total": 0.0,
-    "checkpoint_total_s": null
+    "checkpoint_total_s": null,
+    "hash_work_bytes": 0,
+    "tree_verify_runs": 0,
+    "fs_watcher_starts": 0,
+    "prepared_queue_reuses": 0
   },
   "category_line_counts": {
     "network": 14,

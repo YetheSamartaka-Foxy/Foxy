@@ -4,6 +4,7 @@ use super::{
 };
 use crate::core::api::SyncMode;
 use crate::ui::app::Foxy;
+use crate::ui::i18n::fmt_bytes;
 use crate::ui::types::RepoState;
 use eframe::egui::{
     self, Align, Button, Color32, CornerRadius, CursorIcon, Frame, Layout, Margin, RichText, Ui,
@@ -111,10 +112,27 @@ impl Foxy {
             } else {
                 (checked.to_string(), total.to_string())
             };
-            self.t_fmt(
+            let counter = self.t_fmt(
                 "Calculating file hashes ({checked}/{total})",
                 &[("checked", checked_text), ("total", total_text)],
-            )
+            );
+            match self.recheck_hash_estimate {
+                Some((remaining_bytes, bytes_per_sec)) if bytes_per_sec > 0 => {
+                    let eta = Self::format_hash_eta(remaining_bytes, bytes_per_sec);
+                    format!(
+                        "{counter} - {}",
+                        self.t_fmt(
+                            "{size} at {rate}/s, about {eta} remaining",
+                            &[
+                                ("size", fmt_bytes(remaining_bytes)),
+                                ("rate", fmt_bytes(bytes_per_sec)),
+                                ("eta", eta),
+                            ],
+                        )
+                    )
+                }
+                _ => counter,
+            }
         } else if let Some(stage) = &self.recheck_stage_label {
             self.translate_repository_check_stage(stage)
         } else {
@@ -624,5 +642,30 @@ impl Foxy {
             },
             show_pending_action: false,
         })
+    }
+}
+
+impl Foxy {
+    /// "M min" or "S s" for the hash benchmark ETA; coarse on purpose, the
+    /// rate is a sample and the number is a hint, not a countdown.
+    pub(crate) fn format_hash_eta(remaining_bytes: u64, bytes_per_sec: u64) -> String {
+        let seconds = remaining_bytes.div_ceil(bytes_per_sec.max(1));
+        if seconds >= 90 {
+            format!("{} min", seconds.div_ceil(60))
+        } else {
+            format!("{seconds} s")
+        }
+    }
+}
+
+#[cfg(test)]
+mod hash_eta_tests {
+    use super::Foxy;
+
+    #[test]
+    fn hash_eta_reports_minutes_for_long_runs_and_seconds_for_short_ones() {
+        assert_eq!(Foxy::format_hash_eta(86_700_000_000, 107_000_000), "14 min");
+        assert_eq!(Foxy::format_hash_eta(50_000_000, 100_000_000), "1 s");
+        assert_eq!(Foxy::format_hash_eta(1_000, 0), "17 min");
     }
 }

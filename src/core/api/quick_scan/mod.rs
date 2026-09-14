@@ -20,10 +20,12 @@ pub use worker::{
 
 // Crate-visible items
 pub(crate) use content_hash::{
-    refresh_content_hashes_for_scoped_tree, refresh_content_hashes_for_tree,
-    refresh_content_hashes_when_tree_matches,
+    refresh_content_hashes_for_file_ids, refresh_content_hashes_for_repository,
+    refresh_content_hashes_for_scoped_tree, refresh_content_hashes_for_tree_files,
 };
-pub(crate) use diff::quick_local_change_diff;
+pub(crate) use diff::{
+    PreHashedFiles, quick_local_change_diff, quick_local_change_diff_with_prehashed,
+};
 pub(crate) use local_path_preflight::{
     format_local_path_mismatch_message, log_addon_path_disk_state, log_local_path_availability,
     summarize_local_path_availability, suspect_local_path_mismatch,
@@ -37,7 +39,7 @@ pub(super) use pending_updates::{
     refresh_patch_plan_metadata_for_pending_updates,
 };
 pub(super) use readiness::{
-    collect_files_with_missing_local_tree_hashes, tree_local_checksums_baseline_missing,
+    collect_hashable_files_with_missing_local_tree_hashes, tree_local_checksums_baseline_missing,
     tree_local_checksums_missing,
 };
 // Re-exported for integration tests (api/tests.rs) only; not referenced by the binary.

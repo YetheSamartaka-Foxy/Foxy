@@ -104,6 +104,13 @@ pub enum ProgressEvent {
         cumulative_hash_ms: u64,
         after_download_hash_ms: u64,
     },
+    /// Emitted once the auto hash benchmark has measured the disk: how many
+    /// bytes the run still has to read and the sampled rate, so the UI can
+    /// show a size and an ETA instead of a bare stage label.
+    HashEstimate {
+        remaining_bytes: u64,
+        bytes_per_sec: u64,
+    },
     Diff {
         mods: Vec<ModDiffSummary>,
     },
@@ -137,6 +144,10 @@ pub struct RepositorySyncOptions {
     pub rollback_temp_directory: Option<String>,
     pub download_speed_limit_mbps: Option<u32>,
     pub recent_local_path_reset: bool,
+    /// The filesystem watcher saw the repository folder change after the last
+    /// prepared download queue, so a `Download` must rebuild the queue instead
+    /// of reusing it.
+    pub discard_prepared_queue: bool,
     pub force_redownload: bool,
     pub allow_suspect_full_redownload: bool,
     pub download_pause_rx: watch::Receiver<bool>,

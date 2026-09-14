@@ -1,3 +1,4 @@
+pub mod overview;
 pub mod settings;
 
 use eframe::egui::{self, Button, Key, Label, Margin, RichText, ScrollArea, TextEdit, Ui, Vec2};
@@ -5,8 +6,19 @@ use log::{info, warn};
 
 use crate::core::game::spaces::{self, GameSpaceEntry};
 use crate::ui::app::Foxy;
+use crate::ui::game_logos::{
+    self, GAME_LOGO_BADGE_HEIGHT, GAME_LOGO_BADGE_MAX_WIDTH, GAME_LOGO_HEIGHT,
+};
 use crate::ui::i18n::tr;
 use crate::ui::types::FoxyView;
+
+/// Fixed logo slot in a game space row so the name column starts at the same
+/// offset for every game.
+const GAME_SPACE_ROW_LOGO_SLOT_WIDTH: f32 = 180.0;
+
+/// Gear glyph size for the sidebar header button, which is as tall as the
+/// logo slot next to it.
+const GAME_SPACE_SETTINGS_ICON_SIZE: f32 = 22.0;
 
 #[derive(Default)]
 pub struct GameSpacesViewState {
@@ -24,35 +36,90 @@ pub struct GameSpacesViewState {
 
 impl Foxy {
     pub(crate) fn render_game_space_header(&mut self, ui: &mut Ui) {
-        let display_name = spaces::active_game_space().display_name.clone();
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(display_name)
-                    .strong()
-                    .color(self.color_text_normal()),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let switch_button = ui
-                    .button(tr("Switch"))
-                    .on_hover_text(tr("Switch game space"));
-                if switch_button.hovered() {
-                    ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
-                }
-                if switch_button.clicked() {
-                    self.open_game_spaces_view();
-                }
-                let settings_button = ui
-                    .button("\u{2699}")
-                    .on_hover_text(tr("Game space settings"));
-                if settings_button.hovered() {
-                    ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
-                }
-                if settings_button.clicked() {
-                    self.open_active_game_space_settings();
-                }
+        let active = spaces::active_game_space();
+        let module_name = crate::core::game::registry()
+            .get(&active.game_id)
+            .map(|module| module.display_name().to_string())
+            .unwrap_or_else(|| active.game_id.clone());
+        let text_color = self.color_text_normal();
+        egui::Frame::NONE
+            .fill(self.color_card_bg())
+            .corner_radius(egui::CornerRadius::same(8))
+            .inner_margin(Margin::symmetric(8, 6))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.vertical_centered(|ui| {
+                    ui.add(
+                        Label::new(
+                            RichText::new(&active.display_name)
+                                .strong()
+                                .color(text_color),
+                        )
+                        .truncate(),
+                    );
+                });
+                let row_height = game_logos::slot_height(GAME_LOGO_BADGE_HEIGHT);
+                ui.allocate_ui_with_layout(
+                    Vec2::new(ui.available_width(), row_height),
+                    egui::Layout::right_to_left(egui::Align::Center),
+                    |ui| {
+                        let settings_button = ui
+                            .add_sized(
+                                Vec2::splat(row_height),
+                                Button::new(
+                                    RichText::new("\u{2699}").size(GAME_SPACE_SETTINGS_ICON_SIZE),
+                                ),
+                            )
+                            .on_hover_text(tr("Game space settings"));
+                        if settings_button.hovered() {
+                            ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                        }
+                        if settings_button.clicked() {
+                            self.open_active_game_space_settings();
+                        }
+                        let switch_width = (ui.available_width()
+                            - GAME_LOGO_BADGE_MAX_WIDTH
+                            - ui.spacing().item_spacing.x)
+                            .max(ui.spacing().interact_size.x);
+                        let switch_button = ui
+                            .add_sized(
+                                Vec2::new(switch_width, row_height),
+                                Button::new(tr("Switch")),
+                            )
+                            .on_hover_text(tr("Switch game space"));
+                        if switch_button.hovered() {
+                            ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                        }
+                        if switch_button.clicked() {
+                            self.open_game_spaces_view();
+                        }
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            let logo = self
+                                .game_logo_textures
+                                .show_badge(
+                                    ui,
+                                    &active.game_id,
+                                    GAME_LOGO_BADGE_HEIGHT,
+                                    GAME_LOGO_BADGE_MAX_WIDTH,
+                                    text_color,
+                                )
+                                .interact(egui::Sense::click())
+                                .on_hover_text(format!(
+                                    "{}\n{}",
+                                    module_name,
+                                    tr("Show game space overview")
+                                ));
+                            if logo.hovered() {
+                                ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                            }
+                            if logo.clicked() {
+                                self.open_game_space_overview();
+                            }
+                        });
+                    },
+                );
             });
-        });
-        ui.add_space(4.0);
+        ui.add_space(6.0);
     }
 
     pub fn open_game_spaces_view(&mut self) {
@@ -179,6 +246,7 @@ impl Foxy {
         let switch_block_reason = self.game_space_switch_block_reason();
         let switch_blocked = switch_block_reason.is_some();
 
+        let text_color = self.color_text_normal();
         let mut open_requested: Option<GameSpaceEntry> = None;
         let mut remove_requested: Option<GameSpaceEntry> = None;
         let mut settings_requested: Option<GameSpaceEntry> = None;
@@ -212,6 +280,13 @@ impl Foxy {
                         .inner_margin(Margin::symmetric(12, 8))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
+                                self.game_logo_textures.show(
+                                    ui,
+                                    &entry.game_id,
+                                    GAME_LOGO_HEIGHT,
+                                    GAME_SPACE_ROW_LOGO_SLOT_WIDTH,
+                                    text_color,
+                                );
                                 ui.vertical(|ui| {
                                     ui.horizontal(|ui| {
                                         ui.label(

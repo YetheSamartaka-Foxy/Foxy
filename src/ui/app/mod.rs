@@ -32,6 +32,7 @@ use tokio::sync::watch;
 use super::types::*;
 use agent_driver::AgentGuiRuntime;
 
+pub use repository::game_space_overview::{RepositoryGroupSummary, TeamSpeakSummary};
 pub use scheduling::{PendingPostAction, ScheduledJobRun};
 pub use state::*;
 
@@ -64,6 +65,7 @@ impl QuickScanProgressState {
 pub struct Foxy {
     pub app_icon: Option<egui::TextureHandle>,
     pub default_repo_image: Option<egui::TextureHandle>,
+    pub game_logo_textures: crate::ui::game_logos::GameLogoTextures,
     pub(crate) repaint_ctx: Option<egui::Context>,
     pub(crate) agent_gui: Option<AgentGuiRuntime>,
     pub current_view: FoxyView,
@@ -81,6 +83,7 @@ pub struct Foxy {
     pub repository_visual_folders: Vec<RepositoryVisualFolder>,
     pub selected_repository_space_id: Option<String>,
     pub selected_repository_visual_folder_id: Option<String>,
+    pub(crate) game_space_overview: repository::game_space_overview::GameSpaceOverviewState,
     pub repository_space_detail_filter: String,
     pub repository_space_detail_filter_space_id: Option<String>,
     pub show_add_repository_modal: bool,
@@ -269,6 +272,11 @@ pub struct Foxy {
     pub fs_watch_tx: StdSender<api::FsChangeEvent>,
     pub fs_watch_worker: Option<std::thread::JoinHandle<()>>,
     pub fs_watch_stop: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Set by the worker when it exited without ever watching (nothing to
+    /// index yet); the owner then waits for the index to be marked dirty or
+    /// for the retry interval instead of respawning it every frame.
+    pub fs_watch_idle_exit: Arc<std::sync::atomic::AtomicBool>,
+    pub fs_watch_idle_retry_at: Option<Instant>,
     pub fs_watch_suppressed_until_ms: Arc<AtomicU64>,
     /// Watched repository folders of the running watcher, so a repository added
     /// or removed after startup restarts it instead of being ignored for the
@@ -278,6 +286,10 @@ pub struct Foxy {
     /// created or changed addon rows it was spawned without).
     pub fs_watch_index_dirty: bool,
     pub fs_watch_observed_repositories_revision: u64,
+    /// Repositories whose folder the watcher saw change since a download queue
+    /// was last prepared for them; the next queue-building sync rebuilds
+    /// instead of reusing the prepared queue.
+    pub fs_changed_since_prepare: HashSet<String>,
     pub deferred_fs_scan: HashSet<String>,
     pub pending_quick_scan_urls: HashSet<String>,
     pub pending_quick_scan_prevalidated_urls: HashSet<String>,
@@ -392,6 +404,9 @@ pub struct Foxy {
     pub recheck_stage_percent: Option<f32>,
     pub recheck_hash_counter: Option<(usize, usize)>,
     pub recheck_hash_part_counter: Option<(usize, usize)>,
+    /// `(remaining_bytes, bytes_per_sec)` from the hash benchmark sample, shown
+    /// as size and ETA next to the hash counter while a baseline runs.
+    pub recheck_hash_estimate: Option<(u64, u64)>,
     pub last_hash_progress_repaint: Option<Instant>,
     pub download_hash_sample_at: Option<Instant>,
     pub download_hash_sample_files: usize,

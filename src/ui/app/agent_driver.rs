@@ -2818,6 +2818,10 @@ impl Foxy {
             }
         };
         push(self.backend_worker.is_some(), "core-sync");
+        push(
+            !self.pending_repository_db_wipes.is_empty(),
+            "repository-db-wipe",
+        );
         push(self.startup_sync_in_progress(), "startup-sync");
         push(self.quick_scan_worker.is_some(), "quick-scan");
         push(self.direct_download_worker.is_some(), "direct-download");
@@ -4967,6 +4971,11 @@ impl Foxy {
                 self.current_view = FoxyView::RepositoryList;
                 self.last_view = FoxyView::None;
             }
+            "open-game-space-overview" => {
+                self.current_view = FoxyView::RepositoryList;
+                self.last_view = FoxyView::None;
+                self.open_game_space_overview();
+            }
             "open-changelog" => self.open_reference_view(FoxyView::Changelog),
             "open-about" => self.open_reference_view(FoxyView::About),
             "open-help" => self.open_reference_view(FoxyView::Help),
@@ -5006,6 +5015,18 @@ impl Foxy {
             "recheck-repo" => {
                 let index = self.agent_gui_resolve_repo_index(params)?;
                 self.start_core_sync(index, api::SyncMode::RecheckOnly);
+            }
+            "quick-check" => {
+                let index = self.agent_gui_resolve_repo_index(params)?;
+                self.start_core_sync(index, api::SyncMode::QuickCheckOnly);
+            }
+            "remote-recheck" => {
+                let index = self.agent_gui_resolve_repo_index(params)?;
+                self.start_remote_recheck_with_plan(index);
+            }
+            "wipe-repo-db" => {
+                let index = self.agent_gui_resolve_repo_index(params)?;
+                self.wipe_repository_database_entries(index);
             }
             "recheck-integrity" => {
                 let index = self.agent_gui_resolve_repo_index(params)?;
@@ -5126,6 +5147,12 @@ const AGENT_ACTIONS: &[AgentAction] = &[
         summary: "Open the repository list",
     },
     AgentAction {
+        name: "open-game-space-overview",
+        destructive: false,
+        params: "",
+        summary: "Open the repository list with the active game space overview in the main panel",
+    },
+    AgentAction {
         name: "open-changelog",
         destructive: false,
         params: "",
@@ -5202,6 +5229,24 @@ const AGENT_ACTIONS: &[AgentAction] = &[
         destructive: true,
         params: "repo-index",
         summary: "Recheck a repository (remote refresh)",
+    },
+    AgentAction {
+        name: "quick-check",
+        destructive: false,
+        params: "repo-index",
+        summary: "Quick local check of a repository (the toolbar quick check)",
+    },
+    AgentAction {
+        name: "remote-recheck",
+        destructive: true,
+        params: "repo-index",
+        summary: "Remote recheck that also prepares the download plan (the toolbar recheck)",
+    },
+    AgentAction {
+        name: "wipe-repo-db",
+        destructive: true,
+        params: "repo-index",
+        summary: "Wipe a repository's database entries (busy reason repository-db-wipe)",
     },
     AgentAction {
         name: "recheck-integrity",

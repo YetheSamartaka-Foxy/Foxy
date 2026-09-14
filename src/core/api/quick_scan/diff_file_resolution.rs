@@ -58,6 +58,19 @@ fn addon_needs_update_from_file_diff(has_expected_file_diffs: bool) -> bool {
     has_expected_file_diffs
 }
 
+/// Whether a mismatched file must be tree-hashed again before it is reported.
+/// Only disk drift (the stored content fingerprint no longer matches, or was
+/// never recorded) or a tree hash that never ran justify re-reading the file;
+/// a tree mismatch with an unchanged fingerprint is a confirmed pending update
+/// whose stored part state is still a true description of the local file.
+fn file_needs_tree_verify(
+    exists: bool,
+    local_checksum_missing: bool,
+    file_content_mismatch: bool,
+) -> bool {
+    exists && (file_content_mismatch || local_checksum_missing)
+}
+
 fn is_stale_tree_only_file_diff(
     exists: bool,
     size_ok: bool,
@@ -344,7 +357,11 @@ pub(super) async fn compute_file_diffs(
                     if file_tree_mismatch {
                         checksum_mismatch_files += 1;
                     }
-                    if exists && (file_content_mismatch || file_tree_mismatch) {
+                    if file_needs_tree_verify(
+                        exists,
+                        f.local_checksum.trim().is_empty(),
+                        file_content_mismatch,
+                    ) {
                         files_needing_tree_verify.insert(f.id);
                     }
                     let part_stats = changed_part_stats_by_file_id
@@ -620,6 +637,28 @@ mod tests {
         };
 
         assert_eq!(inferred_patch_bytes_from_part_stats(stats, 100, true), 25);
+    }
+
+    #[test]
+    fn outdated_file_with_unchanged_fingerprint_is_not_reverified() {
+        // Tree mismatch, stored fingerprint equals the current one: reported from
+        // stored checksums, no disk read.
+        assert!(!file_needs_tree_verify(true, false, false));
+    }
+
+    #[test]
+    fn outdated_file_with_drifted_fingerprint_is_reverified() {
+        assert!(file_needs_tree_verify(true, false, true));
+    }
+
+    #[test]
+    fn file_without_local_tree_hash_is_reverified() {
+        assert!(file_needs_tree_verify(true, true, false));
+    }
+
+    #[test]
+    fn missing_file_is_never_tree_verified() {
+        assert!(!file_needs_tree_verify(false, true, true));
     }
 
     #[test]

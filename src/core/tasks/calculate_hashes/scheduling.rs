@@ -1587,6 +1587,11 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
             checked_parts: benchmark_total_parts.min(total_parts),
             total_parts,
         });
+        let remaining_bytes: u64 = jobs.iter().map(job_estimated_bytes).sum();
+        let _ = tx.send(ProgressEvent::HashEstimate {
+            remaining_bytes,
+            bytes_per_sec: best_throughput as u64,
+        });
     }
     let remaining_started = Instant::now();
     let remaining_results = recalculate_parts_for_jobs(

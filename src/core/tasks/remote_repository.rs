@@ -305,9 +305,9 @@ async fn repository_has_remote_state(
     // so a file with a non-empty remote_checksum implies its parts already carry
     // theirs (mirrors the local rollup ordering in `calculate_hashes`). With all
     // files complete, the parts are complete too, so the part term in
-    // `remote_state_complete_from_addons` is satisfied with part_count = 0. If a
-    // partial graph ever slipped through, the repository-level checksum equality
-    // that gates the skip decision still catches it.
+    // `remote_state_complete_from_addons` is satisfied with part_count = 0. The
+    // one hole in that derivation (files persisted, parts never landed) is
+    // closed by the `LIMIT 1` part probe below.
     let rows = match context
         .db()
         .query_all(
@@ -354,7 +354,66 @@ async fn repository_has_remote_state(
         })
         .collect::<Vec<_>>();
 
-    remote_state_complete_from_addons(&states, enabled_overrides)
+    if !remote_state_complete_from_addons(&states, enabled_overrides) {
+        return false;
+    }
+
+    // The derivation above assumes the parts landed with the files. A deferred
+    // rebuild writes the file rows inline and holds the part rows in memory until
+    // the hash pass persists them, so a process exit in between leaves every file
+    // "complete" over an empty `subfiles`. Such a graph cannot produce local tree
+    // hashes and the quick scan preflight already refuses it; the skip decision
+    // must agree, or every sync re-reads the whole repository for nothing.
+    let enabled_file_count: i64 = states
+        .iter()
+        .filter(|addon| addon_enabled_for_remote_state(addon, enabled_overrides))
+        .map(|addon| addon.file_count)
+        .sum();
+    if enabled_file_count == 0 || context.deferred_part_count() > 0 {
+        return true;
+    }
+    match repository_part_rows_exist(context, repository_id).await {
+        Some(true) => true,
+        Some(false) => {
+            info!(
+                "Repository id={} has {} enabled files but no part rows and no deferred part inserts; remote state is incomplete",
+                repository_id, enabled_file_count
+            );
+            false
+        }
+        None => false,
+    }
+}
+
+/// Indexed `LIMIT 1` probe for any part row under the repository's enabled
+/// addons. Mirrors the quick scan preflight probe so both gates agree on what a
+/// missing part graph looks like.
+async fn repository_part_rows_exist(context: Arc<FoxyContext>, repository_id: i64) -> Option<bool> {
+    match context
+        .db()
+        .query_one(
+            r#"SELECT 1 FROM subfiles sf
+               WHERE sf.file_id IN (
+                   SELECT af.file_id
+                   FROM addon_files af
+                   JOIN repository_addons ra ON ra.addon_id = af.addon_id
+                   JOIN addons a ON a.id = ra.addon_id
+                   WHERE ra.repository_id = ? AND a.enabled = 1
+               )
+               LIMIT 1"#,
+            params![repository_id],
+        )
+        .await
+    {
+        Ok(row) => Some(row.is_some()),
+        Err(err) => {
+            warn!(
+                "Failed to probe part rows for repository_id={}: {}",
+                repository_id, err
+            );
+            None
+        }
+    }
 }
 
 /// Cheaply fetch the repository's canonical remote checksum without touching the
@@ -1001,6 +1060,79 @@ mod tests {
 
         assert!(!repository_addon_paths_match_space_layout(context, &repo).await);
         std::fs::remove_dir_all(root).expect("remove test tree");
+    }
+
+    async fn seed_repository_with_file(fdb: &FoxyDb) {
+        fdb.execute(
+            "INSERT INTO repositories (id, name, remote_url, local_path, remote_checksum) VALUES (1, 'r', 'https://example.com/', 'C:/mods/', 'REPO')",
+            params![],
+        )
+        .await
+        .expect("seed repository");
+        fdb.execute(
+            "INSERT INTO addons (id, name, local_path, enabled, remote_checksum, required) VALUES (1, '@a', 'C:/mods/@a', 1, 'ADDON', 1)",
+            params![],
+        )
+        .await
+        .expect("seed addon");
+        fdb.execute(
+            "INSERT INTO repository_addons (repository_id, addon_id) VALUES (1, 1)",
+            params![],
+        )
+        .await
+        .expect("link addon");
+        fdb.execute(
+            "INSERT INTO files (id, name, remote_path, local_path, remote_checksum, length) VALUES (10, 'a.pbo', 'https://example.com/@a/addons/a.pbo', 'C:/mods/@a/addons/a.pbo', 'FILE', 4)",
+            params![],
+        )
+        .await
+        .expect("seed file");
+        fdb.execute(
+            "INSERT INTO addon_files (addon_id, file_id) VALUES (1, 10)",
+            params![],
+        )
+        .await
+        .expect("link file");
+    }
+
+    #[tokio::test]
+    async fn remote_state_incomplete_when_files_have_no_part_rows() {
+        let db = crate::core::tasks::db_turso::build_test_database().await;
+        let fdb = FoxyDb::from_turso(db.clone());
+        seed_repository_with_file(&fdb).await;
+        let context = Arc::new(FoxyContext::new(db, reqwest::Client::new()));
+
+        assert!(!repository_has_remote_state(context.clone(), 1, None).await);
+
+        fdb.execute(
+            "INSERT INTO subfiles (file_id, path, local_length, local_start, remote_length, remote_start, local_checksum, remote_checksum, data_order) VALUES (10, 'p0', 0, 0, 4, 0, '', 'PART', 0)",
+            params![],
+        )
+        .await
+        .expect("seed part");
+
+        assert!(repository_has_remote_state(context, 1, None).await);
+    }
+
+    #[tokio::test]
+    async fn remote_state_complete_when_part_rows_are_deferred_in_memory() {
+        use crate::core::models::context::DeferredPartInsert;
+
+        let db = crate::core::tasks::db_turso::build_test_database().await;
+        let fdb = FoxyDb::from_turso(db.clone());
+        seed_repository_with_file(&fdb).await;
+        let context = Arc::new(FoxyContext::new(db, reqwest::Client::new()));
+        context.set_defer_part_inserts(true);
+        context.buffer_deferred_parts(vec![DeferredPartInsert {
+            file_id: 10,
+            path: "p0".to_owned(),
+            remote_length: 4,
+            remote_start: 0,
+            remote_checksum: "PART".to_owned(),
+            data_order: 0,
+        }]);
+
+        assert!(repository_has_remote_state(context, 1, None).await);
     }
 
     // ── should_skip_remote_refresh ──────────────────────────────────────

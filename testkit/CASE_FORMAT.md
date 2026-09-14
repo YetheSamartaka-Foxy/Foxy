@@ -100,9 +100,26 @@ no unallowlisted WARN or ERROR entries.
 
 Supported operations are `startup`, `ui-walk`, `remote-refresh`, `quick-check`,
 `recheck`, `recheck-integrity`, `force-redownload`, `download`, `wipe-db`,
-`mutate`, and `restore`. Each operation may contain `wait_timeout_s` and
-`expect`. GUI cannot express remote-refresh-only or quick-check, so those
-operations require the CLI harness. Setup operations are not ledgered.
+`mutate`, and `restore`. Each operation may contain `wait_timeout_s`,
+`expect`, and `label`. Setup operations are not ledgered. `label` names the
+operation's artifacts and its ledger row (`label` field) when a case repeats
+one kind of operation inside an iteration, such as a quick check run twice to
+prove the second one reads nothing; without it the second operation's
+artifacts overwrite the first.
+
+The two harnesses run the same mode through different entry points, and the
+difference matters for the sync-path cases: the GUI `remote-refresh` is the
+toolbar recheck, which also prepares the download queue so the following
+`download` reuses it (`run_metrics.prepared_queue_reuses`), while the CLI
+`remote-refresh` is `repo sync --mode remote-refresh` and prepares nothing. The
+GUI `quick-check` is the toolbar quick check and `wipe-db` is the repository's
+"wipe database entries" action (busy reason `repository-db-wipe`).
+
+`run_metrics` also carries the redundant-work counters the checker cases
+assert on: `hash_work_bytes` (bytes read by every `SOL op=hash` run in the
+operation), `tree_verify_runs` (targeted tree-hash verifies the quick scan
+triggered), `fs_watcher_starts`, and `prepared_queue_reuses`. Expectations
+reach them as `breakdown.run_metrics.<name>`.
 
 `ui-walk` runs an array of driver `steps` - the same command objects a UX case
 uses - as one measured operation, and requires the GUI harness. A UX case
@@ -187,6 +204,10 @@ run journal. Supported profiles are documented by `foxy-testkit-mutate --help`.
 | `max_run_gb` | unset | Invalidate a run that downloads too much |
 | `expected_files` | unset | Required `files_updated` for full-download operations |
 | `oracle_command` | unset | Independent post-run argv array; nonzero exit invalidates the row |
+
+`oracle_command` runs after every measured `download` and `force-redownload`
+operation, not after checks: a check that sits between a mutation and its
+repair sees the mutated payload on purpose.
 
 `oracle_command` is an **argv array**, never a command string. A bare string is
 rejected with an error naming the fix rather than being split on whitespace,

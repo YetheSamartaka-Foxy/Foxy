@@ -715,6 +715,7 @@ async fn run_quick_scan_worker_repo(
         force_fresh_addon_hash,
         Some(&shared_cache),
         reusable_preflight,
+        super::diff::PreHashedFiles::None,
     )
     .await;
     drop(progress_sender);

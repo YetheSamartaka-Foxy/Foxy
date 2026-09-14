@@ -28,6 +28,7 @@ pub struct GameSpaceSettingsViewState {
     pub is_active_space: bool,
     pub snapshot: SettingsViewState,
     pub current_tab: GameSpaceSettingsTab,
+    pub rename_input: String,
 }
 
 impl Foxy {
@@ -53,6 +54,7 @@ impl Foxy {
         state.is_active_space = is_active;
         state.snapshot = snapshot;
         state.current_tab = GameSpaceSettingsTab::Game;
+        state.rename_input = entry.display_name.clone();
         self.workshop_view_state.loaded = false;
         if self.current_view != FoxyView::GameSpaceSettings {
             self.last_view = self.current_view;
@@ -152,6 +154,45 @@ impl Foxy {
                 "Could not save game space settings: {error}",
                 &[("error", err)],
             ));
+        }
+    }
+
+    /// Apply the name typed in the settings view's rename field to the edited
+    /// space and keep every cached copy of the entry in step with the registry.
+    pub(crate) fn rename_edited_game_space(&mut self) {
+        let space = self.game_space_settings_target();
+        let name = self
+            .game_space_settings_view_state
+            .rename_input
+            .trim()
+            .to_string();
+        if name.is_empty() || name == space.display_name {
+            return;
+        }
+        match spaces::rename_game_space(&space.id, &name) {
+            Ok(entry) => {
+                info!("Renamed game space {}", entry.id);
+                self.game_space_settings_view_state.rename_input = entry.display_name.clone();
+                self.game_space_settings_view_state.space = Some(entry.clone());
+                if let Some(listed) = self
+                    .game_spaces_view_state
+                    .entries
+                    .iter_mut()
+                    .find(|listed| listed.id == entry.id)
+                {
+                    listed.display_name = entry.display_name.clone();
+                }
+                self.show_success_toast(self.t_fmt(
+                    "Game space renamed to {name}.",
+                    &[("name", entry.display_name)],
+                ));
+            }
+            Err(err) => {
+                warn!("Failed to rename game space: {}", err);
+                self.show_error_toast(
+                    self.t_fmt("Could not rename game space: {error}", &[("error", err)]),
+                );
+            }
         }
     }
 

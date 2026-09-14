@@ -452,6 +452,7 @@ fn run_repository_sync(
             operation_id: api::next_operation_id("cli-sync"),
             persisted_addon_selection: Some(selected_mod_states),
             prepare_download_plan: false,
+            discard_prepared_queue: false,
             repository_space_shared_path: None,
             auto_backup_directory: None,
             rollback_temp_directory: Some(if settings.temp_directory.trim().is_empty() {
@@ -501,6 +502,7 @@ fn run_repository_sync(
                 ProgressEvent::DownloadTelemetry { .. } => {}
                 ProgressEvent::HashTelemetry { .. } => {}
                 ProgressEvent::HashSummary { .. } => {}
+                ProgressEvent::HashEstimate { .. } => {}
                 ProgressEvent::SiblingPropagation { .. } => {}
                 ProgressEvent::DownloadMod {
                     mod_name,

@@ -2,7 +2,7 @@ use crate::core::game::{DirectorySetting, GameModule};
 use crate::ui::app::Foxy;
 use crate::ui::i18n::tr;
 use crate::ui::types::{SettingsViewState, path_is_inside_onedrive};
-use eframe::egui::{Button, RichText, ScrollArea, TextEdit, TextStyle, Ui, Vec2};
+use eframe::egui::{Button, Key, RichText, ScrollArea, TextEdit, TextStyle, Ui, Vec2};
 use log::{info, warn};
 use rfd::FileDialog;
 
@@ -197,6 +197,9 @@ impl Foxy {
 
         ScrollArea::vertical().show(ui, |ui| {
             ui.vertical(|ui| {
+                self.render_game_space_name_setting(ui, horizontal_padding, browse_button_width);
+                ui.separator();
+
                 for directory in &schema.directories {
                     if directory.id == "arma3_profiles_directory" {
                         continue;
@@ -342,6 +345,68 @@ impl Foxy {
             if !ui.ctx().egui_wants_keyboard_input() {
                 self.show_success_toast(self.t("Settings saved"));
             }
+        }
+    }
+
+    fn render_game_space_name_setting(
+        &mut self,
+        ui: &mut Ui,
+        horizontal_padding: f32,
+        button_width: f32,
+    ) {
+        let current_name = self.game_space_settings_target().display_name;
+        ui.horizontal(|ui| {
+            ui.add_space(horizontal_padding);
+            ui.label(tr("Game space name"));
+            ui.add_space(horizontal_padding);
+        });
+        let mut rename_requested = false;
+        ui.horizontal(|ui| {
+            ui.add_space(horizontal_padding);
+            let field_width = (ui.available_width()
+                - button_width
+                - ui.spacing().item_spacing.x
+                - 2.0 * horizontal_padding)
+                .max(0.0);
+            let response = ui.add(
+                TextEdit::singleline(&mut self.game_space_settings_view_state.rename_input)
+                    .id_salt("game_space_rename_input")
+                    .desired_width(field_width),
+            );
+            if response.hovered() {
+                ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+            }
+            if response.lost_focus() && ui.ctx().input(|i| i.key_pressed(Key::Enter)) {
+                rename_requested = true;
+            }
+            let trimmed = self.game_space_settings_view_state.rename_input.trim();
+            let can_rename = !trimmed.is_empty() && trimmed != current_name;
+            let rename_button = ui.add_enabled_ui(can_rename, |ui| {
+                ui.add_sized(
+                    Vec2::new(button_width, ui.spacing().interact_size.y),
+                    Button::new(tr("Rename")),
+                )
+            });
+            let rename_button = rename_button.inner;
+            if rename_button.hovered() {
+                ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+            }
+            if rename_button.clicked() {
+                rename_requested = true;
+            }
+            ui.add_space(horizontal_padding);
+        });
+        render_wrapped_info_row(
+            ui,
+            horizontal_padding,
+            RichText::new(tr(
+                "Only the name shown in Foxy changes. The game space folder and its data stay where they are.",
+            ))
+            .italics()
+            .color(self.color_text_dim()),
+        );
+        if rename_requested {
+            self.rename_edited_game_space();
         }
     }
 

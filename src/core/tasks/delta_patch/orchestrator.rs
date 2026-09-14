@@ -7,6 +7,7 @@ use crate::core::models::download_patch_op::{
     delete_download_patch_ops_for_file, fetch_download_patch_ops_for_file,
 };
 use crate::core::models::download_target_file::DownloadTargetFile;
+use crate::core::tasks::calculate_hashes::{PatchedFileSegments, PatchedSegment};
 use crate::core::tasks::download_files::{
     AdaptiveBandwidthLimiter, DownloadMetrics, SharedRollbackSession,
 };
@@ -83,6 +84,7 @@ async fn mark_patch_fallback(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn try_patch_first(
     context: Arc<FoxyContext>,
     download_target: &DownloadTargetFile,
@@ -91,7 +93,8 @@ pub(crate) async fn try_patch_first(
     rollback_session: Option<SharedRollbackSession>,
     rate_limiter: Arc<AdaptiveBandwidthLimiter>,
     metrics: Arc<DownloadMetrics>,
-) -> anyhow::Result<bool> {
+    apply_permits: Arc<tokio::sync::Semaphore>,
+) -> anyhow::Result<Option<PatchedFileSegments>> {
     let file_id = download_target.file_id as i64;
     let patch_started = std::time::Instant::now();
 
@@ -103,7 +106,7 @@ pub(crate) async fn try_patch_first(
             "Delta patch plan not available for file_id={}, falling back to full download",
             file_id
         );
-        return Ok(false);
+        return Ok(None);
     };
 
     let artifact = match load_patch_artifact(&patch_file.patch_json_path).await {
@@ -115,7 +118,7 @@ pub(crate) async fn try_patch_first(
                 &format!("patch artifact read failed: {}", err),
             )
             .await;
-            return Ok(false);
+            return Ok(None);
         }
     };
 
@@ -126,7 +129,7 @@ pub(crate) async fn try_patch_first(
             "patch artifact file_id mismatch with DB record",
         )
         .await;
-        return Ok(false);
+        return Ok(None);
     }
 
     if artifact.new_file_expected_size == 0 {
@@ -136,7 +139,7 @@ pub(crate) async fn try_patch_first(
             "patch artifact has zero expected output size",
         )
         .await;
-        return Ok(false);
+        return Ok(None);
     }
 
     let mut patch_ops = match fetch_download_patch_ops_for_file(context.clone(), file_id).await {
@@ -148,7 +151,7 @@ pub(crate) async fn try_patch_first(
                 &format!("failed to fetch patch ops: {}", err),
             )
             .await;
-            return Ok(false);
+            return Ok(None);
         }
     };
 
@@ -182,7 +185,7 @@ pub(crate) async fn try_patch_first(
             &format!("invalid patch plan: {}", err),
         )
         .await;
-        return Ok(false);
+        return Ok(None);
     }
 
     let planned_tree_checksum = compute_tree_checksum_from_segment_checksums(
@@ -198,7 +201,7 @@ pub(crate) async fn try_patch_first(
             ),
         )
         .await;
-        return Ok(false);
+        return Ok(None);
     }
 
     let preflight =
@@ -211,7 +214,7 @@ pub(crate) async fn try_patch_first(
                     &format!("copy source preflight failed: {}", err),
                 )
                 .await;
-                return Ok(false);
+                return Ok(None);
             }
         };
     if preflight.copy_ops_total > 0 {
@@ -241,7 +244,7 @@ pub(crate) async fn try_patch_first(
             ),
         )
         .await;
-        return Ok(false);
+        return Ok(None);
     }
 
     let preflight_elapsed = patch_started.elapsed();
@@ -285,7 +288,7 @@ pub(crate) async fn try_patch_first(
             &format!("patch blob range download failed: {}", err),
         )
         .await;
-        return Ok(false);
+        return Ok(None);
     }
 
     let download_elapsed = patch_started.elapsed();
@@ -322,6 +325,20 @@ pub(crate) async fn try_patch_first(
         );
     }
 
+    // Only the apply is disk-bound; the network phases above run unthrottled.
+    let apply_permit_wait = std::time::Instant::now();
+    let _apply_permit = apply_permits
+        .acquire()
+        .await
+        .map_err(|_| anyhow::anyhow!("patch apply semaphore closed"))?;
+    let apply_permit_wait = apply_permit_wait.elapsed();
+    if apply_permit_wait > std::time::Duration::from_millis(500) {
+        debug!(
+            "Delta patch apply waited for a disk slot: file_id={} wait={:.2?}",
+            file_id, apply_permit_wait
+        );
+    }
+
     let tmp_path_for_cleanup = PathBuf::from(format!("{}.foxy.tmp", artifact.local_target_path));
     let (temp_path, segment_checksums) = match apply_patch_to_temp_file(
         context.clone(),
@@ -351,7 +368,7 @@ pub(crate) async fn try_patch_first(
                 &format!("patch apply failed: {}", err),
             )
             .await;
-            return Ok(false);
+            return Ok(None);
         }
     };
 
@@ -374,7 +391,7 @@ pub(crate) async fn try_patch_first(
                 &format!("patch promote failed: {}", err),
             )
             .await;
-            return Ok(false);
+            return Ok(None);
         }
     };
 
@@ -430,7 +447,7 @@ pub(crate) async fn try_patch_first(
             ),
         )
         .await;
-        return Ok(false);
+        return Ok(None);
     }
 
     debug!(
@@ -503,5 +520,16 @@ pub(crate) async fn try_patch_first(
         savings_bytes,
         savings_percent
     );
-    Ok(true)
+    Ok(Some(PatchedFileSegments {
+        file_id: patch_file.file_id,
+        parts: patch_ops
+            .iter()
+            .zip(segment_checksums)
+            .map(|(op, checksum)| PatchedSegment {
+                dest_start: op.dest_start,
+                length: op.length,
+                checksum,
+            })
+            .collect(),
+    }))
 }

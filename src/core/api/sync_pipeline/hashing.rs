@@ -1,7 +1,8 @@
 use super::super::*;
 use crate::core::db::DbValue;
 use crate::core::tasks::calculate_hashes::{
-    AddonHashMetrics, FileHashBatchResult, HashPhaseTimings, RepositoryHashContext,
+    AddonHashMetrics, FileHashBatchResult, HashPhaseTimings, PatchedFileSegments,
+    RepositoryHashContext, apply_segment_verified_files,
     calculate_hashes_for_files_in_tree_with_profile_and_sticky_auto,
     calculate_hashes_for_files_with_profile_and_sticky_auto,
 };
@@ -70,6 +71,7 @@ pub(super) async fn run_incremental_hash_batch(
     addon_hash_metrics: &mut Vec<AddonHashMetrics>,
     progress_percent: f32,
     clean_part_mark_downloaded_files: bool,
+    patched_segments: &[PatchedFileSegments],
 ) -> FileHashBatchResult {
     if file_ids.is_empty() {
         return FileHashBatchResult::default();
@@ -77,7 +79,7 @@ pub(super) async fn run_incremental_hash_batch(
 
     let already_verified_file_ids =
         collect_already_verified_file_ids(context.clone(), file_ids).await;
-    let file_ids_to_hash: HashSet<u64> = if already_verified_file_ids.is_empty() {
+    let mut file_ids_to_hash: HashSet<u64> = if already_verified_file_ids.is_empty() {
         file_ids.clone()
     } else {
         hashed_download_file_ids.extend(already_verified_file_ids.iter().copied());
@@ -114,6 +116,50 @@ pub(super) async fn run_incremental_hash_batch(
             repository_url, hash_tree_loads
         );
         *hash_context = Some(loaded);
+    }
+
+    // Delta-patched files carry their part checksums out of the apply; record
+    // those instead of re-reading the bytes that were just written. A file
+    // whose segments do not match the remote layout stays in the re-read set.
+    let mut segment_verified_file_ids: HashSet<u64> = HashSet::new();
+    let pending_segments: Vec<PatchedFileSegments> = patched_segments
+        .iter()
+        .filter(|segments| file_ids_to_hash.contains(&segments.file_id))
+        .cloned()
+        .collect();
+    if !pending_segments.is_empty()
+        && let Some(hash_context) = hash_context.as_mut()
+    {
+        let outcome = apply_segment_verified_files(
+            context.clone(),
+            &mut hash_context.tree,
+            &pending_segments,
+        )
+        .await;
+        if !outcome.rejected.is_empty() {
+            warn!(
+                "Segment-verified hash rejected for {} delta-patched files; re-reading them from disk",
+                outcome.rejected.len()
+            );
+        }
+        segment_verified_file_ids = outcome.accepted;
+        file_ids_to_hash.retain(|file_id| !segment_verified_file_ids.contains(file_id));
+        hashed_download_file_ids.extend(segment_verified_file_ids.iter().copied());
+    }
+    info!(
+        "Incremental hash sources: repo={} hash_source=segments files={} hash_source=reread files={}",
+        repository_url,
+        segment_verified_file_ids.len(),
+        file_ids_to_hash.len()
+    );
+    if file_ids_to_hash.is_empty() {
+        let mut processed_file_ids = already_verified_file_ids;
+        processed_file_ids.extend(segment_verified_file_ids.iter().copied());
+        return FileHashBatchResult {
+            requested_file_ids: file_ids.clone(),
+            processed_file_ids,
+            ..Default::default()
+        };
     }
 
     let incremental_hash_start = std::time::Instant::now();
@@ -195,16 +241,20 @@ pub(super) async fn run_incremental_hash_batch(
         );
     }
 
+    let mut hash_result = hash_result;
     if !hash_result.processed_file_ids.is_empty() {
         hashed_download_file_ids.extend(hash_result.processed_file_ids.iter().copied());
         addon_hash_metrics.extend(hash_result.addon_metrics.iter().cloned());
-    } else {
+    } else if segment_verified_file_ids.is_empty() {
         warn!(
             "Incremental hash returned no updates for repo={} files={}",
             repository_url,
             file_ids.len()
         );
     }
+    hash_result
+        .processed_file_ids
+        .extend(segment_verified_file_ids.iter().copied());
     hash_result
 }
 

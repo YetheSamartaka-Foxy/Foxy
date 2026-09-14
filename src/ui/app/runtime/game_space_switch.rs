@@ -235,6 +235,7 @@ impl Foxy {
         self.bump_repository_visual_folders_version();
         self.selected_repository_space_id = None;
         self.selected_repository_visual_folder_id = None;
+        self.game_space_overview = Default::default();
         self.repository_space_detail_filter.clear();
         self.repository_space_detail_filter_space_id = None;
         self.repository_space_selector_state = None;
@@ -339,6 +340,10 @@ impl Foxy {
         self.fs_watch_signature = None;
         self.fs_watch_index_dirty = false;
         self.fs_watch_observed_repositories_revision = 0;
+        self.fs_watch_idle_exit
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.fs_watch_idle_retry_at = None;
+        self.fs_changed_since_prepare.clear();
 
         // Images and metadata fetches.
         self.pending_image_jobs.clear();
@@ -419,6 +424,7 @@ impl Foxy {
         self.recheck_stage_percent = None;
         self.recheck_hash_counter = None;
         self.recheck_hash_part_counter = None;
+        self.recheck_hash_estimate = None;
         self.last_hash_progress_repaint = None;
         self.download_hash_sample_at = None;
         self.download_hash_sample_files = 0;
@@ -484,6 +490,7 @@ const APP_GLOBAL_FOXY_FIELDS: &[&str] = &[
     "app_icon_texture_bytes",
     "default_repo_image",
     "default_repo_image_texture_bytes",
+    "game_logo_textures",
     "repaint_ctx",
     "needs_repaint",
     "startup_frame_rendered",

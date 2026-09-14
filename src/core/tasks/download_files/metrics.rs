@@ -68,6 +68,9 @@ pub(super) struct DownloadCounters {
     /// end-of-run SOL ratio when no bandwidth limiter is configured.
     pub(super) peak_network_bps: AtomicU64,
     pub(super) disk_bytes_written: AtomicU64,
+    /// Full size of every file that was delta patched rather than downloaded;
+    /// its bytes were produced by local copies and never re-read by the hash.
+    pub(super) patched_full_bytes: AtomicU64,
     pub(super) files_completed: AtomicUsize,
     pub(super) range_retries: AtomicUsize,
     pub(super) db_checkpoint_ms: AtomicU64,
@@ -142,6 +145,7 @@ impl DownloadMetrics {
                 bytes_transferred: AtomicU64::new(0),
                 peak_network_bps: AtomicU64::new(0),
                 disk_bytes_written: AtomicU64::new(0),
+                patched_full_bytes: AtomicU64::new(0),
                 files_completed: AtomicUsize::new(0),
                 range_retries: AtomicUsize::new(0),
                 db_checkpoint_ms: AtomicU64::new(0),
@@ -175,6 +179,11 @@ impl DownloadMetrics {
 
     /// Record a completed (or failed) file download.
     pub(super) fn record_file(&self, metric: FileMetric) {
+        if metric.method == "delta_patch" {
+            self.counters
+                .patched_full_bytes
+                .fetch_add(metric.size as u64, Ordering::Relaxed);
+        }
         if metric.split_count <= 1 && metric.disk_write_time > Duration::ZERO {
             self.counters
                 .disk_bytes_written
@@ -675,6 +684,9 @@ pub(super) struct DownloadSchedulerState {
     pub(super) queued_large_files: AtomicUsize,
     /// Global semaphore capping total concurrent HTTP range requests.
     pub(super) range_permits: std::sync::Arc<Semaphore>,
+    /// Caps concurrent delta-patch applies (the disk-bound phase), so a
+    /// rotational destination is not seeked by dozens of applies at once.
+    pub(super) patch_apply_permits: std::sync::Arc<Semaphore>,
     /// Raised when a large file finishes, so range workers parked above the
     /// old fair-share cap wake on the event instead of on their poll interval.
     pub(super) range_cap_changed: tokio::sync::Notify,
@@ -687,6 +699,7 @@ impl DownloadSchedulerState {
             active_large_files: AtomicUsize::new(0),
             queued_large_files: AtomicUsize::new(0),
             range_permits: std::sync::Arc::new(Semaphore::new(limits.max_active_range_requests)),
+            patch_apply_permits: std::sync::Arc::new(Semaphore::new(limits.max_patch_applies)),
             range_cap_changed: tokio::sync::Notify::new(),
             limits,
         }

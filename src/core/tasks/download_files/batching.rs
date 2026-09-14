@@ -1,6 +1,7 @@
 use crate::core::api::ProgressEvent;
 use crate::core::models::context::FoxyContext;
 use crate::core::models::download_target_file::DownloadTargetFile;
+use crate::core::tasks::calculate_hashes::PatchedFileSegments;
 use crate::core::tasks::delta_patch::try_patch_first;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
@@ -46,6 +47,9 @@ pub(crate) struct DownloadModCompletion {
     pub(crate) file_ids: HashSet<u64>,
     pub(crate) bytes: u64,
     pub(crate) success: bool,
+    /// Part checksums a delta-patch apply verified while writing the file, so
+    /// the hash stage can record them instead of re-reading the output.
+    pub(crate) patched_segments: Option<PatchedFileSegments>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -121,6 +125,7 @@ async fn download_single_file(
         permit_type
     );
 
+    let mut patched_segments: Option<PatchedFileSegments> = None;
     let (result, download_method): (Result<Option<TransferStats>, anyhow::Error>, &str) =
         if has_patch_plan {
             match try_patch_first(
@@ -131,17 +136,19 @@ async fn download_single_file(
                 rollback_session.clone(),
                 rate_limiter.clone(),
                 metrics.clone(),
+                scheduler.patch_apply_permits.clone(),
             )
             .await
             {
-                Ok(true) => {
+                Ok(Some(segments)) => {
                     file.download_total
                         .store(expected_transfer_bytes, Ordering::SeqCst);
                     file.download_cycle
                         .store(expected_transfer_bytes, Ordering::SeqCst);
+                    patched_segments = Some(segments);
                     (Ok(None), "delta_patch")
                 }
-                Ok(false) => {
+                Ok(None) => {
                     let r = download_file_ranges(
                         context.clone(),
                         &file,
@@ -288,6 +295,7 @@ async fn download_single_file(
                     file_ids: [file.file_id].into_iter().collect(),
                     bytes: file.size as u64,
                     success: true,
+                    patched_segments: patched_segments.take(),
                 };
                 if tx.try_send(completion).is_err() {
                     warn!(

@@ -1,14 +1,15 @@
 use super::super::quick_scan::{
-    apply_download_target_estimates_to_pending_updates,
-    apply_patch_plan_estimates_to_pending_updates, collect_files_with_missing_local_tree_hashes,
-    collect_repo_download_targets, collect_unexpected_files_for_repo_mods,
-    delete_unexpected_local_files, format_local_path_mismatch_message, log_addon_path_disk_state,
-    log_local_path_availability, pending_update_mod_scope, persist_pending_updates,
-    quick_local_change_diff, refresh_content_hashes_for_scoped_tree,
-    refresh_content_hashes_for_tree, refresh_content_hashes_when_tree_matches,
-    refresh_patch_plan_metadata_for_pending_updates, summarize_local_path_availability,
-    suspect_local_path_mismatch, tree_local_checksums_baseline_missing,
-    tree_local_checksums_missing,
+    PreHashedFiles, apply_download_target_estimates_to_pending_updates,
+    apply_patch_plan_estimates_to_pending_updates,
+    collect_hashable_files_with_missing_local_tree_hashes, collect_repo_download_targets,
+    collect_unexpected_files_for_repo_mods, delete_unexpected_local_files,
+    format_local_path_mismatch_message, log_addon_path_disk_state, log_local_path_availability,
+    pending_update_mod_scope, persist_pending_updates, quick_local_change_diff,
+    quick_local_change_diff_with_prehashed, refresh_content_hashes_for_file_ids,
+    refresh_content_hashes_for_repository, refresh_content_hashes_for_scoped_tree,
+    refresh_content_hashes_for_tree_files, refresh_patch_plan_metadata_for_pending_updates,
+    summarize_local_path_availability, suspect_local_path_mismatch,
+    tree_local_checksums_baseline_missing, tree_local_checksums_missing,
 };
 use super::super::*;
 use super::backup::backup_pending_addons_for_download;
@@ -24,11 +25,12 @@ use crate::core::models::modification::ADDON_COLUMNS;
 use crate::core::models::pending_update::fetch_pending_update_for_context;
 use crate::core::models::repository::load_repository_by_remote_url_and_local_path;
 use crate::core::tasks::calculate_hashes::{
-    AddonHashMetrics, HashCalculationResult, HashPhaseTimings, RepositoryHashContext,
-    calculate_hashes_for_files_in_tree_with_profile, calculate_hashes_for_files_with_profile,
-    calculate_hashes_with_profile, calculate_hashes_with_tree_and_profile_cancellable,
-    finalize_repository_hashes_from_mods, finalize_repository_hashes_from_tree,
-    pre_propagate_sibling_checksums, propagate_checksums_to_siblings,
+    AddonHashMetrics, HashCalculationResult, HashPhaseTimings, PatchedFileSegments,
+    RepositoryHashContext, calculate_hashes_for_files_in_tree_with_profile,
+    calculate_hashes_for_files_with_profile, calculate_hashes_with_profile,
+    calculate_hashes_with_tree_and_profile_cancellable, finalize_repository_hashes_from_mods,
+    finalize_repository_hashes_from_tree, pre_propagate_sibling_checksums,
+    propagate_checksums_to_siblings,
 };
 use crate::core::tasks::download_files::{
     DownloadRunReport, UpdateRollbackSession, apply_download_plan_bytes,
@@ -53,6 +55,24 @@ use tokio::sync::{Mutex, mpsc};
 // gigabyte has piled up.
 const INCREMENTAL_HASH_MIN_FILES: usize = 32;
 const INCREMENTAL_HASH_MIN_BYTES: u64 = 128 * 1024 * 1024;
+/// A file at least this large is hashed as soon as its last range lands, while
+/// its bytes are still in the page cache. Waiting for a full batch on a
+/// rotational destination with a dozen large files in flight means the batch
+/// has been evicted by the time it is hashed and is read back from the platter.
+const INCREMENTAL_HASH_IMMEDIATE_FILE_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Whether the pending incremental hash set should be flushed now.
+fn should_flush_incremental_hash_batch(
+    pending_files: usize,
+    pending_bytes: u64,
+    completed_file_bytes: u64,
+    completed_from_segments: bool,
+) -> bool {
+    pending_files >= INCREMENTAL_HASH_MIN_FILES
+        || pending_bytes >= INCREMENTAL_HASH_MIN_BYTES
+        || (!completed_from_segments
+            && completed_file_bytes >= INCREMENTAL_HASH_IMMEDIATE_FILE_BYTES)
+}
 const AUTO_REBENCHMARK_DOWNLOAD_PERCENT_STEP: u64 = 10;
 const AUTO_REBENCHMARK_DOWNLOAD_PERCENT_DENOMINATOR: u64 = 100;
 const PATCH_PLAN_TINY_FILE_THRESHOLD_BYTES: i64 = 64 * 1024;
@@ -172,6 +192,15 @@ fn local_path_mismatch_guard_applies(mode: SyncMode) -> bool {
 
 fn should_build_download_plan(mode: SyncMode, prepare_download_plan: bool) -> bool {
     mode == SyncMode::Download || prepare_download_plan
+}
+
+/// A local quick check that has to be escalated to a remote refresh already
+/// pays for the metadata rebuild, the tree-hash init and the quick verify, so
+/// it also prepares the download queue once. The following `Download` then
+/// takes the prepared-queue reuse fast path instead of running the whole
+/// prepare pipeline a second time. A plain `QuickCheckOnly` stays local-only.
+fn escalated_quick_check_plan() -> (SyncMode, bool) {
+    (SyncMode::RemoteRefreshOnly, true)
 }
 
 fn should_refresh_delta_plan_after_quick_verify(
@@ -741,12 +770,13 @@ async fn run_repository_pipeline(
 ) {
     let RepositorySyncOptions {
         operation_id,
-        prepare_download_plan,
+        mut prepare_download_plan,
         repository_space_shared_path,
         auto_backup_directory,
         rollback_temp_directory,
         download_speed_limit_mbps,
         recent_local_path_reset,
+        discard_prepared_queue,
         force_redownload,
         allow_suspect_full_redownload,
         mut download_pause_rx,
@@ -877,7 +907,7 @@ async fn run_repository_pipeline(
                 "Repository {} has file rows but zero part rows (subfiles); a local quick check cannot rebuild its tree hashes. Escalating QuickCheckOnly to a forced RemoteRefreshOnly to rebuild parts from remote metadata and re-hash the on-disk files (no content re-download).",
                 sanitize_log_url(&normalized_repo_url)
             );
-            mode = SyncMode::RemoteRefreshOnly;
+            (mode, prepare_download_plan) = escalated_quick_check_plan();
             builds_download_plan = should_build_download_plan(mode, prepare_download_plan);
             context = Arc::new(
                 create_context_with_recheck_level(RecheckLevel::REPOSITORY)
@@ -980,9 +1010,16 @@ async fn run_repository_pipeline(
     // repository checksum and local-path identity are unchanged. This skips the
     // redundant remote refresh, hash bootstrap, quick verify and queue rebuild
     // (the second ~7s pass) and goes straight to backup + transfer.
+    if mode == SyncMode::Download && discard_prepared_queue {
+        info!(
+            "Prepared download queue discarded for repo={}: the repository folder changed after it was built",
+            normalized_repo_url
+        );
+    }
     let mut reuse_prepared_queue = mode == SyncMode::Download
         && !force_redownload
         && !recent_local_path_reset
+        && !discard_prepared_queue
         && can_reuse_prepared_download_queue(
             context.clone(),
             &normalized_repo_url,
@@ -1188,9 +1225,8 @@ async fn run_repository_pipeline(
             label: "Refreshing content hashes".into(),
             percent: 0.60,
         });
-        let _ =
-            refresh_content_hashes_when_tree_matches(context.clone(), &normalized_repo_url, None)
-                .await;
+        let _ = refresh_content_hashes_for_repository(context.clone(), &normalized_repo_url, None)
+            .await;
         summary.push(StageEntry::new(
             "content_hash_refresh",
             integrity_stage.elapsed(),
@@ -1623,6 +1659,7 @@ async fn run_repository_pipeline(
     // initialized and the quick scan preflight would just confirm that.
     let mut full_tree_hash_bootstrap = false;
     let mut targeted_tree_hash_init = false;
+    let mut targeted_init_hashed_file_ids: HashSet<u64> = HashSet::new();
     let mut bootstrap_tree_for_content_hash: Option<Tree> = None;
     let scoped_tree_bootstrap = builds_download_plan && !quick_update_mod_names.is_empty();
     summary.push(StageEntry::new("bootstrap_prepare", stage.elapsed()));
@@ -1770,10 +1807,10 @@ async fn run_repository_pipeline(
             // Reuse the computed tree for content-hash refresh to avoid a redundant Tree::load
             bootstrap_tree_for_content_hash = bootstrap_tree;
         } else if tree_local_checksums_missing(&tree) {
-            let missing_file_ids = collect_files_with_missing_local_tree_hashes(&tree);
+            let missing_file_ids = collect_hashable_files_with_missing_local_tree_hashes(&tree);
             if missing_file_ids.is_empty() {
                 info!(
-                    "Local tree hashes are partially missing for repo {}, but no file scope was resolved for targeted bootstrap",
+                    "Local tree hashes are partially missing for repo {}, but every unhashed file is absent on disk; nothing to initialize",
                     normalized_repo_url
                 );
             } else {
@@ -1790,7 +1827,7 @@ async fn run_repository_pipeline(
                     percent: 0.30,
                 });
                 if scoped_tree_bootstrap {
-                    let _ = calculate_hashes_for_files_with_profile(
+                    let hashed = calculate_hashes_for_files_with_profile(
                         context.clone(),
                         &normalized_repo_url,
                         &missing_file_ids,
@@ -1799,6 +1836,7 @@ async fn run_repository_pipeline(
                         hash_io_profile,
                     )
                     .await;
+                    targeted_init_hashed_file_ids.extend(hashed.processed_file_ids.iter());
                     if *cancel_rx.borrow() {
                         info!(
                             "Sync cancelled during scoped targeted tree hash bootstrap for repo={}",
@@ -1823,7 +1861,7 @@ async fn run_repository_pipeline(
                         tree = refreshed_tree;
                     }
                 } else {
-                    let _ = calculate_hashes_for_files_in_tree_with_profile(
+                    let hashed = calculate_hashes_for_files_in_tree_with_profile(
                         context.clone(),
                         &mut tree,
                         &missing_file_ids,
@@ -1832,6 +1870,7 @@ async fn run_repository_pipeline(
                         hash_io_profile,
                     )
                     .await;
+                    targeted_init_hashed_file_ids.extend(hashed.processed_file_ids.iter());
                     if *cancel_rx.borrow() {
                         info!(
                             "Sync cancelled during targeted tree hash bootstrap for repo={}",
@@ -1859,30 +1898,69 @@ async fn run_repository_pipeline(
         }
     }
 
-    // Refresh content-hash baseline after any tree hash initialization so the
-    // quick scan bootstrap finds content hashes already present and skips both
-    // tree AND content hash re-computation.
-    if targeted_tree_hash_init {
-        if scoped_tree_bootstrap {
-            if let Some(tree) = bootstrap_tree_for_content_hash.take() {
-                let _ = refresh_content_hashes_for_scoped_tree(
+    // A rebuild that deferred its part rows relies on the hash bootstrap to
+    // persist them. Every path that skips hashing (repository already complete,
+    // nothing hashable on disk, no local files yet) would otherwise leave the
+    // manifest parts in memory only, and the next process would see files with
+    // no parts. The force-redownload path flushes them itself at download start.
+    if !force_redownload
+        && context.deferred_part_count() > 0
+        && context.deferred_part_inserts_are_fresh_load()
+    {
+        let stage_started = std::time::Instant::now();
+        let rows = context.deferred_part_count();
+        info!(
+            "Persisting {} deferred manifest parts for repo {} after tree hash bootstrap",
+            rows, normalized_repo_url
+        );
+        context.set_defer_part_inserts(false);
+        if !flush_deferred_part_inserts(context.clone()).await {
+            error!(
+                "Failed to persist deferred manifest parts for repo {}; the next sync will rebuild the remote metadata",
+                normalized_repo_url
+            );
+        }
+        summary.push(
+            StageEntry::new("deferred_parts_flush", stage_started.elapsed()).with("rows", rows),
+        );
+        stage = std::time::Instant::now();
+    }
+
+    // Refresh the content-hash baseline after a tree hash initialization so
+    // the quick scan finds it present. A targeted init refreshes only the files
+    // it hashed (and their addons); the one-time full baseline refreshes all.
+    if targeted_tree_hash_init && !targeted_init_hashed_file_ids.is_empty() {
+        let stage_started = std::time::Instant::now();
+        match bootstrap_tree_for_content_hash.take() {
+            Some(tree) => {
+                let _ = refresh_content_hashes_for_tree_files(
                     context.clone(),
                     &normalized_repo_url,
                     &tree,
+                    &targeted_init_hashed_file_ids,
+                    !scoped_tree_bootstrap,
                 )
                 .await;
             }
-        } else {
-            let _ = refresh_content_hashes_when_tree_matches(
-                context.clone(),
-                &normalized_repo_url,
-                bootstrap_tree_for_content_hash.take(),
-            )
-            .await;
+            None => {
+                let _ = refresh_content_hashes_for_file_ids(
+                    context.clone(),
+                    &normalized_repo_url,
+                    &targeted_init_hashed_file_ids,
+                )
+                .await;
+            }
         }
+        summary.push(
+            StageEntry::new("content_hash_refresh", stage_started.elapsed())
+                .with("scope", "targeted")
+                .with("files", targeted_init_hashed_file_ids.len()),
+        );
+        stage = std::time::Instant::now();
     }
 
     if full_tree_hash_bootstrap {
+        let stage_started = std::time::Instant::now();
         if scoped_tree_bootstrap {
             if let Some(tree) = bootstrap_tree_for_content_hash.take() {
                 let _ = refresh_content_hashes_for_scoped_tree(
@@ -1893,13 +1971,17 @@ async fn run_repository_pipeline(
                 .await;
             }
         } else {
-            let _ = refresh_content_hashes_when_tree_matches(
+            let _ = refresh_content_hashes_for_repository(
                 context.clone(),
                 &normalized_repo_url,
                 bootstrap_tree_for_content_hash.take(),
             )
             .await;
         }
+        summary.push(
+            StageEntry::new("content_hash_refresh", stage_started.elapsed()).with("scope", "full"),
+        );
+        stage = std::time::Instant::now();
     }
 
     if !builds_download_plan
@@ -1918,7 +2000,7 @@ async fn run_repository_pipeline(
                 scope.len()
             );
         }
-        let mut mods = quick_local_change_diff(
+        let mut mods = quick_local_change_diff_with_prehashed(
             context.clone(),
             &normalized_repo_url,
             cached_pending_scope.as_ref(),
@@ -1928,6 +2010,7 @@ async fn run_repository_pipeline(
             true, // already_eligible: tree hashes + content baseline were just initialized
             false,
             None,
+            PreHashedFiles::All,
         )
         .await;
         let mut has_bootstrap_updates = mods.iter().any(|m| m.needs_update);
@@ -2043,7 +2126,14 @@ async fn run_repository_pipeline(
             } else {
                 None
             };
-            mods = quick_local_change_diff(
+            let pre_hashed = if full_tree_hash_bootstrap {
+                PreHashedFiles::All
+            } else if targeted_init_hashed_file_ids.is_empty() {
+                PreHashedFiles::None
+            } else {
+                PreHashedFiles::Files(&targeted_init_hashed_file_ids)
+            };
+            mods = quick_local_change_diff_with_prehashed(
                 context.clone(),
                 &normalized_repo_url,
                 quick_verify_mod_filter,
@@ -2053,6 +2143,7 @@ async fn run_repository_pipeline(
                 targeted_tree_hash_init || repo_already_complete, // skip bootstrap if tree is initialized or repo is already complete
                 false,
                 None,
+                pre_hashed,
             )
             .await;
         }
@@ -2674,6 +2765,7 @@ async fn run_repository_pipeline(
         }
         let mut hashed_file_ids: HashSet<u64> = HashSet::new();
         let mut pending_file_ids: HashSet<u64> = HashSet::new();
+        let mut pending_segments: Vec<PatchedFileSegments> = Vec::new();
         let mut pending_bytes = 0u64;
         let mut completed_download_bytes = 0u64;
         let mut hash_duration = Duration::ZERO;
@@ -2733,14 +2825,22 @@ async fn run_repository_pipeline(
             }
             pending_file_ids.extend(file_ids);
             pending_bytes = pending_bytes.saturating_add(completion.bytes);
+            let completed_from_segments = completion.patched_segments.is_some();
+            if let Some(segments) = completion.patched_segments {
+                pending_segments.push(segments);
+            }
             let pending_mod_label = completion.mod_name.clone();
-            if pending_file_ids.len() < INCREMENTAL_HASH_MIN_FILES
-                && pending_bytes < INCREMENTAL_HASH_MIN_BYTES
-            {
+            if !should_flush_incremental_hash_batch(
+                pending_file_ids.len(),
+                pending_bytes,
+                completion.bytes,
+                completed_from_segments,
+            ) {
                 continue;
             }
 
             let file_ids = std::mem::take(&mut pending_file_ids);
+            let batch_segments = std::mem::take(&mut pending_segments);
             let batch_bytes = pending_bytes;
             pending_bytes = 0;
             info!(
@@ -2770,6 +2870,7 @@ async fn run_repository_pipeline(
                 &mut addon_hash_metrics,
                 0.86,
                 force_redownload,
+                &batch_segments,
             )
             .await;
             hash_phase_timings.merge(&hash_result.phase_timings);
@@ -2809,6 +2910,7 @@ async fn run_repository_pipeline(
         }
         if !pending_file_ids.is_empty() {
             let file_ids = std::mem::take(&mut pending_file_ids);
+            let batch_segments = std::mem::take(&mut pending_segments);
             info!(
                 "Flushing final incremental hash batch after download: repo={} files={} bytes={}",
                 incremental_hash_repo_url,
@@ -2830,6 +2932,7 @@ async fn run_repository_pipeline(
                 &mut addon_hash_metrics,
                 0.86,
                 force_redownload,
+                &batch_segments,
             )
             .await;
             hash_phase_timings.merge(&hash_result.phase_timings);
@@ -3072,6 +3175,7 @@ async fn run_repository_pipeline(
             &mut addon_hash_metrics,
             0.91,
             force_redownload,
+            &[],
         )
         .await;
         hash_phase_timings.merge(&final_hash_result.phase_timings);
@@ -3122,35 +3226,25 @@ async fn run_repository_pipeline(
         );
     }
     info!("Hash stage finished in {:.2?}", hash_start.elapsed());
-    if let Some(hash_context) = incremental_hash_tree_context.as_ref() {
-        let _ = refresh_content_hashes_for_tree(
+    // Only the files this run wrote or patched changed on disk; the rest of the
+    // repository keeps its stored baseline.
+    if download_file_ids.is_empty() {
+    } else if let Some(hash_context) = incremental_hash_tree_context.as_ref() {
+        let _ = refresh_content_hashes_for_tree_files(
             context.clone(),
             &normalized_repo_url,
             &hash_context.tree,
+            &download_file_ids,
+            true,
         )
         .await;
-    } else if hash_work_performed {
-        let _ =
-            refresh_content_hashes_when_tree_matches(context.clone(), &normalized_repo_url, None)
-                .await;
-    } else if !download_file_ids.is_empty() {
-        match Tree::load_for_files(context.clone(), &normalized_repo_url, &download_file_ids).await
-        {
-            Ok(scoped_tree) => {
-                let _ = refresh_content_hashes_for_scoped_tree(
-                    context.clone(),
-                    &normalized_repo_url,
-                    &scoped_tree,
-                )
-                .await;
-            }
-            Err(err) => {
-                warn!(
-                    "Failed to load scoped tree for verified download content-hash refresh repo={}: {}",
-                    normalized_repo_url, err
-                );
-            }
-        }
+    } else {
+        let _ = refresh_content_hashes_for_file_ids(
+            context.clone(),
+            &normalized_repo_url,
+            &download_file_ids,
+        )
+        .await;
     }
 
     // Propagate checksums to sibling repositories sharing the same addon paths,
@@ -3617,6 +3711,63 @@ mod tests {
         assert!(should_build_download_plan(SyncMode::RecheckOnly, true));
         assert!(!should_build_download_plan(SyncMode::RecheckOnly, false));
         assert!(should_build_download_plan(SyncMode::Download, false));
+    }
+
+    #[test]
+    fn large_full_downloads_are_hashed_on_arrival_and_small_ones_batched() {
+        assert!(should_flush_incremental_hash_batch(
+            1,
+            64 * 1024 * 1024,
+            64 * 1024 * 1024,
+            false
+        ));
+        assert!(!should_flush_incremental_hash_batch(
+            1,
+            4 * 1024 * 1024,
+            4 * 1024 * 1024,
+            false
+        ));
+        // A patched file brings its own checksums; nothing to read while warm.
+        assert!(!should_flush_incremental_hash_batch(
+            1,
+            64 * 1024 * 1024,
+            64 * 1024 * 1024,
+            true
+        ));
+        assert!(should_flush_incremental_hash_batch(
+            INCREMENTAL_HASH_MIN_FILES,
+            0,
+            0,
+            true
+        ));
+        assert!(should_flush_incremental_hash_batch(
+            1,
+            INCREMENTAL_HASH_MIN_BYTES,
+            0,
+            true
+        ));
+    }
+
+    #[test]
+    fn escalated_quick_check_prepares_the_download_plan() {
+        assert!(!should_build_download_plan(SyncMode::QuickCheckOnly, false));
+        let (mode, prepare_download_plan) = escalated_quick_check_plan();
+        assert_eq!(mode, SyncMode::RemoteRefreshOnly);
+        assert!(should_build_download_plan(mode, prepare_download_plan));
+    }
+
+    #[test]
+    fn prepared_queue_from_a_check_is_reusable_when_the_probe_matches() {
+        assert!(prepared_queue_reuse_is_safe(
+            "REMOTE",
+            "LOCAL",
+            Some("remote")
+        ));
+        assert!(!prepared_queue_reuse_is_safe(
+            "REMOTE",
+            "LOCAL",
+            Some("MOVED")
+        ));
     }
 
     #[test]

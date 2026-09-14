@@ -1,6 +1,8 @@
+use super::background_runtime::background_runtime;
 use super::logging::request_background_repaint;
 use super::*;
-use crate::core::db::params;
+use crate::core::db::{FoxyDb, params};
+use crate::core::tasks::init_database::init_database;
 use crate::core::utils::format::sanitize_log_path_str;
 use std::sync::atomic::AtomicBool;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -36,9 +38,7 @@ struct ModPathEntry {
     linked_repos: Vec<LinkedRepoPath>,
 }
 
-async fn build_mod_repo_index(context: Arc<FoxyContext>) -> Vec<ModPathEntry> {
-    let db = context.db();
-
+async fn build_mod_repo_index(db: FoxyDb) -> Vec<ModPathEntry> {
     // Fetch only needed columns, run all three queries concurrently
     let (repos_result, repo_mods_result, mods_result) = tokio::join!(
         db.query_all(
@@ -155,12 +155,18 @@ fn repo_urls_for_changed_paths(
     repo_urls
 }
 
+/// Spawn the watcher worker. `idle_exit` is set when the worker returns without
+/// ever establishing a watch (no addon rows to index, no registrable path, or
+/// a watcher init failure), so the owner can back off instead of respawning it
+/// on the next frame; it stays false while the watcher is active and after a
+/// requested stop.
 pub fn spawn_repo_fs_watcher(
     watch_paths: Vec<String>,
     suppress_until_ms: Arc<AtomicU64>,
     result_tx: StdSender<FsChangeEvent>,
     repaint_ctx: Option<egui::Context>,
     stop: Arc<AtomicBool>,
+    idle_exit: Arc<AtomicBool>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         info!(
@@ -168,21 +174,21 @@ pub fn spawn_repo_fs_watcher(
             watch_paths.len()
         );
         ensure_logger();
-        // DATABASE_URL is set once at startup in main.rs to avoid unsafe env::set_var
-        // race conditions in multi-threaded context.
 
-        let rt = match Builder::new_multi_thread().enable_all().build() {
-            Ok(rt) => rt,
-            Err(err) => {
-                error!("Failed to build runtime for fs watcher: {}", err);
-                return;
-            }
+        // The index probe only needs the shared database handle, not a
+        // runtime, HTTP client or context of its own.
+        let Some(rt) = background_runtime() else {
+            error!("Filesystem watcher disabled: shared background runtime unavailable");
+            idle_exit.store(true, Ordering::Relaxed);
+            return;
         };
-
-        let context = rt.block_on(create_context());
-        let mod_index = rt.block_on(build_mod_repo_index(context.clone()));
+        let mod_index = rt.block_on(async {
+            let db = FoxyDb::from_handle(init_database().await);
+            build_mod_repo_index(db).await
+        });
         if mod_index.is_empty() {
             warn!("Filesystem watcher disabled: no repository/mod path index available");
+            idle_exit.store(true, Ordering::Relaxed);
             return;
         }
 
@@ -195,6 +201,7 @@ pub fn spawn_repo_fs_watcher(
             Ok(w) => w,
             Err(err) => {
                 warn!("Failed to initialize filesystem watcher: {}", err);
+                idle_exit.store(true, Ordering::Relaxed);
                 return;
             }
         };
@@ -224,6 +231,7 @@ pub fn spawn_repo_fs_watcher(
 
         if !watching_any {
             warn!("Filesystem watcher disabled: no valid watch paths were registered");
+            idle_exit.store(true, Ordering::Relaxed);
             return;
         }
         info!("Filesystem watcher active");

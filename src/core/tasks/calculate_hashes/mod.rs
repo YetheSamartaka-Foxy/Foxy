@@ -46,6 +46,7 @@ mod persistence;
 mod pipeline;
 mod propagation;
 mod scheduling;
+mod segment_verified;
 
 pub(crate) use context::RepositoryHashContext;
 pub(crate) use file_hashes::{
@@ -68,4 +69,7 @@ pub(crate) use propagation::{
 pub(crate) use scheduling::{
     AddonHashMetrics, HashStorageClass, detect_storage_class_for_path,
     invalidate_storage_class_cache,
+};
+pub(crate) use segment_verified::{
+    PatchedFileSegments, PatchedSegment, apply_segment_verified_files,
 };

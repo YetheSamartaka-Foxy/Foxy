@@ -8,7 +8,7 @@ use log::{info, warn};
 
 /// How a plugin is presented in the settings tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Ts3PluginRowStatus {
+pub(crate) enum Ts3PluginRowStatus {
     UpToDate,
     UpdateAvailable,
     /// Opened for installation through Foxy, but TeamSpeak has not applied it yet.
@@ -153,6 +153,7 @@ impl Foxy {
         let mut prompt: Option<Ts3PluginUpdatePrompt> = None;
         let mut records = Vec::with_capacity(statuses.len());
         let mut settings_changed = false;
+        self.mark_game_space_overview_dirty();
 
         for status in &statuses {
             let plugin = &status.info;
@@ -244,6 +245,17 @@ impl Foxy {
 
     /// Build the rows to render, preferring this session's verified scan and
     /// falling back to the persisted state of the last check.
+    /// The plugins the settings tab would list, reduced to what the game space
+    /// overview shows: addon name, package path, and install state.
+    pub(crate) fn ts3_plugin_overview_entries(
+        &self,
+    ) -> Vec<(String, std::path::PathBuf, Ts3PluginRowStatus)> {
+        self.ts3_plugin_rows()
+            .into_iter()
+            .map(|row| (row.addon_name, row.plugin_path, row.status))
+            .collect()
+    }
+
     fn ts3_plugin_rows(&self) -> Vec<Ts3PluginRow> {
         let hashes = &self.settings_view_state.ts3_installed_plugin_hashes;
         if let Some(statuses) = &self.ts3_plugin_cache {

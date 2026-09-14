@@ -33,6 +33,7 @@ use super::metrics::{
 use super::progress::{download_progress_percent, start_progress_ticker};
 use super::range_scheduler::{RangePartMeta, range_part_meta_path};
 use super::transfer::cancellation_requested;
+use crate::core::tasks::calculate_hashes::{HashStorageClass, detect_storage_class_for_path};
 use crate::core::utils::resource_profile::{ResourcePressure, ResourceProfile};
 use crate::core::utils::speed_of_light::{SolLight, sol_line};
 
@@ -49,11 +50,65 @@ const PROGRESS_CHECKPOINT_PRESSURE_BYTES: usize = 32 * 1024 * 1024;
 const PROGRESS_CHECKPOINT_SLOW_WRITE_MS: u128 = 250;
 const PROGRESS_CHECKPOINT_RECOVERY_FLUSHES: usize = 3;
 
-fn download_limits_for_profile(resource_profile: ResourceProfile) -> DownloadResourceLimits {
+fn download_limits_for_profile(
+    resource_profile: ResourceProfile,
+    destination_storage: HashStorageClass,
+) -> DownloadResourceLimits {
+    let rotational = matches!(
+        destination_storage,
+        HashStorageClass::Hdd | HashStorageClass::Removable
+    );
     match resource_profile.pressure {
+        ResourcePressure::Normal if rotational => DownloadResourceLimits::rotational(),
         ResourcePressure::Normal => DownloadResourceLimits::normal(),
+        ResourcePressure::Constrained if rotational => {
+            DownloadResourceLimits::constrained().with_rotational_destination()
+        }
         ResourcePressure::Constrained => DownloadResourceLimits::constrained(),
+        ResourcePressure::Severe if rotational => {
+            DownloadResourceLimits::severe().with_rotational_destination()
+        }
         ResourcePressure::Severe => DownloadResourceLimits::severe(),
+    }
+}
+
+/// Nominal sequential rate of a 7200 rpm disk; the disk light is a floor for
+/// reading the ratio, not a measured ceiling.
+const ROTATIONAL_SEQUENTIAL_BPS: u64 = 110_000_000;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct DiskLight {
+    bytes: u64,
+    light_bps: u64,
+    ideal_secs: f64,
+    ratio: f64,
+}
+
+/// Disk traffic of a download stage on rotational media: `full_bytes` written
+/// once, the patch sources (`delta_savings_bytes`) read once, and every byte
+/// that was not delta patched read back by the on-arrival hash.
+fn rotational_disk_light(
+    full_bytes: u64,
+    delta_savings_bytes: u64,
+    patched_full_bytes: u64,
+    elapsed: std::time::Duration,
+) -> DiskLight {
+    let hash_reread_bytes = full_bytes.saturating_sub(patched_full_bytes);
+    let bytes = full_bytes
+        .saturating_add(delta_savings_bytes)
+        .saturating_add(hash_reread_bytes);
+    let ideal_secs = bytes as f64 / ROTATIONAL_SEQUENTIAL_BPS as f64;
+    let actual_secs = elapsed.as_secs_f64();
+    let ratio = if actual_secs > 0.0 {
+        (ideal_secs / actual_secs).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    DiskLight {
+        bytes,
+        light_bps: ROTATIONAL_SEQUENTIAL_BPS,
+        ideal_secs,
+        ratio,
     }
 }
 
@@ -780,22 +835,6 @@ pub(crate) async fn download_files(
     telemetry_epoch: Arc<std::sync::OnceLock<std::time::Instant>>,
 ) -> anyhow::Result<DownloadRunReport> {
     info!("Download worker started: op={}", operation_id);
-    let resource_profile = ResourceProfile::sample();
-    let resource_limits = download_limits_for_profile(resource_profile);
-    info!(
-        "Download resource profile: {}; limits large_files={} small_files={} ranges={} per_file_ranges={}..{} range_chunk={}",
-        resource_profile.summary(),
-        resource_limits.max_large_files,
-        resource_limits.max_small_files,
-        resource_limits.max_active_range_requests,
-        resource_limits.min_ranges_per_file,
-        resource_limits.max_ranges_per_file,
-        resource_limits.range_chunk_target
-    );
-    let large_file_permits = Arc::new(Semaphore::new(resource_limits.max_large_files));
-    let small_file_permits = Arc::new(Semaphore::new(resource_limits.max_small_files));
-    let scheduler_state = Arc::new(DownloadSchedulerState::new(resource_limits));
-
     let rate_limiter = Arc::new(AdaptiveBandwidthLimiter::from_mbps(
         download_speed_limit_mbps,
     ));
@@ -812,6 +851,28 @@ pub(crate) async fn download_files(
             }
         }
     };
+
+    let resource_profile = ResourceProfile::sample();
+    let destination_storage = targets
+        .first()
+        .map(|target| detect_storage_class_for_path(&target.download.download_local_path))
+        .unwrap_or(HashStorageClass::Unknown);
+    let resource_limits = download_limits_for_profile(resource_profile, destination_storage);
+    info!(
+        "Download resource profile: {}; destination_storage={:?} limits large_files={} small_files={} ranges={} per_file_ranges={}..{} range_chunk={} patch_applies={}",
+        resource_profile.summary(),
+        destination_storage,
+        resource_limits.max_large_files,
+        resource_limits.max_small_files,
+        resource_limits.max_active_range_requests,
+        resource_limits.min_ranges_per_file,
+        resource_limits.max_ranges_per_file,
+        resource_limits.range_chunk_target,
+        resource_limits.max_patch_applies
+    );
+    let large_file_permits = Arc::new(Semaphore::new(resource_limits.max_large_files));
+    let small_file_permits = Arc::new(Semaphore::new(resource_limits.max_small_files));
+    let scheduler_state = Arc::new(DownloadSchedulerState::new(resource_limits));
 
     // When the pipeline provides a scoped file-id set (e.g. from quick-scan
     // pending updates), drop any download-target rows that leaked in from
@@ -1218,6 +1279,7 @@ pub(crate) async fn download_files(
                             .collect(),
                         bytes: finished_batch.total_size as u64,
                         success,
+                        patched_segments: None,
                     };
                     if tx.try_send(completion).is_err() {
                         warn!(
@@ -1344,6 +1406,36 @@ pub(crate) async fn download_files(
         _ if peak_bps > 0 => SolLight::PeakSample(peak_bps),
         _ => SolLight::SelfBaseline,
     };
+    let mut sol_extras = vec![
+        ("files", total_files.to_string()),
+        ("peak_1s_bps", peak_bps.to_string()),
+        ("delta_savings_percent", delta_savings_percent.to_string()),
+        ("destination_storage", format!("{destination_storage:?}")),
+    ];
+    // On a rotational destination the disk, not the link, bounds the stage:
+    // every byte is written once, patch sources are read once, and full
+    // downloads are read back by the hash. Report that light too so a low
+    // network ratio is not misread as a slow link.
+    if matches!(
+        destination_storage,
+        HashStorageClass::Hdd | HashStorageClass::Removable
+    ) {
+        let patched_full_bytes = metrics
+            .counters
+            .patched_full_bytes
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let disk = rotational_disk_light(
+            total_full_bytes,
+            delta_savings_bytes,
+            patched_full_bytes,
+            download_elapsed,
+        );
+        sol_extras.push(("disk_bytes", disk.bytes.to_string()));
+        sol_extras.push(("disk_light_bps", disk.light_bps.to_string()));
+        sol_extras.push(("disk_ideal_s", format!("{:.3}", disk.ideal_secs)));
+        sol_extras.push(("disk_sol", format!("{:.3}", disk.ratio)));
+        sol_extras.push(("disk_light_src", "nominal_hdd_sequential".to_string()));
+    }
     info!(
         "{}",
         sol_line(
@@ -1351,11 +1443,7 @@ pub(crate) async fn download_files(
             wire_bytes,
             download_elapsed,
             &light,
-            &[
-                ("files", total_files.to_string()),
-                ("peak_1s_bps", peak_bps.to_string()),
-                ("delta_savings_percent", delta_savings_percent.to_string()),
-            ],
+            &sol_extras
         )
     );
 
@@ -1498,10 +1586,61 @@ mod tests {
     fn constrained_profile_reduces_download_concurrency() {
         let profile =
             ResourceProfile::from_memory(8 * 1024 * 1024 * 1024, 3 * 1024 * 1024 * 1024, 0);
-        let limits = download_limits_for_profile(profile);
+        let limits = download_limits_for_profile(profile, HashStorageClass::Ssd);
 
         assert_eq!(limits.max_large_files, 4);
         assert_eq!(limits.max_active_range_requests, 16);
+    }
+
+    #[test]
+    fn rotational_disk_light_counts_writes_patch_reads_and_hash_rereads() {
+        // 23.2 GB written, 11.4 GB copied by patches (read once), 11.8 GB of
+        // full downloads read back by the hash; patched files are not re-read.
+        let disk = rotational_disk_light(
+            23_200_000_000,
+            11_400_000_000,
+            11_400_000_000,
+            std::time::Duration::from_secs(748),
+        );
+        assert_eq!(disk.bytes, 23_200_000_000 + 11_400_000_000 + 11_800_000_000);
+        assert!((disk.ideal_secs - 421.8).abs() < 1.0);
+        assert!(disk.ratio > 0.56 && disk.ratio < 0.57);
+        let zero = rotational_disk_light(0, 0, 0, std::time::Duration::ZERO);
+        assert_eq!(zero.ratio, 0.0);
+    }
+
+    #[test]
+    fn rotational_destination_gets_the_hdd_profile_and_ssd_is_unchanged() {
+        let normal =
+            ResourceProfile::from_memory(32 * 1024 * 1024 * 1024, 20 * 1024 * 1024 * 1024, 0);
+
+        assert_eq!(
+            download_limits_for_profile(normal, HashStorageClass::Ssd),
+            DownloadResourceLimits::normal()
+        );
+        assert_eq!(
+            download_limits_for_profile(normal, HashStorageClass::Unknown),
+            DownloadResourceLimits::normal()
+        );
+        for class in [HashStorageClass::Hdd, HashStorageClass::Removable] {
+            let limits = download_limits_for_profile(normal, class);
+            assert_eq!(limits, DownloadResourceLimits::rotational());
+            assert!(limits.max_large_files <= 4);
+            assert!(limits.range_chunk_target >= 16 * 1024 * 1024);
+            assert_eq!(
+                limits.max_patch_applies,
+                super::super::ROTATIONAL_MAX_PATCH_APPLIES
+            );
+        }
+
+        let constrained =
+            ResourceProfile::from_memory(8 * 1024 * 1024 * 1024, 3 * 1024 * 1024 * 1024, 0);
+        let limits = download_limits_for_profile(constrained, HashStorageClass::Hdd);
+        assert_eq!(limits.max_large_files, 4);
+        assert_eq!(
+            limits.max_patch_applies,
+            super::super::ROTATIONAL_MAX_PATCH_APPLIES
+        );
     }
 
     #[test]

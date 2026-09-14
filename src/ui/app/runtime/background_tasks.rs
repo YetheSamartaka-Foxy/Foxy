@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::TryRecvError as StdTryRecvError;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use log::{debug, info, warn};
 
@@ -11,6 +11,7 @@ use crate::ui::app::{Foxy, QuickScanProgressState, StartupQuickScanFilterResult}
 use crate::ui::types::{RepoState, Repository, sanitize_user_path};
 
 const FS_WATCH_DOWNLOAD_GRACE_MS: u64 = 3_000;
+const FS_WATCH_IDLE_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 
 fn unix_time_millis() -> u64 {
     SystemTime::now()
@@ -83,6 +84,12 @@ impl Foxy {
     pub(in crate::ui::app) fn suppress_fs_watch_for_active_download(&self) {
         self.fs_watch_suppressed_until_ms
             .store(u64::MAX, Ordering::Relaxed);
+    }
+
+    /// Whether the open-ended suppression a running sync installed is still in
+    /// place, so the finishing sync knows to replace it with the short grace.
+    pub(in crate::ui::app) fn fs_watch_suppressed_for_active_sync(&self) -> bool {
+        self.fs_watch_suppressed_until_ms.load(Ordering::Relaxed) == u64::MAX
     }
 
     pub(in crate::ui::app) fn suppress_fs_watch_after_download(&self) {
@@ -209,6 +216,58 @@ impl Foxy {
             info!("Startup remote refreshes queued: {}", queued);
         }
         self.note_startup_rechecks_queued(queued);
+    }
+
+    /// Queue the first remote refresh for repositories that were just imported
+    /// with an existing local folder. An import writes no database rows, so the
+    /// startup eligibility plan has nothing to verify and every imported
+    /// repository would otherwise sit at "unknown" until the user rechecks by
+    /// hand; the refresh builds the metadata graph and the local hash baseline.
+    pub(crate) fn queue_initial_baseline_for_imported_repositories(
+        &mut self,
+        repo_indices: impl IntoIterator<Item = usize>,
+    ) {
+        let mut queued = 0usize;
+        for idx in repo_indices {
+            let Some(repo) = self.repository_view_state.repositories.get(idx) else {
+                continue;
+            };
+            let path = sanitize_user_path(&repo.path);
+            if repo.address.trim().is_empty() || path.trim().is_empty() {
+                continue;
+            }
+            if !std::path::Path::new(&path).is_dir() {
+                debug!(
+                    "Initial baseline skipped for imported repository {}: local folder does not exist yet",
+                    repo.name
+                );
+                continue;
+            }
+            let normalized_url = Self::normalize_repo_url(&repo.address);
+            let local_path_key = Self::repo_instance_path_key(&path);
+            let already_queued =
+                self.startup_recheck_queue
+                    .iter()
+                    .any(|(address, queued_path, _)| {
+                        Self::normalize_repo_url(address) == normalized_url
+                            && Self::repo_instance_path_key(queued_path) == local_path_key
+                    });
+            if already_queued {
+                continue;
+            }
+            self.startup_recheck_queue.push_back((
+                repo.address.clone(),
+                path,
+                SyncMode::RemoteRefreshOnly,
+            ));
+            queued += 1;
+        }
+        if queued > 0 {
+            info!(
+                "Initial baseline queued for {} imported repositories with an existing local folder",
+                queued
+            );
+        }
     }
 
     /// Start the startup eligibility plan before the first frame.
@@ -731,13 +790,29 @@ impl Foxy {
         self.fs_watch_signature = Some(Self::fs_watch_signature_for(&watch_paths));
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.fs_watch_stop = Some(stop.clone());
+        self.fs_watch_idle_exit.store(false, Ordering::Relaxed);
+        self.fs_watch_idle_retry_at = Some(Instant::now() + FS_WATCH_IDLE_RETRY_INTERVAL);
         self.fs_watch_worker = Some(api::spawn_repo_fs_watcher(
             watch_paths,
             self.fs_watch_suppressed_until_ms.clone(),
             self.fs_watch_tx.clone(),
             self.repaint_ctx.clone(),
             stop,
+            self.fs_watch_idle_exit.clone(),
         ));
+    }
+
+    /// Whether an exited watcher worker should be respawned now. A worker that
+    /// found nothing to watch is retried only once its index was marked dirty,
+    /// the repositories changed, or the retry interval elapsed; respawning it
+    /// on every frame built a runtime and database probe per repaint.
+    fn fs_watcher_respawn_after_exit(
+        idle_exit: bool,
+        index_dirty: bool,
+        repositories_changed: bool,
+        retry_due: bool,
+    ) -> bool {
+        !idle_exit || index_dirty || repositories_changed || retry_due
     }
 
     /// Mark the watcher's repository/addon index stale. The index is built once
@@ -764,6 +839,17 @@ impl Foxy {
         let repositories_changed =
             self.fs_watch_observed_repositories_revision != self.repositories_revision;
         if !self.fs_watch_index_dirty && !worker_exited && !repositories_changed {
+            return;
+        }
+        if worker_exited
+            && !Self::fs_watcher_respawn_after_exit(
+                self.fs_watch_idle_exit.load(Ordering::Relaxed),
+                self.fs_watch_index_dirty,
+                repositories_changed,
+                self.fs_watch_idle_retry_at
+                    .is_none_or(|retry_at| Instant::now() >= retry_at),
+            )
+        {
             return;
         }
 
@@ -830,6 +916,12 @@ impl Foxy {
             if event.repo_urls.is_empty() {
                 continue;
             }
+            self.fs_changed_since_prepare.extend(
+                event
+                    .repo_urls
+                    .iter()
+                    .map(|repo_url| Self::normalize_repo_url(repo_url)),
+            );
 
             // The watcher reports changes for every configured repository, but
             // automatic quick scans must respect the auto quick-scan setting
@@ -945,6 +1037,25 @@ mod tests {
             path: path.to_string(),
             ..Repository::default()
         }
+    }
+
+    #[test]
+    fn idle_watcher_exit_is_not_respawned_until_dirty_or_retry_due() {
+        assert!(!Foxy::fs_watcher_respawn_after_exit(
+            true, false, false, false
+        ));
+        assert!(Foxy::fs_watcher_respawn_after_exit(
+            true, true, false, false
+        ));
+        assert!(Foxy::fs_watcher_respawn_after_exit(
+            true, false, true, false
+        ));
+        assert!(Foxy::fs_watcher_respawn_after_exit(
+            true, false, false, true
+        ));
+        assert!(Foxy::fs_watcher_respawn_after_exit(
+            false, false, false, false
+        ));
     }
 
     #[test]

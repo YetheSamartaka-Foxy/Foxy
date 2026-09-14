@@ -779,6 +779,54 @@ pub fn detect_teamspeak_directory() -> Option<PathBuf> {
         .find(|dir| teamspeak_client_exe_in(dir).is_some())
 }
 
+/// The TeamSpeak 3 client directory Foxy would use: the configured one when
+/// it holds a client executable, otherwise the auto-detected install.
+pub fn resolve_teamspeak_directory(configured_dir: &str) -> Option<PathBuf> {
+    let configured_dir = configured_dir.trim();
+    if !configured_dir.is_empty() {
+        let dir = Path::new(configured_dir);
+        if teamspeak_client_exe_in(dir).is_some() {
+            return Some(dir.to_path_buf());
+        }
+    }
+    detect_teamspeak_directory()
+}
+
+/// The `Version` declared in the package's `package.ini`, if the archive has
+/// one. Only the ini is read, never the plugin payload.
+pub fn read_package_version(package_path: &Path) -> Option<String> {
+    let file = fs::File::open(package_path).ok()?;
+    let mut archive = ZipArchive::new(file).ok()?;
+    let ini_index = (0..archive.len()).find(|index| {
+        archive
+            .by_index(*index)
+            .ok()
+            .and_then(|entry| entry.enclosed_name())
+            .is_some_and(|name| {
+                name.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.eq_ignore_ascii_case("package.ini"))
+            })
+    })?;
+    let mut contents = String::new();
+    archive
+        .by_index(ini_index)
+        .ok()?
+        .read_to_string(&mut contents)
+        .ok()?;
+    parse_package_ini_version(&contents)
+}
+
+fn parse_package_ini_version(contents: &str) -> Option<String> {
+    contents.lines().find_map(|line| {
+        let (key, value) = line.split_once('=')?;
+        key.trim()
+            .eq_ignore_ascii_case("version")
+            .then(|| value.trim().trim_matches('"').to_string())
+            .filter(|value| !value.is_empty())
+    })
+}
+
 /// Launch the installed TeamSpeak 3 client (not connected to any server).
 ///
 /// Prefers the user-configured install directory; when that is unset or invalid
@@ -1024,6 +1072,55 @@ mod tests {
         assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
         // Ensure uppercase
         assert_eq!(hash, hash.to_uppercase());
+    }
+
+    #[test]
+    fn package_version_comes_from_package_ini() {
+        let tmp = TempDir::new().unwrap();
+        let package = tmp.path().join("task_force_radio.ts3_plugin");
+        write_test_ts3_package(
+            &package,
+            &[
+                (
+                    "package.ini",
+                    b"Name = Task Force Arrowhead Radio
+version = 1.0.334
+Author = x"
+                        .as_slice(),
+                ),
+                ("plugins/TFAR_win64.dll", b"dll content".as_slice()),
+            ],
+        );
+        assert_eq!(read_package_version(&package).as_deref(), Some("1.0.334"));
+
+        let no_ini = tmp.path().join("bare.ts3_plugin");
+        write_test_ts3_package(&no_ini, &[("plugins/x.dll", b"dll".as_slice())]);
+        assert_eq!(read_package_version(&no_ini), None);
+        assert_eq!(
+            read_package_version(&tmp.path().join("missing.ts3_plugin")),
+            None
+        );
+    }
+
+    #[test]
+    fn package_ini_version_parsing_tolerates_case_and_quotes() {
+        assert_eq!(
+            parse_package_ini_version(
+                "Name = a
+VERSION = \"2.1\"
+"
+            )
+            .as_deref(),
+            Some("2.1")
+        );
+        assert_eq!(
+            parse_package_ini_version(
+                "Version =   
+"
+            ),
+            None
+        );
+        assert_eq!(parse_package_ini_version("Name = a"), None);
     }
 
     #[test]

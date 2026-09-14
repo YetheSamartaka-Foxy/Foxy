@@ -671,6 +671,51 @@ pub(crate) fn collect_files_with_missing_local_tree_hashes(tree: &Tree) -> HashS
     file_ids
 }
 
+/// The subset of [`collect_files_with_missing_local_tree_hashes`] a targeted
+/// init can actually make progress on. A file that is absent on disk can never
+/// earn a local tree hash, so re-running the init over it on every sync only
+/// re-reads part rows and flips the "targeted init ran" state for nothing;
+/// such a file is reported through the quick scan's `!exists` path instead.
+/// A missing file that still carries stale local state is kept so the hash
+/// pass can clear it.
+pub(crate) fn collect_hashable_files_with_missing_local_tree_hashes(tree: &Tree) -> HashSet<u64> {
+    collect_files_with_missing_local_tree_hashes(tree)
+        .into_iter()
+        .filter(|file_id| {
+            tree.file_id_to_index
+                .get(file_id)
+                .and_then(|&file_idx| tree.files.get(file_idx).map(|file| (file_idx, file)))
+                .is_none_or(|(file_idx, file)| {
+                    local_file_present(&file.local_path)
+                        || file_has_local_tree_state(tree, file_idx, file)
+                })
+        })
+        .collect()
+}
+
+fn local_file_present(local_path: &str) -> bool {
+    let local_path = local_path.trim();
+    !local_path.is_empty()
+        && std::fs::metadata(local_path)
+            .map(|metadata| metadata.is_file())
+            .unwrap_or(false)
+}
+
+fn file_has_local_tree_state(tree: &Tree, file_idx: usize, file: &FoxyModFile) -> bool {
+    if !file.local_checksum.trim().is_empty() {
+        return true;
+    }
+    tree.file_nodes.get(file_idx).is_some_and(|file_node| {
+        file_node.parts.iter().any(|&part_idx| {
+            tree.parts.get(part_idx).is_some_and(|part| {
+                !part.local_checksum.trim().is_empty()
+                    || part.local_length != 0
+                    || part.local_start != 0
+            })
+        })
+    })
+}
+
 pub(crate) struct TreeHashReadiness {
     pub(crate) ready_file_ids: HashSet<u64>,
     pub(crate) incomplete_files: Vec<String>,
@@ -1279,6 +1324,42 @@ mod tests {
             mods: repo_mod_indices,
         });
         tree
+    }
+
+    #[test]
+    fn hashable_missing_tree_hashes_skip_files_absent_on_disk() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let present = dir.path().join("present.pbo");
+        std::fs::write(&present, b"data").expect("write file");
+        let mut tree = node_tree(
+            "R",
+            vec![("M", vec![(10, "", vec![""]), (11, "", vec![""])])],
+        );
+        tree.files[0].local_path = present.to_string_lossy().to_string();
+        tree.files[1].local_path = dir.path().join("missing.pbo").to_string_lossy().to_string();
+        tree.file_id_to_index = HashMap::from([(10, 0), (11, 1)]);
+
+        assert_eq!(
+            collect_files_with_missing_local_tree_hashes(&tree),
+            HashSet::from([10, 11])
+        );
+        assert_eq!(
+            collect_hashable_files_with_missing_local_tree_hashes(&tree),
+            HashSet::from([10])
+        );
+    }
+
+    #[test]
+    fn hashable_missing_tree_hashes_keep_absent_file_with_stale_part_state() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut tree = node_tree("R", vec![("M", vec![(10, "", vec!["STALE", ""])])]);
+        tree.files[0].local_path = dir.path().join("missing.pbo").to_string_lossy().to_string();
+        tree.file_id_to_index = HashMap::from([(10, 0)]);
+
+        assert_eq!(
+            collect_hashable_files_with_missing_local_tree_hashes(&tree),
+            HashSet::from([10])
+        );
     }
 
     #[test]

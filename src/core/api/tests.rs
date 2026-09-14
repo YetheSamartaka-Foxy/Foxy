@@ -1,7 +1,7 @@
 use super::quick_scan::{
     StartupQuickScanEligibility, batch_eligible_repos, content_hash_baseline_ready_joined,
     launch_quick_scan_repo_eligible_joined, launch_quick_scan_repo_startup_eligibility,
-    quick_local_change_diff, refresh_content_hashes_when_tree_matches,
+    quick_local_change_diff, refresh_content_hashes_for_repository,
     remote_checksum_state_ready_joined,
 };
 use super::*;
@@ -278,7 +278,7 @@ async fn quick_scan_separates_same_url_instances_by_local_path() {
             .with_target_local_path(shared_root.to_string_lossy()),
     );
     assert!(
-        refresh_content_hashes_when_tree_matches(shared_context, repo_url, None).await,
+        refresh_content_hashes_for_repository(shared_context, repo_url, None).await,
         "shared instance should establish a clean content baseline"
     );
 
@@ -416,7 +416,7 @@ async fn shared_addon_propagation_keeps_sibling_quick_scan_clean() {
     .expect("insert sibling pending update");
 
     assert!(
-        refresh_content_hashes_when_tree_matches(context.clone(), repo_a_url, None).await,
+        refresh_content_hashes_for_repository(context.clone(), repo_a_url, None).await,
         "repo A should refresh content-hash baseline from shared files"
     );
 
@@ -554,7 +554,7 @@ async fn content_hash_refresh_does_not_bless_addon_with_missing_manifest_file() 
     seed_addon_file(&fdb, 11, 22).await;
 
     assert!(
-        refresh_content_hashes_when_tree_matches(context, repo_url, None).await,
+        refresh_content_hashes_for_repository(context, repo_url, None).await,
         "content hash refresh should complete"
     );
 

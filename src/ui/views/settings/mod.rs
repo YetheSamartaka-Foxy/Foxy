@@ -8,7 +8,7 @@ mod game_space;
 mod profile_manager;
 mod scheduling;
 mod tools;
-mod ts3_plugins;
+pub(crate) mod ts3_plugins;
 
 pub use profile_manager::Arma3ProfileAction;
 

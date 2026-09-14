@@ -155,7 +155,7 @@ impl Foxy {
             self.direct_download_update_view = false;
             self.syncing_repository = Some(repo_idx);
             self.current_sync_mode = Some(mode);
-            if mode == SyncMode::Download {
+            if Self::sync_writes_repository_files(mode, prepare_download_plan) {
                 self.suppress_fs_watch_for_active_download();
             }
             if !preserve_completed_download {
@@ -167,6 +167,7 @@ impl Foxy {
             self.recheck_stage_percent = Self::initial_recheck_stage_label(mode).map(|_| 0.05);
             self.recheck_hash_counter = None;
             self.recheck_hash_part_counter = None;
+            self.recheck_hash_estimate = None;
             self.last_hash_progress_repaint = None;
             self.download_hash_sample_at = None;
             self.download_hash_sample_files = 0;
@@ -296,6 +297,10 @@ impl Foxy {
                                 != crate::core::utils::content_hash::normalize_path(&repo.path)
                     })
             });
+            // Only a run that rebuilds the queue consumes the watcher's "folder
+            // changed" mark; a plain recheck leaves it for the next Download.
+            let discard_prepared_queue = (mode == SyncMode::Download || prepare_download_plan)
+                && self.fs_changed_since_prepare.remove(&normalized_repo_url);
             self.backend_worker = Some(api::spawn_repository_sync(
                 repo.address.clone(),
                 sanitize_user_path(&repo.path),
@@ -310,6 +315,7 @@ impl Foxy {
                     rollback_temp_directory,
                     download_speed_limit_mbps,
                     recent_local_path_reset,
+                    discard_prepared_queue,
                     force_redownload,
                     allow_suspect_full_redownload: force_redownload,
                     download_pause_rx,
@@ -330,6 +336,17 @@ impl Foxy {
 
     pub fn start_core_sync(&mut self, repo_idx: usize, mode: SyncMode) {
         self.start_core_sync_with_selected_mod_states(repo_idx, mode, None, false);
+    }
+
+    /// Whether a sync may write into the repository folder itself, so the
+    /// filesystem watcher must not read Foxy's own writes as user edits. A
+    /// download does; so does any run that builds the download plan (it cleans
+    /// unexpected files first), and a quick check may escalate into one.
+    pub(in crate::ui::app) fn sync_writes_repository_files(
+        mode: SyncMode,
+        prepare_download_plan: bool,
+    ) -> bool {
+        prepare_download_plan || matches!(mode, SyncMode::Download | SyncMode::QuickCheckOnly)
     }
 
     pub(crate) fn prepare_update_confirmation(&mut self, repo_idx: usize) {
@@ -904,5 +921,42 @@ impl Foxy {
 
         self.update_modal_open = false;
         self.prepare_update_confirmation(repo_idx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn watcher_is_suppressed_only_for_syncs_that_may_write_repository_files() {
+        assert!(Foxy::sync_writes_repository_files(
+            SyncMode::Download,
+            false
+        ));
+        assert!(Foxy::sync_writes_repository_files(
+            SyncMode::QuickCheckOnly,
+            false
+        ));
+        assert!(Foxy::sync_writes_repository_files(
+            SyncMode::RemoteRefreshOnly,
+            true
+        ));
+        assert!(Foxy::sync_writes_repository_files(
+            SyncMode::RecheckOnly,
+            true
+        ));
+        assert!(!Foxy::sync_writes_repository_files(
+            SyncMode::RemoteRefreshOnly,
+            false
+        ));
+        assert!(!Foxy::sync_writes_repository_files(
+            SyncMode::RecheckOnly,
+            false
+        ));
+        assert!(!Foxy::sync_writes_repository_files(
+            SyncMode::RecheckIntegrity,
+            false
+        ));
     }
 }

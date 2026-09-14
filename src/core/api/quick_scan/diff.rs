@@ -1,7 +1,8 @@
 use super::super::*;
 use super::content_hash::{
-    persist_mod_content_hashes, refresh_content_hashes_for_scoped_tree,
-    refresh_content_hashes_for_tree, refresh_content_hashes_when_tree_matches,
+    persist_mod_content_hashes, refresh_content_hashes_for_file_ids,
+    refresh_content_hashes_for_repository, refresh_content_hashes_for_scoped_tree,
+    refresh_content_hashes_for_tree,
 };
 use super::diff_addon_hash::resolve_addon_hashes;
 use super::diff_file_resolution::compute_file_diffs;
@@ -10,8 +11,9 @@ use super::local_path_preflight::{
     summarize_local_path_availability, suspect_local_path_mismatch,
 };
 use super::readiness::{
-    QuickScanBootstrapPlan, QuickScanPreflightResult, collect_files_with_missing_local_tree_hashes,
-    content_hash_baseline_missing, content_hash_baseline_ready, partition_tree_hash_ready_files,
+    QuickScanBootstrapPlan, QuickScanPreflightResult,
+    collect_hashable_files_with_missing_local_tree_hashes, content_hash_baseline_missing,
+    content_hash_baseline_ready, partition_tree_hash_ready_files,
     quick_scan_preflight_for_local_check, tree_local_checksums_missing,
 };
 use super::shared_cache::QuickScanSharedCache;
@@ -68,6 +70,44 @@ fn has_conclusive_file_presence_or_size_mismatch(
     missing_files > 0 || size_mismatch_files > 0
 }
 
+/// Files the caller tree-hashed earlier in the same run. The quick scan unions
+/// them with its own bootstrap set so a file the sync pipeline just hashed is
+/// not verified a second time before it is reported.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) enum PreHashedFiles<'a> {
+    #[default]
+    None,
+    Files(&'a HashSet<u64>),
+    All,
+}
+
+impl PreHashedFiles<'_> {
+    fn hashed_all(self) -> bool {
+        matches!(self, PreHashedFiles::All)
+    }
+
+    fn file_ids(self) -> HashSet<u64> {
+        match self {
+            PreHashedFiles::Files(ids) => ids.clone(),
+            PreHashedFiles::None | PreHashedFiles::All => HashSet::new(),
+        }
+    }
+}
+
+/// The flagged files that still need a targeted tree-hash verify once the
+/// files hashed by this run (bootstrap or caller) are taken out.
+fn tree_verify_targets(
+    flagged: &HashSet<u64>,
+    hashed_all_files: bool,
+    hashed_file_ids: &HashSet<u64>,
+) -> HashSet<u64> {
+    if hashed_all_files {
+        HashSet::new()
+    } else {
+        flagged.difference(hashed_file_ids).copied().collect()
+    }
+}
+
 /// Emit the canonical `SOL op=quick_scan` line (conventions/SPEED_OF_LIGHT.md, O4).
 /// Quick scan work is stat-denominated, so no absolute byte light exists in-app;
 /// the rate is trended against the machine's own best clean-run baseline.
@@ -120,6 +160,36 @@ pub(crate) async fn quick_local_change_diff(
     force_fresh_addon_hash: bool,
     shared_cache: Option<&Arc<Mutex<QuickScanSharedCache>>>,
 ) -> Vec<ModDiffSummary> {
+    quick_local_change_diff_with_prehashed(
+        context,
+        repo_url,
+        mod_name_filter,
+        mod_enabled_overrides,
+        progress_tx,
+        auto_tree_verify_on_mismatch,
+        already_eligible,
+        force_fresh_addon_hash,
+        shared_cache,
+        PreHashedFiles::None,
+    )
+    .await
+}
+
+/// Quick scan for a caller that already ran a tree-hash init in this run and
+/// wants the scan to skip re-verifying those files.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn quick_local_change_diff_with_prehashed(
+    context: Arc<FoxyContext>,
+    repo_url: &str,
+    mod_name_filter: Option<&HashSet<String>>,
+    mod_enabled_overrides: Option<&HashMap<String, bool>>,
+    progress_tx: Option<&Sender<ProgressEvent>>,
+    auto_tree_verify_on_mismatch: bool,
+    already_eligible: bool,
+    force_fresh_addon_hash: bool,
+    shared_cache: Option<&Arc<Mutex<QuickScanSharedCache>>>,
+    pre_hashed: PreHashedFiles<'_>,
+) -> Vec<ModDiffSummary> {
     quick_local_change_diff_with_preflight(
         context,
         repo_url,
@@ -131,6 +201,7 @@ pub(crate) async fn quick_local_change_diff(
         force_fresh_addon_hash,
         shared_cache,
         None,
+        pre_hashed,
     )
     .await
 }
@@ -148,6 +219,7 @@ pub(super) async fn quick_local_change_diff_with_preflight(
     force_fresh_addon_hash: bool,
     shared_cache: Option<&Arc<Mutex<QuickScanSharedCache>>>,
     precomputed_preflight: Option<QuickScanPreflightResult>,
+    pre_hashed: PreHashedFiles<'_>,
 ) -> Vec<ModDiffSummary> {
     let repo_lock = quick_scan_repo_lock(repo_url, context.target_local_path.as_deref());
     let _in_flight_guard = match repo_lock.try_lock() {
@@ -171,6 +243,7 @@ pub(super) async fn quick_local_change_diff_with_preflight(
         force_fresh_addon_hash,
         shared_cache,
         precomputed_preflight,
+        pre_hashed,
     )
     .await
 }
@@ -187,6 +260,7 @@ async fn quick_local_change_diff_locked(
     force_fresh_addon_hash: bool,
     shared_cache: Option<&Arc<Mutex<QuickScanSharedCache>>>,
     precomputed_preflight: Option<QuickScanPreflightResult>,
+    pre_hashed: PreHashedFiles<'_>,
 ) -> Vec<ModDiffSummary> {
     let quick_scan_total_started = Instant::now();
     let preflight_started = Instant::now();
@@ -196,8 +270,8 @@ async fn quick_local_change_diff_locked(
     let mut tree_part_stats_load_elapsed = Duration::default();
     let mut tree_verify_elapsed = Duration::default();
 
-    let mut bootstrap_hashed_all_files = false;
-    let mut bootstrap_hashed_file_ids: HashSet<u64> = HashSet::new();
+    let mut bootstrap_hashed_all_files = pre_hashed.hashed_all();
+    let mut bootstrap_hashed_file_ids: HashSet<u64> = pre_hashed.file_ids();
 
     if !already_eligible {
         let checksum_ready_started = Instant::now();
@@ -236,7 +310,7 @@ async fn quick_local_change_diff_locked(
                     });
                 }
                 let _ =
-                    refresh_content_hashes_when_tree_matches(context.clone(), repo_url, None).await;
+                    refresh_content_hashes_for_repository(context.clone(), repo_url, None).await;
             }
             QuickScanBootstrapPlan::InitializeTreeAndRefreshContent => {
                 info!(
@@ -252,7 +326,7 @@ async fn quick_local_change_diff_locked(
                 calculate_hashes(context.clone(), repo_url, progress_tx).await;
                 bootstrap_hashed_all_files = true;
                 let _ =
-                    refresh_content_hashes_when_tree_matches(context.clone(), repo_url, None).await;
+                    refresh_content_hashes_for_repository(context.clone(), repo_url, None).await;
             }
             QuickScanBootstrapPlan::LoadTreeAndRepairMissingChecksums => {
                 let scoped_bootstrap = mod_name_filter.is_some_and(|filter| !filter.is_empty());
@@ -314,7 +388,7 @@ async fn quick_local_change_diff_locked(
                         } else {
                             calculate_hashes(context.clone(), repo_url, progress_tx).await;
                             bootstrap_hashed_all_files = true;
-                            let _ = refresh_content_hashes_when_tree_matches(
+                            let _ = refresh_content_hashes_for_repository(
                                 context.clone(),
                                 repo_url,
                                 None,
@@ -322,7 +396,8 @@ async fn quick_local_change_diff_locked(
                             .await;
                         }
                     } else if tree_local_checksums_missing(&tree) {
-                        let missing_file_ids = collect_files_with_missing_local_tree_hashes(&tree);
+                        let missing_file_ids =
+                            collect_hashable_files_with_missing_local_tree_hashes(&tree);
                         if !missing_file_ids.is_empty() {
                             let readiness =
                                 partition_tree_hash_ready_files(&tree, &missing_file_ids);
@@ -387,10 +462,10 @@ async fn quick_local_change_diff_locked(
                                         .await;
                                     }
                                 } else {
-                                    let _ = refresh_content_hashes_when_tree_matches(
+                                    let _ = refresh_content_hashes_for_file_ids(
                                         context.clone(),
                                         repo_url,
-                                        None,
+                                        &hashed.processed_file_ids,
                                     )
                                     .await;
                                 }
@@ -774,21 +849,17 @@ async fn quick_local_change_diff_locked(
         },
     );
 
-    let verify_targets: HashSet<u64> = if bootstrap_hashed_all_files {
-        HashSet::new()
-    } else {
-        diff_result
-            .files_needing_tree_verify
-            .difference(&bootstrap_hashed_file_ids)
-            .copied()
-            .collect()
-    };
+    let verify_targets = tree_verify_targets(
+        &diff_result.files_needing_tree_verify,
+        bootstrap_hashed_all_files,
+        &bootstrap_hashed_file_ids,
+    );
     if auto_tree_verify_on_mismatch
         && !diff_result.files_needing_tree_verify.is_empty()
         && verify_targets.is_empty()
     {
         info!(
-            "Quick scan skipping targeted tree-hash verify for repo={}: all {} flagged files were hashed by this scan's bootstrap",
+            "Quick scan skipping targeted tree-hash verify for repo={}: all {} flagged files were hashed earlier in this run",
             repo_url,
             diff_result.files_needing_tree_verify.len()
         );
@@ -821,7 +892,12 @@ async fn quick_local_change_diff_locked(
                 verify_targets.len()
             );
         }
-        let _ = refresh_content_hashes_when_tree_matches(context.clone(), repo_url, None).await;
+        let _ = refresh_content_hashes_for_file_ids(
+            context.clone(),
+            repo_url,
+            &hashed.processed_file_ids,
+        )
+        .await;
         tree_verify_elapsed = tree_verify_started.elapsed();
         info!(
             "Quick scan timings: repo={} outcome=retry_after_tree_verify preflight={:.2?} checksum_ready_check={:.2?} bootstrap_check={:.2?} db_load={:.2?} addon_hash={:.2?} file_fallback={:.2?} tree_part_stats_load={:.2?} tree_verify={:.2?} total_before_retry={:.2?} addons_total={} computed={} shared_hits={} persistent_hits={} deep_scan_files={}",
@@ -865,6 +941,7 @@ async fn quick_local_change_diff_locked(
             false,
             shared_cache,
             None,
+            PreHashedFiles::None,
         ))
         .await;
     }
@@ -898,7 +975,10 @@ async fn quick_local_change_diff_locked(
 
 #[cfg(test)]
 mod tests {
-    use super::has_conclusive_file_presence_or_size_mismatch;
+    use super::{
+        PreHashedFiles, has_conclusive_file_presence_or_size_mismatch, tree_verify_targets,
+    };
+    use std::collections::HashSet;
 
     #[test]
     fn conclusive_mismatch_detects_missing_or_wrong_size_files() {
@@ -906,5 +986,39 @@ mod tests {
         assert!(has_conclusive_file_presence_or_size_mismatch(0, 1));
         assert!(has_conclusive_file_presence_or_size_mismatch(2, 3));
         assert!(!has_conclusive_file_presence_or_size_mismatch(0, 0));
+    }
+
+    #[test]
+    fn tree_verify_targets_skip_files_hashed_by_the_caller() {
+        let flagged = HashSet::from([1, 2, 3]);
+        let pre_hashed_ids = HashSet::from([1, 2]);
+        let pre_hashed = PreHashedFiles::Files(&pre_hashed_ids);
+
+        let targets =
+            tree_verify_targets(&flagged, pre_hashed.hashed_all(), &pre_hashed.file_ids());
+
+        assert_eq!(targets, HashSet::from([3]));
+    }
+
+    #[test]
+    fn tree_verify_targets_empty_when_the_whole_tree_was_hashed() {
+        let flagged = HashSet::from([1, 2, 3]);
+        let pre_hashed = PreHashedFiles::All;
+
+        let targets =
+            tree_verify_targets(&flagged, pre_hashed.hashed_all(), &pre_hashed.file_ids());
+
+        assert!(targets.is_empty());
+    }
+
+    #[test]
+    fn tree_verify_targets_keep_everything_without_prior_hashing() {
+        let flagged = HashSet::from([1, 2]);
+        let pre_hashed = PreHashedFiles::None;
+
+        let targets =
+            tree_verify_targets(&flagged, pre_hashed.hashed_all(), &pre_hashed.file_ids());
+
+        assert_eq!(targets, flagged);
     }
 }

@@ -751,10 +751,7 @@ impl Foxy {
                     }
                     ui.advance_cursor_after_rect(available_rect);
                 } else {
-                    ui.vertical_centered_justified(|ui| {
-                        ui.heading(tr("Selected repository"));
-                        ui.label(tr("No repository selected"));
-                    });
+                    self.render_game_space_overview(ui);
                 }
             });
 

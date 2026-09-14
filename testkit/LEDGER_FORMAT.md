@@ -26,6 +26,12 @@ ledger/<case-id>.<harness>.<build>.<database-mode>.gate-<n>.baseline.json
 two warm samples. A baseline stores the accepted Git SHA, case hash, sample
 size, warm medians, and tolerances.
 
+`breakdown.run_metrics` grows over time (`hash_work_bytes`, `tree_verify_runs`,
+`fs_watcher_starts`, `prepared_queue_reuses` were added on 2026-09-14). A
+metric the recorded row never had is not a replay difference: `replay`
+re-derives the row from the retained log, so a counter added later simply
+appears on the rebuilt row, while a key the rebuilt row lost is still reported.
+
 `memory` carries the process footprint the runner sampled around the operation
 (see `CASE_FORMAT.md`). It is null for rows recorded before the memory lane
 existed, which is what keeps `replay --all` byte-identical over them. The raw

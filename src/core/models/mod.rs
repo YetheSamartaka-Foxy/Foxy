@@ -2,6 +2,7 @@ pub mod context;
 pub mod download_patch_file;
 pub mod download_patch_op;
 pub mod download_target_file;
+pub mod game_space_stats;
 pub mod model_tree;
 pub mod modification;
 pub mod modification_file;

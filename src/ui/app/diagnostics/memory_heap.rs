@@ -340,6 +340,7 @@ impl Foxy {
             | ProgressEvent::DownloadTelemetry { .. }
             | ProgressEvent::HashTelemetry { .. }
             | ProgressEvent::HashSummary { .. }
+            | ProgressEvent::HashEstimate { .. }
             | ProgressEvent::Finished
             | ProgressEvent::Cancelled => 0,
         }

@@ -494,6 +494,13 @@ impl Foxy {
                         self.needs_repaint = true;
                     }
                 }
+                ProgressEvent::HashEstimate {
+                    remaining_bytes,
+                    bytes_per_sec,
+                } => {
+                    self.recheck_hash_estimate = Some((*remaining_bytes, *bytes_per_sec));
+                    self.needs_repaint = true;
+                }
                 ProgressEvent::HashSummary {
                     cumulative_hash_ms,
                     after_download_hash_ms,
@@ -686,7 +693,7 @@ impl Foxy {
                     if finished_successfully {
                         self.mark_fs_watch_index_dirty();
                     }
-                    if last_mode == Some(SyncMode::Download) {
+                    if self.fs_watch_suppressed_for_active_sync() {
                         self.suppress_fs_watch_after_download();
                     }
                     self.refresh_repository_space_bulk_current_repo();
@@ -699,6 +706,9 @@ impl Foxy {
                             self.update_modal_open = false;
                         } else if finished_successfully {
                             self.invalidate_addon_inventory_cache();
+                            if let Some(idx) = last_repo {
+                                self.mark_repository_updated(idx);
+                            }
                             self.download_progress = Some(("Finished".to_string(), 1.0));
                             self.download_finished = true;
                             self.download_finished_repo = last_repo;
@@ -1040,6 +1050,7 @@ impl Foxy {
                     self.recheck_stage_percent = None;
                     self.recheck_hash_counter = None;
                     self.recheck_hash_part_counter = None;
+                    self.recheck_hash_estimate = None;
                     self.memory_diagnostics_last_logged_stage_key = None;
                     if self.syncing_repository.is_none() && !self.deferred_fs_scan.is_empty() {
                         let repo_urls: Vec<String> = self.deferred_fs_scan.drain().collect();
@@ -1129,6 +1140,7 @@ impl Foxy {
                         if !Self::stage_label_uses_hash_counter(label) {
                             self.recheck_hash_counter = None;
                             self.recheck_hash_part_counter = None;
+                            self.recheck_hash_estimate = None;
                         }
                         self.needs_repaint = true;
                     }

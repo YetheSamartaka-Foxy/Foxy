@@ -294,6 +294,43 @@ fn create_game_space_at(
     Ok(entry)
 }
 
+/// Rename a game space. Only the display name changes; the space id and its
+/// `games/<id>/` directory stay as they are so nothing that keys on the id
+/// (settings, database, caches) has to move.
+pub fn rename_game_space(space_id: &str, display_name: &str) -> Result<GameSpaceEntry, String> {
+    let entry = rename_game_space_at(&app_paths::foxy_data_dir(), space_id, display_name)?;
+    if active_game_space().space_id == entry.id {
+        set_process_active_game_space(ActiveGameSpace::from(&entry));
+    }
+    Ok(entry)
+}
+
+fn rename_game_space_at(
+    root: &Path,
+    space_id: &str,
+    display_name: &str,
+) -> Result<GameSpaceEntry, String> {
+    let space_id = validated_space_id(space_id)?;
+    let display_name = display_name.trim();
+    if display_name.is_empty() {
+        return Err("Game space name must not be empty".to_string());
+    }
+    let path = games_registry_path(root);
+    let mut registry = load_games_registry(&path)?;
+    let entry = registry
+        .game_spaces
+        .iter_mut()
+        .find(|entry| entry.id == space_id)
+        .ok_or_else(|| format!("Game space {} does not exist", space_id))?;
+    if entry.display_name != display_name {
+        entry.display_name = display_name.to_string();
+        let entry = entry.clone();
+        save_games_registry(&path, &registry)?;
+        return Ok(entry);
+    }
+    Ok(entry.clone())
+}
+
 /// Remove a game space: delete Foxy's `games/<id>/` workspace (never any game
 /// install or mod folders outside it), then drop the registry entry. The
 /// active space cannot be removed.
@@ -714,6 +751,24 @@ mod tests {
         assert_eq!(registry.active_game_space_id, created.id);
         assert_eq!(registry.last_opened_game_space_id, DEFAULT_GAME_SPACE_ID);
         assert!(set_active_game_space_at(dir.path(), "missing").is_err());
+    }
+
+    #[test]
+    fn rename_game_space_changes_only_the_display_name() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        ensure_layout_at(dir.path()).expect("layout");
+        let created = create_game_space_at(dir.path(), "arma3", "Second").expect("create");
+
+        let renamed = rename_game_space_at(dir.path(), &created.id, "  Renamed  ").expect("rename");
+
+        assert_eq!(renamed.id, created.id);
+        assert_eq!(renamed.display_name, "Renamed");
+        let registry =
+            load_games_registry(&dir.path().join(GAMES_REGISTRY_FILE)).expect("registry");
+        assert_eq!(registry.entry(&created.id).unwrap().display_name, "Renamed");
+        assert!(dir.path().join(GAMES_DIR_NAME).join(&created.id).exists());
+        assert!(rename_game_space_at(dir.path(), &created.id, "   ").is_err());
+        assert!(rename_game_space_at(dir.path(), "missing", "Name").is_err());
     }
 
     #[test]

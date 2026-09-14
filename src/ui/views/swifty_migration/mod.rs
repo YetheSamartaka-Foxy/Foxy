@@ -762,6 +762,7 @@ impl Foxy {
             for i in (total - imported)..total {
                 self.update_repository_from_url(i, ctx);
             }
+            self.queue_initial_baseline_for_imported_repositories((total - imported)..total);
         }
 
         // Refresh metadata for existing repos that were skipped as duplicates

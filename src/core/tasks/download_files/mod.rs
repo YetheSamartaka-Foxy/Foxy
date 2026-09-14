@@ -53,7 +53,12 @@ pub(super) const RANGE_CHUNK_TARGET: usize = 2 * 1024 * 1024;
 /// the extra round trips cost under 2% even at low concurrency.
 pub(super) const MIN_RANGE_CHUNK: usize = 1024 * 1024;
 
-#[derive(Clone, Copy, Debug)]
+/// Concurrent delta-patch applies on a rotational destination. Each apply is
+/// a sequential read of the old file interleaved with a sequential write of
+/// the new one; more than a couple at once turns both into seeks.
+pub(super) const ROTATIONAL_MAX_PATCH_APPLIES: usize = 2;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct DownloadResourceLimits {
     pub(super) max_large_files: usize,
     pub(super) max_small_files: usize,
@@ -62,6 +67,9 @@ pub(super) struct DownloadResourceLimits {
     pub(super) max_ranges_per_file: usize,
     pub(super) range_chunk_target: usize,
     pub(super) min_range_chunk: usize,
+    /// Delta-patch applies allowed to run at once. Applies are disk-bound, so
+    /// the cap follows the destination's storage class rather than memory.
+    pub(super) max_patch_applies: usize,
 }
 
 impl DownloadResourceLimits {
@@ -74,6 +82,25 @@ impl DownloadResourceLimits {
             max_ranges_per_file: MAX_RANGES_PER_FILE,
             range_chunk_target: RANGE_CHUNK_TARGET,
             min_range_chunk: MIN_RANGE_CHUNK,
+            max_patch_applies: MAXIMUM_LARGE_FILES + MAXIMUM_SMALL_FILES,
+        }
+    }
+
+    /// Rotational destination: the disk, not the link, is the light source.
+    /// Few concurrent large files and 32 MiB chunks keep the range writes
+    /// close to sequential; the global range budget stays so the link still
+    /// fills. Ranges are dispatched in file order, so with few files in
+    /// flight the writes land nearly in order.
+    pub(super) const fn rotational() -> Self {
+        Self {
+            max_large_files: 3,
+            max_small_files: 16,
+            max_active_range_requests: MAX_ACTIVE_RANGE_REQUESTS,
+            min_ranges_per_file: MIN_RANGES_PER_FILE,
+            max_ranges_per_file: MAX_RANGES_PER_FILE,
+            range_chunk_target: 32 * 1024 * 1024,
+            min_range_chunk: 8 * 1024 * 1024,
+            max_patch_applies: ROTATIONAL_MAX_PATCH_APPLIES,
         }
     }
 
@@ -86,6 +113,7 @@ impl DownloadResourceLimits {
             max_ranges_per_file: 8,
             range_chunk_target: 16 * 1024 * 1024,
             min_range_chunk: 4 * 1024 * 1024,
+            max_patch_applies: 16,
         }
     }
 
@@ -98,6 +126,16 @@ impl DownloadResourceLimits {
             max_ranges_per_file: 4,
             range_chunk_target: 64 * 1024 * 1024,
             min_range_chunk: 16 * 1024 * 1024,
+            max_patch_applies: 5,
         }
+    }
+
+    /// Memory pressure keeps its conservative profile on any disk; on a
+    /// rotational destination it only tightens the apply cap further.
+    pub(super) const fn with_rotational_destination(mut self) -> Self {
+        if self.max_patch_applies > ROTATIONAL_MAX_PATCH_APPLIES {
+            self.max_patch_applies = ROTATIONAL_MAX_PATCH_APPLIES;
+        }
+        self
     }
 }

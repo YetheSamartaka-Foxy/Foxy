@@ -75,6 +75,12 @@ Pre-release build (release-optimized, version label and logs carry source commit
 cargo prerelease
 ```
 
+Pre-release installer, one command (set the version and short commit hash; output lands in `dist/`, needs Inno Setup `iscc` in `PATH`):
+```bash
+cargo build --release --features prerelease -p Foxy && iscc /DAppVersion="1.2.0" /DOutputSuffix="-prerelease-6b6d132" /DSourceDir="..\..\target\release" installer\windows\foxy-setup.iss
+```
+Or let `scripts\build-windows-prerelease-installer.bat` fill both in for you.
+
 Build installers:
 ```bash
 # Windows
@@ -357,6 +363,12 @@ Huge thanks to the Task Force Roddenberry community for giving Foxy the opportun
 You can use DeepWiki to better understand this repo.
 
 [![DeepWiki](https://img.shields.io/badge/DeepWiki-YetheSamartaka--Foxy%2FFoxy-blue.svg?logo=data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACwAAAAyCAYAAAAnWDnqAAAAAXNSR0IArs4c6QAAA05JREFUaEPtmUtyEzEQhtWTQyQLHNak2AB7ZnyXZMEjXMGeK/AIi+QuHrMnbChYY7MIh8g01fJoopFb0uhhEqqcbWTp06/uv1saEDv4O3n3dV60RfP947Mm9/SQc0ICFQgzfc4CYZoTPAswgSJCCUJUnAAoRHOAUOcATwbmVLWdGoH//PB8mnKqScAhsD0kYP3j/Yt5LPQe2KvcXmGvRHcDnpxfL2zOYJ1mFwrryWTz0advv1Ut4CJgf5uhDuDj5eUcAUoahrdY/56ebRWeraTjMt/00Sh3UDtjgHtQNHwcRGOC98BJEAEymycmYcWwOprTgcB6VZ5JK5TAJ+fXGLBm3FDAmn6oPPjR4rKCAoJCal2eAiQp2x0vxTPB3ALO2CRkwmDy5WohzBDwSEFKRwPbknEggCPB/imwrycgxX2NzoMCHhPkDwqYMr9tRcP5qNrMZHkVnOjRMWwLCcr8ohBVb1OMjxLwGCvjTikrsBOiA6fNyCrm8V1rP93iVPpwaE+gO0SsWmPiXB+jikdf6SizrT5qKasx5j8ABbHpFTx+vFXp9EnYQmLx02h1QTTrl6eDqxLnGjporxl3NL3agEvXdT0WmEost648sQOYAeJS9Q7bfUVoMGnjo4AZdUMQku50McDcMWcBPvr0SzbTAFDfvJqwLzgxwATnCgnp4wDl6Aa+Ax283gghmj+vj7feE2KBBRMW3FzOpLOADl0Isb5587h/U4gGvkt5v60Z1VLG8BhYjbzRwyQZemwAd6cCR5/XFWLYZRIMpX39AR0tjaGGiGzLVyhse5C9RKC6ai42ppWPKiBagOvaYk8lO7DajerabOZP46Lby5wKjw1HCRx7p9sVMOWGzb/vA1hwiWc6jm3MvQDTogQkiqIhJV0nBQBTU+3okKCFDy9WwferkHjtxib7t3xIUQtHxnIwtx4mpg26/HfwVNVDb4oI9RHmx5WGelRVlrtiw43zboCLaxv46AZeB3IlTkwouebTr1y2NjSpHz68WNFjHvupy3q8TFn3Hos2IAk4Ju5dCo8B3wP7VPr/FGaKiG+T+v+TQqIrOqMTL1VdWV1DdmcbO8KXBz6esmYWYKPwDL5b5FA1a0hwapHiom0r/cKaoqr+27/XcrS5UwSMbQAAAABJRU5ErkJggg==)](https://deepwiki.com/YetheSamartaka-Foxy/Foxy)
+
+## Trademarks
+
+Foxy is an independent community tool. It is not affiliated with, endorsed by, or authorized by Bohemia Interactive a.s. or Valve Corporation.
+
+Bohemia Interactive, ARMA, and all associated logos and designs are trademarks or registered trademarks of Bohemia Interactive a.s. Foxy shows the unmodified official Arma 3 and Arma Reforger logos only to identify which game a game space manages, within the scope of Bohemia Interactive's Game Content Usage Rules. Steam and the Steam logo are trademarks of Valve Corporation; Foxy refers to Steam and the Steam Workshop by name only and does not use the Steam logo. All other game names are the property of their respective owners. See `src/ui/icons/games/README.md` for the artwork sources.
 
 ## License
 

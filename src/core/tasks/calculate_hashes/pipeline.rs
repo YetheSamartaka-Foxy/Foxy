@@ -106,6 +106,36 @@ fn should_insert_part_metadata_in_background(context: &FoxyContext) -> bool {
     context.deferred_part_count() > 0 && context.deferred_part_inserts_are_fresh_load()
 }
 
+/// Persist deferred manifest part rows when the hash pass is skipped. Returns
+/// `false` only when rows were pending and the insert failed.
+async fn flush_deferred_parts_without_hash_pass(
+    context: &Arc<FoxyContext>,
+    data_tree: &Tree,
+    repository_url: &str,
+) -> bool {
+    let pending = context.deferred_part_count();
+    if pending == 0 {
+        return true;
+    }
+    info!(
+        "Persisting {} deferred manifest parts for repo {} without a hash pass",
+        pending, repository_url
+    );
+    context.set_defer_part_inserts(false);
+    if flush_deferred_part_inserts_with_local_state(context.clone(), &data_tree.parts, |_| {}).await
+    {
+        return true;
+    }
+    if context.deferred_part_count() == 0 && data_tree.parts.is_empty() {
+        return true;
+    }
+    error!(
+        "Failed to persist deferred manifest parts for repo {} without a hash pass",
+        repository_url
+    );
+    false
+}
+
 async fn await_deferred_part_metadata_insert(
     handle: &mut Option<tokio::task::JoinHandle<bool>>,
     repository_url: &str,
@@ -206,6 +236,12 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
             repository_url,
             all_file_indices.len()
         );
+        // The deferred manifest part rows are remote metadata, not hash state;
+        // skipping the hash pass must not leave them in memory only, or a
+        // restart before the first download sees files with no parts.
+        if !flush_deferred_parts_without_hash_pass(&context, &data_tree, repository_url).await {
+            return HashCalculationResult::Failed;
+        }
         return HashCalculationResult::Completed(Box::new(data_tree));
     }
     let mut deferred_part_metadata_insert_handle = if should_insert_part_metadata_in_background(
@@ -776,6 +812,74 @@ mod tests {
         context.set_fresh_subfiles_load(false);
 
         assert!(should_insert_part_metadata_in_background(&context));
+    }
+
+    /// A skipped hash pass (every file absent on disk) must still land the
+    /// deferred manifest parts; a fresh install would otherwise restart with
+    /// file rows and an empty `subfiles`.
+    #[tokio::test]
+    async fn skipped_hash_pass_persists_deferred_manifest_parts() {
+        use crate::core::db::{FoxyDb, params};
+        use crate::core::models::modification_file::FoxyModFile;
+        use crate::core::models::modification_file_part::FoxyModFilePart;
+
+        let handle = crate::core::tasks::db_turso::build_test_database().await;
+        let db = FoxyDb::from_handle(handle.clone());
+        db.execute(
+            "INSERT INTO files (id, name, remote_path, local_path, remote_checksum, length) VALUES (1, 'a.pbo', 'r/a.pbo', 'C:/missing/a.pbo', 'FILE', 4)",
+            params![],
+        )
+        .await
+        .expect("seed file");
+        let context = Arc::new(FoxyContext::new(handle, reqwest::Client::new()));
+        context.set_fresh_subfiles_load(true);
+        context.set_defer_part_inserts(true);
+        context.buffer_deferred_parts(vec![DeferredPartInsert {
+            file_id: 1,
+            path: "p0".to_owned(),
+            remote_length: 4,
+            remote_start: 0,
+            remote_checksum: "PART".to_owned(),
+            data_order: 0,
+        }]);
+        context.set_fresh_subfiles_load(false);
+
+        let tree = Tree {
+            files: vec![FoxyModFile {
+                id: 1,
+                local_path: "C:/missing/a.pbo".to_owned(),
+                remote_checksum: "FILE".to_owned(),
+                length: 4,
+                ..Default::default()
+            }],
+            parts: vec![FoxyModFilePart {
+                file_id: 1,
+                path: "p0".to_owned(),
+                remote_length: 4,
+                remote_checksum: "PART".to_owned(),
+                ..Default::default()
+            }],
+            file_nodes: vec![FileNode {
+                file_idx: 0,
+                parts: vec![0],
+            }],
+            ..Default::default()
+        };
+
+        assert!(flush_deferred_parts_without_hash_pass(&context, &tree, "r/").await);
+        assert_eq!(context.deferred_part_count(), 0);
+        let row = db
+            .query_one(
+                "SELECT remote_checksum FROM subfiles WHERE file_id = 1",
+                params![],
+            )
+            .await
+            .expect("query part")
+            .expect("part row persisted");
+        assert_eq!(
+            row.get_string("remote_checksum").expect("checksum column"),
+            "PART"
+        );
     }
 
     #[tokio::test]

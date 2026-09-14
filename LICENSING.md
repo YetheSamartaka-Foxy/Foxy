@@ -125,7 +125,13 @@ If `cargo about generate` reports an unmatched or unexpected license, review tha
 
 The release process should ship `THIRD-PARTY-LICENSES.txt` next to the binary or installer and link it from the About screen if the application has one.
 
-## 10. Repository files
+## 10. Trademarks and game artwork
+
+The Foxy Community Source License covers Foxy's own code and materials. It grants no rights in third-party trademarks, and the game logos embedded under `src/ui/icons/games/` are not licensed by it.
+
+Foxy is not affiliated with, endorsed by, or authorized by Bohemia Interactive a.s. or Valve Corporation. Bohemia Interactive, ARMA, and all associated logos and designs are trademarks or registered trademarks of Bohemia Interactive a.s.; Foxy shows the unmodified official Arma 3 and Arma Reforger logos only to identify the game a game space manages, following Bohemia Interactive's Game Content Usage Rules and the Arma 3 logo manual. Steam and the Steam logo are trademarks of Valve Corporation; Foxy does not use the Steam logo. Forks and continuation builds must keep these logos out of their own branding, keep the disclaimer, and remove the logos if the trademark owner asks. `src/ui/icons/games/README.md` lists the sources and rules for each file.
+
+## 11. Repository files
 
 Recommended root files:
 
@@ -139,7 +145,7 @@ THIRD-PARTY-LICENSES.txt
 
 `THIRD-PARTY-LICENSES.txt` should be generated from the actual dependency lockfile before release.
 
-## 11. Cargo metadata
+## 12. Cargo metadata
 
 For Rust package metadata, prefer:
 
