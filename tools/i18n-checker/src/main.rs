@@ -235,6 +235,15 @@ fn placeholder_report(key: &str, english: &Value, translated: &Value) -> Option<
     if expected == actual {
         return None;
     }
+    if key.ends_with(".one")
+        && key.contains("{count}")
+        && !expected.contains("count")
+        && actual.len() == expected.len() + 1
+        && actual.contains("count")
+        && expected.is_subset(&actual)
+    {
+        return None;
+    }
     Some(format!(
         "{}: expected {:?}, got {:?}",
         truncate(key, 100),
@@ -467,6 +476,26 @@ mod tests {
                 .is_none()
         );
         assert!(placeholder_report("k", &json!("{count}"), &json!("{cantidad}")).is_some());
+        assert!(placeholder_report("k", &json!("{path}"), &json!("{पथ}")).is_some());
         assert!(placeholder_report("k", &json!("{game} dir"), &json!("Arma 3 dir")).is_some());
+    }
+
+    #[test]
+    fn singular_translation_can_keep_count_from_base_key() {
+        let key = "Delete all {count} backups for {name}?.one";
+        let english = json!("Delete the backup for {name}?");
+        assert!(
+            placeholder_report(key, &english, &json!("Delete {count} backups for {name}?"))
+                .is_none()
+        );
+        assert!(
+            placeholder_report(
+                "Delete all {count} backups for {name}?.other",
+                &english,
+                &json!("Delete {count} backups for {name}?")
+            )
+            .is_some()
+        );
+        assert!(placeholder_report(key, &english, &json!("Delete {count} backups?")).is_some());
     }
 }

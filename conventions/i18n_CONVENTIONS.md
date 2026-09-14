@@ -131,6 +131,7 @@ When adding a new language:
 - For exact-English fallback cleanup, pass `--audit-changed-since HEAD`.
 - Run `git diff --check` before final handoff.
 - For docs-only convention changes, no Rust build or test run is required.
+- The checker allows a `.one` translation to retain `{count}` when the English key has `{count}` but its `.one` value omits it. Some locales select `.one` for counts beyond 1, so the localized count can still be necessary. All other named placeholders must match the English value.
 
 ### L10n Conventions
 
