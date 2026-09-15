@@ -131,6 +131,9 @@ pub enum Command {
         /// Extra key file or directory to add to the combined keys folder (repeatable, implies --collect-keys)
         #[arg(long, value_name = "PATH")]
         additional_keys: Vec<PathBuf>,
+        /// Also write each repository's .bikey files (plus --additional-keys) into <output>/<folder>/keys so a server can symlink one repository's keys folder directly
+        #[arg(long)]
+        per_repo_keys: bool,
     },
     /// Generate a blank repository space config file
     NewSpace {

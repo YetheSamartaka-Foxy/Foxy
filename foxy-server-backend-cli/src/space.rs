@@ -742,6 +742,8 @@ pub struct CreateSpaceOptions<'a> {
     pub no_progress: bool,
     pub mod_line: mod_line::ModLineOptions<'a>,
     pub keys: KeyCollectionRequest,
+    /// Write `<repo>/keys` with each repository's own keys next to its manifests.
+    pub per_repo_keys: bool,
 }
 
 pub fn cmd_create_space(
@@ -759,6 +761,7 @@ pub fn cmd_create_space(
         no_progress,
         mod_line: mod_line_options,
         keys: key_collection,
+        per_repo_keys,
     } = options;
     let started = Instant::now();
 
@@ -817,6 +820,14 @@ pub fn cmd_create_space(
         reserved.push(&keys_dir);
     }
     ensure_folders_free(&space, output_dir, &reserved)?;
+    if per_repo_keys {
+        ensure_repo_keys_dir_free(
+            space
+                .repos
+                .iter()
+                .map(|r| (r.folder.as_str(), r.mods.as_slice())),
+        )?;
+    }
 
     let progress = crate::progress_bar(no_progress);
     println!("Processing files with {} threads...", threads);
@@ -880,6 +891,33 @@ pub fn cmd_create_space(
         None
     };
 
+    let repo_key_reports = if per_repo_keys {
+        let mut reports = Vec::with_capacity(space.repos.len());
+        for (r, repo) in space.repos.iter().enumerate() {
+            let dir = ctx.repo_dir(r);
+            let dest = dir.join(DEFAULT_KEYS_DIR);
+            println!("Collecting {} keys into: {}", repo.folder, dest.display());
+            let report = keys::collect_key_paths(
+                keys::generated_key_paths(&dir, &built.repo_mods[r]),
+                &keys::KeyCollectionOptions {
+                    dest: &dest,
+                    additional_sources: &key_collection.additional_sources,
+                },
+            )?;
+            for name in &report.conflicts {
+                log::warn!(
+                    "{}: multiple different keys named {}; kept the first one found",
+                    repo.folder,
+                    name
+                );
+            }
+            reports.push((dest, report));
+        }
+        reports
+    } else {
+        Vec::new()
+    };
+
     let content_bytes: u64 = built.repo_mods.iter().flatten().map(mod_bytes).sum();
     let duplicated_bytes: u64 = groups
         .iter()
@@ -917,6 +955,19 @@ pub fn cmd_create_space(
     }
     if let Some(report) = &key_report {
         println!("  Keys:       {} in {}", report.copied, keys_dir.display());
+        if report.duplicates > 0 {
+            println!("              {} duplicate keys skipped", report.duplicates);
+        }
+        if !report.conflicts.is_empty() {
+            println!(
+                "              {} conflicting key names kept at first match: {}",
+                report.conflicts.len(),
+                report.conflicts.join(", ")
+            );
+        }
+    }
+    for (dest, report) in &repo_key_reports {
+        println!("  Keys:       {} in {}", report.copied, dest.display());
         if report.duplicates > 0 {
             println!("              {} duplicate keys skipped", report.duplicates);
         }
@@ -997,6 +1048,25 @@ fn ensure_folders_free(space: &LoadedSpace, output_dir: &Path, reserved: &[&Path
     Ok(())
 }
 
+/// `--per-repo-keys` writes `<repo>/keys`, which must not be a mod folder of that repository.
+fn ensure_repo_keys_dir_free<'a>(
+    repos: impl Iterator<Item = (&'a str, &'a [ResolvedMod])>,
+) -> Result<()> {
+    for (folder, mods) in repos {
+        if let Some(m) = mods
+            .iter()
+            .find(|m| m.mod_name.eq_ignore_ascii_case(DEFAULT_KEYS_DIR))
+        {
+            bail!(
+                "Mod {} in repository {} collides with the per-repository keys folder; rename the mod or drop --per-repo-keys",
+                m.mod_name,
+                folder
+            );
+        }
+    }
+    Ok(())
+}
+
 pub fn cmd_new_space(output: &Path) -> Result<()> {
     if output.exists() {
         bail!(
@@ -1052,6 +1122,18 @@ mod tests {
             Some("https://a.example/x/".to_string())
         );
         assert_eq!(normalize_url("   "), None);
+    }
+
+    #[test]
+    fn per_repo_keys_dir_refuses_a_mod_named_keys() {
+        let fine = [resolved("@ace", "src/@ace")];
+        let clash = [resolved("@cba", "src/@cba"), resolved("Keys", "src/Keys")];
+        assert!(ensure_repo_keys_dir_free([("modern", &fine[..])].into_iter()).is_ok());
+        let err =
+            ensure_repo_keys_dir_free([("modern", &fine[..]), ("ww2", &clash[..])].into_iter())
+                .unwrap_err()
+                .to_string();
+        assert!(err.contains("Keys") && err.contains("ww2"), "{err}");
     }
 
     #[test]

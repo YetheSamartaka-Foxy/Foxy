@@ -70,6 +70,7 @@ fn main() -> Result<()> {
             collect_keys,
             keys_output,
             additional_keys,
+            per_repo_keys,
         } => space::cmd_create_space(
             &config,
             &output,
@@ -90,6 +91,7 @@ fn main() -> Result<()> {
                     dest: keys_output,
                     additional_sources: additional_keys,
                 },
+                per_repo_keys,
             },
         ),
         cli::Command::New { output, game } => cmd_new(&output, game),
