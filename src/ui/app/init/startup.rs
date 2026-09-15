@@ -437,6 +437,8 @@ impl Foxy {
             download_finished: false,
             download_finished_repo: None,
             download_summary: None,
+            download_disk_space_shortfall: None,
+            update_modal_disk_space_probe: None,
             open_update_after_sync: false,
             needs_repaint: false,
             mod_download_progress: HashMap::new(),

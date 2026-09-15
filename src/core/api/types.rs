@@ -121,6 +121,9 @@ pub enum ProgressEvent {
         is_foxy: bool,
         app_update_url: Option<String>,
     },
+    /// The destination volume cannot take the planned download; always
+    /// followed by `Failed` carrying the same shortfall as text.
+    DiskSpaceShortfall(crate::core::utils::disk_space::DiskSpaceShortfall),
     Finished,
     Failed(String),
     Cancelled,

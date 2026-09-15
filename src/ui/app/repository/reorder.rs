@@ -32,6 +32,14 @@ impl Foxy {
             Self::adjust_index_after_move(self.update_ready_repo, from_idx, to_idx);
         self.download_finished_repo =
             Self::adjust_index_after_move(self.download_finished_repo, from_idx, to_idx);
+        self.download_disk_space_shortfall =
+            self.download_disk_space_shortfall
+                .take()
+                .and_then(|(index, shortfall)| {
+                    Self::adjust_index_after_move(Some(index), from_idx, to_idx)
+                        .map(|index| (index, shortfall))
+                });
+        self.update_modal_disk_space_probe = None;
         self.selected_repository_for_settings =
             Self::adjust_index_after_move(self.selected_repository_for_settings, from_idx, to_idx);
 

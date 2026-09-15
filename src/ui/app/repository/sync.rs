@@ -194,6 +194,13 @@ impl Foxy {
                 self.invalidate_update_modal_sort_cache();
             }
             if mode == SyncMode::Download {
+                if self
+                    .download_disk_space_shortfall
+                    .as_ref()
+                    .is_some_and(|(index, _)| *index == repo_idx)
+                {
+                    self.download_disk_space_shortfall = None;
+                }
                 self.set_repo_state_for_address(&repo.address, &repo.path, RepoState::Updating);
                 let instance_key = Self::repo_instance_key(&repo.address, &repo.path);
                 let current_pending_source: Vec<ModDiffSummary> = self

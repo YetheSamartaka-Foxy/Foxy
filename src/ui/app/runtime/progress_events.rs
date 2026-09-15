@@ -199,7 +199,15 @@ impl Foxy {
             .and_then(|idx| self.repository_view_state.repositories.get(idx))
             .map(|repo| repo.name.clone())
             .unwrap_or_default();
-        self.show_error_toast(self.t_fmt("Update failed for {name}", &[("name", repo_name)]));
+        let toast = match self
+            .download_disk_space_shortfall
+            .as_ref()
+            .filter(|(index, _)| Some(*index) == repo_index)
+        {
+            Some((_, shortfall)) => self.disk_space_shortfall_toast(&repo_name, shortfall),
+            None => self.t_fmt("Update failed for {name}", &[("name", repo_name)]),
+        };
+        self.show_error_toast(toast);
         if repo_index.is_some() && repo_index == self.repository_view_state.selected_repository {
             self.completed_repository_check_banner =
                 repo_index.map(|repo_index| RepositoryCheckCompletionState {
@@ -370,6 +378,13 @@ impl Foxy {
                         if !preserve_completed_download {
                             self.set_mod_diff_cache(mods.clone());
                         }
+                    }
+                    self.needs_repaint = true;
+                }
+                ProgressEvent::DiskSpaceShortfall(shortfall) => {
+                    if let Some(repo_index) = self.syncing_repository {
+                        self.download_disk_space_shortfall = Some((repo_index, shortfall.clone()));
+                        self.update_modal_disk_space_probe = None;
                     }
                     self.needs_repaint = true;
                 }
@@ -803,7 +818,15 @@ impl Foxy {
                             self.download_finished = false;
                             self.download_finished_repo = None;
                             if let ProgressEvent::Failed(message) = &evt {
-                                self.report_download_failure(last_repo, message, sync_elapsed);
+                                let message = self
+                                    .download_disk_space_shortfall
+                                    .as_ref()
+                                    .filter(|(repo_index, _)| Some(*repo_index) == last_repo)
+                                    .map(|(_, shortfall)| {
+                                        self.disk_space_shortfall_message(shortfall)
+                                    })
+                                    .unwrap_or_else(|| message.clone());
+                                self.report_download_failure(last_repo, &message, sync_elapsed);
                             }
                         }
                     }

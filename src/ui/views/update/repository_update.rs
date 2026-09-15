@@ -185,6 +185,17 @@ impl Foxy {
                         ))
                         .size(self.settings_view_state.font_sizes.update_view.total_size as f32),
                     );
+                    if !downloading
+                        && !download_finished_for_selected
+                        && let Some(shortfall) = selected.and_then(|idx| {
+                            self.update_modal_disk_space_shortfall(idx, total_bytes)
+                        })
+                    {
+                        ui.add_space(6.0);
+                        self.render_disk_space_shortfall_warning(ui, &shortfall);
+                        // Re-probe while the modal is open so freeing space clears the notice.
+                        ui.ctx().request_repaint_after(Duration::from_secs(3));
+                    }
                     ui.add_space(6.0);
 
                     // Show the live download summary (planned/downloaded, hash,
@@ -865,6 +876,49 @@ impl Foxy {
             self.arm_benchmark(crate::core::benchmarks::BenchmarkKind::Update, Vec::new());
             self.start_core_sync(idx, SyncMode::Download);
         }
+    }
+
+    /// Framed warning above the addon list: the volume cannot take the update,
+    /// with the numbers the user needs to act on.
+    fn render_disk_space_shortfall_warning(&self, ui: &mut Ui, shortfall: &DiskSpaceShortfall) {
+        let title_size = self.settings_view_state.font_sizes.update_view.total_size as f32;
+        let detail_size = (title_size - 2.0).max(13.0);
+        Frame::NONE
+            .fill(self.color_widget_bg())
+            .stroke(egui::Stroke::new(1.0, self.color_error()))
+            .corner_radius(CornerRadius::same(8))
+            .inner_margin(Margin::same(10))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(
+                    RichText::new(format!(
+                        "\u{26A0} {}",
+                        self.disk_space_shortfall_title(shortfall)
+                    ))
+                    .color(self.color_text_error())
+                    .size(title_size)
+                    .strong(),
+                );
+                ui.label(
+                    RichText::new(self.t_fmt(
+                        "Update size: {needed} - Free space: {available} - Missing: {missing}",
+                        &[
+                            ("needed", fmt_bytes(shortfall.needed_bytes)),
+                            ("available", fmt_bytes(shortfall.available_bytes)),
+                            ("missing", fmt_bytes(shortfall.missing_bytes())),
+                        ],
+                    ))
+                    .color(self.color_text_normal())
+                    .size(detail_size),
+                );
+                ui.label(
+                    RichText::new(self.t(
+                        "The download will not start until enough space is free. Delete or move files on that drive, or set a different local path for the repository.",
+                    ))
+                    .color(self.color_text_dim())
+                    .size(detail_size),
+                );
+            });
     }
 
     fn render_download_summary_stats(

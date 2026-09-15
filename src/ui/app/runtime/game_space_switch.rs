@@ -412,6 +412,8 @@ impl Foxy {
         self.download_finished = false;
         self.download_finished_repo = None;
         self.download_summary = None;
+        self.download_disk_space_shortfall = None;
+        self.update_modal_disk_space_probe = None;
         self.open_update_after_sync = false;
         self.mod_download_progress.clear();
         self.download_started_at = None;

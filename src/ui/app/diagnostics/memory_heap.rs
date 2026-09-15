@@ -318,6 +318,9 @@ impl Foxy {
             ProgressEvent::Stage { label, .. } => Self::heap_bytes_of_string(label),
             ProgressEvent::DownloadMod { mod_name, .. } => Self::heap_bytes_of_string(mod_name),
             ProgressEvent::Failed(message) => Self::heap_bytes_of_string(message),
+            ProgressEvent::DiskSpaceShortfall(shortfall) => {
+                Self::heap_bytes_of_string(&shortfall.path)
+            }
             ProgressEvent::Diff { mods } => {
                 mods.capacity() * size_of::<ModDiffSummary>()
                     + mods

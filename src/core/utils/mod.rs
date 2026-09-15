@@ -2,6 +2,7 @@ pub mod addon_backup;
 pub mod app_paths;
 pub mod content_hash;
 pub mod deelevate;
+pub mod disk_space;
 pub mod fetch_json;
 pub mod file_io;
 pub mod format;

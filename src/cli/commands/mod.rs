@@ -505,6 +505,7 @@ fn run_repository_sync(
                 ProgressEvent::HashSummary { .. } => {}
                 ProgressEvent::HashEstimate { .. } => {}
                 ProgressEvent::SiblingPropagation { .. } => {}
+                ProgressEvent::DiskSpaceShortfall(_) => {}
                 ProgressEvent::DownloadMod {
                     mod_name,
                     files_done,

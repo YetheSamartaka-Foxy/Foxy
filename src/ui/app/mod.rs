@@ -33,6 +33,7 @@ use tokio::sync::watch;
 use super::types::*;
 use agent_driver::AgentGuiRuntime;
 
+pub use downloads::UpdateModalDiskSpaceProbe;
 pub use repository::game_space_overview::{RepositoryGroupSummary, TeamSpeakSummary};
 pub use scheduling::{PendingPostAction, ScheduledJobRun};
 pub use state::*;
@@ -402,6 +403,11 @@ pub struct Foxy {
     pub download_finished: bool,
     pub download_finished_repo: Option<usize>,
     pub download_summary: Option<DownloadSummary>,
+    /// The downloader refused the last run for this repository index because
+    /// its volume is short of space; the update modal explains it in place.
+    pub download_disk_space_shortfall:
+        Option<(usize, crate::core::utils::disk_space::DiskSpaceShortfall)>,
+    pub update_modal_disk_space_probe: Option<UpdateModalDiskSpaceProbe>,
     pub open_update_after_sync: bool,
     pub needs_repaint: bool,
     pub mod_download_progress: HashMap<String, (f32, usize, usize, u64, u64)>,

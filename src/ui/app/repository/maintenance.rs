@@ -711,6 +711,15 @@ impl Foxy {
         if self.download_finished_repo == Some(repo_idx) {
             self.download_finished_repo = None;
         }
+        self.download_disk_space_shortfall =
+            self.download_disk_space_shortfall
+                .take()
+                .and_then(|(index, shortfall)| match index {
+                    index if index == repo_idx => None,
+                    index if index > repo_idx => Some((index - 1, shortfall)),
+                    index => Some((index, shortfall)),
+                });
+        self.update_modal_disk_space_probe = None;
 
         if let Some(action) = self.pending_repository_space_bulk_action.as_mut() {
             action.entries.retain_mut(|entry| {

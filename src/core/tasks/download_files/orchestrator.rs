@@ -34,11 +34,12 @@ use super::progress::{download_progress_percent, start_progress_ticker};
 use super::range_scheduler::{RangePartMeta, range_part_meta_path};
 use super::transfer::cancellation_requested;
 use crate::core::tasks::calculate_hashes::{HashStorageClass, detect_storage_class_for_path};
+use crate::core::utils::disk_space::{
+    DISK_SPACE_MARGIN_BYTES, DiskSpaceShortfall, disk_space_needed, disk_space_shortfall,
+};
 use crate::core::utils::resource_profile::{ResourcePressure, ResourceProfile};
 use crate::core::utils::speed_of_light::{SolLight, sol_line};
 
-/// Disk space safety margin (500 MB) to avoid filling the drive completely.
-const DISK_SPACE_MARGIN_BYTES: u64 = 500 * 1024 * 1024;
 /// Maximum retries for network connectivity pre-check.
 const CONNECTIVITY_CHECK_MAX_RETRIES: u32 = 3;
 /// Base delay for connectivity check retries.
@@ -551,10 +552,11 @@ fn reconcile_download_progress(
 }
 
 /// Check that enough disk space is available for the planned downloads.
-/// Returns Ok(()) if sufficient, or an error message if not.
-fn check_disk_space(targets: &[DownloadTargetWithModName]) -> Result<(), String> {
+/// Returns the shortfall when the destination volume cannot take them.
+fn check_disk_space(targets: &[DownloadTargetWithModName]) -> Option<DiskSpaceShortfall> {
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
     if targets.is_empty() {
-        return Ok(());
+        return None;
     }
 
     let total_needed: u64 = targets
@@ -573,35 +575,41 @@ fn check_disk_space(targets: &[DownloadTargetWithModName]) -> Result<(), String>
         .next();
 
     let Some(check_path) = check_path else {
-        return Ok(()); // Can't determine path, proceed optimistically
+        return None; // Can't determine path, proceed optimistically
     };
 
     match fs4::available_space(check_path) {
         Ok(available) => {
-            let needed_with_margin = total_needed.saturating_add(DISK_SPACE_MARGIN_BYTES);
-            if available < needed_with_margin {
-                Err(format!(
-                    "Insufficient disk space: need {:.1} GB ({:.1} GB + {:.0} MB margin) but only {:.1} GB available on {}",
-                    needed_with_margin as f64 / (1024.0 * 1024.0 * 1024.0),
-                    total_needed as f64 / (1024.0 * 1024.0 * 1024.0),
-                    DISK_SPACE_MARGIN_BYTES as f64 / (1024.0 * 1024.0),
-                    available as f64 / (1024.0 * 1024.0 * 1024.0),
-                    check_path.display()
-                ))
-            } else {
+            let shortfall = disk_space_shortfall(total_needed, available, check_path);
+            if shortfall.is_none() {
                 info!(
                     "Disk space check passed: need {:.1} GB, available {:.1} GB",
-                    needed_with_margin as f64 / (1024.0 * 1024.0 * 1024.0),
-                    available as f64 / (1024.0 * 1024.0 * 1024.0),
+                    disk_space_needed(total_needed) as f64 / GIB,
+                    available as f64 / GIB,
                 );
-                Ok(())
             }
+            shortfall
         }
         Err(err) => {
             warn!("Could not check disk space: {}", err);
-            Ok(()) // Proceed optimistically if we can't check
+            None // Proceed optimistically if we can't check
         }
     }
+}
+
+fn format_disk_space_shortfall(shortfall: &DiskSpaceShortfall) -> String {
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    format!(
+        "Insufficient disk space: need {:.1} GB ({:.1} GB + {:.0} MB margin) but only {:.1} GB available on {}",
+        shortfall.needed_bytes as f64 / GIB,
+        shortfall
+            .needed_bytes
+            .saturating_sub(DISK_SPACE_MARGIN_BYTES) as f64
+            / GIB,
+        DISK_SPACE_MARGIN_BYTES as f64 / (1024.0 * 1024.0),
+        shortfall.available_bytes as f64 / GIB,
+        shortfall.path
+    )
 }
 
 /// Refuse to start when the destination filesystem cannot take the planned
@@ -990,9 +998,15 @@ pub(crate) async fn download_files(
     // Issue 09: Check available disk space before starting downloads
     {
         let _phase = metrics.phase("disk_space_check");
-        if let Err(space_err) = check_disk_space(&targets) {
+        if let Some(shortfall) = check_disk_space(&targets) {
+            let space_err = format_disk_space_shortfall(&shortfall);
             error!("{}", space_err);
             if let Some(tx) = progress_tx.as_ref() {
+                send_progress_event(
+                    tx,
+                    ProgressEvent::DiskSpaceShortfall(shortfall),
+                    &operation_id,
+                );
                 send_progress_event(tx, ProgressEvent::Failed(space_err.clone()), &operation_id);
             }
             return Err(anyhow!(space_err));
