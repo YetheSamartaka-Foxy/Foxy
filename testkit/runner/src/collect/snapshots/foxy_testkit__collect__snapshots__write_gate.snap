@@ -18,7 +18,9 @@ expression: "digest(&corpus(\"write-gate\"))"
     "hash_work_bytes": 262144,
     "tree_verify_runs": 0,
     "fs_watcher_starts": 0,
-    "prepared_queue_reuses": 0
+    "prepared_queue_reuses": 0,
+    "pipeline_outcome": null,
+    "failed_pipelines": 0
   },
   "category_line_counts": {
     "network": 6,

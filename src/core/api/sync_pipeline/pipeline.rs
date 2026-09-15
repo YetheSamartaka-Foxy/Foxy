@@ -2,14 +2,15 @@ use super::super::quick_scan::{
     PreHashedFiles, apply_download_target_estimates_to_pending_updates,
     apply_patch_plan_estimates_to_pending_updates,
     collect_hashable_files_with_missing_local_tree_hashes, collect_repo_download_targets,
-    collect_unexpected_files_for_repo_mods, delete_unexpected_local_files,
-    format_local_path_mismatch_message, log_addon_path_disk_state, log_local_path_availability,
-    pending_update_mod_scope, persist_pending_updates, quick_local_change_diff,
-    quick_local_change_diff_with_prehashed, refresh_content_hashes_for_file_ids,
-    refresh_content_hashes_for_repository, refresh_content_hashes_for_scoped_tree,
-    refresh_content_hashes_for_tree_files, refresh_patch_plan_metadata_for_pending_updates,
-    summarize_local_path_availability, suspect_local_path_mismatch,
-    tree_local_checksums_baseline_missing, tree_local_checksums_missing,
+    collect_targeted_init_content_baseline_files, collect_unexpected_files_for_repo_mods,
+    delete_unexpected_local_files, format_local_path_mismatch_message, log_addon_path_disk_state,
+    log_local_path_availability, pending_update_mod_scope, persist_pending_updates,
+    quick_local_change_diff, quick_local_change_diff_with_prehashed,
+    refresh_content_hashes_for_file_ids, refresh_content_hashes_for_repository,
+    refresh_content_hashes_for_scoped_tree, refresh_content_hashes_for_tree_files,
+    refresh_patch_plan_metadata_for_pending_updates, summarize_local_path_availability,
+    suspect_local_path_mismatch, tree_local_checksums_baseline_missing,
+    tree_local_checksums_missing,
 };
 use super::super::*;
 use super::backup::backup_pending_addons_for_download;
@@ -1660,6 +1661,7 @@ async fn run_repository_pipeline(
     let mut full_tree_hash_bootstrap = false;
     let mut targeted_tree_hash_init = false;
     let mut targeted_init_hashed_file_ids: HashSet<u64> = HashSet::new();
+    let mut targeted_init_baseline_file_ids: HashSet<u64> = HashSet::new();
     let mut bootstrap_tree_for_content_hash: Option<Tree> = None;
     let scoped_tree_bootstrap = builds_download_plan && !quick_update_mod_names.is_empty();
     summary.push(StageEntry::new("bootstrap_prepare", stage.elapsed()));
@@ -1826,6 +1828,7 @@ async fn run_repository_pipeline(
                     ),
                     percent: 0.30,
                 });
+                let targeted_init_processed_file_ids: HashSet<u64>;
                 if scoped_tree_bootstrap {
                     let hashed = calculate_hashes_for_files_with_profile(
                         context.clone(),
@@ -1837,6 +1840,7 @@ async fn run_repository_pipeline(
                     )
                     .await;
                     targeted_init_hashed_file_ids.extend(hashed.processed_file_ids.iter());
+                    targeted_init_processed_file_ids = hashed.processed_file_ids;
                     if *cancel_rx.borrow() {
                         info!(
                             "Sync cancelled during scoped targeted tree hash bootstrap for repo={}",
@@ -1871,6 +1875,7 @@ async fn run_repository_pipeline(
                     )
                     .await;
                     targeted_init_hashed_file_ids.extend(hashed.processed_file_ids.iter());
+                    targeted_init_processed_file_ids = hashed.processed_file_ids;
                     if *cancel_rx.borrow() {
                         info!(
                             "Sync cancelled during targeted tree hash bootstrap for repo={}",
@@ -1887,10 +1892,25 @@ async fn run_repository_pipeline(
                     }
                 }
                 targeted_tree_hash_init = true;
+                targeted_init_baseline_file_ids = collect_targeted_init_content_baseline_files(
+                    &tree,
+                    &missing_file_ids,
+                    &targeted_init_processed_file_ids,
+                );
+                let skipped_without_baseline = targeted_init_baseline_file_ids
+                    .len()
+                    .saturating_sub(targeted_init_processed_file_ids.len());
+                if skipped_without_baseline > 0 {
+                    info!(
+                        "Targeted tree hash init skipped {} sibling-synced files without a content-hash baseline for repo {}; including them in the baseline refresh",
+                        skipped_without_baseline, normalized_repo_url
+                    );
+                }
                 summary.push(
                     StageEntry::new("tree_hash_bootstrap", stage.elapsed())
                         .with("type", "targeted")
-                        .with("files", missing_file_ids.len()),
+                        .with("files", missing_file_ids.len())
+                        .with("skipped_without_baseline", skipped_without_baseline),
                 );
                 stage = std::time::Instant::now();
                 bootstrap_tree_for_content_hash = Some(tree);
@@ -1927,9 +1947,10 @@ async fn run_repository_pipeline(
     }
 
     // Refresh the content-hash baseline after a tree hash initialization so
-    // the quick scan finds it present. A targeted init refreshes only the files
-    // it hashed (and their addons); the one-time full baseline refreshes all.
-    if targeted_tree_hash_init && !targeted_init_hashed_file_ids.is_empty() {
+    // the quick scan finds it present. A targeted init refreshes the files it
+    // hashed plus any it skipped as sibling-synced without a baseline (and
+    // their addons); the one-time full baseline refreshes all.
+    if targeted_tree_hash_init && !targeted_init_baseline_file_ids.is_empty() {
         let stage_started = std::time::Instant::now();
         match bootstrap_tree_for_content_hash.take() {
             Some(tree) => {
@@ -1937,7 +1958,7 @@ async fn run_repository_pipeline(
                     context.clone(),
                     &normalized_repo_url,
                     &tree,
-                    &targeted_init_hashed_file_ids,
+                    &targeted_init_baseline_file_ids,
                     !scoped_tree_bootstrap,
                 )
                 .await;
@@ -1946,7 +1967,7 @@ async fn run_repository_pipeline(
                 let _ = refresh_content_hashes_for_file_ids(
                     context.clone(),
                     &normalized_repo_url,
-                    &targeted_init_hashed_file_ids,
+                    &targeted_init_baseline_file_ids,
                 )
                 .await;
             }
@@ -1954,7 +1975,7 @@ async fn run_repository_pipeline(
         summary.push(
             StageEntry::new("content_hash_refresh", stage_started.elapsed())
                 .with("scope", "targeted")
-                .with("files", targeted_init_hashed_file_ids.len()),
+                .with("files", targeted_init_baseline_file_ids.len()),
         );
         stage = std::time::Instant::now();
     }

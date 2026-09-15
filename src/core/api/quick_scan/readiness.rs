@@ -701,6 +701,30 @@ fn local_file_present(local_path: &str) -> bool {
             .unwrap_or(false)
 }
 
+/// Files a targeted tree-hash init must still baseline: the ones it hashed
+/// plus any requested file it skipped (already tree-synced through sibling
+/// propagation) that carries no content hash. Without a baseline the quick
+/// scan reports such a file as a content mismatch while the tree checksums
+/// keep it out of the download queue.
+pub(crate) fn collect_targeted_init_content_baseline_files(
+    tree: &Tree,
+    requested_file_ids: &HashSet<u64>,
+    processed_file_ids: &HashSet<u64>,
+) -> HashSet<u64> {
+    let mut file_ids = processed_file_ids.clone();
+    for file in &tree.files {
+        if !requested_file_ids.contains(&file.id) || processed_file_ids.contains(&file.id) {
+            continue;
+        }
+        let tree_synced =
+            !file.local_checksum.trim().is_empty() && file.local_checksum == file.remote_checksum;
+        if tree_synced && file.local_content_hash.trim().is_empty() {
+            file_ids.insert(file.id);
+        }
+    }
+    file_ids
+}
+
 fn file_has_local_tree_state(tree: &Tree, file_idx: usize, file: &FoxyModFile) -> bool {
     if !file.local_checksum.trim().is_empty() {
         return true;
@@ -1358,6 +1382,59 @@ mod tests {
 
         assert_eq!(
             collect_hashable_files_with_missing_local_tree_hashes(&tree),
+            HashSet::from([10])
+        );
+    }
+
+    #[test]
+    fn targeted_init_baseline_keeps_processed_files() {
+        let tree = node_tree("R", vec![("M", vec![(10, "F", vec!["P"])])]);
+        let requested = HashSet::from([10]);
+        let processed = HashSet::from([10]);
+        assert_eq!(
+            collect_targeted_init_content_baseline_files(&tree, &requested, &processed),
+            HashSet::from([10])
+        );
+    }
+
+    #[test]
+    fn targeted_init_baseline_adds_skipped_synced_file_without_content_hash() {
+        let mut tree = node_tree(
+            "R",
+            vec![("M", vec![(10, "F", vec!["P"]), (11, "F", vec!["P"])])],
+        );
+        for file in &mut tree.files {
+            file.remote_checksum = "F".to_string();
+        }
+        tree.files[0].local_content_hash = "baseline".to_string();
+        let requested = HashSet::from([10, 11]);
+        let processed = HashSet::new();
+        assert_eq!(
+            collect_targeted_init_content_baseline_files(&tree, &requested, &processed),
+            HashSet::from([11])
+        );
+    }
+
+    #[test]
+    fn targeted_init_baseline_ignores_unsynced_and_unrequested_files() {
+        let mut tree = node_tree(
+            "R",
+            vec![(
+                "M",
+                vec![
+                    (10, "F", vec!["P"]),
+                    (11, "", vec![""]),
+                    (12, "F", vec!["P"]),
+                ],
+            )],
+        );
+        for file in &mut tree.files {
+            file.remote_checksum = "F".to_string();
+        }
+        let requested = HashSet::from([10, 11]);
+        let processed = HashSet::new();
+        assert_eq!(
+            collect_targeted_init_content_baseline_files(&tree, &requested, &processed),
             HashSet::from([10])
         );
     }

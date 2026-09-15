@@ -6,7 +6,9 @@ use super::quick_scan::{
 };
 use super::*;
 use crate::core::db::{FoxyDb, params};
-use crate::core::tasks::calculate_hashes::propagate_checksums_to_siblings;
+use crate::core::tasks::calculate_hashes::{
+    pre_propagate_sibling_checksums, propagate_checksums_to_siblings,
+};
 use std::collections::HashSet;
 
 /// Build a fresh Turso test database (full bootstrap schema) for fixtures.
@@ -477,6 +479,173 @@ async fn shared_addon_propagation_keeps_sibling_quick_scan_clean() {
     assert!(
         !pending_update_exists(&fdb, repo_b_url, "").await,
         "sibling pending update should be cleared after propagation"
+    );
+}
+
+#[tokio::test]
+async fn pre_propagation_copies_sibling_content_hash_so_quick_scan_stays_clean() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db = build_db().await;
+    let fdb = FoxyDb::from_turso(db.clone());
+
+    let context = Arc::new(FoxyContext::new(db.clone(), reqwest::Client::new()));
+
+    let shared_root = temp.path().join("shared");
+    let addon_dir = shared_root.join("@shared_addon");
+    std::fs::create_dir_all(&addon_dir).expect("create addon dir");
+    let shared_file = addon_dir.join("data.pbo");
+    std::fs::write(&shared_file, b"shared-addon-content-v1").expect("write shared file");
+
+    let repo_a_url = "https://example.invalid/repo-a/";
+    let repo_b_url = "https://example.invalid/repo-b/";
+    let addon_local_path = addon_dir.to_string_lossy().to_string();
+    let shared_file_path = shared_file.to_string_lossy().to_string();
+    let file_length = std::fs::metadata(&shared_file)
+        .expect("file metadata")
+        .len() as i64;
+
+    seed_repository(
+        &fdb,
+        1,
+        "Repo A",
+        repo_a_url,
+        &shared_root.to_string_lossy(),
+        "REPO_REMOTE",
+        "REPO_REMOTE",
+        "",
+    )
+    .await;
+    seed_repository(
+        &fdb,
+        2,
+        "Repo B",
+        repo_b_url,
+        &shared_root.to_string_lossy(),
+        "",
+        "REPO_REMOTE_B",
+        "",
+    )
+    .await;
+
+    seed_addon(
+        &fdb,
+        11,
+        "@shared_addon",
+        "https://example.invalid/repo-a/@shared_addon/",
+        &addon_local_path,
+        "MOD_REMOTE",
+        "MOD_REMOTE",
+        "",
+        true,
+    )
+    .await;
+    seed_addon(
+        &fdb,
+        12,
+        "@shared_addon",
+        "https://example.invalid/repo-b/@shared_addon/",
+        &addon_local_path,
+        "",
+        "MOD_REMOTE",
+        "",
+        true,
+    )
+    .await;
+
+    seed_repository_addon(&fdb, 1, 11).await;
+    seed_repository_addon(&fdb, 2, 12).await;
+
+    seed_file(
+        &fdb,
+        21,
+        "data.pbo",
+        "https://example.invalid/repo-a/@shared_addon/data.pbo",
+        &shared_file_path,
+        "FILE_REMOTE",
+        "FILE_REMOTE",
+        "",
+        file_length,
+        0,
+    )
+    .await;
+    seed_file(
+        &fdb,
+        22,
+        "data.pbo",
+        "https://example.invalid/repo-b/@shared_addon/data.pbo",
+        &shared_file_path,
+        "",
+        "FILE_REMOTE",
+        "",
+        file_length,
+        0,
+    )
+    .await;
+
+    seed_addon_file(&fdb, 11, 21).await;
+    seed_addon_file(&fdb, 12, 22).await;
+
+    assert!(
+        refresh_content_hashes_for_repository(context.clone(), repo_a_url, None).await,
+        "repo A should refresh content-hash baseline from shared files"
+    );
+
+    assert_eq!(
+        pre_propagate_sibling_checksums(context.clone(), repo_b_url).await,
+        1,
+        "repo B should receive the shared file tree checksum from repo A"
+    );
+
+    let (_, _, file_a_content) = checksums(&fdb, "files", 21).await;
+    let (file_b_local, file_b_remote, file_b_content) = checksums(&fdb, "files", 22).await;
+    assert_eq!(file_b_local, file_b_remote);
+    assert_eq!(file_b_content, file_a_content);
+    assert!(!file_b_content.is_empty());
+
+    let (_, _, addon_a_content) = checksums(&fdb, "addons", 11).await;
+    let (addon_b_local, addon_b_remote, addon_b_content) = checksums(&fdb, "addons", 12).await;
+    assert_eq!(addon_b_local, addon_b_remote);
+    assert_eq!(addon_b_content, addon_a_content);
+    assert!(!addon_b_content.is_empty());
+
+    // Tree checksums already copied by an earlier pass must still get the
+    // content-hash baseline on the next pass.
+    fdb.execute(
+        "UPDATE files SET local_content_hash = '' WHERE id = 22",
+        params![],
+    )
+    .await
+    .expect("clear sibling file content hash");
+    fdb.execute(
+        "UPDATE addons SET local_content_hash = '' WHERE id = 12",
+        params![],
+    )
+    .await
+    .expect("clear sibling addon content hash");
+    assert_eq!(
+        pre_propagate_sibling_checksums(context.clone(), repo_b_url).await,
+        0
+    );
+    let (_, _, file_b_content) = checksums(&fdb, "files", 22).await;
+    assert_eq!(file_b_content, file_a_content);
+    let (_, _, addon_b_content) = checksums(&fdb, "addons", 12).await;
+    assert_eq!(addon_b_content, addon_a_content);
+
+    let diff = quick_local_change_diff(
+        context.clone(),
+        repo_b_url,
+        None,
+        None,
+        None,
+        false,
+        true,
+        false,
+        None,
+    )
+    .await;
+    assert!(
+        !diff.iter().any(|m| m.needs_update),
+        "repo B should be clean once tree checksums and content baseline are propagated"
     );
 }
 

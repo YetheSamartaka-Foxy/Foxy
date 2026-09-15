@@ -224,11 +224,32 @@ impl ContextRun<'_> {
             json!({"elapsed_s":elapsed,"summary":summary,"progress":progress,"snapshot":snapshot,"logs":null,"log_text":log,"database_profile":null}),
         )
     }
+    /// The repository an operation acts on: `operation.repository` names one of
+    /// the fixture's repositories (a sibling in a shared folder, for example),
+    /// otherwise it is the case repository.
+    fn operation_repository<'o>(&'o self, operation: &'o Value) -> Result<&'o str> {
+        if let Some(name) = operation["repository"].as_str() {
+            return Ok(name);
+        }
+        self.case["repository"]["name"]
+            .as_str()
+            .context("Missing repository name")
+    }
+    fn gui_repository_index(&self, operation: &Value) -> Result<usize> {
+        let name = self.operation_repository(operation)?;
+        let listed = self.data(&["repositories"])?;
+        listed["repositories"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|row| row["name"].as_str() == Some(name))
+            .and_then(|row| row["index"].as_u64())
+            .map(|index| index as usize)
+            .with_context(|| format!("Repository {name:?} is not listed by the running app"))
+    }
     fn cli_operation(&self, operation: &Value) -> Result<Value> {
         let name = operation["op"].as_str().context("Missing operation name")?;
-        let repository = self.case["repository"]["name"]
-            .as_str()
-            .context("Missing repository name")?;
+        let repository = self.operation_repository(operation)?;
         let args = match name {
             "wipe-db" => vec!["repo", "wipe-db", "--repo-name", repository, "--yes"],
             "force-redownload" => vec![
@@ -307,9 +328,16 @@ impl ContextRun<'_> {
         let generation = self.data(&["logs", "--limit", "1"])?["generation"]
             .as_u64()
             .context("Missing log generation")?;
+        let repo_index = self.gui_repository_index(operation)?.to_string();
         let offsets = logs::offsets(self.run, self.config)?;
         let started = Instant::now();
-        self.data(&["invoke", action, "--repo-index", "0", "--allow-destructive"])?;
+        self.data(&[
+            "invoke",
+            action,
+            "--repo-index",
+            &repo_index,
+            "--allow-destructive",
+        ])?;
         let busy_deadline = Instant::now() + Duration::from_secs(30);
         let mut observed_busy = false;
         let mut finished_between_polls = false;

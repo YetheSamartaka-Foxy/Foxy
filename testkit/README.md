@@ -198,6 +198,21 @@ while moving three orders of magnitude fewer bytes. It is what
 `perf-db-parts-bulk` uses to exercise the deferred bulk part insert, which is the
 largest single write Foxy performs.
 
+Two repositories that publish the same addons (a repository space, or two
+standalone repositories installed into one folder) are two copies of one
+origin under one root. `perf-sibling-shared-folder-check` serves
+`testkit/origin/data/sibling-synthetic/` with `repo-a/` and `repo-b/`, both a
+plain copy of `synthetic-writes`:
+
+```powershell
+Copy-Item -Recurse .\testkit\origin\data\synthetic-writes .\testkit\origin\data\sibling-synthetic\repo-a
+Copy-Item -Recurse .\testkit\origin\data\synthetic-writes .\testkit\origin\data\sibling-synthetic\repo-b
+```
+
+The case downloads `repo-a`, then checks and updates `repo-b` through the
+operation-level `repository` field; the second repository must come out clean
+with no hashing and no failed pipeline.
+
 A case declares `"origin": {"root": ..., "port": ...}`; the runner serves it
 in-process for the life of the run, so there is no origin process to leak. Serve
 one by hand with `foxy-testkit origin --root <dir>`, and measure the server

@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 
 pub fn run_metrics(text: &str) -> Value {
-    let mut result = json!({"files":null,"bytes":null,"db_write_time_ms":null,"lock_retries":null,"total_backoff_ms":null,"elapsed_ms":null,"permit_wait_ms_total":null,"write_calls_total":null,"write_failures_total":null,"write_retries_total":null,"checkpoint_total_s":null,"hash_work_bytes":0,"tree_verify_runs":0,"fs_watcher_starts":0,"prepared_queue_reuses":0});
+    let mut result = json!({"files":null,"bytes":null,"db_write_time_ms":null,"lock_retries":null,"total_backoff_ms":null,"elapsed_ms":null,"permit_wait_ms_total":null,"write_calls_total":null,"write_failures_total":null,"write_retries_total":null,"checkpoint_total_s":null,"hash_work_bytes":0,"tree_verify_runs":0,"fs_watcher_starts":0,"prepared_queue_reuses":0,"pipeline_outcome":null,"failed_pipelines":0});
     let pattern =
         regex::Regex::new(r"TOTAL DOWNLOAD total:\s*files=(\d+)\s+bytes=([\d.]+)\s*([KMGT]?i?B)")
             .unwrap();
@@ -76,6 +76,20 @@ pub fn run_metrics(text: &str) -> Value {
     result["fs_watcher_starts"] = count_lines(text, "Starting filesystem watcher").into();
     result["prepared_queue_reuses"] =
         count_lines(text, "Reusing confirmation-prepared download queue").into();
+    // The sync pipeline's own verdict. A check that ends in `failed-*` still
+    // clears the busy reason and returns a summary, so without this a case
+    // could pass on a sync the user would have seen fail.
+    let pattern = regex::Regex::new(r"Pipeline summary: op=\S+ mode=\S+ outcome=(\S+)").unwrap();
+    let outcomes: Vec<&str> = event_lines(text)
+        .filter_map(|line| pattern.captures(line))
+        .filter_map(|c| c.get(1).map(|m| m.as_str()))
+        .collect();
+    result["pipeline_outcome"] = outcomes.last().map_or(Value::Null, |o| (*o).into());
+    result["failed_pipelines"] = (outcomes
+        .iter()
+        .filter(|o| o.starts_with("failed") || o.starts_with("cancelled"))
+        .count() as u64)
+        .into();
     result
 }
 
@@ -176,6 +190,17 @@ INFO Starting filesystem watcher for 2 paths",
         let none = run_metrics("unrelated");
         assert_eq!(none["hash_work_bytes"], 0);
         assert_eq!(none["tree_verify_runs"], 0);
+        assert!(none["pipeline_outcome"].is_null());
+        assert_eq!(none["failed_pipelines"], 0);
+    }
+
+    #[test]
+    fn pipeline_outcome_is_the_last_verdict_and_failures_are_counted() {
+        let metrics = run_metrics(
+            "[2026-09-14 08:00:00.000000 +02:00] INFO  [m] Pipeline summary: op=repo-sync-0001 mode=RemoteRefreshOnly outcome=failed-empty-queue repo=r stages=13 elapsed=1.00s\n[2026-09-14 08:00:01.000000 +02:00] INFO  [m] Pipeline summary: op=repo-sync-0002 mode=Download outcome=early-exit-clean repo=r stages=8 elapsed=0.25s\nPipeline summary: op=repo-sync-0001 mode=RemoteRefreshOnly outcome=failed-empty-queue repo=r stages=13 elapsed=1.00s",
+        );
+        assert_eq!(metrics["pipeline_outcome"], "early-exit-clean");
+        assert_eq!(metrics["failed_pipelines"], 1);
     }
 
     #[test]

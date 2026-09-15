@@ -77,7 +77,7 @@ cargo prerelease
 
 Pre-release installer, one command (set the version and short commit hash; output lands in `dist/`, needs Inno Setup `iscc` in `PATH`):
 ```bash
-cargo build --release --features prerelease -p Foxy && iscc /DAppVersion="1.2.0" /DOutputSuffix="-prerelease-6b6d132" /DSourceDir="..\..\target\release" installer\windows\foxy-setup.iss
+cargo build --release --features prerelease -p Foxy && iscc /DAppVersion="1.2.0" /DOutputSuffix="-prerelease-f6b8ab9" /DSourceDir="..\..\target\release" installer\windows\foxy-setup.iss
 ```
 Or let `scripts\build-windows-prerelease-installer.bat` fill both in for you.
 

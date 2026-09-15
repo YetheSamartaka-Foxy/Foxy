@@ -8,6 +8,11 @@ use crate::core::models::pending_update::clear_pending_update_for_context;
 /// `local_path` and `remote_checksum`. This lets the hashing phase skip files
 /// that were already hashed by a sibling repository on the same disk.
 ///
+/// The content-hash baseline is copied alongside: a file the hash pass skips
+/// because a sibling already proved it synced never gets its own baseline
+/// refresh, and the quick scan treats an empty baseline as a content mismatch
+/// while the download queue (built from tree checksums) stays empty.
+///
 /// Returns the number of file-level checksum updates applied.
 pub(crate) async fn pre_propagate_sibling_checksums(
     context: Arc<FoxyContext>,
@@ -15,7 +20,16 @@ pub(crate) async fn pre_propagate_sibling_checksums(
 ) -> u64 {
     let db = context.db();
     let start = Instant::now();
+    let file_updates = pre_propagate_sibling_tree_checksums(&db, repository_url, start).await;
+    pre_propagate_sibling_content_hashes(&db, repository_url).await;
+    file_updates
+}
 
+async fn pre_propagate_sibling_tree_checksums(
+    db: &FoxyDb,
+    repository_url: &str,
+    start: Instant,
+) -> u64 {
     // Early bail-out: check if this repo has any unsynced files with a synced
     // sibling. This cheap EXISTS avoids running expensive UPDATEs when there is
     // nothing to propagate (e.g. single-repository setups).
@@ -149,6 +163,158 @@ pub(crate) async fn pre_propagate_sibling_checksums(
     );
 
     file_updates
+}
+
+/// Copy `local_content_hash` from synced siblings onto files and addons of the
+/// repository that are tree-synced but have no content-hash baseline yet. Runs
+/// independently of the tree-checksum bail-out because the tree checksums may
+/// already have been propagated by an earlier pass that predates this copy.
+async fn pre_propagate_sibling_content_hashes(db: &FoxyDb, repository_url: &str) {
+    let start = Instant::now();
+    let has_propagatable = matches!(
+        db.query_one(
+            r#"SELECT 1
+               FROM repository_addons ra
+               JOIN repositories r ON r.id = ra.repository_id
+               JOIN addons a ON a.id = ra.addon_id
+               JOIN addon_files af ON af.addon_id = a.id
+               JOIN files tgt_f ON tgt_f.id = af.file_id
+               WHERE r.remote_url = ?
+               AND tgt_f.local_content_hash = ''
+               AND tgt_f.remote_checksum != ''
+               AND tgt_f.local_checksum = tgt_f.remote_checksum
+               AND EXISTS (
+                   SELECT 1 FROM files src_f
+                   WHERE src_f.local_path = tgt_f.local_path
+                   AND src_f.remote_checksum = tgt_f.remote_checksum
+                   AND src_f.local_checksum = src_f.remote_checksum
+                   AND src_f.local_content_hash != ''
+                   AND src_f.id != tgt_f.id
+               )
+               LIMIT 1"#,
+            params![repository_url],
+        )
+        .await,
+        Ok(Some(_))
+    );
+    if !has_propagatable {
+        debug!(
+            "No sibling content hashes to pre-propagate for repo={} (checked in {:.2?})",
+            repository_url,
+            start.elapsed()
+        );
+        return;
+    }
+
+    let file_updates = match db
+        .execute_retry(
+            "pre-propagate sibling file content hashes",
+            r#"UPDATE files
+               SET local_content_hash = (
+                   SELECT src_f.local_content_hash
+                   FROM files src_f
+                   WHERE src_f.local_path = files.local_path
+                   AND src_f.remote_checksum = files.remote_checksum
+                   AND src_f.local_checksum = src_f.remote_checksum
+                   AND src_f.local_content_hash != ''
+                   AND src_f.id != files.id
+                   LIMIT 1
+               )
+               WHERE local_content_hash = ''
+               AND remote_checksum != ''
+               AND local_checksum = remote_checksum
+               AND id IN (
+                   SELECT tgt_f.id
+                   FROM repository_addons ra
+                   JOIN repositories r ON r.id = ra.repository_id
+                   JOIN addons a ON a.id = ra.addon_id
+                   JOIN addon_files af ON af.addon_id = a.id
+                   JOIN files tgt_f ON tgt_f.id = af.file_id
+                   WHERE r.remote_url = ?
+                   AND tgt_f.local_content_hash = ''
+                   AND tgt_f.remote_checksum != ''
+                   AND tgt_f.local_checksum = tgt_f.remote_checksum
+                   AND EXISTS (
+                       SELECT 1 FROM files src_f
+                       WHERE src_f.local_path = tgt_f.local_path
+                       AND src_f.remote_checksum = tgt_f.remote_checksum
+                       AND src_f.local_checksum = src_f.remote_checksum
+                       AND src_f.local_content_hash != ''
+                       AND src_f.id != tgt_f.id
+                   )
+               )"#,
+            params![repository_url],
+        )
+        .await
+    {
+        Ok(rows_affected) => rows_affected,
+        Err(e) => {
+            warn!(
+                "Pre-propagation of sibling file content hashes failed for repo={}: {}",
+                repository_url, e
+            );
+            0
+        }
+    };
+
+    let addon_updates = match db
+        .execute_retry(
+            "pre-propagate sibling addon content hashes",
+            r#"UPDATE addons
+               SET local_content_hash = (
+                   SELECT src.local_content_hash
+                   FROM addons src
+                   WHERE src.name = addons.name
+                   AND src.local_path = addons.local_path
+                   AND src.remote_checksum = addons.remote_checksum
+                   AND src.local_checksum = src.remote_checksum
+                   AND src.local_content_hash != ''
+                   AND src.id != addons.id
+                   LIMIT 1
+               )
+               WHERE local_content_hash = ''
+               AND remote_checksum != ''
+               AND local_checksum = remote_checksum
+               AND id IN (
+                   SELECT a.id
+                   FROM repository_addons ra
+                   JOIN repositories r ON r.id = ra.repository_id
+                   JOIN addons a ON a.id = ra.addon_id
+                   WHERE r.remote_url = ?
+                   AND a.local_content_hash = ''
+                   AND a.remote_checksum != ''
+                   AND a.local_checksum = a.remote_checksum
+                   AND EXISTS (
+                       SELECT 1 FROM addons src
+                       WHERE src.name = a.name
+                       AND src.local_path = a.local_path
+                       AND src.remote_checksum = a.remote_checksum
+                       AND src.local_checksum = src.remote_checksum
+                       AND src.local_content_hash != ''
+                       AND src.id != a.id
+                   )
+               )"#,
+            params![repository_url],
+        )
+        .await
+    {
+        Ok(rows_affected) => rows_affected,
+        Err(e) => {
+            warn!(
+                "Pre-propagation of sibling addon content hashes failed for repo={}: {}",
+                repository_url, e
+            );
+            0
+        }
+    };
+
+    info!(
+        "Pre-propagated sibling content hashes for repo={}: files={} addons={} in {:.2?}",
+        repository_url,
+        file_updates,
+        addon_updates,
+        start.elapsed()
+    );
 }
 
 #[derive(Clone, Copy, Debug, Default)]

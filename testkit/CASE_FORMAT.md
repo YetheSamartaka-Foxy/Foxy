@@ -90,6 +90,7 @@ no unallowlisted WARN or ERROR entries.
 | Field | Required | Default | Meaning |
 | --- | --- | --- | --- |
 | `repository` | yes | none | `{name,address,path,space_id}` |
+| `extra_repositories` | no | `[]` | Further `{name,address,path,space_id}` entries written after `repository` |
 | `space` | no | `null` | Repository-space fixture object |
 | `operations` | yes | none | Ordered operation objects |
 | `repetitions` | no | `3` | Recorded passes |
@@ -101,7 +102,12 @@ no unallowlisted WARN or ERROR entries.
 Supported operations are `startup`, `ui-walk`, `remote-refresh`, `quick-check`,
 `recheck`, `recheck-integrity`, `force-redownload`, `download`, `wipe-db`,
 `mutate`, and `restore`. Each operation may contain `wait_timeout_s`,
-`expect`, and `label`. Setup operations are not ledgered. `label` names the
+`expect`, `label`, and `repository`. `repository` names the fixture repository
+the operation acts on (the CLI `--repo-name`, or the GUI row with that name);
+it defaults to the case `repository`. `extra_repositories` is what puts a
+second repository into the fixture, so a case can download one repository and
+then check its sibling in the same folder. Mutation, the oracle, and the
+manifest probe always address the case `repository`. Setup operations are not ledgered. `label` names the
 operation's artifacts and its ledger row (`label` field) when a case repeats
 one kind of operation inside an iteration, such as a quick check run twice to
 prove the second one reads nothing; without it the second operation's
@@ -120,6 +126,13 @@ assert on: `hash_work_bytes` (bytes read by every `SOL op=hash` run in the
 operation), `tree_verify_runs` (targeted tree-hash verifies the quick scan
 triggered), `fs_watcher_starts`, and `prepared_queue_reuses`. Expectations
 reach them as `breakdown.run_metrics.<name>`.
+
+The pipeline's own verdict is there too: `pipeline_outcome` is the outcome of
+the last `Pipeline summary` line in the operation (`early-exit-clean`,
+`failed-empty-queue`, ...) and `failed_pipelines` counts the `failed-*` and
+`cancelled` ones. A sync that fails still clears its busy reason and returns a
+summary, so a sync-path case must assert `failed_pipelines` equals 0 or it
+passes on a failure the user would have seen as an error dialog.
 
 `ui-walk` runs an array of driver `steps` - the same command objects a UX case
 uses - as one measured operation, and requires the GUI harness. A UX case

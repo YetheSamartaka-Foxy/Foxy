@@ -39,7 +39,8 @@ pub(super) use pending_updates::{
     refresh_patch_plan_metadata_for_pending_updates,
 };
 pub(super) use readiness::{
-    collect_hashable_files_with_missing_local_tree_hashes, tree_local_checksums_baseline_missing,
+    collect_hashable_files_with_missing_local_tree_hashes,
+    collect_targeted_init_content_baseline_files, tree_local_checksums_baseline_missing,
     tree_local_checksums_missing,
 };
 // Re-exported for integration tests (api/tests.rs) only; not referenced by the binary.

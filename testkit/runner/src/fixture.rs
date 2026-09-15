@@ -42,11 +42,29 @@ pub fn mod_count(metadata: &Value) -> usize {
 }
 
 fn generated(case: &Value) -> Result<Value> {
-    let source = &case["repository"];
     ensure!(
-        source.is_object(),
+        case["repository"].is_object(),
         "A case needs fixture.files or repository"
     );
+    let mut repositories = vec![generated_repository(&case["repository"])?];
+    for extra in case["extra_repositories"].as_array().into_iter().flatten() {
+        repositories.push(generated_repository(extra)?);
+    }
+    let spaces: Vec<Value> = case
+        .get("space")
+        .filter(|v| !v.is_null())
+        .cloned()
+        .into_iter()
+        .collect();
+    Ok(json!({"files": {
+        "settings.json":{"auto_recheck_on_launch":false,"auto_quick_scan_on_launch":false,"swifty_migration_offered":true},
+        "repositories.json":repositories, "repository_spaces.json":spaces
+    }}))
+}
+
+/// One `repositories.json` entry for a `{name,address,path,space_id}` source,
+/// with the repository's published addons enabled.
+fn generated_repository(source: &Value) -> Result<Value> {
     let address = format!(
         "{}/",
         source["address"]
@@ -128,16 +146,7 @@ fn generated(case: &Value) -> Result<Value> {
     ] {
         repository[field] = json!("");
     }
-    let spaces: Vec<Value> = case
-        .get("space")
-        .filter(|v| !v.is_null())
-        .cloned()
-        .into_iter()
-        .collect();
-    Ok(json!({"files": {
-        "settings.json":{"auto_recheck_on_launch":false,"auto_quick_scan_on_launch":false,"swifty_migration_offered":true},
-        "repositories.json":[repository], "repository_spaces.json":spaces
-    }}))
+    Ok(repository)
 }
 
 /// Process-owned state that belongs to whichever app instance is running, not
@@ -223,6 +232,24 @@ fn validate_files(files: &serde_json::Map<String, Value>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn generated_fixture_lists_extra_repositories_after_the_primary() {
+        let case = json!({
+            "repository": {"name": "A", "address": "https://example.invalid/a", "path": "X:\\p", "space_id": null},
+            "extra_repositories": [
+                {"name": "B", "address": "https://example.invalid/b/", "path": "X:\\p", "space_id": null}
+            ]
+        });
+        let fixture = generated(&case).expect("fixture");
+        let repositories = fixture["files"]["repositories.json"]
+            .as_array()
+            .expect("repositories array");
+        assert_eq!(repositories.len(), 2);
+        assert_eq!(repositories[0]["name"], "A");
+        assert_eq!(repositories[0]["address"], "https://example.invalid/a/");
+        assert_eq!(repositories[1]["name"], "B");
+        assert_eq!(repositories[1]["path"], "X:\\p");
+    }
     #[test]
     fn fixture_arrays_keep_shape_and_cannot_escape_root() {
         assert!(
