@@ -23,7 +23,7 @@ For any non-English locale change:
 
 Do not trust PowerShell console rendering for non-ASCII locale content. It may show `?` or mojibake while the file is valid UTF-8. Prefer parser/checker results, or print escaped output when inspecting exact values.
 
-Do not paste translated non-ASCII strings through PowerShell here-strings, `Set-Content`, or ad hoc shell write paths unless the full UTF-8 path is proven. These paths can silently replace unsupported characters with literal `?` in the file. Prefer `apply_patch` for targeted edits, or a checked UTF-8 script/source file, then parse the JSON and explicitly scan changed values for literal `?` characters.
+Do not paste translated non-ASCII strings through PowerShell here-strings, `Set-Content`, or ad hoc shell write paths unless the full UTF-8 path is proven. These paths can silently replace unsupported characters with literal `?` in the file. Prefer `apply_patch` for targeted edits, or a checked UTF-8 JSON batch applied with the Rust `locale-apply` binary (never a Python or other scripting-language helper), then parse the JSON and explicitly scan changed values for literal `?` characters.
 
 ### Exact-English Fallback Cleanup
 

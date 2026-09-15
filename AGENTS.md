@@ -15,6 +15,7 @@ Keep this file as the compact root router. Put detailed conventions in `conventi
 - Do not reformat unrelated code, rename unrelated items, or change dependencies unless the task requires it.
 - Do not log secrets, tokens, or user file paths.
 - Never use em dashes (—) or en dashes (–) in any text (code, comments, docs, UI strings, commit messages, changelog). Use a plain hyphen `-` instead.
+- Rust only. Never write Python or any other scripting-language helper, scratch script, audit, or batch tool for this repo, not even as a throwaway. Extend the Rust tools in `tools/` (for example `tools/i18n-checker/`) when a capability is missing, and never leave scratch files in the repository root.
 - Default to writing no comment. Add one only to explain a non-obvious *why* (a safety invariant, an ordering constraint, a subtle edge case) that the code cannot state itself, and keep it to one or two lines. Never add narrative bug-history, dated regression stories, benchmark anecdotes, decorative separators, restated-code, or "what this obvious line does" comments; put operational context in logs, tests, commit messages, or conventions docs instead. When editing existing code, do not leave behind comments that narrate the change you just made.
 - Do not edit runtime `database.db`, logs, caches, backups, temp patch artifacts, or user config files unless explicitly requested.
 - Use `rg`/`rg --files` for discovery, inspect the nearest `mod.rs`, and confirm behavior in code before changing it.

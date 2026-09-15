@@ -279,17 +279,35 @@ pub fn serialize_locale_value(value: &Value) -> String {
 }
 
 pub fn locale_entry_line(key: &str, value: &Value, newline: &str, comma: bool) -> String {
+    locale_entry_line_indented(ENTRY_INDENT, key, value, newline, comma)
+}
+
+pub fn locale_entry_line_indented(
+    indent: &str,
+    key: &str,
+    value: &Value,
+    newline: &str,
+    comma: bool,
+) -> String {
     let suffix = if comma { "," } else { "" };
     format!(
-        "{ENTRY_INDENT}{}: {}{suffix}{newline}",
+        "{indent}{}: {}{suffix}{newline}",
         serialize_json_key(key),
         serialize_locale_value(value)
     )
 }
 
+/// Locale files are not all indented the same way, so edits reuse the indent
+/// of the line they touch instead of assuming `ENTRY_INDENT`.
+pub fn entry_indent(line: &str) -> &str {
+    &line[..line.len() - line.trim_start().len()]
+}
+
 pub fn find_entry_line(lines: &[String], key: &str) -> Option<usize> {
-    let needle = format!("{ENTRY_INDENT}{}:", serialize_json_key(key));
-    lines.iter().position(|line| line.starts_with(&needle))
+    let needle = format!("{}:", serialize_json_key(key));
+    lines
+        .iter()
+        .position(|line| line.trim_start().starts_with(&needle))
 }
 
 /// Nearest earlier `en.json` key that the target locale already contains, used
@@ -426,6 +444,19 @@ mod tests {
         assert_eq!(find_entry_line(&lines, "Line\nKey"), Some(1));
         assert_eq!(find_entry_line(&lines, "Other"), Some(2));
         assert_eq!(find_entry_line(&lines, "Missing"), None);
+    }
+
+    #[test]
+    fn entry_lookup_and_indent_tolerate_mixed_indentation() {
+        let lines = split_lines_keep_ends("{\n    \"A\": \"a\",\n  \"B\": \"b\"\n}\n");
+
+        assert_eq!(find_entry_line(&lines, "B"), Some(2));
+        assert_eq!(entry_indent(&lines[1]), "    ");
+        assert_eq!(entry_indent(&lines[2]), "  ");
+        assert_eq!(
+            locale_entry_line_indented("  ", "C", &Value::String("c".into()), "\n", true),
+            "  \"C\": \"c\",\n"
+        );
     }
 
     #[test]

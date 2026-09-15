@@ -22,7 +22,7 @@ target-language judgment for natural UI wording.
 8. Avoid regex-only edits for serialized JSON keys containing escapes. Prefer parser-based edits, then write back only changed values or do exact line replacement against the serialized key text.
 9. Preserve existing formatting and line endings where possible. Full JSON reserialization can create large noisy diffs; if a parser rewrite is useful for computing values, reconstruct edits onto the original file text before finalizing.
 10. Do not trust PowerShell console rendering for non-ASCII text; it may show `?` or mojibake while the file is valid UTF-8. Validate by parsing JSON and running the checker. Use escaped output (`unicode_escape`) when inspecting non-ASCII values in PowerShell.
-11. Do not paste translated non-ASCII strings through PowerShell here-strings, `Set-Content`, or ad hoc shell write paths unless the full UTF-8 path is proven. These paths can silently replace unsupported characters with literal `?` in the file. Prefer `apply_patch` for targeted edits, or a checked UTF-8 script/source file.
+11. Do not paste translated non-ASCII strings through PowerShell here-strings, `Set-Content`, or ad hoc shell write paths unless the full UTF-8 path is proven. These paths can silently replace unsupported characters with literal `?` in the file. Prefer `apply_patch` for targeted edits, or a checked UTF-8 JSON batch applied with the Rust `locale-apply` binary. Never write Python or other scripting-language helpers for locale work; extend `tools/i18n-checker/` instead.
 
 ## Translation Quality Rules
 

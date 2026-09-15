@@ -14,9 +14,9 @@
 //! their en.json neighbour, so the diff stays value-only.
 
 use i18n_checker::{
-    detect_line_ending, find_entry_line, locale_entry_line, parse_locale_object, placeholder_names,
-    previous_present_key, read_locale_text, serialize_locale_value, split_lines_keep_ends,
-    top_level_keys, truncate, write_key_file,
+    detect_line_ending, entry_indent, find_entry_line, locale_entry_line_indented,
+    parse_locale_object, placeholder_names, previous_present_key, read_locale_text,
+    serialize_locale_value, split_lines_keep_ends, top_level_keys, truncate, write_key_file,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -105,7 +105,8 @@ fn main() {
 
             if let Some(index) = find_entry_line(&lines, key) {
                 let comma = lines[index].trim_end_matches(['\r', '\n']).ends_with(',');
-                let new_line = locale_entry_line(key, translated, newline, comma);
+                let indent = entry_indent(&lines[index]).to_string();
+                let new_line = locale_entry_line_indented(&indent, key, translated, newline, comma);
                 if lines[index] != new_line {
                     lines[index] = new_line;
                     changed_here += 1;
@@ -133,6 +134,7 @@ fn main() {
             // An anchor without a trailing comma is the object's last entry, so
             // it needs one and the inserted line becomes the new last entry.
             let anchor_line = &lines[anchor_index];
+            let indent = entry_indent(anchor_line).to_string();
             let anchor_text = anchor_line.trim_end_matches(['\r', '\n']);
             let anchor_has_comma = anchor_text.ends_with(',');
             if !anchor_has_comma {
@@ -142,7 +144,7 @@ fn main() {
             }
             lines.insert(
                 anchor_index + 1,
-                locale_entry_line(key, translated, newline, anchor_has_comma),
+                locale_entry_line_indented(&indent, key, translated, newline, anchor_has_comma),
             );
             changed_here += 1;
             record_changed(&mut changed_keys, key);
