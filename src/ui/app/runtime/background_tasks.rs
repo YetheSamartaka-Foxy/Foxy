@@ -220,58 +220,6 @@ impl Foxy {
         self.note_startup_rechecks_queued(queued);
     }
 
-    /// Queue the first remote refresh for repositories that were just imported
-    /// with an existing local folder. An import writes no database rows, so the
-    /// startup eligibility plan has nothing to verify and every imported
-    /// repository would otherwise sit at "unknown" until the user rechecks by
-    /// hand; the refresh builds the metadata graph and the local hash baseline.
-    pub(crate) fn queue_initial_baseline_for_imported_repositories(
-        &mut self,
-        repo_indices: impl IntoIterator<Item = usize>,
-    ) {
-        let mut queued = 0usize;
-        for idx in repo_indices {
-            let Some(repo) = self.repository_view_state.repositories.get(idx) else {
-                continue;
-            };
-            let path = sanitize_user_path(&repo.path);
-            if repo.address.trim().is_empty() || path.trim().is_empty() {
-                continue;
-            }
-            if !std::path::Path::new(&path).is_dir() {
-                debug!(
-                    "Initial baseline skipped for imported repository {}: local folder does not exist yet",
-                    repo.name
-                );
-                continue;
-            }
-            let normalized_url = Self::normalize_repo_url(&repo.address);
-            let local_path_key = Self::repo_instance_path_key(&path);
-            let already_queued =
-                self.startup_recheck_queue
-                    .iter()
-                    .any(|(address, queued_path, _)| {
-                        Self::normalize_repo_url(address) == normalized_url
-                            && Self::repo_instance_path_key(queued_path) == local_path_key
-                    });
-            if already_queued {
-                continue;
-            }
-            self.startup_recheck_queue.push_back((
-                repo.address.clone(),
-                path,
-                SyncMode::RemoteRefreshOnly,
-            ));
-            queued += 1;
-        }
-        if queued > 0 {
-            info!(
-                "Initial baseline queued for {} imported repositories with an existing local folder",
-                queued
-            );
-        }
-    }
-
     /// Start the startup eligibility plan before the first frame.
     ///
     /// The plan is a database preflight plus one `repo.json` probe per
