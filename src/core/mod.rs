@@ -3,6 +3,7 @@ pub mod api;
 pub mod arma3_missions;
 pub mod arma3_profiles;
 pub mod arma3_server_query;
+pub mod benchmarks;
 pub(crate) mod db;
 pub mod game;
 pub mod models;

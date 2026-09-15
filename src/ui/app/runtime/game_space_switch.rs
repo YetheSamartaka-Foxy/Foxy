@@ -254,6 +254,11 @@ impl Foxy {
         self.delete_repository_delete_files = false;
         self.show_force_redownload_confirmation = false;
         self.show_wipe_db_confirmation = false;
+        self.wipe_db_include_benchmarks = false;
+        self.benchmark_armed = None;
+        self.benchmark_capture = None;
+        self.benchmark_prompt = None;
+        self.benchmarks_view = Default::default();
         self.show_wipe_repo_db_confirmation = false;
         self.show_add_repository_modal = false;
         self.add_repository_input_address.clear();
@@ -344,6 +349,10 @@ impl Foxy {
             .store(false, std::sync::atomic::Ordering::Relaxed);
         self.fs_watch_idle_retry_at = None;
         self.fs_changed_since_prepare.clear();
+        self.fs_watch_clean_scan_streak = 0;
+        self.fs_watch_backoff_until = None;
+        self.fs_watch_backoff_urls.clear();
+        self.fs_watch_scan_urls.clear();
 
         // Images and metadata fetches.
         self.pending_image_jobs.clear();
@@ -533,6 +542,7 @@ const APP_GLOBAL_FOXY_FIELDS: &[&str] = &[
     // Worker channel endpoints; the view state they feed is reset above.
     "workshop_task_rx",
     "workshop_task_worker",
+    "benchmark_channels",
     // Activity log and diagnostics.
     "activity_log_cache",
     "activity_log_galleys",

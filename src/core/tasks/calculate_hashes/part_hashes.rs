@@ -26,6 +26,10 @@ pub(super) struct PartHashMetrics {
 pub(super) struct PartHashCalculation {
     pub(super) parts: Vec<FoxyModFilePart>,
     pub(super) metrics: PartHashMetrics,
+    /// Sampled fingerprint taken right after the parts were read, while the
+    /// file was still in the page cache. `None` when the file could not be read
+    /// or the pass was cancelled before it finished.
+    pub(super) content_hash: Option<String>,
 }
 
 #[derive(Clone)]
@@ -100,6 +104,7 @@ pub(super) async fn calculate_part_hashes(
     semaphore: Arc<Semaphore>,
     span_source: PartSpanSource,
     progress: Option<PartHashProgress>,
+    cancel: Option<watch::Receiver<bool>>,
 ) -> PartHashCalculation {
     let pbo_name = Path::new(file_path)
         .file_name()
@@ -122,11 +127,12 @@ pub(super) async fn calculate_part_hashes(
         return PartHashCalculation {
             parts: Vec::new(),
             metrics,
+            content_hash: None,
         };
     }
 
     let metadata_started = Instant::now();
-    match tokio::fs::metadata(file_path).await {
+    let file_metadata = match tokio::fs::metadata(file_path).await {
         Ok(meta) => {
             let actual_size = meta.len();
             let expected_size = parts
@@ -140,6 +146,7 @@ pub(super) async fn calculate_part_hashes(
                     pbo_name, actual_size, expected_size
                 );
             }
+            meta
         }
         Err(_) => {
             debug!("File {} does not exist, skipping hash", file_path);
@@ -159,9 +166,10 @@ pub(super) async fn calculate_part_hashes(
                     })
                     .collect(),
                 metrics,
+                content_hash: None,
             };
         }
-    }
+    };
     metrics.metadata_elapsed = metadata_started.elapsed();
 
     // Detect local archive layout for local span remapping before opening the file
@@ -273,6 +281,7 @@ pub(super) async fn calculate_part_hashes(
         return PartHashCalculation {
             parts: indexed_parts.into_iter().map(|(_, part)| part).collect(),
             metrics,
+            content_hash: None,
         };
     };
     metrics.semaphore_wait_elapsed = semaphore_started.elapsed();
@@ -294,7 +303,7 @@ pub(super) async fn calculate_part_hashes(
                 if let Some(progress) = &blocking_progress {
                     progress.mark_parts_done(total_part_count);
                 }
-                return indexed_parts;
+                return (indexed_parts, None);
             }
         };
 
@@ -310,8 +319,21 @@ pub(super) async fn calculate_part_hashes(
         const MAX_READ_FAILURES: usize = 3;
         let mut consecutive_read_failures: usize = 0;
         let total_part_count = indexed_parts.len();
+        let mut cancelled = false;
 
         for (idx, part) in &mut indexed_parts {
+            // A multi-gigabyte PBO would otherwise keep the disk busy for
+            // its whole length after the user asked to stop.
+            if cancel.as_ref().is_some_and(|rx| *rx.borrow()) {
+                cancelled = true;
+                part.local_checksum = String::new();
+                part.local_length = 0;
+                part.local_start = 0;
+                if let Some(progress) = &blocking_progress {
+                    progress.mark_parts_done(1);
+                }
+                continue;
+            }
             // Bail early if the file is consistently unreadable
             if consecutive_read_failures >= MAX_READ_FAILURES {
                 part.local_checksum = String::new();
@@ -434,13 +456,22 @@ pub(super) async fn calculate_part_hashes(
                 .map(|(_, part)| part.local_length)
                 .sum::<u64>(),
         );
-        indexed_parts
+        let content_hash = if cancelled || consecutive_read_failures >= MAX_READ_FAILURES {
+            None
+        } else {
+            crate::core::utils::content_hash::fast_file_content_hash_from_reader(
+                &mut reader,
+                &file_metadata,
+            )
+            .ok()
+        };
+        (indexed_parts, content_hash)
     })
     .await;
     metrics.blocking_hash_elapsed = blocking_started.elapsed();
     // _permit is dropped here, releasing the semaphore slot
 
-    let mut final_parts = match result {
+    let (mut final_parts, content_hash) = match result {
         Ok(parts) => parts,
         Err(e) => {
             error!("Part hashing task panicked for {}: {}", pbo_name, e);
@@ -448,6 +479,7 @@ pub(super) async fn calculate_part_hashes(
             return PartHashCalculation {
                 parts: Vec::new(),
                 metrics,
+                content_hash: None,
             };
         }
     };
@@ -465,7 +497,11 @@ pub(super) async fn calculate_part_hashes(
     let parts: Vec<_> = final_parts.into_iter().map(|(_, part)| part).collect();
     metrics.hashed_bytes = parts.iter().map(|part| part.local_length).sum();
     metrics.total_elapsed = started_at.elapsed();
-    PartHashCalculation { parts, metrics }
+    PartHashCalculation {
+        parts,
+        metrics,
+        content_hash,
+    }
 }
 
 #[cfg(test)]
@@ -500,6 +536,7 @@ mod tests {
             file.path().to_str().unwrap(),
             Arc::new(Semaphore::new(1)),
             PartSpanSource::RemoteLayout,
+            None,
             None,
         )
         .await;
@@ -598,6 +635,7 @@ mod tests {
             Arc::new(Semaphore::new(1)),
             PartSpanSource::RemoteLayout,
             None,
+            None,
         )
         .await;
         assert!(result.parts.is_empty());
@@ -625,6 +663,7 @@ mod tests {
             Arc::new(Semaphore::new(1)),
             PartSpanSource::RemoteLayout,
             None,
+            None,
         )
         .await;
 
@@ -632,6 +671,34 @@ mod tests {
         assert!(result.parts[0].local_checksum.is_empty());
         assert_eq!(result.parts[0].local_length, 0);
         assert_eq!(result.parts[0].local_start, 0);
+    }
+
+    #[tokio::test]
+    async fn calculate_part_hashes_cancelled_before_start_clears_parts_and_fingerprint() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(b"abcd").unwrap();
+        let parts = vec![FoxyModFilePart {
+            remote_length: 4,
+            remote_start: 0,
+            remote_checksum: blake3::hash(b"abcd").to_hex().to_uppercase(),
+            data_order: 0,
+            ..Default::default()
+        }];
+        let (_cancel_tx, cancel_rx) = watch::channel(true);
+
+        let result = calculate_part_hashes(
+            parts,
+            file.path().to_str().unwrap(),
+            Arc::new(Semaphore::new(1)),
+            PartSpanSource::RemoteLayout,
+            None,
+            Some(cancel_rx),
+        )
+        .await;
+
+        assert_eq!(result.parts.len(), 1);
+        assert!(result.parts[0].local_checksum.is_empty());
+        assert!(result.content_hash.is_none());
     }
 
     #[tokio::test]
@@ -652,12 +719,23 @@ mod tests {
             Arc::new(Semaphore::new(1)),
             PartSpanSource::RemoteLayout,
             None,
+            None,
         )
         .await;
 
         assert_eq!(result.parts.len(), 1);
         assert_eq!(result.parts[0].local_length, 4);
         assert_eq!(result.parts[0].local_start, 0);
+        assert_eq!(
+            result.content_hash.as_deref(),
+            Some(
+                crate::core::utils::content_hash::fast_file_content_hash(
+                    file.path().to_str().unwrap()
+                )
+                .unwrap()
+                .as_str()
+            )
+        );
         assert!(!result.parts[0].local_checksum.is_empty());
         assert_eq!(result.metrics.hashed_bytes, 4);
     }

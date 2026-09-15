@@ -29,6 +29,17 @@ pub struct SettingsViewState {
     pub show_memory_diagnostics_icon: bool,
     #[serde(default)]
     pub show_fps_counter: bool,
+    /// Debug-level log records plus per-operation profile and resource
+    /// samples in the log files. Off by default; costs disk and a little CPU.
+    #[serde(default)]
+    pub extended_diagnostics_logging: bool,
+    /// Offer to save user-triggered rechecks and updates as benchmarks.
+    #[serde(default)]
+    pub benchmarks_enabled: bool,
+    /// Extended diagnostics were switched on by enabling benchmarks, not by
+    /// the user, so disabling benchmarks switches them off again.
+    #[serde(default)]
+    pub extended_diagnostics_by_benchmarks: bool,
     /// Globally hide the repository banner image in the repository and space views.
     #[serde(default)]
     pub hide_repository_image: bool,
@@ -273,6 +284,9 @@ impl Default for SettingsViewState {
             show_activity_log: false,
             show_memory_diagnostics_icon: false,
             show_fps_counter: false,
+            extended_diagnostics_logging: false,
+            benchmarks_enabled: false,
+            extended_diagnostics_by_benchmarks: false,
             hide_repository_image: false,
             close_after_launch: true,
             hide_to_tray_after_launch: false,
@@ -343,6 +357,42 @@ impl Default for SettingsViewState {
     }
 }
 
+impl SettingsViewState {
+    /// Benchmarks need the detailed log, so enabling them also enables
+    /// extended diagnostics unless the user already had them on; disabling
+    /// benchmarks only reverts what this coupling switched on. Returns
+    /// whether `extended_diagnostics_logging` changed.
+    pub fn set_benchmarks_enabled(&mut self, enabled: bool) -> bool {
+        self.benchmarks_enabled = enabled;
+        if enabled {
+            if self.extended_diagnostics_logging {
+                return false;
+            }
+            self.extended_diagnostics_logging = true;
+            self.extended_diagnostics_by_benchmarks = true;
+            true
+        } else if self.extended_diagnostics_by_benchmarks {
+            self.extended_diagnostics_by_benchmarks = false;
+            self.extended_diagnostics_logging = false;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// An explicit choice of the user; the benchmarks coupling no longer
+    /// owns the diagnostics switch afterwards. Diagnostics cannot be turned
+    /// off while benchmarks are enabled; returns whether the value applied.
+    pub fn set_extended_diagnostics_logging(&mut self, enabled: bool) -> bool {
+        if !enabled && self.benchmarks_enabled {
+            return false;
+        }
+        self.extended_diagnostics_logging = enabled;
+        self.extended_diagnostics_by_benchmarks = false;
+        true
+    }
+}
+
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize, Default)]
 pub struct WindowState {
     #[serde(default)]
@@ -367,4 +417,50 @@ pub enum ServerOnlineStatus {
 pub struct ServerStatusCache {
     pub last_check: Instant,
     pub status: ServerOnlineStatus,
+}
+
+#[cfg(test)]
+mod benchmark_diagnostics_tests {
+    use super::SettingsViewState;
+
+    #[test]
+    fn enabling_benchmarks_turns_on_diagnostics_and_reverts_them() {
+        let mut settings = SettingsViewState::default();
+        assert!(settings.set_benchmarks_enabled(true));
+        assert!(settings.extended_diagnostics_logging);
+        assert!(settings.extended_diagnostics_by_benchmarks);
+        assert!(settings.set_benchmarks_enabled(false));
+        assert!(!settings.extended_diagnostics_logging);
+        assert!(!settings.extended_diagnostics_by_benchmarks);
+    }
+
+    #[test]
+    fn diagnostics_enabled_by_the_user_survive_benchmarks() {
+        let mut settings = SettingsViewState::default();
+        settings.set_extended_diagnostics_logging(true);
+        assert!(!settings.set_benchmarks_enabled(true));
+        assert!(!settings.extended_diagnostics_by_benchmarks);
+        assert!(!settings.set_benchmarks_enabled(false));
+        assert!(settings.extended_diagnostics_logging);
+    }
+
+    #[test]
+    fn diagnostics_cannot_be_disabled_while_benchmarks_are_on() {
+        let mut settings = SettingsViewState::default();
+        settings.set_benchmarks_enabled(true);
+        assert!(!settings.set_extended_diagnostics_logging(false));
+        assert!(settings.extended_diagnostics_logging);
+        assert!(settings.extended_diagnostics_by_benchmarks);
+        assert!(settings.set_benchmarks_enabled(false));
+        assert!(!settings.extended_diagnostics_logging);
+    }
+
+    #[test]
+    fn user_taking_over_the_switch_ends_the_coupling() {
+        let mut settings = SettingsViewState::default();
+        settings.set_benchmarks_enabled(true);
+        assert!(settings.set_extended_diagnostics_logging(true));
+        assert!(!settings.set_benchmarks_enabled(false));
+        assert!(settings.extended_diagnostics_logging);
+    }
 }

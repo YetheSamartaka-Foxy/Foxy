@@ -126,6 +126,7 @@ impl AppState {
             None => SettingsViewState::default(),
         };
         sanitize_settings(&mut settings);
+        crate::core::api::set_extended_diagnostics(settings.extended_diagnostics_logging);
 
         let mut repositories: Vec<Repository> =
             read_json_or_default(&Foxy::get_repositories_path())

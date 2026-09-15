@@ -5,65 +5,8 @@ use crate::core::db::{DbValue, FoxyDb};
 use crate::core::tasks::init_database::bulk_write_rows_for;
 use crate::core::utils::format::sanitize_log_path_str;
 
-// Do not include creation time: it changes on copies/restores while content does not.
 pub(super) fn calculate_fast_file_content_hash(path: &str) -> Result<String, std::io::Error> {
-    const SAMPLE_CHUNK_BYTES: usize = 16 * 1024;
-    const SAMPLE_SLOTS: u64 = 8;
-
-    let metadata = std::fs::metadata(path)?;
-    let file_len = metadata.len();
-    let modified_ns = metadata
-        .modified()
-        .ok()
-        .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"FOXY_FILE_CONTENT_HASH_V2");
-    hasher.update(&file_len.to_le_bytes());
-    hasher.update(&modified_ns.to_le_bytes());
-
-    if file_len == 0 {
-        return Ok(crate::core::utils::content_hash::blake3_hex(hasher));
-    }
-
-    let mut file = std::fs::File::open(path)?;
-    let sample_chunk = SAMPLE_CHUNK_BYTES as u64;
-    let mut sample_buf = vec![0u8; SAMPLE_CHUNK_BYTES];
-
-    // For smaller files, hash entire content. For larger files, hash evenly spaced samples.
-    if file_len <= sample_chunk.saturating_mul(SAMPLE_SLOTS) {
-        loop {
-            let read = std::io::Read::read(&mut file, &mut sample_buf)?;
-            if read == 0 {
-                break;
-            }
-            hasher.update(&(read as u64).to_le_bytes());
-            hasher.update(&sample_buf[..read]);
-        }
-        return Ok(crate::core::utils::content_hash::blake3_hex(hasher));
-    }
-
-    let max_offset = file_len.saturating_sub(sample_chunk);
-    let mut last_offset = u64::MAX;
-    for slot in 0..SAMPLE_SLOTS {
-        let offset = if SAMPLE_SLOTS <= 1 {
-            0
-        } else {
-            max_offset.saturating_mul(slot) / (SAMPLE_SLOTS - 1)
-        };
-        if offset == last_offset {
-            continue;
-        }
-        last_offset = offset;
-        std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(offset))?;
-        let read = std::io::Read::read(&mut file, &mut sample_buf)?;
-        hasher.update(&offset.to_le_bytes());
-        hasher.update(&(read as u64).to_le_bytes());
-        hasher.update(&sample_buf[..read]);
-    }
-
-    Ok(crate::core::utils::content_hash::blake3_hex(hasher))
+    crate::core::utils::content_hash::fast_file_content_hash(path)
 }
 
 pub(super) fn calculate_fast_addon_folder_content_hash(
@@ -424,12 +367,22 @@ async fn refresh_content_hashes_for_tree_started(
 
     let file_in_scope = |file_id: u64| file_scope.is_none_or(|scope| scope.contains(&file_id));
     let mut files_sampled = 0usize;
+    let mut files_reused = 0usize;
+    let mut file_content_hash_by_id: HashMap<u64, String> = HashMap::new();
     for file in &tree.files {
         let file_id = file.id;
         if !file_in_scope(file_id) {
             continue;
         }
         files_sampled += 1;
+        // The hash pass that ran earlier in this operation fingerprinted the
+        // file while it was in the page cache; sampling it again would pay
+        // eight seeks per file on a cold disk for the same answer.
+        if let Some(fresh) = context.take_fresh_file_content_hash(file_id) {
+            files_reused += 1;
+            file_content_hash_by_id.insert(file_id, fresh);
+            continue;
+        }
         let path = file.local_path.clone();
         let sem = semaphore.clone();
         join_set.spawn(async move {
@@ -448,7 +401,6 @@ async fn refresh_content_hashes_for_tree_started(
     }
 
     let file_hash_started = Instant::now();
-    let mut file_content_hash_by_id: HashMap<u64, String> = HashMap::new();
     let mut file_hash_failures = 0usize;
     while let Some(result) = join_set.join_next().await {
         match result {
@@ -694,7 +646,7 @@ async fn refresh_content_hashes_for_tree_started(
         .checked_div(total_addons)
         .unwrap_or(0);
     info!(
-        "Content-hash baseline refreshed: repo={} scope={} total_elapsed={:.2?} file_hash={:.2?} file_persist={:.2?} addon_hash={:.2?} repos_hashed={} addons_hashed={}/{} files_hashed={}/{} file_failures={} addon_failures={}",
+        "Content-hash baseline refreshed: repo={} scope={} total_elapsed={:.2?} file_hash={:.2?} file_persist={:.2?} addon_hash={:.2?} repos_hashed={} addons_hashed={}/{} files_hashed={}/{} files_reused_from_hash_pass={} file_failures={} addon_failures={}",
         repo_url,
         if file_scope.is_some() {
             "files"
@@ -710,6 +662,7 @@ async fn refresh_content_hashes_for_tree_started(
         total_addons,
         files_with_content_hash,
         total_files,
+        files_reused,
         file_hash_failures,
         addon_hash_failures
     );

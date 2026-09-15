@@ -13,8 +13,8 @@ use tokio::sync::watch;
 
 use super::transfer::{download_range_to_output, hash_file_segment, wait_for_download_resume};
 use super::types::{
-    ApplySegment, PatchArtifact, PatchOpType, RUN_COPY_BUFFER_SIZE, checksum_matches,
-    coalesce_apply_segments, should_abort_copy_fallback,
+    APPLY_BATCH_BYTES, ApplyBatch, ApplySegment, PatchArtifact, PatchOpType, RUN_COPY_BUFFER_SIZE,
+    checksum_matches, coalesce_apply_segments, plan_apply_batches, should_abort_copy_fallback,
 };
 pub(super) fn validate_runtime_ops(
     ops: &[DownloadPatchOp],
@@ -289,6 +289,245 @@ async fn copy_run_with_hashes(
     }
 }
 
+/// Assemble one batch of output in `buffer` (copy runs read from `source`,
+/// inserts from `blob`), hash every op's bytes, and write the batch with one
+/// positional call. Returns `(op index, streamed checksum)` for every op in the
+/// batch; `None` marks an op whose bytes could not be read (a source range past
+/// the end of the file, or a read error), which the caller repairs from the
+/// network. Only a failed output write is an error.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn apply_batch_blocking(
+    source: &std::fs::File,
+    source_len: u64,
+    blob: &std::fs::File,
+    output: &std::fs::File,
+    ops: &[DownloadPatchOp],
+    segments: &[ApplySegment],
+    batch: &ApplyBatch,
+    buffer: &mut Vec<u8>,
+) -> std::io::Result<Vec<(usize, Option<String>)>> {
+    let batch_len = usize::try_from(batch.length)
+        .map_err(|_| std::io::Error::other("apply batch does not fit in memory"))?;
+    buffer.clear();
+    buffer.resize(batch_len, 0);
+    let buffer_offset = |dest_start: u64| (dest_start - batch.dest_start) as usize;
+    let span = |dest_start: u64, length: u64| -> std::io::Result<std::ops::Range<usize>> {
+        let at = buffer_offset(dest_start);
+        let end = at.saturating_add(length as usize);
+        if dest_start < batch.dest_start || end > batch_len {
+            return Err(std::io::Error::other(format!(
+                "op at {dest_start}+{length} lies outside apply batch {}+{}",
+                batch.dest_start, batch.length
+            )));
+        }
+        Ok(at..end)
+    };
+
+    // (op index, readable) in output order; readable is false until the
+    // bytes for that op landed in the buffer.
+    let mut op_states: Vec<(usize, bool)> = Vec::new();
+    // Source reads are issued in source order so a rotational disk sweeps
+    // forward once per batch instead of following the output layout.
+    let mut copy_reads: Vec<(u64, std::ops::Range<usize>, std::ops::Range<usize>)> = Vec::new();
+
+    for segment in &segments[batch.segment_range.clone()] {
+        match segment {
+            ApplySegment::CopyRun {
+                op_range,
+                source_start,
+                dest_start,
+                ..
+            } => {
+                let first_state = op_states.len();
+                let mut readable_len = 0u64;
+                let mut readable_ops = 0usize;
+                for op_idx in op_range.clone() {
+                    let op = &ops[op_idx];
+                    let end = source_start
+                        .saturating_add(readable_len)
+                        .checked_add(op.length);
+                    let readable = readable_ops == op_idx - op_range.start
+                        && end.is_some_and(|end| end <= source_len);
+                    if readable {
+                        readable_len = readable_len.saturating_add(op.length);
+                        readable_ops += 1;
+                    }
+                    op_states.push((op_idx, false));
+                }
+                if readable_ops > 0 {
+                    let range = span(*dest_start, readable_len)?;
+                    copy_reads.push((
+                        *source_start,
+                        range,
+                        first_state..first_state + readable_ops,
+                    ));
+                }
+            }
+            ApplySegment::Insert { op_idx } => {
+                let op = &ops[*op_idx];
+                let state = op_states.len();
+                op_states.push((*op_idx, false));
+                let Some(blob_offset) = op.blob_offset else {
+                    continue;
+                };
+                let range = span(op.dest_start, op.length)?;
+                match read_at(blob, blob_offset, &mut buffer[range]) {
+                    Ok(()) => op_states[state].1 = true,
+                    Err(err) => warn!(
+                        "Insert op blob read failed, deferring to range download: file_id={} op={} blob_offset={} length={} error={}",
+                        op.file_id, op.data_order, blob_offset, op.length, err
+                    ),
+                }
+            }
+        }
+    }
+
+    copy_reads.sort_by_key(|(source_offset, ..)| *source_offset);
+    for (source_offset, range, states) in copy_reads {
+        let len = range.len();
+        match read_at(source, source_offset, &mut buffer[range]) {
+            Ok(()) => {
+                for (_, readable) in &mut op_states[states] {
+                    *readable = true;
+                }
+            }
+            Err(err) => warn!(
+                "Copy run source read failed, deferring {} ops to range download: source_start={} length={} error={}",
+                states.len(),
+                source_offset,
+                len,
+                err
+            ),
+        }
+    }
+
+    write_at(output, batch.dest_start, &buffer[..batch_len])?;
+
+    Ok(op_states
+        .into_iter()
+        .map(|(op_idx, readable)| {
+            let op = &ops[op_idx];
+            // A readable op's slice was bounds-checked by `span` when read.
+            let checksum = readable.then(|| {
+                let at = buffer_offset(op.dest_start);
+                let mut hasher = FlexHasher::from_checksum(&op.target_checksum);
+                hasher.update(&buffer[at..at + op.length as usize]);
+                hasher.finalize_hex()
+            });
+            (op_idx, checksum)
+        })
+        .collect())
+}
+
+/// Per-file copy fallback accounting shared by the batched and streamed apply
+/// paths, including the abort rule for a plan whose source turns out wrong.
+struct CopyFallbackTracker {
+    copy_ops_total: usize,
+    attempted_ops: usize,
+    attempted_bytes: u64,
+    fallback_ops: usize,
+    fallback_bytes: u64,
+}
+
+impl CopyFallbackTracker {
+    fn attempt(&mut self, op: &DownloadPatchOp) {
+        self.attempted_ops = self.attempted_ops.saturating_add(1);
+        self.attempted_bytes = self.attempted_bytes.saturating_add(op.length);
+    }
+
+    fn fallback(&mut self, op: &DownloadPatchOp) -> anyhow::Result<()> {
+        self.fallback_ops = self.fallback_ops.saturating_add(1);
+        self.fallback_bytes = self.fallback_bytes.saturating_add(op.length);
+        if !should_abort_copy_fallback(
+            self.attempted_ops,
+            self.attempted_bytes,
+            self.fallback_ops,
+            self.fallback_bytes,
+        ) {
+            return Ok(());
+        }
+        let fallback_ops_percent =
+            (self.fallback_ops as u64).saturating_mul(100) / self.attempted_ops.max(1) as u64;
+        let fallback_bytes_percent = self
+            .fallback_bytes
+            .saturating_mul(100)
+            .checked_div(self.attempted_bytes)
+            .unwrap_or(0);
+        Err(anyhow!(
+            "aborting delta apply due widespread copy fallback: file_id={} fallback_ops={}/{} ({}%) total_copy_ops={} fallback_bytes={}/{} ({}%)",
+            op.file_id,
+            self.fallback_ops,
+            self.attempted_ops,
+            fallback_ops_percent,
+            self.copy_ops_total,
+            self.fallback_bytes,
+            self.attempted_bytes,
+            fallback_bytes_percent
+        ))
+    }
+}
+
+/// Settle one op after its bytes were assembled: a streamed checksum equal to
+/// the target is done; anything else is repaired by downloading that range
+/// straight into the output (subject to the copy abort rule).
+#[allow(clippy::too_many_arguments)]
+async fn settle_op(
+    context: &Arc<FoxyContext>,
+    artifact: &PatchArtifact,
+    op: &DownloadPatchOp,
+    streamed: Option<&str>,
+    tracker: &mut CopyFallbackTracker,
+    output_file: &Arc<std::fs::File>,
+    download_pause_rx: &mut watch::Receiver<bool>,
+    cancel_rx: &mut watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    let is_copy = PatchOpType::CopyLocal.matches(op);
+    if is_copy {
+        tracker.attempt(op);
+    }
+    // Verify against target_checksum (the expected output), not
+    // source_checksum, so the check remains correct even if the two
+    // checksums diverge due to planning edge cases.
+    if streamed.is_some_and(|actual| checksum_matches(&op.target_checksum, actual)) {
+        return Ok(());
+    }
+    if is_copy {
+        warn!(
+            "Copy op fallback to remote range: file_id={} op={} source_start={:?} dest_start={} length={} source_checksum={:?} copied_checksum={:?}",
+            op.file_id,
+            op.data_order,
+            op.source_start,
+            op.dest_start,
+            op.length,
+            op.source_checksum,
+            streamed
+        );
+        tracker.fallback(op)?;
+    } else {
+        warn!(
+            "Insert op blob checksum mismatch, downloading fallback range: file_id={} op={} blob_offset={:?} dest_start={} length={} expected={} actual={:?}",
+            op.file_id,
+            op.data_order,
+            op.blob_offset,
+            op.dest_start,
+            op.length,
+            op.target_checksum,
+            streamed
+        );
+    }
+    download_range_to_output(
+        context.clone(),
+        &artifact.remote_url,
+        op.dest_start,
+        op.length,
+        &op.target_checksum,
+        output_file.clone(),
+        download_pause_rx,
+        cancel_rx,
+    )
+    .await
+}
+
 pub(crate) async fn apply_patch_to_temp_file(
     context: Arc<FoxyContext>,
     artifact: &PatchArtifact,
@@ -346,201 +585,119 @@ pub(crate) async fn apply_patch_to_temp_file(
         .iter()
         .filter(|segment| matches!(segment, ApplySegment::CopyRun { .. }))
         .count();
-    let mut attempted_copy_ops = 0usize;
-    let mut attempted_copy_bytes = 0_u64;
-    let mut fallback_copy_ops = 0usize;
-    let mut fallback_copy_bytes = 0_u64;
+    let mut tracker = CopyFallbackTracker {
+        copy_ops_total,
+        attempted_ops: 0,
+        attempted_bytes: 0,
+        fallback_ops: 0,
+        fallback_bytes: 0,
+    };
+    let batches = plan_apply_batches(&segments, patch_ops, APPLY_BATCH_BYTES);
+    let batched_writes = batches
+        .iter()
+        .filter(|batch| !batch.is_oversized(APPLY_BATCH_BYTES))
+        .count();
 
     let apply_phase_started = std::time::Instant::now();
     debug!(
-        "Delta apply plan: file_id={} ops={} copy_ops={} copy_runs={} insert_ops={}",
+        "Delta apply plan: file_id={} ops={} copy_ops={} copy_runs={} insert_ops={} batches={} batched_writes={}",
         artifact.file_id,
         patch_ops.len(),
         copy_ops_total,
         copy_runs,
-        patch_ops.len().saturating_sub(copy_ops_total)
+        patch_ops.len().saturating_sub(copy_ops_total),
+        batches.len(),
+        batched_writes
     );
 
-    for segment in &segments {
+    let segments = Arc::new(segments);
+    let ops_shared: Arc<Vec<DownloadPatchOp>> = Arc::new(patch_ops.to_vec());
+    let mut batch_buffer: Option<Vec<u8>> = None;
+
+    for batch in &batches {
         wait_for_download_resume(&mut download_pause_rx, &mut cancel_rx).await?;
-        let segment_started = std::time::Instant::now();
+        let batch_started = std::time::Instant::now();
 
-        match segment {
-            ApplySegment::CopyRun {
-                op_range,
-                source_start,
-                dest_start,
-                length,
-            } => {
-                let parts: Arc<Vec<RunPart>> = Arc::new(
-                    op_range
-                        .clone()
-                        .map(|op_idx| RunPart {
-                            op_idx,
-                            length: patch_ops[op_idx].length,
-                            expected_checksum: patch_ops[op_idx].target_checksum.clone(),
-                        })
-                        .collect(),
-                );
-                let streamed = copy_run_with_hashes(
-                    old_file.clone(),
-                    old_len,
-                    output_file.clone(),
-                    *source_start,
-                    *dest_start,
-                    parts.clone(),
-                    &mut download_pause_rx,
-                    &mut cancel_rx,
-                )
-                .await;
-                let streamed = match streamed {
-                    Ok(hashes) => hashes,
-                    Err(err) if *cancel_rx.borrow() => return Err(err),
-                    Err(err) => {
-                        warn!(
-                            "Copy run failed ({}), falling back to range downloads: file_id={} ops={}..{} source_start={} dest_start={} length={}",
-                            err,
-                            artifact.file_id,
-                            op_range.start,
-                            op_range.end,
-                            source_start,
-                            dest_start,
-                            length
-                        );
-                        vec![None; parts.len()]
-                    }
-                };
-
-                for (run_idx, part) in parts.iter().enumerate() {
-                    let op = &patch_ops[part.op_idx];
-                    attempted_copy_ops = attempted_copy_ops.saturating_add(1);
-                    attempted_copy_bytes = attempted_copy_bytes.saturating_add(op.length);
-                    let copied_checksum = streamed[run_idx].as_deref();
-                    // Verify against target_checksum (the expected output), not
-                    // source_checksum, so the check remains correct even if the
-                    // two checksums diverge due to planning edge cases.
-                    let checksum_ok = copied_checksum
-                        .is_some_and(|actual| checksum_matches(&op.target_checksum, actual));
-                    if !checksum_ok {
-                        fallback_copy_ops = fallback_copy_ops.saturating_add(1);
-                        fallback_copy_bytes = fallback_copy_bytes.saturating_add(op.length);
-                        warn!(
-                            "Copy op fallback to remote range: file_id={} op={} source_start={:?} dest_start={} length={} source_checksum={:?} copied_checksum={:?}",
-                            op.file_id,
-                            op.data_order,
-                            op.source_start,
-                            op.dest_start,
-                            op.length,
-                            op.source_checksum,
-                            copied_checksum
-                        );
-                        if should_abort_copy_fallback(
-                            attempted_copy_ops,
-                            attempted_copy_bytes,
-                            fallback_copy_ops,
-                            fallback_copy_bytes,
-                        ) {
-                            let fallback_ops_percent = (fallback_copy_ops as u64)
-                                .saturating_mul(100)
-                                / attempted_copy_ops as u64;
-                            let fallback_bytes_percent = fallback_copy_bytes
-                                .saturating_mul(100)
-                                .checked_div(attempted_copy_bytes)
-                                .unwrap_or(0);
-                            return Err(anyhow!(
-                                "aborting delta apply due widespread copy fallback: file_id={} fallback_ops={}/{} ({}%) total_copy_ops={} fallback_bytes={}/{} ({}%)",
-                                op.file_id,
-                                fallback_copy_ops,
-                                attempted_copy_ops,
-                                fallback_ops_percent,
-                                copy_ops_total,
-                                fallback_copy_bytes,
-                                attempted_copy_bytes,
-                                fallback_bytes_percent
-                            ));
-                        }
-                        download_range_to_output(
-                            context.clone(),
-                            &artifact.remote_url,
-                            op.dest_start,
-                            op.length,
-                            &op.target_checksum,
-                            output_file.clone(),
-                            &mut download_pause_rx,
-                            &mut cancel_rx,
-                        )
-                        .await?;
-                    }
-                    segment_checksums[part.op_idx] = op.target_checksum.clone();
-                }
-
-                let elapsed = segment_started.elapsed();
-                if elapsed > std::time::Duration::from_millis(500) {
-                    info!(
-                        "Slow delta op: file_id={} op={} type=copy_run ops={} length={} elapsed={:.2?}",
-                        artifact.file_id,
-                        patch_ops[op_range.start].data_order,
-                        op_range.len(),
-                        length,
-                        elapsed
+        let streamed: Vec<(usize, Option<String>)> = if batch.is_oversized(APPLY_BATCH_BYTES) {
+            // One segment past the batch budget: stream it through the fixed
+            // copy buffer with per-chunk pause and cancel checks.
+            match &segments[batch.segment_range.start] {
+                ApplySegment::CopyRun {
+                    op_range,
+                    source_start,
+                    dest_start,
+                    length,
+                } => {
+                    let parts: Arc<Vec<RunPart>> = Arc::new(
+                        op_range
+                            .clone()
+                            .map(|op_idx| RunPart {
+                                op_idx,
+                                length: patch_ops[op_idx].length,
+                                expected_checksum: patch_ops[op_idx].target_checksum.clone(),
+                            })
+                            .collect(),
                     );
-                }
-            }
-            ApplySegment::Insert { op_idx } => {
-                let op = &patch_ops[*op_idx];
-                let blob_offset = op
-                    .blob_offset
-                    .ok_or_else(|| anyhow!("insert op {} missing blob_offset", op.data_order))?;
-                let part = Arc::new(vec![RunPart {
-                    op_idx: *op_idx,
-                    length: op.length,
-                    expected_checksum: op.target_checksum.clone(),
-                }]);
-                let blob_len = blob_offset.saturating_add(op.length);
-                let copied = copy_run_with_hashes(
-                    blob_file.clone(),
-                    blob_len,
-                    output_file.clone(),
-                    blob_offset,
-                    op.dest_start,
-                    part,
-                    &mut download_pause_rx,
-                    &mut cancel_rx,
-                )
-                .await;
-
-                match copied {
-                    Ok(hashes)
-                        if hashes.first().is_some_and(|actual| {
-                            actual
-                                .as_deref()
-                                .is_some_and(|actual| checksum_matches(&op.target_checksum, actual))
-                        }) =>
+                    let hashes = match copy_run_with_hashes(
+                        old_file.clone(),
+                        old_len,
+                        output_file.clone(),
+                        *source_start,
+                        *dest_start,
+                        parts.clone(),
+                        &mut download_pause_rx,
+                        &mut cancel_rx,
+                    )
+                    .await
                     {
-                        debug!(
-                            "Insert op applied from patch blob: file_id={} op={} blob_offset={} dest_start={} length={} elapsed={:.2?}",
-                            op.file_id,
-                            op.data_order,
-                            blob_offset,
-                            op.dest_start,
-                            op.length,
-                            segment_started.elapsed()
-                        );
-                    }
-                    Err(err) if *cancel_rx.borrow() => return Err(err),
-                    other => {
-                        match other {
-                            Ok(hashes) => warn!(
-                                "Insert op blob checksum mismatch, downloading fallback range: file_id={} op={} blob_offset={} dest_start={} length={} expected={} actual={:?}",
-                                op.file_id,
-                                op.data_order,
-                                blob_offset,
-                                op.dest_start,
-                                op.length,
-                                op.target_checksum,
-                                hashes.first().cloned().flatten()
-                            ),
-                            Err(err) => warn!(
+                        Ok(hashes) => hashes,
+                        Err(err) if *cancel_rx.borrow() => return Err(err),
+                        Err(err) => {
+                            warn!(
+                                "Copy run failed ({}), falling back to range downloads: file_id={} ops={}..{} source_start={} dest_start={} length={}",
+                                err,
+                                artifact.file_id,
+                                op_range.start,
+                                op_range.end,
+                                source_start,
+                                dest_start,
+                                length
+                            );
+                            vec![None; parts.len()]
+                        }
+                    };
+                    parts
+                        .iter()
+                        .zip(hashes)
+                        .map(|(part, hash)| (part.op_idx, hash))
+                        .collect()
+                }
+                ApplySegment::Insert { op_idx } => {
+                    let op = &patch_ops[*op_idx];
+                    let blob_offset = op.blob_offset.ok_or_else(|| {
+                        anyhow!("insert op {} missing blob_offset", op.data_order)
+                    })?;
+                    let part = Arc::new(vec![RunPart {
+                        op_idx: *op_idx,
+                        length: op.length,
+                        expected_checksum: op.target_checksum.clone(),
+                    }]);
+                    let hashes = match copy_run_with_hashes(
+                        blob_file.clone(),
+                        blob_offset.saturating_add(op.length),
+                        output_file.clone(),
+                        blob_offset,
+                        op.dest_start,
+                        part,
+                        &mut download_pause_rx,
+                        &mut cancel_rx,
+                    )
+                    .await
+                    {
+                        Ok(hashes) => hashes,
+                        Err(err) if *cancel_rx.borrow() => return Err(err),
+                        Err(err) => {
+                            warn!(
                                 "Insert op blob read failed, downloading fallback range: file_id={} op={} blob_offset={} dest_start={} length={} error={}",
                                 op.file_id,
                                 op.data_order,
@@ -548,34 +705,73 @@ pub(crate) async fn apply_patch_to_temp_file(
                                 op.dest_start,
                                 op.length,
                                 err
-                            ),
+                            );
+                            vec![None]
                         }
-                        download_range_to_output(
-                            context.clone(),
-                            &artifact.remote_url,
-                            op.dest_start,
-                            op.length,
-                            &op.target_checksum,
-                            output_file.clone(),
-                            &mut download_pause_rx,
-                            &mut cancel_rx,
-                        )
-                        .await?;
-                    }
+                    };
+                    vec![(*op_idx, hashes.into_iter().next().flatten())]
                 }
-                let elapsed = segment_started.elapsed();
-                if elapsed > std::time::Duration::from_millis(500) {
-                    info!(
-                        "Slow delta op: file_id={} op={} type={} length={} elapsed={:.2?}",
-                        op.file_id, op.data_order, op.op_type, op.length, elapsed
-                    );
-                }
-                // Every path above ensures the segment matches target_checksum:
-                // blob copy verified directly, fallback verified by download_range_to_output.
-                segment_checksums[*op_idx] = op.target_checksum.clone();
             }
+        } else {
+            let source = old_file.clone();
+            let blob = blob_file.clone();
+            let output = output_file.clone();
+            let ops = ops_shared.clone();
+            let segments = segments.clone();
+            let batch = batch.clone();
+            let mut buffer = batch_buffer.take().unwrap_or_default();
+            let (buffer, result) = tokio::task::spawn_blocking(move || {
+                let result = apply_batch_blocking(
+                    &source,
+                    old_len,
+                    &blob,
+                    &output,
+                    &ops,
+                    &segments,
+                    &batch,
+                    &mut buffer,
+                );
+                (buffer, result)
+            })
+            .await
+            .context("apply batch task failed")?;
+            batch_buffer = Some(buffer);
+            result.context("failed to write patched output batch")?
+        };
+
+        for (op_idx, checksum) in streamed {
+            let op = &patch_ops[op_idx];
+            settle_op(
+                &context,
+                artifact,
+                op,
+                checksum.as_deref(),
+                &mut tracker,
+                &output_file,
+                &mut download_pause_rx,
+                &mut cancel_rx,
+            )
+            .await?;
+            segment_checksums[op_idx] = op.target_checksum.clone();
+        }
+
+        let elapsed = batch_started.elapsed();
+        if elapsed > std::time::Duration::from_millis(500) {
+            info!(
+                "Slow delta batch: file_id={} first_op={} segments={} length={} elapsed={:.2?}",
+                artifact.file_id,
+                batch.segment_range.start,
+                batch.segment_range.len(),
+                batch.length,
+                elapsed
+            );
         }
     }
+
+    let attempted_copy_ops = tracker.attempted_ops;
+    let attempted_copy_bytes = tracker.attempted_bytes;
+    let fallback_copy_ops = tracker.fallback_ops;
+    let fallback_copy_bytes = tracker.fallback_bytes;
 
     info!(
         "Delta patch apply completed: file_id={} ops={} copy_runs={} copy_ops_attempted={} copy_bytes={} fallback_copy_ops={} fallback_copy_bytes={} output_size={} elapsed={:.2?}",

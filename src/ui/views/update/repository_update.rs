@@ -862,6 +862,7 @@ impl Foxy {
             self.set_download_paused(paused);
         }
         if let Some(idx) = start_download {
+            self.arm_benchmark(crate::core::benchmarks::BenchmarkKind::Update, Vec::new());
             self.start_core_sync(idx, SyncMode::Download);
         }
     }

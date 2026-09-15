@@ -126,6 +126,10 @@ impl Foxy {
                                         result.repository_name
                                     );
                                     self.repository_view_state.selected_repository = Some(repo_idx);
+                                    self.arm_benchmark(
+                                        crate::core::benchmarks::BenchmarkKind::ForceRedownload,
+                                        Vec::new(),
+                                    );
                                     self.start_core_sync_with_selected_mod_states(
                                         repo_idx,
                                         SyncMode::Download,
@@ -309,6 +313,7 @@ impl Foxy {
 
             let Some(evt) = evt else { continue };
             processed_events += 1;
+            self.benchmark_observe_event(&evt);
 
             match &evt {
                 ProgressEvent::Diff { mods } => {
@@ -1012,6 +1017,7 @@ impl Foxy {
                             true,
                         );
                     }
+                    self.benchmark_finish_capture(&evt, last_mode, update_count);
                     self.record_repository_space_bulk_completion(
                         last_repo,
                         last_mode,

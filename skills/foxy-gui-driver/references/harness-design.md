@@ -398,7 +398,7 @@ cargo run -- agent-gui set-setting download-speed-limit-mbps unlimited --json
 cargo run -- agent-gui set-setting locale en --json
 ```
 
-Keys: `debug-mode`, `show-activity-log` (routes through `set_activity_log_visibility`), `show-fps-counter` (bool spellings: true/1/on/yes/false/0/off/no), `ui-scale-percent` (integer, reuses the `scale` clamp), `locale` (string; also calls `i18n.set_language`), `download-speed-limit-mbps` (integer ≥ 1, or `unlimited`/`none` to disable). Response echoes `{ key, value }` with `value` set to the *applied* (clamped) value so an agent can confirm clamping; an unknown key or unparseable value returns an `invalid-setting` error.
+Keys: `debug-mode`, `show-activity-log` (routes through `set_activity_log_visibility`), `show-fps-counter` (bool spellings: true/1/on/yes/false/0/off/no), `extended-diagnostics-logging` (bool; also flips the live log level, profiler and resource sampler), `ui-scale-percent` (integer, reuses the `scale` clamp), `locale` (string; also calls `i18n.set_language`), `download-speed-limit-mbps` (integer ≥ 1, or `unlimited`/`none` to disable). Response echoes `{ key, value }` with `value` set to the *applied* (clamped) value so an agent can confirm clamping; an unknown key or unparseable value returns an `invalid-setting` error.
 
 ### `invoke`
 

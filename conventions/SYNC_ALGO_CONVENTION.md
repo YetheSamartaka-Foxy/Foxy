@@ -95,6 +95,15 @@ Local content hashes must be file and folder based, not part based:
 
 Part checksums are not part of the quick content hash layer.
 
+The file fingerprint is taken by the hash pass itself, right after a file's
+parts were read and while it is still in the page cache, and handed to the
+content-hash refresh through the operation's `FoxyContext`
+(`record_fresh_file_content_hashes` / `take_fresh_file_content_hash`). The
+refresh samples the disk only for files no hash pass in the same operation
+fingerprinted. On rotational media the eight sampled reads per file cost more
+than a minute per few thousand files once the pass has evicted them; the
+fingerprint describes the same bytes the tree hash does either way.
+
 ### Download Target
 
 A transient row in `download_target_file` or `download_target_file_part`.
@@ -444,8 +453,9 @@ Algorithm for a targeted file set:
 7. Recompute affected repository checksums from ordered addons only when all
    addon rows required for the ordered rollup are available.
 8. Refresh content hashes only for the files that were just hashed and the
-   addons that contain them. The unscoped full refresh survives only after the
-   one-time full baseline init and the integrity recheck.
+   addons that contain them, reusing the fingerprints the hash pass recorded
+   rather than sampling the files again. The unscoped full refresh survives
+   only after the one-time full baseline init and the integrity recheck.
 9. For a scoped content-hash refresh, persist scoped file/addon content hashes
    and recompute the repository `local_content_hash` only when every addon row
    is present (a file-scoped tree carries all addon headers; a mod-scoped tree
@@ -1204,6 +1214,8 @@ The logs should make it possible to answer:
 - Do not clear or withhold the content hash of a tree-mismatched file or addon;
   that forces a full re-hash of every outdated file on every scan.
 - Do not run an unscoped content-hash refresh after a targeted hash pass.
+- Do not sample a file for its content hash in the same operation that just
+  tree-hashed it; consume the fingerprint the hash pass recorded.
 - Do not use stale download target rows as proof that a file still needs update.
 - Do not fetch all mod manifests when `repo.json.checksum == local_checksum`.
 - Do not run full tree hashing for ordinary no-change startup.

@@ -303,6 +303,10 @@ impl Foxy {
             }
             if recheck_repository_integrity {
                 info!("Triggering full repository integrity recheck");
+                self.arm_benchmark(
+                    crate::core::benchmarks::BenchmarkKind::IntegrityCheck,
+                    Vec::new(),
+                );
                 self.start_core_sync(repo_index, SyncMode::RecheckIntegrity);
             }
         }

@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender as StdSender;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -35,7 +35,8 @@ use crate::core::utils::app_paths;
 
 use flexi_logger::writers::LogWriter;
 use flexi_logger::{
-    Cleanup, Criterion, DeferredNow, Duplicate, FileSpec, Logger, Naming, Record, WriteMode,
+    Cleanup, Criterion, DeferredNow, Duplicate, FileSpec, LevelFilter, LogSpecBuilder,
+    LogSpecification, Logger, LoggerHandle, Naming, Record, WriteMode,
 };
 
 mod background_runtime;
@@ -52,7 +53,7 @@ pub use fs_watcher::spawn_repo_fs_watcher;
 pub(crate) use logging::send_progress_event;
 pub use logging::{
     activity_log_generation, activity_log_snapshot, logger_health, next_operation_id,
-    process_start_elapsed,
+    process_start_elapsed, set_extended_diagnostics,
 };
 pub(crate) use logging::{ensure_logger, ensure_logger_with_terminal};
 pub use quick_scan::{

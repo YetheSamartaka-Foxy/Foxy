@@ -3,6 +3,7 @@ mod app_general;
 mod app_paths;
 mod application;
 mod backup;
+mod benchmarks;
 mod customization;
 mod game_space;
 mod profile_manager;
@@ -69,6 +70,7 @@ impl Foxy {
                 // TS3 plugins) live in the game space settings view.
                 let tabs = [
                     "Application",
+                    "Benchmarks",
                     "Cleanup",
                     "Direct download",
                     "Backup Manager",
@@ -123,6 +125,7 @@ impl Foxy {
                             "Customization" => {
                                 self.render_customization_settings(ui, card_size.y - 30.0)
                             }
+                            "Benchmarks" => self.render_benchmarks_settings(ui, card_size.y - 30.0),
                             _ => self.render_application_settings(ui),
                         }
                     });

@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use log::{error, info, warn};
 use turso::{Connection, Database};
 
+use crate::core::benchmarks::index::BENCHMARK_UPSERT_SQL;
 use crate::core::models::pending_update::PENDING_UPDATE_UPSERT_SQL;
 use crate::core::models::repository::REPOSITORY_UPSERT_SQL;
 use crate::core::tasks::db_turso::TURSO_BOOTSTRAP_SCHEMA;
@@ -35,6 +36,7 @@ use crate::core::utils::format::sanitize_log_path;
 const PROBE_STATEMENTS: &[(&str, &str)] = &[
     ("repositories upsert", REPOSITORY_UPSERT_SQL),
     ("pending_updates upsert", PENDING_UPDATE_UPSERT_SQL),
+    ("benchmarks upsert", BENCHMARK_UPSERT_SQL),
 ];
 
 /// Result of probing one database file. Empty `problems` means compatible.

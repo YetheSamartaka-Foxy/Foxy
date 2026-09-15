@@ -497,7 +497,9 @@ pub(crate) async fn try_patch_first(
 
     let total_elapsed = patch_started.elapsed();
     let download_phase = download_elapsed.saturating_sub(preflight_elapsed);
-    let apply_phase = apply_elapsed.saturating_sub(download_elapsed);
+    let apply_phase = apply_elapsed
+        .saturating_sub(download_elapsed)
+        .saturating_sub(apply_permit_wait);
     let verify_promote_phase = total_elapsed.saturating_sub(apply_elapsed);
     let savings_bytes = artifact
         .new_file_expected_size
@@ -507,12 +509,13 @@ pub(crate) async fn try_patch_first(
         .checked_div(artifact.new_file_expected_size)
         .unwrap_or(0);
     info!(
-        "Delta patch applied successfully: file_id={} local_path={} total_elapsed={:.2?} preflight={:.2?} download={:.2?} apply={:.2?} verify_promote={:.2?} planned_download_bytes={} full_bytes={} savings_bytes={} savings_percent={}%",
+        "Delta patch applied successfully: file_id={} local_path={} total_elapsed={:.2?} preflight={:.2?} download={:.2?} apply_wait={:.2?} apply={:.2?} verify_promote={:.2?} planned_download_bytes={} full_bytes={} savings_bytes={} savings_percent={}%",
         patch_file.file_id,
         artifact.local_target_path,
         total_elapsed,
         preflight_elapsed,
         download_phase,
+        apply_permit_wait,
         apply_phase,
         verify_promote_phase,
         planned_download_bytes,

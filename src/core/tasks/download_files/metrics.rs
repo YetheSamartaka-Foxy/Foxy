@@ -136,7 +136,7 @@ impl Drop for PhaseGuard<'_> {
 }
 
 impl DownloadMetrics {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             started_at: Instant::now(),
             counters: DownloadCounters {
@@ -204,6 +204,12 @@ impl DownloadMetrics {
         if let Ok(mut ranges) = self.range_events.lock() {
             ranges.push(metric);
         }
+    }
+
+    /// Highest one-second network throughput sampled so far in this
+    /// download, 0 until the first sample.
+    pub(crate) fn peak_network_bps(&self) -> u64 {
+        self.counters.peak_network_bps.load(Ordering::Relaxed)
     }
 
     /// Record bytes transferred (called from transfer layer per chunk).

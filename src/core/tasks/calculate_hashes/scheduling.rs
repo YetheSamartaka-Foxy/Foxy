@@ -25,6 +25,9 @@ pub(super) struct FileHashResult {
     pub(super) file_idx: usize,
     pub(super) updated_parts: Vec<(usize, FoxyModFilePart)>,
     pub(super) whole_file_checksum: Option<String>,
+    /// Content fingerprint sampled while the file was hot; see
+    /// `PartHashCalculation::content_hash`.
+    pub(super) content_hash: Option<String>,
     pub(super) file_path: String,
     pub(super) elapsed: std::time::Duration,
     pub(super) parts_count: usize,
@@ -601,7 +604,11 @@ async fn calculate_whole_file_checksum(
     expected_len: u64,
     semaphore: Arc<Semaphore>,
     hash_io: WholeFileHashIo,
-) -> (Option<String>, super::part_hashes::PartHashMetrics) {
+) -> (
+    Option<String>,
+    Option<String>,
+    super::part_hashes::PartHashMetrics,
+) {
     const WHOLE_FILE_HASH_BUF_SIZE: usize = 4 * 1024 * 1024;
 
     let started = Instant::now();
@@ -617,7 +624,7 @@ async fn calculate_whole_file_checksum(
             debug!("Whole-file hash skipped for {}: {}", file_path, err);
             metrics.metadata_elapsed = metadata_started.elapsed();
             metrics.total_elapsed = started.elapsed();
-            return (None, metrics);
+            return (None, None, metrics);
         }
     };
     metrics.metadata_elapsed = metadata_started.elapsed();
@@ -631,7 +638,7 @@ async fn calculate_whole_file_checksum(
             expected_len
         );
         metrics.total_elapsed = started.elapsed();
-        return (None, metrics);
+        return (None, None, metrics);
     }
 
     let wait_started = Instant::now();
@@ -645,49 +652,61 @@ async fn calculate_whole_file_checksum(
     } else {
         Blake3ReadStrategy::Buffered
     };
-    let result = tokio::task::spawn_blocking(move || -> std::io::Result<String> {
-        let _permit = permit;
-        let profiled = crate::core::utils::profiling::FsTimer::start();
-        if let Some(hex) = blake3_mmap_file_hash_full(Path::new(&file_path_for_hash), mmap_strategy)
-        {
-            profiled.stop("hash_mmap", expected_len);
-            return Ok(hex);
-        }
-        let mut file = std::fs::File::open(&file_path_for_hash)?;
-        let mut hasher = FlexHasher::from_checksum(&expected_checksum);
-        let mut buffer = vec![0u8; WHOLE_FILE_HASH_BUF_SIZE];
-        let mut read_bytes = 0u64;
-        loop {
-            let read = file.read(&mut buffer)?;
-            if read == 0 {
-                break;
+    let result =
+        tokio::task::spawn_blocking(move || -> std::io::Result<(String, Option<String>)> {
+            let _permit = permit;
+            let profiled = crate::core::utils::profiling::FsTimer::start();
+            let fingerprint = |file: &mut std::fs::File| {
+                crate::core::utils::content_hash::fast_file_content_hash_from_reader(
+                    file, &metadata,
+                )
+                .ok()
+            };
+            if let Some(hex) =
+                blake3_mmap_file_hash_full(Path::new(&file_path_for_hash), mmap_strategy)
+            {
+                profiled.stop("hash_mmap", expected_len);
+                let content_hash = std::fs::File::open(&file_path_for_hash)
+                    .ok()
+                    .and_then(|mut file| fingerprint(&mut file));
+                return Ok((hex, content_hash));
             }
-            read_bytes += read as u64;
-            hasher.update(&buffer[..read]);
-        }
-        profiled.stop("hash_read", read_bytes);
-        Ok(hasher.finalize_hex())
-    })
-    .await;
+            let mut file = std::fs::File::open(&file_path_for_hash)?;
+            let mut hasher = FlexHasher::from_checksum(&expected_checksum);
+            let mut buffer = vec![0u8; WHOLE_FILE_HASH_BUF_SIZE];
+            let mut read_bytes = 0u64;
+            loop {
+                let read = file.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                read_bytes += read as u64;
+                hasher.update(&buffer[..read]);
+            }
+            profiled.stop("hash_read", read_bytes);
+            let content_hash = fingerprint(&mut file);
+            Ok((hasher.finalize_hex(), content_hash))
+        })
+        .await;
     metrics.blocking_hash_elapsed = blocking_started.elapsed();
 
-    let checksum = match result {
-        Ok(Ok(checksum)) => {
+    let (checksum, content_hash) = match result {
+        Ok(Ok((checksum, content_hash))) => {
             metrics.hashed_bytes = expected_len;
-            Some(checksum)
+            (Some(checksum), content_hash)
         }
         Ok(Err(err)) => {
             warn!("Whole-file hash failed for {}: {}", file_path, err);
-            None
+            (None, None)
         }
         Err(err) => {
             error!("Whole-file hash task panicked for {}: {}", file_path, err);
-            None
+            (None, None)
         }
     };
 
     metrics.total_elapsed = started.elapsed();
-    (checksum, metrics)
+    (checksum, content_hash, metrics)
 }
 
 pub(super) async fn recalculate_parts_for_jobs(
@@ -747,6 +766,7 @@ pub(super) async fn recalculate_parts_for_jobs(
                     file_idx,
                     updated_parts: Vec::new(),
                     whole_file_checksum: None,
+                    content_hash: None,
                     file_path,
                     elapsed: std::time::Duration::ZERO,
                     parts_count,
@@ -756,43 +776,51 @@ pub(super) async fn recalculate_parts_for_jobs(
             }
             let file_started = Instant::now();
             let missing_file = !Path::new(&file_path).exists();
-            let (part_calculation, whole_file_checksum) = if indexed_parts.is_empty()
-                && !file_remote_checksum.is_empty()
-            {
-                let (checksum, metrics) = calculate_whole_file_checksum(
-                    file_path.clone(),
-                    file_remote_checksum,
-                    file_length,
-                    sem,
-                    hash_io,
-                )
-                .await;
-                (
-                    super::part_hashes::PartHashCalculation {
-                        parts: Vec::new(),
-                        metrics,
-                    },
-                    checksum,
-                )
-            } else {
-                let parts_only: Vec<FoxyModFilePart> =
-                    indexed_parts.iter().map(|(_, p)| p.clone()).collect();
-                let part_progress = ptx.clone().map(|tx| {
-                    PartHashProgress::new(
-                        part_counter.clone(),
-                        progress.total_parts,
-                        done_counter.clone(),
-                        progress.total_files,
-                        tx,
+            let (part_calculation, whole_file_checksum) =
+                if indexed_parts.is_empty() && !file_remote_checksum.is_empty() {
+                    let (checksum, content_hash, metrics) = calculate_whole_file_checksum(
+                        file_path.clone(),
+                        file_remote_checksum,
+                        file_length,
+                        sem,
+                        hash_io,
                     )
-                });
-                (
-                    calculate_part_hashes(parts_only, &file_path, sem, span_source, part_progress)
+                    .await;
+                    (
+                        super::part_hashes::PartHashCalculation {
+                            parts: Vec::new(),
+                            metrics,
+                            content_hash,
+                        },
+                        checksum,
+                    )
+                } else {
+                    let parts_only: Vec<FoxyModFilePart> =
+                        indexed_parts.iter().map(|(_, p)| p.clone()).collect();
+                    let part_progress = ptx.clone().map(|tx| {
+                        PartHashProgress::new(
+                            part_counter.clone(),
+                            progress.total_parts,
+                            done_counter.clone(),
+                            progress.total_files,
+                            tx,
+                        )
+                    });
+                    (
+                        calculate_part_hashes(
+                            parts_only,
+                            &file_path,
+                            sem,
+                            span_source,
+                            part_progress,
+                            cancel.clone(),
+                        )
                         .await,
-                    None,
-                )
-            };
+                        None,
+                    )
+                };
             let file_elapsed = file_started.elapsed();
+            let content_hash = part_calculation.content_hash.clone();
             let updated_parts = if cancel.as_ref().is_some_and(|rx| *rx.borrow()) {
                 cancelled_flag.store(true, Ordering::Relaxed);
                 Vec::new()
@@ -827,6 +855,7 @@ pub(super) async fn recalculate_parts_for_jobs(
                 file_idx,
                 updated_parts,
                 whole_file_checksum,
+                content_hash,
                 file_path,
                 elapsed: file_elapsed,
                 parts_count,
@@ -1753,7 +1782,7 @@ mod tests {
         std::fs::write(&path, &bytes).unwrap();
         let expected = blake3::hash(&bytes).to_hex().to_uppercase();
 
-        let (checksum, _) = calculate_whole_file_checksum(
+        let (checksum, _, _) = calculate_whole_file_checksum(
             path.to_string_lossy().to_string(),
             expected.clone(),
             bytes.len() as u64,
@@ -1774,7 +1803,7 @@ mod tests {
         md5.update(b"hello");
         let expected = md5.finalize_hex();
 
-        let (checksum, _) = calculate_whole_file_checksum(
+        let (checksum, _, _) = calculate_whole_file_checksum(
             path.to_string_lossy().to_string(),
             expected.clone(),
             5,
@@ -1793,7 +1822,7 @@ mod tests {
         std::fs::write(&path, b"hello").unwrap();
         let expected = blake3::hash(b"hello").to_hex().to_uppercase();
 
-        let (checksum, metrics) = calculate_whole_file_checksum(
+        let (checksum, _, metrics) = calculate_whole_file_checksum(
             path.to_string_lossy().to_string(),
             expected.clone(),
             5,
@@ -1813,7 +1842,7 @@ mod tests {
         std::fs::write(&path, b"hello").unwrap();
         let expected = blake3::hash(b"hello").to_hex().to_uppercase();
 
-        let (checksum, metrics) = calculate_whole_file_checksum(
+        let (checksum, _, metrics) = calculate_whole_file_checksum(
             path.to_string_lossy().to_string(),
             expected,
             10,

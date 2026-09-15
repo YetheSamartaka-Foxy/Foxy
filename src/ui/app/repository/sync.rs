@@ -8,6 +8,7 @@ use tokio::sync::broadcast;
 use tokio::sync::watch;
 
 use crate::core::api::{self, ModDiffSummary, SyncMode};
+use crate::core::benchmarks::BenchmarkKind;
 use crate::core::tasks::create_web_client::create_web_client;
 use crate::core::tasks::remote_reachability::ensure_remote_repository_reachable;
 use crate::ui::app::{AddonForceRedownloadProbeResult, AddonHashRecalcResult, Foxy};
@@ -61,8 +62,15 @@ impl Foxy {
         force_redownload: bool,
         prepare_download_plan: bool,
     ) {
+        let benchmark_arm = self.benchmark_armed.take();
         if self.syncing_repository.is_some() {
             warn!("Sync request ignored: another repository sync is already in progress");
+            return;
+        }
+        // A cancelled worker whose repository was deleted still owns the
+        // progress channel until it reports; starting now would orphan it.
+        if self.current_sync_mode.is_some() {
+            warn!("Sync request ignored: the previous sync worker is still winding down");
             return;
         }
         if self.is_direct_download_running() {
@@ -301,6 +309,7 @@ impl Foxy {
             // changed" mark; a plain recheck leaves it for the next Download.
             let discard_prepared_queue = (mode == SyncMode::Download || prepare_download_plan)
                 && self.fs_changed_since_prepare.remove(&normalized_repo_url);
+            self.begin_benchmark_capture(benchmark_arm, repo_idx);
             self.backend_worker = Some(api::spawn_repository_sync(
                 repo.address.clone(),
                 sanitize_user_path(&repo.path),
@@ -445,6 +454,7 @@ impl Foxy {
         self.clear_completed_repository_check_banner_for_repo_change(Some(repo_idx));
         self.update_modal_open = true;
         self.open_update_after_sync = false;
+        self.arm_benchmark(BenchmarkKind::AddonDownload, found_targets.clone());
         self.start_core_sync_with_selected_mod_states(
             repo_idx,
             SyncMode::Download,
@@ -505,6 +515,10 @@ impl Foxy {
         self.open_update_after_sync = false;
         self.needs_repaint = true;
 
+        self.arm_benchmark(
+            crate::core::benchmarks::BenchmarkKind::ForceRedownload,
+            Vec::new(),
+        );
         self.start_core_sync_with_selected_mod_states(repo_idx, SyncMode::Download, None, true);
     }
 
@@ -920,6 +934,10 @@ impl Foxy {
         }
 
         self.update_modal_open = false;
+        self.arm_benchmark(
+            BenchmarkKind::AddonForceRedownload,
+            vec![addon_name.to_string()],
+        );
         self.prepare_update_confirmation(repo_idx);
     }
 }

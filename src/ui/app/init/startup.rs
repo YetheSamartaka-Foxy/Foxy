@@ -198,7 +198,13 @@ impl Foxy {
             delete_repository_delete_files: false,
             show_force_redownload_confirmation: false,
             show_wipe_db_confirmation: false,
+            wipe_db_include_benchmarks: false,
             show_wipe_repo_db_confirmation: false,
+            benchmark_armed: None,
+            benchmark_capture: None,
+            benchmark_prompt: None,
+            benchmarks_view: Default::default(),
+            benchmark_channels: Default::default(),
             pending_renderer_fallback_notice: false,
             pending_db_schema_wipe: None,
             db_lock_conflict: None,
@@ -348,6 +354,10 @@ impl Foxy {
             fs_watch_index_dirty: false,
             fs_watch_observed_repositories_revision: 0,
             fs_changed_since_prepare: HashSet::new(),
+            fs_watch_clean_scan_streak: 0,
+            fs_watch_backoff_until: None,
+            fs_watch_backoff_urls: HashSet::new(),
+            fs_watch_scan_urls: HashSet::new(),
             deferred_fs_scan: HashSet::new(),
             pending_quick_scan_urls: HashSet::new(),
             pending_quick_scan_prevalidated_urls: HashSet::new(),
@@ -850,6 +860,9 @@ impl Foxy {
 
     pub(in crate::ui::app) fn sync_debug_runtime_state(&mut self) {
         self.show_debug_windows = self.settings_view_state.show_debug_windows;
+        crate::core::api::set_extended_diagnostics(
+            self.settings_view_state.extended_diagnostics_logging,
+        );
         if !self.settings_view_state.show_memory_diagnostics_icon {
             self.show_memory_diagnostics_window = false;
         }

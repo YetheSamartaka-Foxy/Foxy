@@ -205,7 +205,14 @@ impl Foxy {
                     ui.vertical_centered(|ui| {
                         ui.label(tr("Are you sure you want to completely wipe the database?"));
                         ui.label(tr("This will clear all cached repository data."));
-                        ui.add_space(20.0);
+                        ui.add_space(8.0);
+                        Self::ui_state_checkbox(
+                            ui,
+                            &mut self.wipe_db_include_benchmarks,
+                            tr("Also delete saved benchmarks"),
+                        )
+                        .on_hover_text(tr("Benchmarks are kept by default; the database only indexes them and the index is rebuilt afterwards."));
+                        ui.add_space(12.0);
                         ui.horizontal(|ui| {
                             ui.with_layout(
                                 egui::Layout::centered_and_justified(egui::Direction::TopDown),
@@ -220,7 +227,19 @@ impl Foxy {
                                     }
                                     if yes_btn.clicked() {
                                         self.show_wipe_db_confirmation = false;
-                                        log::warn!("Database wipe confirmed");
+                                        let include_benchmarks = self.wipe_db_include_benchmarks;
+                                        self.wipe_db_include_benchmarks = false;
+                                        log::warn!(
+                                            "Database wipe confirmed (delete_benchmarks={})",
+                                            include_benchmarks
+                                        );
+                                        if include_benchmarks {
+                                            match crate::core::benchmarks::store::delete_all() {
+                                                Ok(count) => info!("Deleted {count} saved benchmarks with the database wipe"),
+                                                Err(err) => log::warn!("Failed to delete saved benchmarks: {err:#}"),
+                                            }
+                                        }
+                                        self.benchmarks_view = Default::default();
                                         // Run the database wipe on a background thread
                                         let database_wipe_tx = self.database_wipe_tx.clone();
                                         std::thread::spawn(move || {

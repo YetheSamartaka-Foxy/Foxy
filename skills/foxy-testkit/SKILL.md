@@ -178,6 +178,10 @@ as a content pass.
 - Never edit a case during an optimization loop. `case_hash` is recorded per row
   and a changed hash starts a new history instead of continuing an old one.
 - Iteration 0 is the cold pass and is ledgered separately from the warm median.
+  "Cold" is only the iteration number: a payload the run just downloaded or
+  mutated is still in the OS page cache, so an HDD case measures memory unless
+  it carries an `evict-cache` operation (a non-cached open of every payload
+  file, Windows only) before the operation that should read the disk.
 - A run that moved fewer bytes, files, or parts is not faster, it is wrong.
 - `database.write_time_ms` and the per-category `txn_ms` behind it are gated
   transaction windows, not row cost, and are meaningless across write-gate

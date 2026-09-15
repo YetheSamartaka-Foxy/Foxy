@@ -17,6 +17,23 @@ pub(super) const COPY_BUFFER_SIZE: usize = 512 * 1024;
 /// rotational disk alternating between the source and the output spends its
 /// time transferring rather than seeking.
 pub(super) const RUN_COPY_BUFFER_SIZE: usize = 8 * 1024 * 1024;
+/// Output bytes assembled in memory before one positional write. Small ops
+/// written one by one let the OS lazy writer interleave with the source reads
+/// on the same spindle; a few large writes keep both sequential.
+pub(super) const APPLY_BATCH_BYTES: u64 = 16 * 1024 * 1024;
+/// Upper bound on a copy gap fetched and discarded between two insert ops so
+/// they share one range request; see [`insert_run_gap_budget`].
+pub(super) const INSERT_RUN_MAX_GAP_BYTES: u64 = 256 * 1024;
+/// Time one extra range request is taken to cost once its round trip is
+/// amortized over the parallel connections; a gap that transfers faster than
+/// this at the measured throughput is cheaper to bridge than to split.
+const INSERT_RUN_GAP_BUDGET_MS: u64 = 8;
+/// Gap bridged before any throughput sample exists (a stage that starts with
+/// patches plans them all at once): one small entry, break-even at ~4 MB/s.
+const INSERT_RUN_MIN_GAP_BYTES: u64 = 32 * 1024;
+/// Upper bound on one coalesced insert request, so a retry repeats at most
+/// this much.
+pub(super) const INSERT_RUN_MAX_BYTES: u64 = 64 * 1024 * 1024;
 pub(super) const PATCH_PREFLIGHT_COPY_SAMPLE_OPS: usize = 24;
 pub(super) const PATCH_COPY_FALLBACK_ABORT_MIN_ATTEMPTED_OPS: usize = 12;
 const PATCH_COPY_FALLBACK_ABORT_PERCENT: u64 = 75;
@@ -257,6 +274,120 @@ pub(super) fn coalesce_apply_segments(
     Ok(segments)
 }
 
+/// A group of consecutive segments whose output is assembled in one buffer
+/// and written with one call. A segment larger than the batch budget stands
+/// alone and is streamed instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ApplyBatch {
+    pub(super) segment_range: std::ops::Range<usize>,
+    pub(super) dest_start: u64,
+    pub(super) length: u64,
+}
+
+impl ApplyBatch {
+    pub(super) fn is_oversized(&self, max_bytes: u64) -> bool {
+        self.segment_range.len() == 1 && self.length > max_bytes
+    }
+}
+
+pub(super) fn segment_dest_span(segment: &ApplySegment, ops: &[DownloadPatchOp]) -> (u64, u64) {
+    match segment {
+        ApplySegment::CopyRun {
+            dest_start, length, ..
+        } => (*dest_start, *length),
+        ApplySegment::Insert { op_idx } => (ops[*op_idx].dest_start, ops[*op_idx].length),
+    }
+}
+
+/// Group segments (already in output order) into batches of at most
+/// `max_bytes` of output. A single segment above the budget becomes its own
+/// batch so the caller can stream it.
+pub(super) fn plan_apply_batches(
+    segments: &[ApplySegment],
+    ops: &[DownloadPatchOp],
+    max_bytes: u64,
+) -> Vec<ApplyBatch> {
+    let mut batches: Vec<ApplyBatch> = Vec::new();
+    for (idx, segment) in segments.iter().enumerate() {
+        let (dest_start, length) = segment_dest_span(segment, ops);
+        if let Some(open) = batches.last_mut()
+            && !open.is_oversized(max_bytes)
+            && open.length.saturating_add(length) <= max_bytes
+        {
+            open.segment_range.end = idx + 1;
+            open.length = open.length.saturating_add(length);
+            continue;
+        }
+        batches.push(ApplyBatch {
+            segment_range: idx..idx + 1,
+            dest_start,
+            length,
+        });
+    }
+    batches
+}
+
+/// Consecutive insert ops fetched with one range request. The request covers
+/// `request_start..=request_end` of the remote file; bytes between the ops
+/// (small copy ops the plan already has locally) are discarded on arrival.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct InsertRun {
+    /// Indices into the op list, in `data_order`.
+    pub(super) op_indices: Vec<usize>,
+    pub(super) request_start: u64,
+    pub(super) request_end: u64,
+}
+
+impl InsertRun {
+    pub(super) fn request_len(&self) -> u64 {
+        self.request_end - self.request_start + 1
+    }
+}
+
+/// Largest copy gap worth fetching and discarding at `peak_network_bps`,
+/// between [`INSERT_RUN_MIN_GAP_BYTES`] and [`INSERT_RUN_MAX_GAP_BYTES`].
+pub(super) fn insert_run_gap_budget(peak_network_bps: u64) -> u64 {
+    peak_network_bps
+        .saturating_mul(INSERT_RUN_GAP_BUDGET_MS)
+        .div_ceil(1000)
+        .clamp(INSERT_RUN_MIN_GAP_BYTES, INSERT_RUN_MAX_GAP_BYTES)
+}
+
+/// Group insert ops into runs: ops adjacent in the output (or separated by at
+/// most `max_gap` bytes of copy ops) share one request, up to `max_bytes` of
+/// remote range per run. Ops without a blob offset are skipped.
+pub(super) fn plan_insert_runs(
+    ops: &[DownloadPatchOp],
+    max_gap: u64,
+    max_bytes: u64,
+) -> Vec<InsertRun> {
+    let mut runs: Vec<InsertRun> = Vec::new();
+    for (idx, op) in ops.iter().enumerate() {
+        if PatchOpType::from_str(&op.op_type) != Some(PatchOpType::InsertRemote)
+            || op.blob_offset.is_none()
+            || op.length == 0
+        {
+            continue;
+        }
+        let op_end = op.dest_start + op.length - 1;
+        if let Some(open) = runs.last_mut()
+            && op.dest_start > open.request_end
+            && op.dest_start - open.request_end - 1 <= max_gap
+            && op_end - open.request_start < max_bytes
+        {
+            open.op_indices.push(idx);
+            open.request_end = op_end;
+            continue;
+        }
+        runs.push(InsertRun {
+            op_indices: vec![idx],
+            request_start: op.dest_start,
+            request_end: op_end,
+        });
+    }
+    runs
+}
+
 pub(super) fn should_abort_copy_fallback(
     attempted_ops: usize,
     attempted_bytes: u64,
@@ -283,6 +414,119 @@ pub(super) fn should_abort_copy_fallback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn op(order: i64, op_type: PatchOpType, dest_start: u64, length: u64) -> DownloadPatchOp {
+        DownloadPatchOp {
+            id: order as u64 + 1,
+            file_id: 1,
+            data_order: order,
+            op_type: op_type.as_str().to_string(),
+            dest_start,
+            length,
+            target_checksum: "X".to_string(),
+            source_start: Some(dest_start),
+            source_checksum: Some("X".to_string()),
+            blob_offset: Some(0),
+            downloaded_bytes: 0,
+            retry_count: 0,
+        }
+    }
+
+    #[test]
+    fn insert_run_gap_budget_scales_with_throughput_and_caps() {
+        assert_eq!(insert_run_gap_budget(0), INSERT_RUN_MIN_GAP_BYTES);
+        assert_eq!(insert_run_gap_budget(8_000_000), 64_000);
+        assert_eq!(insert_run_gap_budget(93_000_000), INSERT_RUN_MAX_GAP_BYTES);
+    }
+
+    #[test]
+    fn insert_runs_merge_adjacent_ops_and_bridge_small_gaps() {
+        let ops = vec![
+            op(0, PatchOpType::InsertRemote, 0, 100),
+            op(1, PatchOpType::InsertRemote, 100, 100),
+            op(2, PatchOpType::CopyLocal, 200, 10),
+            op(3, PatchOpType::InsertRemote, 210, 100),
+            op(4, PatchOpType::CopyLocal, 310, 1000),
+            op(5, PatchOpType::InsertRemote, 1310, 100),
+        ];
+        let runs = plan_insert_runs(&ops, 50, 1 << 20);
+        assert_eq!(
+            runs,
+            vec![
+                InsertRun {
+                    op_indices: vec![0, 1, 3],
+                    request_start: 0,
+                    request_end: 309
+                },
+                InsertRun {
+                    op_indices: vec![5],
+                    request_start: 1310,
+                    request_end: 1409
+                },
+            ]
+        );
+        assert_eq!(runs[0].request_len(), 310);
+    }
+
+    #[test]
+    fn insert_runs_respect_the_byte_budget_and_skip_ops_without_blob_offset() {
+        let mut ops = vec![
+            op(0, PatchOpType::InsertRemote, 0, 60),
+            op(1, PatchOpType::InsertRemote, 60, 60),
+            op(2, PatchOpType::InsertRemote, 120, 60),
+        ];
+        ops[2].blob_offset = None;
+        let runs = plan_insert_runs(&ops, 0, 100);
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].op_indices, vec![0]);
+        assert_eq!(runs[1].op_indices, vec![1]);
+    }
+
+    #[test]
+    fn apply_batches_fill_up_to_budget_in_output_order() {
+        let ops = vec![
+            op(0, PatchOpType::CopyLocal, 0, 40),
+            op(1, PatchOpType::InsertRemote, 40, 30),
+            op(2, PatchOpType::CopyLocal, 70, 50),
+            op(3, PatchOpType::InsertRemote, 120, 10),
+        ];
+        let segments = coalesce_apply_segments(&ops).unwrap();
+        let batches = plan_apply_batches(&segments, &ops, 100);
+        assert_eq!(
+            batches,
+            vec![
+                ApplyBatch {
+                    segment_range: 0..2,
+                    dest_start: 0,
+                    length: 70
+                },
+                ApplyBatch {
+                    segment_range: 2..4,
+                    dest_start: 70,
+                    length: 60
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn apply_batches_isolate_oversized_segments() {
+        let ops = vec![
+            op(0, PatchOpType::InsertRemote, 0, 10),
+            op(1, PatchOpType::CopyLocal, 10, 500),
+            op(2, PatchOpType::CopyLocal, 510, 500),
+            op(3, PatchOpType::InsertRemote, 1010, 10),
+        ];
+        let segments = coalesce_apply_segments(&ops).unwrap();
+        assert_eq!(segments.len(), 3);
+        let batches = plan_apply_batches(&segments, &ops, 100);
+        assert_eq!(batches.len(), 3);
+        assert!(!batches[0].is_oversized(100));
+        assert!(batches[1].is_oversized(100));
+        assert_eq!(batches[1].length, 1000);
+        assert_eq!(batches[2].dest_start, 1010);
+        assert!(!batches[2].is_oversized(100));
+    }
 
     // ── normalize_checksum ──────────────────────────────────────────────
 

@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 mod case;
 mod collect;
 mod driver;
+mod evict;
 mod fixture;
 mod guards;
 mod launch;

@@ -643,6 +643,11 @@ impl Foxy {
             return false;
         }
 
+        // The worker would otherwise keep hashing or downloading into a folder
+        // nobody tracks any more, contending with the next sync for the disk.
+        if self.syncing_repository == Some(repo_idx) {
+            self.cancel_sync();
+        }
         let removed = self.repository_view_state.repositories.remove(repo_idx);
         let removed_visual_folder_key = Self::repo_instance_key(&removed.address, &removed.path);
         let mut visual_folders_changed = false;

@@ -12,6 +12,8 @@ use crate::ui::types::{RepoState, Repository, sanitize_user_path};
 
 const FS_WATCH_DOWNLOAD_GRACE_MS: u64 = 3_000;
 const FS_WATCH_IDLE_RETRY_INTERVAL: Duration = Duration::from_secs(30);
+const FS_WATCH_CLEAN_BACKOFF_BASE: Duration = Duration::from_secs(5);
+const FS_WATCH_CLEAN_BACKOFF_MAX: Duration = Duration::from_secs(60);
 
 fn unix_time_millis() -> u64 {
     SystemTime::now()
@@ -467,6 +469,11 @@ impl Foxy {
     }
 
     pub fn queue_quick_scan_for_urls_from_fs(&mut self, repo_urls: Vec<String>) {
+        self.fs_watch_scan_urls.extend(
+            repo_urls
+                .iter()
+                .map(|repo_url| Self::normalize_repo_url(repo_url)),
+        );
         self.queue_quick_scan_for_urls_with_flags(repo_urls, false, true);
     }
 
@@ -648,6 +655,12 @@ impl Foxy {
             }
 
             let has_updates = result.mods.iter().any(|m| m.needs_update);
+            if self
+                .fs_watch_scan_urls
+                .remove(&Self::normalize_repo_url(&result.repo_url))
+            {
+                self.note_fs_watch_scan_outcome(!has_updates);
+            }
             if !has_updates {
                 info!(
                     "Quick scan clean for repo {}",
@@ -820,6 +833,7 @@ impl Foxy {
     /// invisible to it until it is respawned.
     pub(in crate::ui::app) fn mark_fs_watch_index_dirty(&mut self) {
         self.fs_watch_index_dirty = true;
+        self.reset_fs_watch_clean_backoff();
     }
 
     /// Respawn the watcher when the repositories it was started for no longer
@@ -911,7 +925,89 @@ impl Foxy {
             .collect()
     }
 
+    /// How long to hold watcher-triggered scans after `clean_streak`
+    /// consecutive clean ones: nothing after the first, then 5 s doubling to
+    /// a minute. Events that arrive inside the window are scanned when it
+    /// closes, so a real change is delayed, never dropped.
+    pub(crate) fn fs_watch_clean_backoff(clean_streak: u32) -> Option<Duration> {
+        let doublings = clean_streak.checked_sub(2)?;
+        Some(
+            FS_WATCH_CLEAN_BACKOFF_BASE
+                .saturating_mul(1u32 << doublings.min(4))
+                .min(FS_WATCH_CLEAN_BACKOFF_MAX),
+        )
+    }
+
+    fn note_fs_watch_scan_outcome(&mut self, clean: bool) {
+        if !clean {
+            self.fs_watch_clean_scan_streak = 0;
+            self.fs_watch_backoff_until = None;
+            return;
+        }
+        self.fs_watch_clean_scan_streak = self.fs_watch_clean_scan_streak.saturating_add(1);
+        if let Some(backoff) = Self::fs_watch_clean_backoff(self.fs_watch_clean_scan_streak) {
+            info!(
+                "Filesystem watcher scans found nothing {} times in a row; holding further watcher scans for {:?}",
+                self.fs_watch_clean_scan_streak, backoff
+            );
+            self.fs_watch_backoff_until = Some(Instant::now() + backoff);
+        }
+    }
+
+    /// Something other than the watcher changed the repository set or its
+    /// files, so the next watcher event is expected to be genuine.
+    pub(in crate::ui::app) fn reset_fs_watch_clean_backoff(&mut self) {
+        self.fs_watch_clean_scan_streak = 0;
+        self.fs_watch_backoff_until = None;
+    }
+
+    fn release_expired_fs_watch_backoff(&mut self) {
+        let Some(until) = self.fs_watch_backoff_until else {
+            return;
+        };
+        if Instant::now() < until {
+            return;
+        }
+        self.fs_watch_backoff_until = None;
+        if self.fs_watch_backoff_urls.is_empty() {
+            return;
+        }
+        let repo_urls: Vec<String> = self.fs_watch_backoff_urls.drain().collect();
+        debug!(
+            "Filesystem watcher backoff expired; scanning {} held repositories",
+            repo_urls.len()
+        );
+        self.dispatch_fs_watch_quick_scan(repo_urls);
+    }
+
+    fn dispatch_fs_watch_quick_scan(&mut self, repo_urls: Vec<String>) {
+        if self.syncing_repository.is_some() {
+            if self.current_sync_mode == Some(SyncMode::Download) {
+                debug!(
+                    "Ignoring filesystem-triggered quick scan for {} repositories during download",
+                    repo_urls.len()
+                );
+                return;
+            }
+            debug!(
+                "Deferring filesystem-triggered quick scan for {} repositories during sync",
+                repo_urls.len()
+            );
+            for url in repo_urls {
+                self.deferred_fs_scan.insert(url);
+            }
+            return;
+        }
+
+        debug!(
+            "Filesystem watcher queued quick scan for {} repositories",
+            repo_urls.len()
+        );
+        self.queue_quick_scan_for_urls_from_fs(repo_urls);
+    }
+
     pub fn poll_fs_watch_results(&mut self) {
+        self.release_expired_fs_watch_backoff();
         while let Ok(event) = self.fs_watch_rx.try_recv() {
             if event.repo_urls.is_empty() {
                 continue;
@@ -961,34 +1057,31 @@ impl Foxy {
                 continue;
             }
 
-            if self.syncing_repository.is_some() {
-                if self.current_sync_mode == Some(SyncMode::Download) {
-                    debug!(
-                        "Ignoring filesystem-triggered quick scan for {} repositories during download",
-                        repo_urls.len()
-                    );
-                    continue;
-                }
+            if self
+                .fs_watch_backoff_until
+                .is_some_and(|until| Instant::now() < until)
+            {
                 debug!(
-                    "Deferring filesystem-triggered quick scan for {} repositories during sync",
+                    "Holding filesystem-triggered quick scan for {} repositories during clean-scan backoff",
                     repo_urls.len()
                 );
-                for url in repo_urls {
-                    self.deferred_fs_scan.insert(url);
-                }
+                self.fs_watch_backoff_urls.extend(
+                    repo_urls
+                        .into_iter()
+                        .map(|url| Self::normalize_repo_url(&url)),
+                );
                 continue;
             }
 
-            debug!(
-                "Filesystem watcher queued quick scan for {} repositories",
-                repo_urls.len()
-            );
-            self.queue_quick_scan_for_urls_from_fs(repo_urls);
+            self.dispatch_fs_watch_quick_scan(repo_urls);
         }
     }
 
     pub fn process_startup_rechecks(&mut self) {
-        if self.syncing_repository.is_some() || self.quick_scan_worker.is_some() {
+        if self.syncing_repository.is_some()
+            || self.current_sync_mode.is_some()
+            || self.quick_scan_worker.is_some()
+        {
             return;
         }
         while let Some((address, path, mode)) = self.startup_recheck_queue.pop_front() {
@@ -1037,6 +1130,32 @@ mod tests {
             path: path.to_string(),
             ..Repository::default()
         }
+    }
+
+    #[test]
+    fn clean_scan_backoff_starts_after_second_clean_scan_and_caps() {
+        assert_eq!(Foxy::fs_watch_clean_backoff(0), None);
+        assert_eq!(Foxy::fs_watch_clean_backoff(1), None);
+        assert_eq!(
+            Foxy::fs_watch_clean_backoff(2),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(
+            Foxy::fs_watch_clean_backoff(3),
+            Some(Duration::from_secs(10))
+        );
+        assert_eq!(
+            Foxy::fs_watch_clean_backoff(5),
+            Some(Duration::from_secs(40))
+        );
+        assert_eq!(
+            Foxy::fs_watch_clean_backoff(6),
+            Some(Duration::from_secs(60))
+        );
+        assert_eq!(
+            Foxy::fs_watch_clean_backoff(40),
+            Some(Duration::from_secs(60))
+        );
     }
 
     #[test]

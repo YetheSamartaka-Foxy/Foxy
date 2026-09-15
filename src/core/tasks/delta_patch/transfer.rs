@@ -3,7 +3,7 @@ use crate::core::models::download_patch_file::DownloadPatchFile;
 use crate::core::models::download_patch_op::{DownloadPatchOp, update_download_patch_op_progress};
 use crate::core::tasks::download_files::{AdaptiveBandwidthLimiter, DownloadMetrics};
 use crate::core::utils::content_hash::FlexHasher;
-use crate::core::utils::file_io::{read_at, write_at};
+use crate::core::utils::file_io::write_at;
 use crate::core::utils::http_range::validate_content_range_header;
 use anyhow::{Context, anyhow};
 use futures::StreamExt;
@@ -17,8 +17,9 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 use tokio::sync::watch;
 
 use super::types::{
-    COPY_BUFFER_SIZE, CopySourcePreflightStats, PATCH_CHUNK_TIMEOUT, PATCH_DOWNLOAD_MAX_RETRIES,
-    PATCH_PREFLIGHT_COPY_SAMPLE_OPS, PatchArtifact, PatchOpType, checksum_matches,
+    COPY_BUFFER_SIZE, CopySourcePreflightStats, INSERT_RUN_MAX_BYTES, InsertRun,
+    PATCH_CHUNK_TIMEOUT, PATCH_DOWNLOAD_MAX_RETRIES, PATCH_PREFLIGHT_COPY_SAMPLE_OPS,
+    PatchArtifact, PatchOpType, checksum_matches, insert_run_gap_budget, plan_insert_runs,
     sampled_copy_op_indices,
 };
 
@@ -415,17 +416,12 @@ pub(crate) async fn download_patch_blob_ranges_parallel(
         ));
     }
 
-    // Collect indices of InsertRemote ops for parallel processing
-    let insert_indices: Vec<usize> = patch_ops
-        .iter()
-        .enumerate()
-        .filter(|(_, op)| PatchOpType::from_str(&op.op_type) == Some(PatchOpType::InsertRemote))
-        .map(|(i, _)| i)
-        .collect();
-
-    if insert_indices.is_empty() {
+    let gap_budget = insert_run_gap_budget(metrics.peak_network_bps());
+    let runs = plan_insert_runs(patch_ops, gap_budget, INSERT_RUN_MAX_BYTES);
+    if runs.is_empty() {
         return Ok(());
     }
+    let insert_ops: usize = runs.iter().map(|run| run.op_indices.len()).sum();
 
     // Open the blob file for random-access writing (std::fs::File for write_at)
     let blob_file = Arc::new(
@@ -444,38 +440,24 @@ pub(crate) async fn download_patch_blob_ranges_parallel(
     let blob_download_started = std::time::Instant::now();
     let concurrency_semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
 
-    // Snapshot op data needed per task (avoids borrowing patch_ops across spawn)
-    struct InsertOpSnapshot {
-        index: usize,
-        file_id: i64,
-        data_order: i64,
-        dest_start: u64,
-        length: u64,
-        blob_offset: u64,
-        target_checksum: String,
-    }
-
-    let snapshots: Vec<InsertOpSnapshot> = insert_indices
-        .iter()
-        .filter_map(|&i| {
-            let op = &patch_ops[i];
-            let blob_offset = op.blob_offset?;
-            Some(InsertOpSnapshot {
-                index: i,
+    let ops_shared: Arc<Vec<InsertOpSnapshot>> = Arc::new(
+        patch_ops
+            .iter()
+            .map(|op| InsertOpSnapshot {
                 file_id: op.file_id as i64,
                 data_order: op.data_order,
                 dest_start: op.dest_start,
                 length: op.length,
-                blob_offset,
+                blob_offset: op.blob_offset.unwrap_or(0),
                 target_checksum: op.target_checksum.clone(),
             })
-        })
-        .collect();
+            .collect(),
+    );
 
     let remote_url: Arc<str> = Arc::from(artifact.remote_url.as_str());
     let mut tasks = FuturesUnordered::new();
 
-    for snap in &snapshots {
+    for run in runs {
         let ctx = context.clone();
         let sem = concurrency_semaphore.clone();
         let blob = blob_file.clone();
@@ -484,13 +466,7 @@ pub(crate) async fn download_patch_blob_ranges_parallel(
         let cancel_rx = cancel_rx.clone();
         let limiter = rate_limiter.clone();
         let task_metrics = metrics.clone();
-        let file_id = snap.file_id;
-        let data_order = snap.data_order;
-        let dest_start = snap.dest_start;
-        let length = snap.length;
-        let blob_offset = snap.blob_offset;
-        let target_checksum = snap.target_checksum.clone();
-        let index = snap.index;
+        let ops = ops_shared.clone();
 
         tasks.push(tokio::spawn(async move {
             let _permit = sem
@@ -498,37 +474,38 @@ pub(crate) async fn download_patch_blob_ranges_parallel(
                 .await
                 .map_err(|_| anyhow!("patch concurrency semaphore closed"))?;
 
-            download_single_insert_op(
+            download_insert_run(
                 ctx,
                 &url,
                 blob,
-                file_id,
-                data_order,
-                dest_start,
-                length,
-                blob_offset,
-                &target_checksum,
+                &ops,
+                &run,
                 pause_rx,
                 cancel_rx,
                 limiter,
                 task_metrics,
             )
             .await
-            .map(|bytes| (index, bytes, data_order))
+            .map(|bytes| (run, bytes))
         }));
     }
 
     let mut total_bytes = 0u64;
+    let mut gap_bytes = 0u64;
     let mut ops_completed = 0usize;
+    let mut runs_completed = 0usize;
     let mut first_error: Option<anyhow::Error> = None;
 
     while let Some(result) = tasks.next().await {
         match result {
-            Ok(Ok((index, bytes, _data_order))) => {
-                // Update the op in place with completion state
-                patch_ops[index].downloaded_bytes = patch_ops[index].length;
+            Ok(Ok((run, bytes))) => {
+                for &index in &run.op_indices {
+                    patch_ops[index].downloaded_bytes = patch_ops[index].length;
+                }
+                gap_bytes += run.request_len().saturating_sub(bytes);
                 total_bytes += bytes;
-                ops_completed += 1;
+                ops_completed += run.op_indices.len();
+                runs_completed += 1;
             }
             Ok(Err(err)) => {
                 if first_error.is_none() {
@@ -548,13 +525,16 @@ pub(crate) async fn download_patch_blob_ranges_parallel(
     }
 
     // Batch-persist all completed op progress
-    for snap in &snapshots {
+    for op in patch_ops
+        .iter()
+        .filter(|op| PatchOpType::from_str(&op.op_type) == Some(PatchOpType::InsertRemote))
+    {
         let _ = update_download_patch_op_progress(
             context.clone(),
-            snap.file_id,
-            snap.data_order,
-            patch_ops[snap.index].downloaded_bytes,
-            patch_ops[snap.index].retry_count,
+            op.file_id as i64,
+            op.data_order,
+            op.downloaded_bytes,
+            op.retry_count,
         )
         .await;
     }
@@ -567,49 +547,69 @@ pub(crate) async fn download_patch_blob_ranges_parallel(
             0.0
         };
         info!(
-            "Parallel delta blob download: file_id={} ops={} bytes={} elapsed={:.2?} speed={:.2} MB/s",
-            artifact.file_id, ops_completed, total_bytes, elapsed, speed
+            "Parallel delta blob download: file_id={} ops={}/{} requests={} bytes={} gap_bytes={} gap_budget={} elapsed={:.2?} speed={:.2} MB/s",
+            artifact.file_id,
+            ops_completed,
+            insert_ops,
+            runs_completed,
+            total_bytes,
+            gap_bytes,
+            gap_budget,
+            elapsed,
+            speed
         );
     }
 
     Ok(())
 }
 
-/// Download a single InsertRemote op into the blob file at the correct offset.
-#[allow(clippy::too_many_arguments)]
-async fn download_single_insert_op(
-    context: Arc<FoxyContext>,
-    remote_url: &str,
-    blob_file: Arc<std::fs::File>,
+/// The fields of an op the insert-run downloader needs, snapshotted so the
+/// spawned tasks do not borrow `patch_ops`.
+struct InsertOpSnapshot {
     file_id: i64,
     data_order: i64,
     dest_start: u64,
     length: u64,
     blob_offset: u64,
-    target_checksum: &str,
+    target_checksum: String,
+}
+
+/// Output bytes buffered per op before one positional write into the blob.
+const INSERT_RUN_WRITE_BUFFER: usize = 1024 * 1024;
+
+/// Fetch one insert run with a single range request, splitting the stream
+/// into its ops as it arrives: each op's bytes are hashed and written at its
+/// blob offset, bytes between ops are dropped. A mismatch or a stalled chunk
+/// restarts from the op that was in flight. Returns the op bytes written.
+#[allow(clippy::too_many_arguments)]
+async fn download_insert_run(
+    context: Arc<FoxyContext>,
+    remote_url: &str,
+    blob_file: Arc<std::fs::File>,
+    ops: &[InsertOpSnapshot],
+    run: &InsertRun,
     mut pause_rx: watch::Receiver<bool>,
     mut cancel_rx: watch::Receiver<bool>,
     rate_limiter: Arc<AdaptiveBandwidthLimiter>,
     metrics: Arc<DownloadMetrics>,
 ) -> anyhow::Result<u64> {
-    let request_start = dest_start;
-    let request_end = dest_start
-        .checked_add(length)
-        .and_then(|v| v.checked_sub(1))
-        .ok_or_else(|| anyhow!("insert op range overflow"))?;
-
+    let file_id = run
+        .op_indices
+        .first()
+        .map(|&idx| ops[idx].file_id)
+        .unwrap_or_default();
     let mut retry_count = 0u32;
-    let mut downloaded = 0u64;
+    let mut next_op = 0usize;
+    let mut written_total = 0u64;
 
-    while downloaded < length {
+    while next_op < run.op_indices.len() {
         wait_for_download_resume(&mut pause_rx, &mut cancel_rx).await?;
-
-        let range_start = request_start.saturating_add(downloaded);
+        let first = &ops[run.op_indices[next_op]];
         let response = match request_exact_range(
             context.clone(),
             remote_url,
-            range_start,
-            request_end,
+            first.dest_start,
+            run.request_end,
         )
         .await
         {
@@ -617,92 +617,145 @@ async fn download_single_insert_op(
             Err(err) => {
                 retry_count += 1;
                 if retry_count > PATCH_DOWNLOAD_MAX_RETRIES {
-                    return Err(err)
-                        .context(format!("insert op {} exceeded retry limit", data_order));
+                    return Err(err).context(format!(
+                        "insert run starting at op {} exceeded retry limit",
+                        first.data_order
+                    ));
                 }
                 warn!(
-                    "Delta parallel range request failed: file_id={} op={} retries={} error={}",
-                    file_id, data_order, retry_count, err
+                    "Delta insert run request failed: file_id={} first_op={} ops={} retries={} error={}",
+                    file_id,
+                    first.data_order,
+                    run.op_indices.len() - next_op,
+                    retry_count,
+                    err
                 );
                 continue;
             }
         };
 
         let mut resp = response;
+        let mut stream_pos = first.dest_start;
+        let mut op_cursor = next_op;
+        // Progress within the op at `op_cursor`.
+        let mut op_done = 0u64;
+        let mut hasher = FlexHasher::from_checksum(&first.target_checksum);
+        let mut pending: Vec<u8> = Vec::with_capacity(INSERT_RUN_WRITE_BUFFER);
+        let mut pending_at = first.blob_offset;
+        let mut written_this_attempt = 0u64;
+        let mut stalled = false;
+
         loop {
             wait_for_download_resume(&mut pause_rx, &mut cancel_rx).await?;
             let chunk = match tokio::time::timeout(PATCH_CHUNK_TIMEOUT, resp.chunk()).await {
                 Ok(Ok(Some(chunk))) => chunk,
                 Ok(Ok(None)) => break,
-                Ok(Err(err)) => return Err(err).context("failed to read parallel blob chunk"),
+                Ok(Err(err)) => return Err(err).context("failed to read insert run chunk"),
                 Err(_) => {
                     retry_count += 1;
                     if retry_count > PATCH_DOWNLOAD_MAX_RETRIES {
                         return Err(anyhow!(
-                            "delta parallel blob chunk timed out after {} retries",
+                            "delta insert run chunk timed out after {} retries",
                             PATCH_DOWNLOAD_MAX_RETRIES
                         ));
                     }
                     warn!(
-                        "Delta parallel blob chunk timed out: file_id={} op={} downloaded={}/{} retries={}",
-                        file_id, data_order, downloaded, length, retry_count
+                        "Delta insert run chunk timed out: file_id={} op={} retries={}",
+                        file_id, ops[run.op_indices[op_cursor]].data_order, retry_count
                     );
+                    stalled = true;
                     break;
                 }
             };
-            let n = chunk.len();
-            rate_limiter.acquire_and_record(n).await;
-            metrics.record_bytes(n as u64);
-            let write_offset = blob_offset.saturating_add(downloaded);
-            let chunk_data = chunk.to_vec();
-            let file = blob_file.clone();
-            tokio::task::spawn_blocking(move || write_at(&file, write_offset, &chunk_data))
-                .await??;
-            downloaded += n as u64;
-            retry_count = 0;
-            if downloaded > length {
-                return Err(anyhow!(
-                    "parallel insert op {} wrote beyond planned length",
-                    data_order
-                ));
+            rate_limiter.acquire_and_record(chunk.len()).await;
+
+            let mut slice: &[u8] = &chunk;
+            while !slice.is_empty() && op_cursor < run.op_indices.len() {
+                let op = &ops[run.op_indices[op_cursor]];
+                if stream_pos < op.dest_start {
+                    // Gap before the next op: copy-op bytes the plan already has.
+                    let skip = (op.dest_start - stream_pos).min(slice.len() as u64) as usize;
+                    slice = &slice[skip..];
+                    stream_pos += skip as u64;
+                    continue;
+                }
+                let take = (op.length - op_done).min(slice.len() as u64) as usize;
+                let bytes = &slice[..take];
+                hasher.update(bytes);
+                if pending.len() + take > INSERT_RUN_WRITE_BUFFER && !pending.is_empty() {
+                    flush_insert_pending(&blob_file, &mut pending, &mut pending_at).await?;
+                }
+                pending.extend_from_slice(bytes);
+                metrics.record_bytes(take as u64);
+                written_this_attempt += take as u64;
+                op_done += take as u64;
+                stream_pos += take as u64;
+                slice = &slice[take..];
+
+                if op_done == op.length {
+                    flush_insert_pending(&blob_file, &mut pending, &mut pending_at).await?;
+                    let actual =
+                        std::mem::replace(&mut hasher, FlexHasher::new_md5()).finalize_hex();
+                    if !checksum_matches(&op.target_checksum, &actual) {
+                        return Err(anyhow!(
+                            "insert op {} checksum mismatch (expected {}, got {})",
+                            op.data_order,
+                            op.target_checksum,
+                            actual
+                        ));
+                    }
+                    debug!(
+                        "Delta insert op complete: file_id={} op={} bytes={}",
+                        file_id, op.data_order, op.length
+                    );
+                    op_cursor += 1;
+                    op_done = 0;
+                    if let Some(&idx) = run.op_indices.get(op_cursor) {
+                        hasher = FlexHasher::from_checksum(&ops[idx].target_checksum);
+                        pending_at = ops[idx].blob_offset;
+                    }
+                }
+            }
+            if op_cursor >= run.op_indices.len() {
+                break;
             }
         }
-    }
 
-    // Verify checksum by reading back from blob
-    let blob_file_verify = blob_file.clone();
-    let verify_offset = blob_offset;
-    let verify_length = length as usize;
-    let checksum_expected = target_checksum.to_string();
-    let actual_checksum = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
-        let mut hasher = FlexHasher::from_checksum(&checksum_expected);
-        let mut buf = vec![0u8; (64 * 1024).min(verify_length)];
-        let mut remaining = verify_length;
-        let mut offset = verify_offset;
-        while remaining > 0 {
-            let to_read = remaining.min(buf.len());
-            read_at(&blob_file_verify, offset, &mut buf[..to_read])?;
-            hasher.update(&buf[..to_read]);
-            offset += to_read as u64;
-            remaining -= to_read;
+        if stalled {
+            // Bytes of the op in flight are rewritten on the retry; the
+            // completed ops before it stay.
+            written_total += written_this_attempt - op_done;
+            next_op = op_cursor;
+            continue;
         }
-        Ok(hasher.finalize_hex())
-    })
-    .await??;
-
-    if !checksum_matches(target_checksum, &actual_checksum) {
-        return Err(anyhow!(
-            "parallel insert op {} checksum mismatch (expected {}, got {})",
-            data_order,
-            target_checksum,
-            actual_checksum
-        ));
+        if op_cursor < run.op_indices.len() {
+            return Err(anyhow!(
+                "insert run ended early: op {} received {}/{} bytes",
+                ops[run.op_indices[op_cursor]].data_order,
+                op_done,
+                ops[run.op_indices[op_cursor]].length
+            ));
+        }
+        written_total += written_this_attempt;
+        next_op = op_cursor;
+        retry_count = 0;
     }
 
-    debug!(
-        "Parallel delta insert op complete: file_id={} op={} bytes={}",
-        file_id, data_order, downloaded
-    );
+    Ok(written_total)
+}
 
-    Ok(downloaded)
+async fn flush_insert_pending(
+    blob_file: &Arc<std::fs::File>,
+    pending: &mut Vec<u8>,
+    pending_at: &mut u64,
+) -> anyhow::Result<()> {
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let data = std::mem::take(pending);
+    let at = *pending_at;
+    *pending_at += data.len() as u64;
+    let file = blob_file.clone();
+    tokio::task::spawn_blocking(move || write_at(&file, at, &data)).await??;
+    Ok(())
 }

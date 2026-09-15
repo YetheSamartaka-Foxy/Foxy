@@ -91,7 +91,10 @@ Every run gets its own config directory below
 `testkit/runs/<case-id>/<run-id>/config`. The runner refuses `%APPDATA%\Foxy`,
 does not copy a database, and never deletes a repository target during cleanup.
 Performance cases may intentionally mutate or redownload their configured
-target, so review the case before running it.
+target, so review the case before running it. A case that should measure a
+rotational disk needs an `evict-cache` operation ahead of the measured one:
+the ledger's `cache_state` only records the iteration, and the payload a
+`setup_once` download just wrote is otherwise served from the page cache.
 
 Foxy is spawned inside a Windows job object with
 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. Graceful shutdown is still attempted
@@ -145,8 +148,11 @@ A case with `"profile": true` runs Foxy with `FOXY_PROFILE=1`, and the run gains
 the database seam split read/write and attributed to its phase, the instrumented
 filesystem calls, and the app's own `PIPELINE SUMMARY` table parsed into rows.
 
-Per-call timing costs 5-10% of wall clock, so profiled and unprofiled rows are
-not comparable. Keep the profiled variant under its own case id
+The same profiler is what the "Extended diagnostics logging" application setting
+turns on for users, together with debug-level records and periodic `RESOURCES`
+samples; a user log with that setting on carries the `PROFILE` lines a
+profiled case does. Per-call timing costs 5-10% of wall clock, so profiled and
+unprofiled rows are not comparable. Keep the profiled variant under its own case id
 (`perf-db-parts-bulk-profiled` beside `perf-db-parts-bulk`) rather than toggling
 the flag inside one history. See `CASE_FORMAT.md` for the field and for what the
 filesystem instrumentation does and does not cover.

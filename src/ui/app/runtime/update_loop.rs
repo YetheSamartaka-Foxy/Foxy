@@ -281,6 +281,9 @@ impl Foxy {
         self.poll_persistence_results();
         self.poll_backend_progress();
         self.poll_finished_backend_worker();
+        self.poll_benchmark_save_results();
+        self.tick_benchmark_capture(&ctx);
+        self.poll_benchmark_export_screenshot(&ctx);
         self.poll_join_preflight_results(&ctx);
         // Drain any pending repo.json metadata refreshes queued by sync completion.
         if !self.pending_repo_metadata_refresh.is_empty() {
@@ -449,6 +452,7 @@ impl Foxy {
         self.render_db_lock_conflict_prompt(&ctx);
         self.render_db_schema_wipe_prompt(&ctx);
         self.render_app_update_prompt(&ctx);
+        self.render_benchmark_save_prompt(&ctx);
         self.render_scheduled_post_action_overlay(&ctx);
 
         if !self.startup_frame_rendered {

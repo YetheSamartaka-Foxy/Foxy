@@ -747,10 +747,23 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
             context.ux()?;
             return Ok(json!({"status":"pass","case_id":id,"run_id":run_id,"run_dir":run}));
         }
+        let evict = |operation: &Value| -> Result<()> {
+            let path = operation["path"]
+                .as_str()
+                .or_else(|| resolved["repository"]["path"].as_str())
+                .context("evict-cache requires a repository path")?;
+            let summary = crate::evict::evict_directory(Path::new(path))?;
+            eprintln!("evict-cache: {summary}");
+            Ok(())
+        };
         for operation in operations
             .iter()
             .filter(|op| op["setup_once"].as_bool().unwrap_or(false))
         {
+            if operation["op"].as_str() == Some("evict-cache") {
+                evict(operation)?;
+                continue;
+            }
             context.operation(operation)?;
         }
         let warmup = resolved["warmup"].as_bool().unwrap_or(false);
@@ -776,6 +789,10 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                     "restore" => {
                         mutation.as_ref().context("Missing mutator")?.restore()?;
                         mutation_info = Value::Null;
+                        continue;
+                    }
+                    "evict-cache" => {
+                        evict(operation)?;
                         continue;
                     }
                     _ => {}

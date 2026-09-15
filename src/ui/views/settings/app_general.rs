@@ -534,6 +534,25 @@ impl Foxy {
                             changed,
                         );
 
+                        let mut extended_diagnostics =
+                            self.settings_view_state.extended_diagnostics_logging;
+                        let extended_diagnostics_checkbox = Self::render_wrapped_settings_checkbox(
+                            ui,
+                            !self.settings_view_state.benchmarks_enabled,
+                            &mut extended_diagnostics,
+                            tr("Extended diagnostics logging"),
+                            Some(tr("Write detailed hashing, checking, download, network, database, disk and memory diagnostics to the log files. Useful when reporting a performance problem; the logs grow faster while enabled. Always on while Benchmarks is enabled.")),
+                            row_width,
+                            changed,
+                        );
+                        if extended_diagnostics_checkbox.changed()
+                            && self
+                                .settings_view_state
+                                .set_extended_diagnostics_logging(extended_diagnostics)
+                        {
+                            crate::core::api::set_extended_diagnostics(extended_diagnostics);
+                        }
+
                         Self::render_wrapped_settings_checkbox(
                             ui,
                             true,

@@ -1076,6 +1076,16 @@ pub struct SettingsSetArgs {
         help = "Show or hide memory diagnostics icon in footer (true/false)"
     )]
     pub show_memory_diagnostics_icon: Option<bool>,
+    #[arg(
+        long,
+        help = "Write extended hashing, download, database and resource diagnostics to the logs (true/false)"
+    )]
+    pub extended_diagnostics_logging: Option<bool>,
+    #[arg(
+        long,
+        help = "Offer to save user-triggered rechecks and updates as benchmarks; enabling also turns on extended diagnostics logging unless it was already on (true/false)"
+    )]
+    pub benchmarks_enabled: Option<bool>,
     #[arg(long, help = "Close Foxy after launching Arma (true/false)")]
     pub close_after_launch: Option<bool>,
     #[arg(long, help = "Hide Foxy to tray after launch (true/false)")]

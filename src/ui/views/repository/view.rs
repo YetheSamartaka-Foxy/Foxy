@@ -407,6 +407,10 @@ impl Foxy {
                                             repo_name
                                         );
                                         recheck_action = Some(Box::new(move |app| {
+                                            app.arm_benchmark(
+                                                crate::core::benchmarks::BenchmarkKind::Recheck,
+                                                Vec::new(),
+                                            );
                                             app.start_remote_recheck_with_plan(idx);
                                         }));
                                     }
@@ -434,6 +438,10 @@ impl Foxy {
                                             repo_name
                                         );
                                         quick_check_action = Some(Box::new(move |app| {
+                                            app.arm_benchmark(
+                                                crate::core::benchmarks::BenchmarkKind::QuickCheck,
+                                                Vec::new(),
+                                            );
                                             app.start_core_sync(idx, SyncMode::QuickCheckOnly);
                                         }));
                                     }

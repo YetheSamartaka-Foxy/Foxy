@@ -81,6 +81,84 @@ pub(crate) fn is_foxy_temp_artifact_path(path: &str) -> bool {
     path.ends_with(".foxy.part") || path.ends_with(".foxy.tmp") || path.ends_with(".foxy.bak")
 }
 
+/// Sampled fingerprint of a local file: length, mtime and eight evenly spaced
+/// 16 KB blocks (a file at most 128 KB is hashed whole). It answers "has this
+/// file changed since it was last hashed", never whether it matches remote.
+/// Creation time is excluded because copies and restores change it while the
+/// content does not.
+pub(crate) fn fast_file_content_hash(path: &str) -> std::io::Result<String> {
+    let metadata = std::fs::metadata(path)?;
+    if metadata.len() == 0 {
+        return fast_file_content_hash_from_reader(&mut std::io::empty(), &metadata);
+    }
+    let mut file = std::fs::File::open(path)?;
+    fast_file_content_hash_from_reader(&mut file, &metadata)
+}
+
+/// [`fast_file_content_hash`] over an already open handle, so a pass that has
+/// just read the whole file can fingerprint it from the page cache instead of
+/// paying eight seeks on a cold disk later. `metadata` must describe `reader`.
+pub(crate) fn fast_file_content_hash_from_reader<R: std::io::Read + std::io::Seek>(
+    reader: &mut R,
+    metadata: &std::fs::Metadata,
+) -> std::io::Result<String> {
+    const SAMPLE_CHUNK_BYTES: usize = 16 * 1024;
+    const SAMPLE_SLOTS: u64 = 8;
+
+    let file_len = metadata.len();
+    let modified_ns = metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"FOXY_FILE_CONTENT_HASH_V2");
+    hasher.update(&file_len.to_le_bytes());
+    hasher.update(&modified_ns.to_le_bytes());
+
+    if file_len == 0 {
+        return Ok(blake3_hex(hasher));
+    }
+
+    let sample_chunk = SAMPLE_CHUNK_BYTES as u64;
+    let mut sample_buf = vec![0u8; SAMPLE_CHUNK_BYTES];
+
+    if file_len <= sample_chunk.saturating_mul(SAMPLE_SLOTS) {
+        reader.seek(std::io::SeekFrom::Start(0))?;
+        loop {
+            let read = reader.read(&mut sample_buf)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&(read as u64).to_le_bytes());
+            hasher.update(&sample_buf[..read]);
+        }
+        return Ok(blake3_hex(hasher));
+    }
+
+    let max_offset = file_len.saturating_sub(sample_chunk);
+    let mut last_offset = u64::MAX;
+    for slot in 0..SAMPLE_SLOTS {
+        let offset = if SAMPLE_SLOTS <= 1 {
+            0
+        } else {
+            max_offset.saturating_mul(slot) / (SAMPLE_SLOTS - 1)
+        };
+        if offset == last_offset {
+            continue;
+        }
+        last_offset = offset;
+        reader.seek(std::io::SeekFrom::Start(offset))?;
+        let read = reader.read(&mut sample_buf)?;
+        hasher.update(&offset.to_le_bytes());
+        hasher.update(&(read as u64).to_le_bytes());
+        hasher.update(&sample_buf[..read]);
+    }
+
+    Ok(blake3_hex(hasher))
+}
+
 /// Compute a whole-file BLAKE3 hash (synchronous, for use inside `spawn_blocking`).
 /// Returns the first 32 hex characters for DB column compatibility.
 pub(crate) fn blake3_file_hash(path: &Path) -> std::io::Result<String> {
@@ -422,6 +500,37 @@ mod tests {
     #[test]
     fn normalize_path_preserves_case_on_unix() {
         assert_eq!(normalize_path("FOO/BAR"), "FOO/BAR");
+    }
+
+    #[test]
+    fn fast_file_content_hash_from_reader_matches_path_variant() {
+        let dir = tempfile::tempdir().unwrap();
+        for len in [0usize, 4096, 512 * 1024] {
+            let path = dir.path().join(format!("{len}.bin"));
+            let bytes: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+            std::fs::write(&path, bytes).unwrap();
+            let path = path.to_string_lossy().to_string();
+            let from_path = fast_file_content_hash(&path).unwrap();
+            let metadata = std::fs::metadata(&path).unwrap();
+            let mut file = std::fs::File::open(&path).unwrap();
+            // Leave the cursor mid-file as a hash pass would.
+            std::io::Seek::seek(&mut file, std::io::SeekFrom::Start((len / 2) as u64)).unwrap();
+            let from_reader = fast_file_content_hash_from_reader(&mut file, &metadata).unwrap();
+            assert_eq!(from_path, from_reader, "len={len}");
+        }
+    }
+
+    #[test]
+    fn fast_file_content_hash_changes_with_sampled_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.bin");
+        std::fs::write(&path, vec![1u8; 512 * 1024]).unwrap();
+        let path = path.to_string_lossy().to_string();
+        let before = fast_file_content_hash(&path).unwrap();
+        let mut bytes = vec![1u8; 512 * 1024];
+        bytes[0] = 2;
+        std::fs::write(&path, bytes).unwrap();
+        assert_ne!(before, fast_file_content_hash(&path).unwrap());
     }
 
     #[test]

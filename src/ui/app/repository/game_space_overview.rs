@@ -47,6 +47,8 @@ pub struct GameSpaceOverviewReport {
 #[derive(Default)]
 pub struct GameSpaceOverviewState {
     pub report: Option<GameSpaceOverviewReport>,
+    /// Benchmark whose detail is expanded inline in the Activity card.
+    pub expanded_benchmark: Option<String>,
     rx: Option<Receiver<GameSpaceOverviewReport>>,
     loaded_key: Option<(u64, u64, u64)>,
     dirty: bool,

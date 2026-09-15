@@ -91,8 +91,18 @@ Currently emitted lines:
 
 Logs live in `%APPDATA%\Foxy\logs\foxy_rCURRENT.log` (rotated files alongside).
 Default file level is info. Debug-only cross-check lines (1 Hz `Download
-sample:`, `Quick scan timings:`, `Fetched response body ...`) require starting
-Foxy with `RUST_LOG="warn,Foxy=debug,foxy=debug"`.
+sample:`, `Quick scan timings:`, `Fetched response body ...`) require either
+starting Foxy with `RUST_LOG="warn,Foxy=debug,foxy=debug"` or the
+"Extended diagnostics logging" checkbox in application settings
+(`extended_diagnostics_logging` in `app_settings.json`, also
+`foxy settings --extended-diagnostics-logging true`). The setting applies live
+and additionally turns on the per-operation `PROFILE` report (phases, database
+statements and filesystem calls per phase, the same output `FOXY_PROFILE=1`
+gives the test kit), `PROFILE slow db` / `PROFILE slow fs` lines for single
+calls over 100 ms / 250 ms, and a `RESOURCES` line every 10 s while Foxy is
+busy (process and system CPU, RSS, system memory, process disk read/write and
+machine network rates; idle samples thin to one per two minutes). Ask a user
+reporting a slow check or update to enable it before capturing a log bundle.
 
 Extraction one-liner (PowerShell):
 
@@ -589,6 +599,34 @@ Workflow rules:
 6. **Split before you tune (O1).** For downloads, decompose the deficit into
    ramp, plateau and tail (A1) before proposing a change. A plateau at B1 with
    a bad `sol` is a tail problem, and the fix is E10, not scheduler tuning.
+
+## Saved benchmarks
+
+Enabling the "Benchmarks" application setting also switches on extended
+diagnostics logging (so the saved log slice carries the `PROFILE`,
+`RESOURCES` and debug lines) and locks it on (the checkbox is greyed out,
+the CLI and agent-gui refuse to turn it off); diagnostics the user had on
+before stay the user's own, otherwise disabling benchmarks switches them
+off again (`SettingsViewState::set_benchmarks_enabled`).
+
+With the "Benchmarks" application setting on, every recheck, quick check,
+integrity check, update, force redownload and per-addon download the user
+starts ends with a "Save benchmark" prompt. A saved benchmark is a folder
+`games/<space>/benchmarks/<id>/` holding `benchmark.json` (the
+`core::benchmarks::BenchmarkRecord`: kind, repository, outcome, build,
+machine, the metrics of the run, the `PIPELINE SUMMARY` stage rows, every
+`SOL` line of the frame, and the 1 Hz samples the UI recorded) and
+`benchmark.log` (the startup block of the process log plus the lines of the
+action's time frame). The `benchmarks` table only indexes those folders and is
+rebuilt from them on load, so a database wipe keeps benchmarks unless the
+wipe confirmation's "Also delete saved benchmarks" box is ticked. The
+Benchmarks settings tab lists, filters, compares (two-way metric and stage
+diff with overlaid charts) and exports them (ZIP with the record, a flat
+`summary.txt`, the log slice and the charts as PNG).
+
+When a benchmark is meant for the tracking table below, take its `SOL` rows
+from `benchmark.json` rather than re-reading the full log; the frame already
+excludes every other operation of the session.
 
 ## Logging requirements for new code
 

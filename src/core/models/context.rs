@@ -1,7 +1,7 @@
 use crate::core::db::{DbHandle, FoxyDb};
 use crate::core::models::recheck_level::RecheckLevel;
 use reqwest::Client;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -53,6 +53,11 @@ pub(crate) struct FoxyContext {
     pending_addon_file_links: Arc<Mutex<Vec<(i64, i64)>>>,
     pending_download_targets: Arc<Mutex<Vec<PendingDownloadTarget>>>,
     pending_patch_clear_ids: Arc<Mutex<Vec<i64>>>,
+    /// Content fingerprints the hash pass computed while each file was still
+    /// in the page cache, keyed by file id, for the content-hash refresh that
+    /// follows in the same operation to consume instead of re-sampling the
+    /// file from a cold disk.
+    fresh_file_content_hashes: Arc<Mutex<HashMap<u64, String>>>,
 }
 
 #[derive(Clone)]
@@ -83,7 +88,28 @@ impl FoxyContext {
             pending_addon_file_links: Arc::new(Mutex::new(Vec::new())),
             pending_download_targets: Arc::new(Mutex::new(Vec::new())),
             pending_patch_clear_ids: Arc::new(Mutex::new(Vec::new())),
+            fresh_file_content_hashes: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Record fingerprints computed by a hash pass for the refresh that follows.
+    /// A later pass over the same file replaces the earlier value.
+    pub(crate) fn record_fresh_file_content_hashes(
+        &self,
+        hashes: impl IntoIterator<Item = (u64, String)>,
+    ) {
+        if let Ok(mut fresh) = self.fresh_file_content_hashes.lock() {
+            fresh.extend(hashes);
+        }
+    }
+
+    /// Take the fingerprint a hash pass recorded for `file_id`, if any. Taking
+    /// it means a second refresh in the same operation samples the disk again.
+    pub(crate) fn take_fresh_file_content_hash(&self, file_id: u64) -> Option<String> {
+        self.fresh_file_content_hashes
+            .lock()
+            .ok()
+            .and_then(|mut fresh| fresh.remove(&file_id))
     }
 
     /// Enable/disable the deferred part-insert path for the current sync (set by the

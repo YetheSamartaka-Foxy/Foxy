@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::path::Path;
 
 use eframe::egui::{
@@ -6,6 +7,7 @@ use eframe::egui::{
 };
 use log::{info, warn};
 
+use crate::core::benchmarks::BenchmarkRecord;
 use crate::core::game::spaces;
 use crate::ui::app::{Foxy, RepositoryGroupSummary, TeamSpeakSummary};
 use crate::ui::game_logos::GAME_LOGO_HEIGHT;
@@ -16,6 +18,8 @@ const OVERVIEW_LOGO_MAX_WIDTH: f32 = 200.0;
 const STAT_VALUE_SIZE: f32 = 24.0;
 const CARD_GAP: f32 = 12.0;
 const SHARE_BAR_HEIGHT: f32 = 4.0;
+const RECENT_BENCHMARKS: usize = 5;
+const BENCHMARK_ROW_HEIGHT: f32 = 28.0;
 
 struct StatTile {
     value: String,
@@ -41,6 +45,7 @@ impl Foxy {
     /// repository spaces, and the most recent update and launch.
     pub(crate) fn render_game_space_overview(&mut self, ui: &mut Ui) {
         self.poll_game_space_overview();
+        self.ensure_benchmarks_loaded();
 
         let active = spaces::active_game_space();
         let module = crate::core::game::registry().get(&active.game_id);
@@ -63,6 +68,7 @@ impl Foxy {
         let dim_color = self.color_text_dim();
         let accent = self.color_primary_accent();
         let mut open_space: Option<String> = None;
+        let mut open_benchmarks = false;
 
         ScrollArea::vertical()
             .id_salt("game_space_overview")
@@ -196,16 +202,154 @@ impl Foxy {
                                 .on_hover_text(&workspace_path);
                             ui.end_row();
                         });
+                    ui.add_space(12.0);
+                    open_benchmarks = this.render_overview_recent_benchmarks(ui);
                 });
                 ui.add_space(CARD_GAP);
             });
 
+        if open_benchmarks {
+            info!("Opening Benchmarks settings from the game space overview");
+            self.open_settings_view();
+            self.settings_view_state.current_tab = "Benchmarks".to_string();
+        }
         if let Some(space_id) = open_space {
             self.repository_view_state.selected_repository = None;
             self.selected_repository_visual_folder_id = None;
             self.selected_repository_space_id = Some(space_id);
             self.needs_repaint = true;
         }
+    }
+
+    /// The newest saved benchmarks with a jump to the Benchmarks tab and an
+    /// inline detail toggle. The store is per game space, so the list is
+    /// already scoped to this game. Returns whether the tab was requested.
+    fn render_overview_recent_benchmarks(&mut self, ui: &mut Ui) -> bool {
+        let text_color = self.color_text_normal();
+        let dim_color = self.color_text_dim();
+        let mut open_benchmarks = false;
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(self.t("Recent benchmarks"))
+                    .strong()
+                    .color(text_color),
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let button = ui.button(self.t("Open benchmarks"));
+                if button.hovered() {
+                    ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                }
+                if button.clicked() {
+                    open_benchmarks = true;
+                }
+            });
+        });
+        ui.add_space(4.0);
+        let mut recent: Vec<&BenchmarkRecord> = self
+            .benchmarks_view
+            .records
+            .iter()
+            .filter(|record| !record.hidden)
+            .collect();
+        recent.sort_by_key(|record| Reverse(record.started_at));
+        let recent: Vec<BenchmarkRecord> = recent
+            .into_iter()
+            .take(RECENT_BENCHMARKS)
+            .cloned()
+            .collect();
+        if recent.is_empty() {
+            let hint = if self.settings_view_state.benchmarks_enabled {
+                self.t("No benchmarks saved yet.")
+            } else {
+                self.t("No benchmarks saved yet. Enable benchmarks in the Benchmarks tab to be offered a save after rechecks and updates.")
+            };
+            ui.label(RichText::new(hint).italics().color(dim_color));
+            return open_benchmarks;
+        }
+        for record in &recent {
+            self.render_overview_benchmark_row(ui, record);
+            ui.add_space(4.0);
+        }
+        open_benchmarks
+    }
+
+    fn render_overview_benchmark_row(&mut self, ui: &mut Ui, record: &BenchmarkRecord) {
+        let expanded =
+            self.game_space_overview.expanded_benchmark.as_deref() == Some(record.id.as_str());
+        let dim_color = self.color_text_dim();
+        Frame::NONE
+            .fill(self.color_main_bg())
+            .corner_radius(CornerRadius::same(6))
+            .inner_margin(Margin::symmetric(10, 6))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                let header_size = Vec2::new(ui.available_width(), BENCHMARK_ROW_HEIGHT);
+                ui.allocate_ui_with_layout(
+                    header_size,
+                    Layout::right_to_left(Align::Center),
+                    |ui| {
+                        let label = if expanded {
+                            self.t("Hide details")
+                        } else {
+                            self.t("Details")
+                        };
+                        let button = ui.button(label);
+                        if button.hovered() {
+                            ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                        }
+                        if button.clicked() {
+                            self.game_space_overview.expanded_benchmark =
+                                (!expanded).then(|| record.id.clone());
+                        }
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        if let Some(sol) = record.headline_sol().and_then(|summary| summary.sol) {
+                            self.benchmark_stat_chip(
+                                ui,
+                                self.t("SoL"),
+                                format!("{:.0}%", (sol * 100.0).round()),
+                            );
+                        }
+                        if let Some((rate, unit)) = record.headline_rate() {
+                            let text = if unit == "B/s" {
+                                format!("{}/s", fmt_bytes(rate as u64))
+                            } else {
+                                format!("{rate:.0} {unit}")
+                            };
+                            self.benchmark_stat_chip(ui, self.t("avg"), text);
+                        }
+                        self.benchmark_stat_chip(
+                            ui,
+                            self.t("elapsed"),
+                            format!("{:.1} s", record.elapsed_secs()),
+                        );
+                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                            self.benchmark_outcome_dot(ui, &record.outcome);
+                            self.benchmark_kind_badge(ui, record.kind);
+                            ui.add(
+                                Label::new(RichText::new(&record.name).strong())
+                                    .truncate()
+                                    .selectable(false),
+                            )
+                            .on_hover_text(&record.repository.url);
+                        });
+                    },
+                );
+                ui.add(
+                    Label::new(
+                        RichText::new(format!(
+                            "{}  \u{00B7}  {}",
+                            record.repository.name, record.started_at_local
+                        ))
+                        .small()
+                        .color(dim_color),
+                    )
+                    .truncate()
+                    .selectable(false),
+                );
+                if expanded {
+                    self.render_benchmark_detail(ui, &record.id);
+                }
+            });
     }
 
     fn latest_repository_activity(

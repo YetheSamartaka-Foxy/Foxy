@@ -433,9 +433,15 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
     let apply_parts_started = Instant::now();
     let mut updated_part_indices: HashSet<usize> = HashSet::new();
     let mut whole_file_checksums_by_file_idx: HashMap<usize, String> = HashMap::new();
+    let mut fresh_content_hashes: Vec<(u64, String)> = Vec::new();
     for file_result in hash_results {
         if let Some(checksum) = file_result.whole_file_checksum {
             whole_file_checksums_by_file_idx.insert(file_result.file_idx, checksum);
+        }
+        if let Some(content_hash) = file_result.content_hash
+            && let Some(file) = data_tree.files.get(file_result.file_idx)
+        {
+            fresh_content_hashes.push((file.id, content_hash));
         }
         for (part_idx, updated_part) in file_result.updated_parts {
             if let Some(dest) = data_tree.parts.get_mut(part_idx) {
@@ -444,6 +450,7 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
             }
         }
     }
+    context.record_fresh_file_content_hashes(fresh_content_hashes);
     info!(
         "Phase 1 (apply part hashes) completed in {:.3}s ({} updated parts)",
         apply_parts_started.elapsed().as_secs_f64(),

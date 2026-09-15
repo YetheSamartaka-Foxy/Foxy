@@ -26,6 +26,59 @@ fn path_matches_mod(root: &str, candidate: &str) -> bool {
     candidate.starts_with(&prefix)
 }
 
+/// Per-flush tally of what the OS reported, so a log bundle can tell a real
+/// edit from an attribute storm (an indexer, an antivirus pass) without the
+/// watcher having to guess.
+#[derive(Default)]
+struct EventKindTally {
+    create: usize,
+    modify_data: usize,
+    modify_metadata: usize,
+    modify_name: usize,
+    modify_other: usize,
+    remove: usize,
+    access: usize,
+    other: usize,
+    sample_path: Option<String>,
+}
+
+impl EventKindTally {
+    fn record(&mut self, kind: &notify::EventKind, sample: Option<&str>) {
+        use notify::EventKind;
+        use notify::event::ModifyKind;
+        match kind {
+            EventKind::Create(_) => self.create += 1,
+            EventKind::Modify(ModifyKind::Data(_)) => self.modify_data += 1,
+            EventKind::Modify(ModifyKind::Metadata(_)) => self.modify_metadata += 1,
+            EventKind::Modify(ModifyKind::Name(_)) => self.modify_name += 1,
+            EventKind::Modify(_) => self.modify_other += 1,
+            EventKind::Remove(_) => self.remove += 1,
+            EventKind::Access(_) => self.access += 1,
+            _ => self.other += 1,
+        }
+        if self.sample_path.is_none()
+            && let Some(path) = sample
+        {
+            self.sample_path = Some(sanitize_log_path_str(path));
+        }
+    }
+
+    fn summary(&self) -> String {
+        format!(
+            "create={} modify_data={} modify_metadata={} modify_name={} modify_other={} remove={} access={} other={} sample={}",
+            self.create,
+            self.modify_data,
+            self.modify_metadata,
+            self.modify_name,
+            self.modify_other,
+            self.remove,
+            self.access,
+            self.other,
+            self.sample_path.as_deref().unwrap_or("-")
+        )
+    }
+}
+
 #[derive(Clone, Debug)]
 struct LinkedRepoPath {
     remote_url: String,
@@ -238,6 +291,7 @@ pub fn spawn_repo_fs_watcher(
 
         let debounce = Duration::from_millis(350);
         let mut pending_paths: HashSet<String> = HashSet::new();
+        let mut pending_kinds = EventKindTally::default();
         let mut last_event_at = Instant::now();
 
         loop {
@@ -247,6 +301,20 @@ pub fn spawn_repo_fs_watcher(
             }
             match rx.recv_timeout(Duration::from_millis(200)) {
                 Ok(Ok(event)) => {
+                    // Access events never change what a sync would find on
+                    // disk; counting them keeps the storm diagnosable.
+                    let is_access = matches!(event.kind, notify::EventKind::Access(_));
+                    pending_kinds.record(
+                        &event.kind,
+                        event
+                            .paths
+                            .first()
+                            .map(|path| path.to_string_lossy())
+                            .as_deref(),
+                    );
+                    if is_access {
+                        continue;
+                    }
                     for path in event.paths {
                         let normalized = normalize_path_for_match(path.to_string_lossy().as_ref());
                         if !normalized.is_empty() {
@@ -265,17 +333,20 @@ pub fn spawn_repo_fs_watcher(
 
                     if unix_time_millis() <= suppress_until_ms.load(Ordering::Relaxed) {
                         pending_paths.clear();
+                        pending_kinds = EventKindTally::default();
                         continue;
                     }
 
                     let repo_urls = repo_urls_for_changed_paths(&mod_index, &pending_paths);
+                    let kinds = std::mem::take(&mut pending_kinds);
 
                     pending_paths.clear();
 
                     if !repo_urls.is_empty() {
                         info!(
-                            "Filesystem watcher detected local changes for {} repositories",
-                            repo_urls.len()
+                            "Filesystem watcher detected local changes for {} repositories: {}",
+                            repo_urls.len(),
+                            kinds.summary()
                         );
                         if result_tx
                             .send(FsChangeEvent {

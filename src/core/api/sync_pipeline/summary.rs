@@ -108,7 +108,7 @@ impl PipelineSummary {
                 entry.name.clone()
             };
             lines.push(format!(
-                " {:<name_w$}  {:>7.2}s  {}",
+                " {:<name_w$}  {:>8.3}s  {}",
                 name_display,
                 entry.duration.as_secs_f64(),
                 detail_str,
@@ -117,7 +117,7 @@ impl PipelineSummary {
 
         lines.push(dash);
         lines.push(format!(
-            " {:<name_w$}  {:>7.2}s  outcome={}",
+            " {:<name_w$}  {:>8.3}s  outcome={}",
             "TOTAL", total_secs, outcome,
         ));
         lines.push(sep);

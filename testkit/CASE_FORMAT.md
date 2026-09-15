@@ -101,7 +101,7 @@ no unallowlisted WARN or ERROR entries.
 
 Supported operations are `startup`, `ui-walk`, `remote-refresh`, `quick-check`,
 `recheck`, `recheck-integrity`, `force-redownload`, `download`, `wipe-db`,
-`mutate`, and `restore`. Each operation may contain `wait_timeout_s`,
+`mutate`, `restore`, and `evict-cache`. Each operation may contain `wait_timeout_s`,
 `expect`, `label`, and `repository`. `repository` names the fixture repository
 the operation acts on (the CLI `--repo-name`, or the GUI row with that name);
 it defaults to the case `repository`. `extra_repositories` is what puts a
@@ -204,6 +204,14 @@ An expectation is `{path, equals}`, `{path, min}`, `{path, max}`, or
 The `mutate` operation adds `profile`, `seed`, `files`, `entries`, `bytes`, and
 optional `path`. `path` defaults to the repository target. `restore` replays the
 run journal. Supported profiles are documented by `foxy-testkit-mutate --help`.
+
+`evict-cache` drops the OS page cache for every file under `path` (default: the
+repository target) by opening each one non-cached, and is not ledgered. Without
+it an HDD case whose payload was just downloaded or mutated measures memory,
+not the disk: the ledger's `cache_state` only records the iteration number.
+Place it after `mutate` and before the first measured operation, and once more
+before a `download` that should read its patch sources cold. Windows only; on
+other platforms it walks the tree and reports `supported: false`.
 
 ## Guards
 

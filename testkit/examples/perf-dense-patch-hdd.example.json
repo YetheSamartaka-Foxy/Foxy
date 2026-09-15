@@ -1,0 +1,64 @@
+{
+  "id": "perf-dense-patch-hdd",
+  "kind": "perf",
+  "description": "Patch repair of entry-dense PBOs with hundreds of flipped entries each, read cold from spinning media: the apply is seek-bound and the blob download is request-bound unless both are coalesced.",
+  "build": "release",
+  "harness": "gui",
+  "repository": {
+    "name": "Example Repository",
+    "address": "https://repo.example.invalid/mods/example/",
+    "path": "D:\\Foxy-TestKit\\Example",
+    "space_id": null
+  },
+  "operations": [
+    {
+      "op": "download",
+      "setup_once": true,
+      "wait_timeout_s": 10800
+    },
+    {
+      "op": "mutate",
+      "profile": "scattered",
+      "seed": 7,
+      "files": 3,
+      "entries": 3000,
+      "targets": [
+        "@map_pack_a/addons/terrain_a.pbo",
+        "@map_pack_b/addons/terrain_b.pbo",
+        "@map_pack_c/addons/terrain_c.pbo"
+      ]
+    },
+    {
+      "op": "evict-cache"
+    },
+    {
+      "op": "download",
+      "wait_timeout_s": 5400,
+      "expect": [
+        {
+          "path": "summary.patched_files",
+          "equals": 3
+        },
+        {
+          "path": "summary.delta_savings_percent",
+          "min": 50
+        }
+      ]
+    },
+    {
+      "op": "restore"
+    }
+  ],
+  "repetitions": 2,
+  "guards": {
+    "require_storage_class": "hdd",
+    "require_no_other_foxy": true,
+    "fail_on_db_wipe": true,
+    "max_run_gb": 3,
+    "oracle_command": [
+      "independent-repository-verifier.exe",
+      "--repository-path",
+      "${REPOSITORY_PATH}"
+    ]
+  }
+}

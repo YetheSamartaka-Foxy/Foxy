@@ -44,6 +44,9 @@ impl LogWriter for UiLogWriter {
 pub(crate) static PROCESS_START: std::sync::LazyLock<Instant> =
     std::sync::LazyLock::new(Instant::now);
 
+const BASE_LOG_SPEC: &str = "warn, Foxy=info, foxy=info";
+/// Crate module prefixes whose level the extended diagnostics switch raises.
+const DIAGNOSTIC_MODULES: [&str; 2] = ["Foxy", "foxy"];
 const LOG_ROTATION_SIZE_BYTES: u64 = 40 * 1024 * 1024;
 const HISTORICAL_LOG_FILE_LIMIT: usize = 15;
 const HISTORICAL_LOG_MAX_AGE: Duration = Duration::from_secs(90 * 24 * 60 * 60);
@@ -65,6 +68,8 @@ impl Default for LoggerHealth {
 
 static LOGGER_HEALTH: std::sync::LazyLock<Mutex<LoggerHealth>> =
     std::sync::LazyLock::new(|| Mutex::new(LoggerHealth::default()));
+static LOGGER_HANDLE: Mutex<Option<LoggerHandle>> = Mutex::new(None);
+static EXTENDED_DIAGNOSTICS: AtomicBool = AtomicBool::new(false);
 static OPERATION_COUNTER: AtomicU64 = AtomicU64::new(1);
 static CLOSED_PROGRESS_CHANNELS: std::sync::LazyLock<Mutex<HashSet<String>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashSet::new()));
@@ -89,7 +94,7 @@ fn ensure_logger_inner(duplicate_to_terminal: bool) {
             .directory(config_dir.clone())
             .basename("foxy");
 
-        match Logger::try_with_env_or_str("warn, Foxy=info, foxy=info") {
+        match Logger::try_with_env_or_str(BASE_LOG_SPEC) {
             Ok(logger) => {
                 let mut logger = logger
                     // Route all standard log records into the in-app activity buffer too.
@@ -108,7 +113,13 @@ fn ensure_logger_inner(duplicate_to_terminal: bool) {
                 }
 
                 match logger.start() {
-                    Ok(_) => {
+                    Ok(handle) => {
+                        if EXTENDED_DIAGNOSTICS.load(Ordering::Relaxed) {
+                            handle.set_new_spec(extended_diagnostics_spec(base_log_spec()));
+                        }
+                        *LOGGER_HANDLE
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(handle);
                         set_logger_health(true, "File logging active");
                         info!("Logger initialized");
                         info!(
@@ -138,6 +149,58 @@ fn ensure_logger_inner(duplicate_to_terminal: bool) {
             }
         }
     });
+}
+
+fn base_log_spec() -> LogSpecification {
+    LogSpecification::env_or_parse(BASE_LOG_SPEC).unwrap_or_else(|_| {
+        LogSpecification::parse(BASE_LOG_SPEC).unwrap_or_else(|_| LogSpecification::off())
+    })
+}
+
+/// The base specification with the Foxy modules raised to at least `Debug`.
+/// A stricter `RUST_LOG` (for example `trace`) is left alone.
+fn extended_diagnostics_spec(base: LogSpecification) -> LogSpecification {
+    let mut builder = LogSpecBuilder::from_module_filters(base.module_filters());
+    for module in DIAGNOSTIC_MODULES {
+        let current = base
+            .module_filters()
+            .iter()
+            .find(|filter| filter.module_name.as_deref() == Some(module))
+            .map(|filter| filter.level_filter)
+            .unwrap_or(LevelFilter::Off);
+        builder.module(module, current.max(LevelFilter::Debug));
+    }
+    builder.finalize()
+}
+
+/// Switch the extra tracing on or off: debug-level records from this crate,
+/// per-operation `PROFILE` reports and periodic `RESOURCES` samples. Safe to
+/// call before the logger starts; the level is applied when it does.
+pub fn set_extended_diagnostics(enabled: bool) {
+    if EXTENDED_DIAGNOSTICS.swap(enabled, Ordering::Relaxed) == enabled {
+        return;
+    }
+    if let Some(handle) = LOGGER_HANDLE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_ref()
+    {
+        let base = base_log_spec();
+        handle.set_new_spec(if enabled {
+            extended_diagnostics_spec(base)
+        } else {
+            base
+        });
+    }
+    crate::core::utils::profiling::set_runtime_enabled(enabled);
+    crate::core::utils::resource_sampler::set_enabled(enabled);
+    if enabled {
+        info!(
+            "Extended diagnostics logging enabled: debug records, PROFILE reports per operation, RESOURCES samples"
+        );
+    } else {
+        info!("Extended diagnostics logging disabled");
+    }
 }
 
 fn redacted_detailed_format(
@@ -364,5 +427,36 @@ mod tests {
             expired,
             now
         ));
+    }
+
+    fn level_of(spec: &LogSpecification, module: &str) -> Option<LevelFilter> {
+        spec.module_filters()
+            .iter()
+            .find(|filter| filter.module_name.as_deref() == Some(module))
+            .map(|filter| filter.level_filter)
+    }
+
+    #[test]
+    fn extended_spec_raises_foxy_modules_to_debug_and_keeps_the_rest() {
+        let base = LogSpecification::parse(BASE_LOG_SPEC).expect("base spec");
+        let spec = extended_diagnostics_spec(base);
+        assert_eq!(level_of(&spec, "Foxy"), Some(LevelFilter::Debug));
+        assert_eq!(level_of(&spec, "foxy"), Some(LevelFilter::Debug));
+        assert_eq!(level_of(&spec, "tokio"), None);
+        let default = spec
+            .module_filters()
+            .iter()
+            .find(|filter| filter.module_name.is_none())
+            .map(|filter| filter.level_filter);
+        assert_eq!(default, Some(LevelFilter::Warn));
+    }
+
+    #[test]
+    fn extended_spec_does_not_lower_a_stricter_level() {
+        let base = LogSpecification::parse("warn, Foxy=trace, reqwest=debug").expect("spec");
+        let spec = extended_diagnostics_spec(base);
+        assert_eq!(level_of(&spec, "Foxy"), Some(LevelFilter::Trace));
+        assert_eq!(level_of(&spec, "foxy"), Some(LevelFilter::Debug));
+        assert_eq!(level_of(&spec, "reqwest"), Some(LevelFilter::Debug));
     }
 }

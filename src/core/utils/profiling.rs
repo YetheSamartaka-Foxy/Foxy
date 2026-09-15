@@ -1,8 +1,8 @@
-//! Opt-in whole-operation profiler for the test kit.
+//! Opt-in whole-operation profiler for the test kit and extended diagnostics.
 //!
-//! Off unless `FOXY_PROFILE` is set to something other than `0`. When off every
-//! hook below is one `OnceLock` load and a branch, so the shipping binary pays
-//! nothing. When on, the process accumulates one report per operation covering
+//! Off unless `FOXY_PROFILE` is set to something other than `0` or the
+//! extended diagnostics setting turned it on at runtime. When off every hook
+//! below is two atomic loads and a branch, so the shipping binary pays nothing. When on, the process accumulates one report per operation covering
 //! four things the existing instrumentation does not:
 //!
 //! - a gap-free phase timeline, including the time no phase claims
@@ -16,6 +16,7 @@
 //! it is not comparable with an unprofiled one for timing.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -23,17 +24,35 @@ pub(crate) mod fs;
 
 /// Phase name used for work that runs outside any declared phase.
 const UNATTRIBUTED: &str = "unattributed";
+/// Single calls at or above these get their own debug line, since the report
+/// only carries the per-label maximum.
+const SLOW_DB_CALL: Duration = Duration::from_millis(100);
+const SLOW_FS_CALL: Duration = Duration::from_millis(250);
 
-static ENABLED: OnceLock<bool> = OnceLock::new();
+static ENV_ENABLED: OnceLock<bool> = OnceLock::new();
+static RUNTIME_ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Whether deep profiling is on for this process.
 pub(crate) fn enabled() -> bool {
-    *ENABLED.get_or_init(|| {
-        std::env::var("FOXY_PROFILE").is_ok_and(|value| {
-            let value = value.trim();
-            !value.is_empty() && value != "0"
+    RUNTIME_ENABLED.load(Ordering::Relaxed)
+        || *ENV_ENABLED.get_or_init(|| {
+            std::env::var("FOXY_PROFILE").is_ok_and(|value| {
+                let value = value.trim();
+                !value.is_empty() && value != "0"
+            })
         })
-    })
+}
+
+/// Turn profiling on or off without the environment variable. Turning it off
+/// mid-operation drops the partial report rather than emitting a torn one.
+pub(crate) fn set_runtime_enabled(enabled: bool) {
+    RUNTIME_ENABLED.store(enabled, Ordering::Relaxed);
+    if !self::enabled() {
+        let mut guard = STATE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = None;
+    }
 }
 
 #[derive(Default, Clone, Copy)]
@@ -122,6 +141,16 @@ pub(crate) fn phase(name: &str) {
 pub(crate) fn record_db(kind: &'static str, sql: &str, elapsed: Duration, rows: u64) {
     with_state(|state| {
         let key = (state.phase_name(), kind, statement_label(sql));
+        if elapsed >= SLOW_DB_CALL {
+            log::debug!(
+                "PROFILE slow db phase={} kind={} label={} rows={} elapsed_ms={:.1}",
+                key.0,
+                kind,
+                key.2,
+                rows,
+                elapsed.as_secs_f64() * 1e3
+            );
+        }
         state.db.entry(key).or_default().add(elapsed, rows);
     });
 }
@@ -131,6 +160,15 @@ pub(crate) fn record_db(kind: &'static str, sql: &str, elapsed: Duration, rows: 
 pub(crate) fn record_fs(op: &'static str, units: u64, elapsed: Duration) {
     with_state(|state| {
         let key = (state.phase_name(), op);
+        if elapsed >= SLOW_FS_CALL {
+            log::debug!(
+                "PROFILE slow fs phase={} op={} units={} elapsed_ms={:.1}",
+                key.0,
+                op,
+                units,
+                elapsed.as_secs_f64() * 1e3
+            );
+        }
         state.fs.entry(key).or_default().add(elapsed, units);
     });
 }

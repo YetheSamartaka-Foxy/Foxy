@@ -1,6 +1,7 @@
 pub mod agent_driver;
 pub mod agent_support;
 mod backup;
+pub mod benchmarks;
 pub mod debug_modals;
 mod diagnostics;
 mod downloads;
@@ -123,7 +124,14 @@ pub struct Foxy {
     pub delete_repository_delete_files: bool,
     pub show_force_redownload_confirmation: bool,
     pub show_wipe_db_confirmation: bool,
+    /// Opt-in on the wipe confirmation: also delete the saved benchmarks.
+    pub wipe_db_include_benchmarks: bool,
     pub show_wipe_repo_db_confirmation: bool,
+    pub benchmark_armed: Option<benchmarks::BenchmarkArm>,
+    pub benchmark_capture: Option<benchmarks::BenchmarkCapture>,
+    pub benchmark_prompt: Option<benchmarks::BenchmarkDraft>,
+    pub benchmarks_view: benchmarks::BenchmarksViewState,
+    pub benchmark_channels: benchmarks::BenchmarkChannels,
     pub pending_renderer_fallback_notice: bool,
     /// Set when the local database schema is older than the schema this binary
     /// ships and the user must be prompted to wipe-and-continue (or dismiss and
@@ -290,6 +298,18 @@ pub struct Foxy {
     /// was last prepared for them; the next queue-building sync rebuilds
     /// instead of reusing the prepared queue.
     pub fs_changed_since_prepare: HashSet<String>,
+    /// Consecutive watcher-triggered quick scans that found nothing. A
+    /// read-only disk walk (an indexer, an antivirus pass, the app's own
+    /// inventory scan) can raise events for a minute straight; after the
+    /// second clean scan the next ones are held back for a growing window.
+    pub fs_watch_clean_scan_streak: u32,
+    pub fs_watch_backoff_until: Option<Instant>,
+    /// Repositories the watcher reported while the backoff window was open;
+    /// scanned once, together, when it closes.
+    pub fs_watch_backoff_urls: HashSet<String>,
+    /// Repositories whose queued quick scan was raised by the watcher, so its
+    /// outcome feeds the clean-scan streak.
+    pub fs_watch_scan_urls: HashSet<String>,
     pub deferred_fs_scan: HashSet<String>,
     pub pending_quick_scan_urls: HashSet<String>,
     pub pending_quick_scan_prevalidated_urls: HashSet<String>,

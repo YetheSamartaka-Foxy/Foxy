@@ -52,6 +52,21 @@ CREATE TABLE IF NOT EXISTS pending_updates (
     PRIMARY KEY (repository_url, local_path)
 );
 
+-- Index of the benchmark folders under games/<space>/benchmarks. The folders
+-- are authoritative; rows are rebuilt from them after a wipe.
+CREATE TABLE IF NOT EXISTS benchmarks (
+    id             TEXT PRIMARY KEY,
+    created_at     INTEGER NOT NULL,
+    kind           TEXT NOT NULL,
+    name           TEXT NOT NULL DEFAULT '',
+    repository_url TEXT NOT NULL DEFAULT '',
+    local_path     TEXT NOT NULL DEFAULT '',
+    outcome        TEXT NOT NULL DEFAULT '',
+    elapsed_ms     INTEGER NOT NULL DEFAULT 0,
+    favourite      INTEGER NOT NULL DEFAULT 0,
+    hidden         INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS addons (
     id                 INTEGER PRIMARY KEY,
     name               TEXT,

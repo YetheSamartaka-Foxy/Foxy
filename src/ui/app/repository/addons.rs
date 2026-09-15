@@ -996,11 +996,24 @@ fn addon_directory_total_sizes(paths: &[String]) -> Vec<Option<u64>> {
         return sizes;
     }
 
-    let workers = std::thread::available_parallelism()
-        .map(std::num::NonZeroUsize::get)
-        .unwrap_or(1)
-        .clamp(1, ADDON_SIZE_SCAN_MAX_WORKERS)
-        .min(paths.len());
+    // Directory metadata on a rotational disk is one seek per entry; parallel
+    // walkers only make the head jump between addon folders.
+    let rotational = paths.iter().any(|path| {
+        matches!(
+            crate::core::tasks::calculate_hashes::detect_storage_class_for_path(path),
+            crate::core::tasks::calculate_hashes::HashStorageClass::Hdd
+                | crate::core::tasks::calculate_hashes::HashStorageClass::Removable
+        )
+    });
+    let workers = if rotational {
+        1
+    } else {
+        std::thread::available_parallelism()
+            .map(std::num::NonZeroUsize::get)
+            .unwrap_or(1)
+            .clamp(1, ADDON_SIZE_SCAN_MAX_WORKERS)
+            .min(paths.len())
+    };
     if workers <= 1 {
         for (index, path) in paths.iter().enumerate() {
             sizes[index] = addon_directory_total_size(Path::new(path)).ok();

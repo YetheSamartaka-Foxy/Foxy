@@ -61,6 +61,19 @@ fn cmd_settings_set(
         state.settings.show_memory_diagnostics_icon = v;
         changed = true;
     }
+    if let Some(v) = args.benchmarks_enabled {
+        state.settings.set_benchmarks_enabled(v);
+        changed = true;
+    }
+    if let Some(v) = args.extended_diagnostics_logging {
+        if !state.settings.set_extended_diagnostics_logging(v) {
+            return Err(CommandError::validation(
+                "settings.set",
+                "Extended diagnostics logging stays on while benchmarks are enabled; disable benchmarks first",
+            ));
+        }
+        changed = true;
+    }
     if let Some(v) = args.close_after_launch {
         state.settings.close_after_launch = v;
         changed = true;

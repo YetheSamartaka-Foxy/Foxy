@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::core::api;
+use crate::core::benchmarks::BenchmarkKind;
 use crate::ui::app::{AddonInventoryEntry, Foxy, FoxyView, MemoryDiagnosticsSample};
 use crate::ui::types::{
     MAX_UI_SCALE_PERCENT, MIN_UI_SCALE_PERCENT, RepoState, RepositorySelection,
@@ -3274,6 +3275,34 @@ impl Foxy {
                 self.mark_settings_dirty();
                 json!(parsed)
             }
+            "extended-diagnostics-logging" | "extended_diagnostics_logging" => {
+                let parsed = parse_agent_gui_bool(trimmed).ok_or_else(|| {
+                    format!("Expected a boolean for extended-diagnostics-logging, got '{value}'")
+                })?;
+                if !self
+                    .settings_view_state
+                    .set_extended_diagnostics_logging(parsed)
+                {
+                    return Err(
+                        "Extended diagnostics logging stays on while benchmarks are enabled; disable benchmarks first"
+                            .to_string(),
+                    );
+                }
+                crate::core::api::set_extended_diagnostics(parsed);
+                self.mark_settings_dirty();
+                json!(parsed)
+            }
+            "benchmarks-enabled" | "benchmarks_enabled" => {
+                let parsed = parse_agent_gui_bool(trimmed).ok_or_else(|| {
+                    format!("Expected a boolean for benchmarks-enabled, got '{value}'")
+                })?;
+                self.apply_benchmarks_enabled(parsed);
+                self.mark_settings_dirty();
+                json!({
+                    "benchmarks_enabled": parsed,
+                    "extended_diagnostics_logging": self.settings_view_state.extended_diagnostics_logging,
+                })
+            }
             "ui-scale-percent" | "ui_scale_percent" => {
                 let parsed: u16 = trimmed.parse().map_err(|_| {
                     format!("Expected an integer percent for ui-scale-percent, got '{value}'")
@@ -3310,7 +3339,7 @@ impl Foxy {
             }
             other => {
                 return Err(format!(
-                    "Unsupported setting '{other}' (try debug-mode, show-activity-log, show-fps-counter, ui-scale-percent, locale, or download-speed-limit-mbps)"
+                    "Unsupported setting '{other}' (try debug-mode, show-activity-log, show-fps-counter, extended-diagnostics-logging, ui-scale-percent, locale, or download-speed-limit-mbps)"
                 ));
             }
         };
@@ -3425,6 +3454,8 @@ impl Foxy {
             "storage-compat-notice",
         );
         push(self.pending_db_schema_wipe.is_some(), "db-schema-wipe");
+        push(self.benchmark_prompt.is_some(), "benchmark-save");
+        push(self.benchmarks_view.export.is_some(), "benchmark-export");
         push(self.pending_app_update_prompt, "app-update-available");
         push(self.show_add_profile_window, "add-profile");
         push(self.show_rename_profile_window, "rename-profile");
@@ -4928,6 +4959,29 @@ impl Foxy {
         Ok(index)
     }
 
+    /// The benchmark at `index` in the list as currently filtered and sorted.
+    fn agent_gui_resolve_benchmark_id(
+        &mut self,
+        params: &Value,
+    ) -> Result<String, (String, String)> {
+        self.ensure_benchmarks_loaded();
+        let index = params
+            .get("index")
+            .and_then(Value::as_u64)
+            .map(|index| index as usize)
+            .unwrap_or(0);
+        self.benchmarks_view
+            .visible_ids()
+            .get(index)
+            .cloned()
+            .ok_or_else(|| {
+                (
+                    "invalid-params".to_string(),
+                    format!("Benchmark index {index} is out of range"),
+                )
+            })
+    }
+
     /// Run one named semantic action. Errors are `(code, message)`.
     fn agent_gui_invoke(
         &mut self,
@@ -5010,6 +5064,7 @@ impl Foxy {
             }
             "start-sync" => {
                 let index = self.agent_gui_resolve_repo_index(params)?;
+                self.arm_benchmark(BenchmarkKind::Update, Vec::new());
                 self.start_core_sync(index, api::SyncMode::Download);
             }
             "recheck-repo" => {
@@ -5018,18 +5073,92 @@ impl Foxy {
             }
             "quick-check" => {
                 let index = self.agent_gui_resolve_repo_index(params)?;
+                self.arm_benchmark(BenchmarkKind::QuickCheck, Vec::new());
                 self.start_core_sync(index, api::SyncMode::QuickCheckOnly);
             }
             "remote-recheck" => {
                 let index = self.agent_gui_resolve_repo_index(params)?;
+                self.arm_benchmark(BenchmarkKind::Recheck, Vec::new());
                 self.start_remote_recheck_with_plan(index);
             }
             "wipe-repo-db" => {
                 let index = self.agent_gui_resolve_repo_index(params)?;
                 self.wipe_repository_database_entries(index);
             }
+            "save-benchmark" => {
+                let draft = self.benchmark_prompt.take().ok_or_else(|| {
+                    (
+                        "no-prompt".to_string(),
+                        "No benchmark save prompt is open".to_string(),
+                    )
+                })?;
+                self.spawn_benchmark_save(draft);
+            }
+            "discard-benchmark" => {
+                if self.benchmark_prompt.take().is_none() {
+                    return Err((
+                        "no-prompt".to_string(),
+                        "No benchmark save prompt is open".to_string(),
+                    ));
+                }
+            }
+            "download-addons" => {
+                let index = self.agent_gui_resolve_repo_index(params)?;
+                let addons: Vec<String> = params
+                    .get("addons")
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if addons.is_empty() {
+                    return Err((
+                        "invalid-params".to_string(),
+                        "Provide addons as a JSON array of addon names".to_string(),
+                    ));
+                }
+                if !self.standalone_download_addons(index, &addons) {
+                    return Err((
+                        "invalid-state".to_string(),
+                        "Standalone addon download did not start (see log)".to_string(),
+                    ));
+                }
+            }
+            "expand-benchmark" => {
+                let id = self.agent_gui_resolve_benchmark_id(params)?;
+                if !self.benchmarks_view.expanded.remove(&id) {
+                    self.benchmarks_view.expanded.insert(id);
+                }
+            }
+            "expand-overview-benchmark" => {
+                let id = self.agent_gui_resolve_benchmark_id(params)?;
+                let expanded = &mut self.game_space_overview.expanded_benchmark;
+                *expanded = (expanded.as_deref() != Some(id.as_str())).then_some(id);
+            }
+            "select-benchmark" => {
+                let id = self.agent_gui_resolve_benchmark_id(params)?;
+                self.benchmarks_view.toggle_selected(&id);
+            }
+            "compare-benchmarks" => {
+                if self.benchmarks_view.selected.len() != 2 {
+                    return Err((
+                        "invalid-state".to_string(),
+                        "Select two benchmarks first (select-benchmark)".to_string(),
+                    ));
+                }
+                self.benchmarks_view.compare_open = true;
+            }
+            "export-benchmark" => {
+                let id = self.agent_gui_resolve_benchmark_id(params)?;
+                self.start_benchmark_export(&id);
+            }
             "recheck-integrity" => {
                 let index = self.agent_gui_resolve_repo_index(params)?;
+                self.arm_benchmark(BenchmarkKind::IntegrityCheck, Vec::new());
                 self.start_core_sync(index, api::SyncMode::RecheckIntegrity);
             }
             "force-redownload" => {
@@ -5247,6 +5376,54 @@ const AGENT_ACTIONS: &[AgentAction] = &[
         destructive: true,
         params: "repo-index",
         summary: "Wipe a repository's database entries (busy reason repository-db-wipe)",
+    },
+    AgentAction {
+        name: "save-benchmark",
+        destructive: true,
+        params: "",
+        summary: "Confirm the open benchmark save prompt (writes the benchmark folder)",
+    },
+    AgentAction {
+        name: "discard-benchmark",
+        destructive: false,
+        params: "",
+        summary: "Dismiss the open benchmark save prompt",
+    },
+    AgentAction {
+        name: "download-addons",
+        destructive: true,
+        params: "repo-index, addons",
+        summary: "Download only the named addons of a repository (the update modal's per-addon download)",
+    },
+    AgentAction {
+        name: "expand-benchmark",
+        destructive: false,
+        params: "index",
+        summary: "Toggle the detail of the nth visible benchmark in the Benchmarks tab",
+    },
+    AgentAction {
+        name: "expand-overview-benchmark",
+        destructive: false,
+        params: "index",
+        summary: "Toggle the inline detail of the nth visible benchmark in the game space overview",
+    },
+    AgentAction {
+        name: "select-benchmark",
+        destructive: false,
+        params: "index",
+        summary: "Toggle the compare selection of the nth visible benchmark",
+    },
+    AgentAction {
+        name: "compare-benchmarks",
+        destructive: false,
+        params: "",
+        summary: "Open the comparison of the two selected benchmarks",
+    },
+    AgentAction {
+        name: "export-benchmark",
+        destructive: true,
+        params: "index",
+        summary: "Export the nth visible benchmark to a ZIP (answers the save dialog; use dialog expect)",
     },
     AgentAction {
         name: "recheck-integrity",
@@ -5793,6 +5970,7 @@ pub fn parse_agent_gui_settings_tab(tab: &str) -> Option<String> {
         "direct-download" | "download" => "Direct download",
         "scheduling" | "schedule" => "Scheduling",
         "customization" | "customisation" | "customize" | "customise" => "Customization",
+        "benchmarks" | "benchmark" => "Benchmarks",
         _ => return None,
     };
     Some(tab.to_string())
