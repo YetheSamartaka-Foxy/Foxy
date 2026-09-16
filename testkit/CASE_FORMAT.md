@@ -127,6 +127,20 @@ operation), `tree_verify_runs` (targeted tree-hash verifies the quick scan
 triggered), `fs_watcher_starts`, and `prepared_queue_reuses`. Expectations
 reach them as `breakdown.run_metrics.<name>`.
 
+The hash-source counters say where an update's hash bytes came from and when
+they were paid: `content_refresh_runs` and `content_refresh_files_sampled`
+(`Content-hash baseline refreshed` passes, and the files they had to sample
+from disk because no hash pass in the operation fingerprinted them),
+`hash_source_segments_files` and `hash_source_reread_files` (delta-patched
+files recorded from their apply segments versus re-read),
+`hash_batches_after_download` and `final_hash_flush_files` (incremental hash
+work that ran after `Download stage completed`, so an update whose hashing
+stopped overlapping the transfer is visible), `download_large_files_limit`,
+`download_small_files_limit` and `download_patch_applies_limit` (the profile
+the destination's storage class selected), and `first_download_start_ms`
+(first timestamped event of the slice to the first `Starting download for
+mod`, the time an update spent preparing before the first byte).
+
 The pipeline's own verdict is there too: `pipeline_outcome` is the outcome of
 the last `Pipeline summary` line in the operation (`early-exit-clean`,
 `failed-empty-queue`, ...) and `failed_pipelines` counts the `failed-*` and

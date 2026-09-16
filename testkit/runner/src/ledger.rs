@@ -197,7 +197,9 @@ pub const DEFINITIONS: &[(&str, bool, f64)] = &[
     ("download.sol", true, 0.08),
     ("download.actual_bps", true, 0.08),
     ("hash.sol", true, 0.08),
-    ("hash.actual_s", false, 0.12),
+    // Total over every hash run of the operation: the `hash` record itself is
+    // only the last run, one arbitrary page-cache batch on a download row.
+    ("breakdown.run_metrics.hash_total_s", false, 0.12),
     ("quick_scan.actual_s", false, 0.12),
     ("summary.total_ms", false, 0.12),
     ("summary.download_stage_ms", false, 0.12),
@@ -279,6 +281,30 @@ pub fn save_baseline(rows: &[Value], path: &Path, case_hash: &str, git_sha: &str
         &json!({"accepted_utc":chrono::Utc::now().to_rfc3339(),"git_sha":git_sha,"case_hash":case_hash,"operations":medians,"tolerances":{"sol":0.08,"duration":0.12,"correctness":0.0}}),
     )
 }
+/// Absolute change below which a duration metric is noise whatever the percent
+/// says: a 12 percent band over a 9 ms hash stage, a 4 ms quick scan or a 63 ms
+/// page-cache hash batch flags scheduler jitter as a verdict. Seconds-valued paths end in `_s`, millisecond
+/// paths in `_ms`; ratios, rates, bytes and counters have no floor.
+pub fn noise_floor(path: &str) -> f64 {
+    if path.ends_with("_s") {
+        0.05
+    } else if path.ends_with("_ms") {
+        50.0
+    } else {
+        0.0
+    }
+}
+
+/// `(regression, improvement)` for one metric against its baseline median.
+pub fn classify(now: f64, was: f64, higher: bool, tolerance: f64, floor: f64) -> (bool, bool) {
+    if (now - was).abs() < floor {
+        return (false, false);
+    }
+    let change = (now - was) / was.abs();
+    let normalized = if higher { -change } else { change };
+    (normalized > tolerance, normalized < -tolerance)
+}
+
 pub fn compare(rows: &[Value], baseline_path: &Path, ledger_path: &Path) -> Result<Value> {
     if !baseline_path.exists() {
         return Ok(json!({"verdict":"no-baseline","deltas":[],"flags":[]}));
@@ -335,17 +361,17 @@ pub fn compare(rows: &[Value], baseline_path: &Path, ledger_path: &Path) -> Resu
                 continue;
             }
             let change = (now - was) / was.abs();
-            let normalized = if higher { -change } else { change };
-            let bad = normalized > tolerance;
-            let good = normalized < -tolerance;
+            let (bad, good) = classify(now, was, higher, tolerance, noise_floor(path));
             regression |= bad;
             improvement |= good;
             let prior = previous[op]["metrics"][path]
                 .as_f64()
                 .map(|n| (n - was) / was.abs());
-            let prior_normalized = prior.map(|n| if higher { -n } else { n });
-            let previous_bad = prior_normalized.is_some_and(|n| n > tolerance);
-            let previous_good = prior_normalized.is_some_and(|n| n < -tolerance);
+            let (previous_bad, previous_good) = previous[op]["metrics"][path]
+                .as_f64()
+                .map_or((false, false), |n| {
+                    classify(n, was, higher, tolerance, noise_floor(path))
+                });
             confirmed_bad |= bad && previous_bad;
             confirmed_good |= good && previous_good;
             let status = if bad && previous_bad {
@@ -401,6 +427,43 @@ mod tests {
             delta_savings(&json!({"full_download_bytes":100,"patch_savings_bytes":97})),
             97.0
         );
+    }
+    #[test]
+    fn duration_verdicts_need_both_the_band_and_the_floor() {
+        // 9.5 ms -> 4.0 ms clears 12 percent but not 50 ms: noise.
+        assert_eq!(
+            classify(4.0, 9.5, false, 0.12, noise_floor("summary.hash_stage_ms")),
+            (false, false)
+        );
+        // 63 ms -> 90 ms on a seconds path: the same.
+        assert_eq!(
+            classify(
+                0.090,
+                0.063,
+                false,
+                0.12,
+                noise_floor("breakdown.run_metrics.hash_total_s")
+            ),
+            (false, false)
+        );
+        // 4 ms -> 200 ms clears both: a real quick-scan regression still flags.
+        assert_eq!(
+            classify(0.2, 0.004, false, 0.12, noise_floor("quick_scan.actual_s")),
+            (true, false)
+        );
+        // 40.5 s -> 45.5 s regresses; 40.5 s -> 35.5 s improves.
+        assert_eq!(
+            classify(45.5, 40.5, false, 0.12, noise_floor("elapsed_s")),
+            (true, false)
+        );
+        assert_eq!(
+            classify(35.5, 40.5, false, 0.12, noise_floor("elapsed_s")),
+            (false, true)
+        );
+        // Ratios have no floor and flip direction.
+        assert_eq!(noise_floor("download.sol"), 0.0);
+        assert_eq!(classify(0.80, 0.92, true, 0.08, 0.0), (true, false));
+        assert_eq!(classify(0.99, 0.92, true, 0.08, 0.0), (false, false));
     }
     #[test]
     fn warm_filter() {

@@ -11,6 +11,7 @@ use crate::core::tasks::calculate_hashes::{PatchedFileSegments, PatchedSegment};
 use crate::core::tasks::download_files::{
     AdaptiveBandwidthLimiter, DownloadMetrics, SharedRollbackSession,
 };
+use crate::core::utils::content_hash::fast_file_content_hash;
 use anyhow::Context;
 use log::{debug, info, warn};
 use std::path::{Path, PathBuf};
@@ -465,6 +466,15 @@ pub(crate) async fn try_patch_first(
         );
     }
 
+    // Fingerprint the promoted file now, while its bytes are still in the page
+    // cache; the post-download content-hash refresh reuses it instead of
+    // sampling a cold disk.
+    let promoted_path = artifact.local_target_path.clone();
+    let content_hash = tokio::task::spawn_blocking(move || fast_file_content_hash(&promoted_path))
+        .await
+        .ok()
+        .and_then(Result::ok);
+
     if let Err(err) =
         update_download_patch_file_status(context.clone(), file_id, PATCH_STATUS_DONE, None).await
     {
@@ -534,5 +544,6 @@ pub(crate) async fn try_patch_first(
                 checksum,
             })
             .collect(),
+        content_hash,
     }))
 }

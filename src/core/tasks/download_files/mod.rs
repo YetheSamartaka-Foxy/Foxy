@@ -86,22 +86,12 @@ impl DownloadResourceLimits {
         }
     }
 
-    /// Rotational destination: the disk, not the link, is the light source.
-    /// Few concurrent large files and 32 MiB chunks keep the range writes
-    /// close to sequential; the global range budget stays so the link still
-    /// fills. Ranges are dispatched in file order, so with few files in
-    /// flight the writes land nearly in order.
+    /// Rotational destination: network limits stay as on SSD, because aggregate
+    /// throughput is bought with connections and fewer files in flight starves
+    /// the link long before range writes seek-bound the disk. Only the
+    /// seek-bound patch applies are capped.
     pub(super) const fn rotational() -> Self {
-        Self {
-            max_large_files: 3,
-            max_small_files: 16,
-            max_active_range_requests: MAX_ACTIVE_RANGE_REQUESTS,
-            min_ranges_per_file: MIN_RANGES_PER_FILE,
-            max_ranges_per_file: MAX_RANGES_PER_FILE,
-            range_chunk_target: 32 * 1024 * 1024,
-            min_range_chunk: 8 * 1024 * 1024,
-            max_patch_applies: ROTATIONAL_MAX_PATCH_APPLIES,
-        }
+        Self::normal().with_rotational_destination()
     }
 
     pub(super) const fn constrained() -> Self {

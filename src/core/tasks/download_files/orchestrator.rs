@@ -1639,8 +1639,18 @@ mod tests {
         for class in [HashStorageClass::Hdd, HashStorageClass::Removable] {
             let limits = download_limits_for_profile(normal, class);
             assert_eq!(limits, DownloadResourceLimits::rotational());
-            assert!(limits.max_large_files <= 4);
-            assert!(limits.range_chunk_target >= 16 * 1024 * 1024);
+            assert_eq!(
+                limits.max_large_files,
+                DownloadResourceLimits::normal().max_large_files
+            );
+            assert_eq!(
+                limits.max_small_files,
+                DownloadResourceLimits::normal().max_small_files
+            );
+            assert_eq!(
+                limits.range_chunk_target,
+                DownloadResourceLimits::normal().range_chunk_target
+            );
             assert_eq!(
                 limits.max_patch_applies,
                 super::super::ROTATIONAL_MAX_PATCH_APPLIES

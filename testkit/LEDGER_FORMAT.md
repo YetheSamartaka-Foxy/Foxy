@@ -27,7 +27,16 @@ two warm samples. A baseline stores the accepted Git SHA, case hash, sample
 size, warm medians, and tolerances.
 
 `breakdown.run_metrics` grows over time (`hash_work_bytes`, `tree_verify_runs`,
-`fs_watcher_starts`, `prepared_queue_reuses` were added on 2026-09-14). A
+`fs_watcher_starts`, `prepared_queue_reuses` were added on 2026-09-14; the
+hash-source, refresh, overlap, limit and first-download counters listed in
+`CASE_FORMAT.md` on 2026-09-16). The regression verdict gates on
+`breakdown.run_metrics.hash_total_s` (wall time summed over every hash run of
+the operation) rather than on `hash.actual_s`, which is only the last run: on a
+download row that is one arbitrary page-cache batch of tens of milliseconds,
+and a 12 percent band over it flagged scheduler noise as a confirmed
+regression. `hash.actual_s` stays on the row; a baseline accepted before
+2026-09-16 has no `hash_total_s` median, so that metric is simply not compared
+until the baseline is re-accepted. A
 metric the recorded row never had is not a replay difference: `replay`
 re-derives the row from the retained log, so a counter added later simply
 appears on the rebuilt row, while a key the rebuilt row lost is still reported.
@@ -38,7 +47,8 @@ existed, which is what keeps `replay --all` byte-identical over them. The raw
 sample series stays in the run directory and is not part of the row.
 
 Default regression tolerances are 8 percent for SOL ratios, 12 percent for
-elapsed/stage durations, 15 percent for peak and retained private commit,
+elapsed/stage durations (and a duration must also move by at least 50 ms;
+a percent band alone over a millisecond-scale metric flags scheduler jitter), 15 percent for peak and retained private commit,
 50 percent for commit growth, and zero for correctness counters. Lower is better for
 durations. Higher is better for SOL ratios, throughput, savings, and rates.
 A regression or improvement must exceed tolerance in two complete runs before

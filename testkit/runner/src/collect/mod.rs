@@ -77,4 +77,8 @@ mod snapshots {
     fn write_gate() {
         insta::assert_json_snapshot!(digest(&corpus("write-gate")));
     }
+    #[test]
+    fn hdd_download() {
+        insta::assert_json_snapshot!(digest(&corpus("hdd-download")));
+    }
 }

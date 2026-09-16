@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 
 pub fn run_metrics(text: &str) -> Value {
-    let mut result = json!({"files":null,"bytes":null,"db_write_time_ms":null,"lock_retries":null,"total_backoff_ms":null,"elapsed_ms":null,"permit_wait_ms_total":null,"write_calls_total":null,"write_failures_total":null,"write_retries_total":null,"checkpoint_total_s":null,"hash_work_bytes":0,"tree_verify_runs":0,"fs_watcher_starts":0,"prepared_queue_reuses":0,"pipeline_outcome":null,"failed_pipelines":0});
+    let mut result = json!({"files":null,"bytes":null,"db_write_time_ms":null,"lock_retries":null,"total_backoff_ms":null,"elapsed_ms":null,"permit_wait_ms_total":null,"write_calls_total":null,"write_failures_total":null,"write_retries_total":null,"checkpoint_total_s":null,"hash_work_bytes":0,"hash_total_s":0.0,"tree_verify_runs":0,"fs_watcher_starts":0,"prepared_queue_reuses":0,"pipeline_outcome":null,"failed_pipelines":0,"content_refresh_runs":0,"content_refresh_files_sampled":0,"hash_source_segments_files":0,"hash_source_reread_files":0,"hash_batches_after_download":0,"final_hash_flush_files":0,"download_large_files_limit":null,"download_small_files_limit":null,"download_patch_applies_limit":null,"first_download_start_ms":null});
     let pattern =
         regex::Regex::new(r"TOTAL DOWNLOAD total:\s*files=(\d+)\s+bytes=([\d.]+)\s*([KMGT]?i?B)")
             .unwrap();
@@ -71,6 +71,15 @@ pub fn run_metrics(text: &str) -> Value {
         .map(|m| m.as_str().parse::<u64>().unwrap_or(0))
         .sum();
     result["hash_work_bytes"] = hash_work_bytes.into();
+    // Wall time of every hash run in the operation, summed. The `hash` SOL
+    // record on a row is only the last run, which on a download is one
+    // arbitrary batch; verdicts gate on this total instead.
+    let hash_secs = regex::Regex::new(r"SOL op=hash actual_s=([\d.]+)").unwrap();
+    let hash_total_s: f64 = event_lines(text)
+        .filter_map(|line| hash_secs.captures(line))
+        .filter_map(|c| c[1].parse::<f64>().ok())
+        .sum();
+    result["hash_total_s"] = ((hash_total_s * 1000.0).round_ties_even() / 1000.0).into();
     result["tree_verify_runs"] =
         count_lines(text, "Quick scan triggering targeted tree-hash verify").into();
     result["fs_watcher_starts"] = count_lines(text, "Starting filesystem watcher").into();
@@ -90,6 +99,68 @@ pub fn run_metrics(text: &str) -> Value {
         .filter(|o| o.starts_with("failed") || o.starts_with("cancelled"))
         .count() as u64)
         .into();
+    // Where the hash bytes came from and when they were paid. The refresh
+    // counters prove the content-hash pass reused the fingerprints the hash
+    // pass took while the file was in the page cache; the source counters
+    // prove patched files were recorded from their apply segments; the
+    // after-download counter proves hashing overlapped the transfer instead of
+    // running as a tail; the limits pin the profile the destination selected.
+    let refresh = regex::Regex::new(
+        r"Content-hash baseline refreshed: .*?files_hashed=(\d+)/\d+ files_reused_from_hash_pass=(\d+)",
+    )
+    .unwrap();
+    let mut refresh_runs = 0u64;
+    let mut refresh_sampled = 0u64;
+    for c in event_lines(text).filter_map(|line| refresh.captures(line)) {
+        refresh_runs += 1;
+        let hashed: u64 = c[1].parse().unwrap_or(0);
+        let reused: u64 = c[2].parse().unwrap_or(0);
+        refresh_sampled += hashed.saturating_sub(reused);
+    }
+    result["content_refresh_runs"] = refresh_runs.into();
+    result["content_refresh_files_sampled"] = refresh_sampled.into();
+    let sources = regex::Regex::new(
+        r"Incremental hash sources: .*?hash_source=segments files=(\d+) hash_source=reread files=(\d+)",
+    )
+    .unwrap();
+    let (mut segments, mut reread) = (0u64, 0u64);
+    for c in event_lines(text).filter_map(|line| sources.captures(line)) {
+        segments += c[1].parse::<u64>().unwrap_or(0);
+        reread += c[2].parse::<u64>().unwrap_or(0);
+    }
+    result["hash_source_segments_files"] = segments.into();
+    result["hash_source_reread_files"] = reread.into();
+    let mut download_done = false;
+    let mut batches_after = 0u64;
+    for line in event_lines(text) {
+        if line.contains("Download stage completed:") {
+            download_done = true;
+        } else if download_done
+            && line.contains("Starting incremental hash for completed download batch")
+        {
+            batches_after += 1;
+        }
+    }
+    result["hash_batches_after_download"] = batches_after.into();
+    let flush =
+        regex::Regex::new(r"Flushing final incremental hash batch after download: .*?files=(\d+)")
+            .unwrap();
+    result["final_hash_flush_files"] = event_lines(text)
+        .filter_map(|line| flush.captures(line))
+        .map(|c| c[1].parse::<u64>().unwrap_or(0))
+        .sum::<u64>()
+        .into();
+    let limits = regex::Regex::new(
+        r"Download resource profile: .*?limits large_files=(\d+) small_files=(\d+) .*?patch_applies=(\d+)",
+    )
+    .unwrap();
+    if let Some(c) = event_lines(text).find_map(|line| limits.captures(line)) {
+        result["download_large_files_limit"] = c[1].parse::<u64>().unwrap_or(0).into();
+        result["download_small_files_limit"] = c[2].parse::<u64>().unwrap_or(0).into();
+        result["download_patch_applies_limit"] = c[3].parse::<u64>().unwrap_or(0).into();
+    }
+    result["first_download_start_ms"] =
+        first_download_start_ms(text).map_or(Value::Null, Value::from);
     result
 }
 
@@ -110,6 +181,22 @@ fn count_lines(text: &str, needle: &str) -> u64 {
     event_lines(text)
         .filter(|line| line.contains(needle))
         .count() as u64
+}
+
+/// Milliseconds from the first timestamped event of the slice to the first
+/// `Starting download for mod` line: the time an update spent preparing before
+/// the first byte moved. Null when the slice has no download start.
+fn first_download_start_ms(text: &str) -> Option<u64> {
+    let first = event_lines(text).find_map(line_timestamp)?;
+    let start = event_lines(text)
+        .filter(|line| line.contains("Starting download for mod"))
+        .find_map(line_timestamp)?;
+    Some((start - first).num_milliseconds().max(0) as u64)
+}
+
+fn line_timestamp(line: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    let end = line.find(']')?;
+    chrono::DateTime::parse_from_str(line.get(1..end)?, "%Y-%m-%d %H:%M:%S%.f %z").ok()
 }
 
 pub fn breakdown(text: &str) -> Value {
@@ -175,6 +262,7 @@ INFO Starting filesystem watcher for 2 paths
 INFO Starting filesystem watcher for 2 paths",
         );
         assert_eq!(metrics["hash_work_bytes"], 350);
+        assert_eq!(metrics["hash_total_s"], 2.0);
         assert_eq!(metrics["tree_verify_runs"], 1);
         assert_eq!(metrics["fs_watcher_starts"], 2);
         assert_eq!(metrics["prepared_queue_reuses"], 0);
@@ -213,5 +301,49 @@ INFO Starting filesystem watcher for 2 paths",
                 .len(),
             1
         );
+    }
+}
+
+#[cfg(test)]
+mod hash_source_tests {
+    use super::*;
+
+    const SLICE: &str = "[2026-09-16 07:16:57.000000 +02:00] INFO  [m] Download resource profile: pressure=normal total=93 GiB; destination_storage=Hdd limits large_files=12 small_files=48 ranges=96 per_file_ranges=8..96 range_chunk=2097152 patch_applies=2
+[2026-09-16 07:16:57.250000 +02:00] INFO  [m] Starting download for mod 3 (3 files, 33 bytes)
+[2026-09-16 07:16:58.000000 +02:00] INFO  [m] Starting incremental hash for completed download batch: repo=r mod_id=3 mod=@a files=1 bytes=5
+[2026-09-16 07:16:59.000000 +02:00] INFO  [m] Incremental hash sources: repo=r hash_source=segments files=4 hash_source=reread files=1
+[2026-09-16 07:17:00.000000 +02:00] INFO  [m] Download stage completed: op=repo-sync-0002 elapsed=3.00s files=5
+[2026-09-16 07:17:00.100000 +02:00] INFO  [m] Starting incremental hash for completed download batch: repo=r mod_id=4 mod=@b files=1 bytes=5
+[2026-09-16 07:17:00.200000 +02:00] INFO  [m] Flushing final incremental hash batch after download: repo=r files=2 bytes=9
+[2026-09-16 07:17:01.000000 +02:00] INFO  [m] Content-hash baseline refreshed: repo=r scope=files total_elapsed=1ms file_hash=1ns file_persist=1ms addon_hash=1ms repos_hashed=1 addons_hashed=3/3 files_hashed=5/5 files_reused_from_hash_pass=4 file_failures=0 addon_failures=0
+[2026-09-16 07:17:02.000000 +02:00] INFO  [m] Content-hash baseline refreshed: repo=r scope=repository total_elapsed=1ms file_hash=1ns file_persist=1ms addon_hash=1ms repos_hashed=1 addons_hashed=3/3 files_hashed=10/10 files_reused_from_hash_pass=10 file_failures=0 addon_failures=0
+Starting download for mod 3 (3 files, 33 bytes)
+Content-hash baseline refreshed: repo=r scope=files total_elapsed=1ms file_hash=1ns file_persist=1ms addon_hash=1ms repos_hashed=1 addons_hashed=3/3 files_hashed=5/5 files_reused_from_hash_pass=4 file_failures=0 addon_failures=0";
+
+    #[test]
+    fn refresh_sources_overlap_and_limits_are_read_from_the_slice() {
+        let metrics = run_metrics(SLICE);
+        assert_eq!(metrics["content_refresh_runs"], 2);
+        assert_eq!(metrics["content_refresh_files_sampled"], 1);
+        assert_eq!(metrics["hash_source_segments_files"], 4);
+        assert_eq!(metrics["hash_source_reread_files"], 1);
+        assert_eq!(metrics["hash_batches_after_download"], 1);
+        assert_eq!(metrics["final_hash_flush_files"], 2);
+        assert_eq!(metrics["download_large_files_limit"], 12);
+        assert_eq!(metrics["download_small_files_limit"], 48);
+        assert_eq!(metrics["download_patch_applies_limit"], 2);
+        assert_eq!(metrics["first_download_start_ms"], 250);
+    }
+
+    #[test]
+    fn counters_are_zero_and_limits_null_without_the_lines() {
+        let metrics = run_metrics("unrelated");
+        assert_eq!(metrics["content_refresh_runs"], 0);
+        assert_eq!(metrics["content_refresh_files_sampled"], 0);
+        assert_eq!(metrics["hash_source_segments_files"], 0);
+        assert_eq!(metrics["hash_batches_after_download"], 0);
+        assert_eq!(metrics["final_hash_flush_files"], 0);
+        assert!(metrics["download_large_files_limit"].is_null());
+        assert!(metrics["first_download_start_ms"].is_null());
     }
 }

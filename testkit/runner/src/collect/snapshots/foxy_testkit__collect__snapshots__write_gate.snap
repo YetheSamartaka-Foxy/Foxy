@@ -16,11 +16,22 @@ expression: "digest(&corpus(\"write-gate\"))"
     "write_retries_total": 0.0,
     "checkpoint_total_s": 2.38,
     "hash_work_bytes": 262144,
+    "hash_total_s": 0.041,
     "tree_verify_runs": 0,
     "fs_watcher_starts": 0,
     "prepared_queue_reuses": 0,
     "pipeline_outcome": null,
-    "failed_pipelines": 0
+    "failed_pipelines": 0,
+    "content_refresh_runs": 0,
+    "content_refresh_files_sampled": 0,
+    "hash_source_segments_files": 0,
+    "hash_source_reread_files": 0,
+    "hash_batches_after_download": 0,
+    "final_hash_flush_files": 0,
+    "download_large_files_limit": null,
+    "download_small_files_limit": null,
+    "download_patch_applies_limit": null,
+    "first_download_start_ms": null
   },
   "category_line_counts": {
     "network": 6,

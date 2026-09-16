@@ -18,6 +18,9 @@ pub(crate) struct PatchedSegment {
 pub(crate) struct PatchedFileSegments {
     pub(crate) file_id: u64,
     pub(crate) parts: Vec<PatchedSegment>,
+    /// Fingerprint of the promoted output taken while it was still in the
+    /// page cache, so the content-hash refresh need not sample it cold.
+    pub(crate) content_hash: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -90,6 +93,7 @@ pub(crate) async fn apply_segment_verified_files(
     let mut part_updates: Vec<FoxyModFilePart> = Vec::new();
     let mut file_updates: Vec<FoxyModFile> = Vec::new();
     let mut accepted_file_indices: HashSet<usize> = HashSet::new();
+    let mut fresh_content_hashes: Vec<(u64, String)> = Vec::new();
     for segments in files {
         let Some(&file_idx) = tree.file_id_to_index.get(&segments.file_id) else {
             outcome.rejected.insert(segments.file_id);
@@ -119,11 +123,15 @@ pub(crate) async fn apply_segment_verified_files(
         }
         accepted_file_indices.insert(file_idx);
         outcome.accepted.insert(segments.file_id);
+        if let Some(content_hash) = segments.content_hash.clone() {
+            fresh_content_hashes.push((segments.file_id, content_hash));
+        }
     }
 
     if accepted_file_indices.is_empty() {
         return outcome;
     }
+    context.record_fresh_file_content_hashes(fresh_content_hashes);
 
     let mod_indices: HashSet<usize> = tree
         .mod_nodes
@@ -238,6 +246,7 @@ mod tests {
                     checksum: checksum.to_string(),
                 })
                 .collect(),
+            content_hash: None,
         }
     }
 
@@ -305,6 +314,7 @@ mod tests {
                 PatchedFileSegments {
                     file_id: 99,
                     parts: Vec::new(),
+                    content_hash: None,
                 },
             ],
         )
@@ -320,5 +330,26 @@ mod tests {
         }));
         // The only file matches remote, so the addon rollup takes the remote value.
         assert_eq!(tree.mods[0].local_checksum, "MOD_REMOTE");
+    }
+
+    #[tokio::test]
+    async fn accepted_segments_hand_their_fingerprint_to_the_refresh() {
+        let db = crate::core::tasks::db_turso::build_test_database().await;
+        let context = Arc::new(FoxyContext::new(db, reqwest::Client::new()));
+        let mut tree = tree_with_file(&["AA", "BB"]);
+        let mut accepted = segments(&["AA", "BB"]);
+        accepted.content_hash = Some("fp-accepted".to_string());
+        let mut rejected = segments(&["AA", "XX"]);
+        rejected.content_hash = Some("fp-rejected".to_string());
+
+        let outcome =
+            apply_segment_verified_files(context.clone(), &mut tree, &[accepted, rejected]).await;
+
+        assert_eq!(outcome.accepted, HashSet::from([1]));
+        assert_eq!(
+            context.take_fresh_file_content_hash(1).as_deref(),
+            Some("fp-accepted")
+        );
+        assert!(context.take_fresh_file_content_hash(1).is_none());
     }
 }

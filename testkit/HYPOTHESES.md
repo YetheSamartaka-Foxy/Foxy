@@ -36,8 +36,26 @@ row; do not delete rejected ideas.
 | open | Run single-statement seam writes in autocommit instead of BEGIN/statement/COMMIT | seam statement count | lower | `perf-db-parts-bulk-profiled` |
 | open | Skip the per-mod patch-table deletes when the repository has no patch rows | `delete download_patch_op` calls | remove | `perf-db-parts-bulk-profiled` |
 | open | Extend filesystem profiling to stat, exists, read_dir and buffered flush | profile `neither` column | shrink | `perf-db-parts-bulk-profiled` |
+| rejected | A rotational download profile with 3 concurrent large files, 16 small files and 32 MiB range chunks keeps range writes sequential and shortens the HDD download | `download.sol` | higher | `perf-redownload-small-hdd` |
+| accepted | Delta-patched files hand their promotion-time fingerprint to the content-hash refresh, so the post-download pass samples nothing from disk | `run_metrics.content_refresh_files_sampled` | zero | `perf-tfr-scifi-delta-patch-hdd` |
 
 ## Closed entries
+
+### rejected: a few-files, big-chunks download profile for rotational destinations
+
+The profile came from the 2026-09-13 user bundle, where a 12-file, 96-range
+download onto a 7200 rpm disk ran at `sol=0.205`. It reasoned that the disk
+was the light and that fewer files in flight with 32 MiB chunks would keep the
+range writes sequential. Measured on `perf-redownload-small-hdd` (4.33 GB, 217
+files, same origin) it ran the download stage at 125-137 s, `sol` 0.28-0.30,
+against 45-58 s and `sol` 0.63-0.81 with the SSD limits on the same disk
+(`20260916T051653Z` versus `20260916T053420Z`). Aggregate throughput on this
+path is bought with connections (~1.5 MB/s each, see the rejected 96-connection
+entry), and the 2026-09-09 HDD rows had already shown the fine 2 MiB grid 20%
+faster on spinning media than a coarser one. The bundle's disk cost was the
+44 concurrent seek-bound patch applies and the 23 GB hash re-read, both fixed
+separately; the network limits were never the problem. `rotational()` now
+keeps the SSD network limits and caps only `patch_applies` at 2.
 
 ### accepted: kill the download tail (grid, ceiling, ordering, stage quanta)
 

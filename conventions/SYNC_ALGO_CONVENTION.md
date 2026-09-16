@@ -98,10 +98,13 @@ Part checksums are not part of the quick content hash layer.
 The file fingerprint is taken by the hash pass itself, right after a file's
 parts were read and while it is still in the page cache, and handed to the
 content-hash refresh through the operation's `FoxyContext`
-(`record_fresh_file_content_hashes` / `take_fresh_file_content_hash`). The
-refresh samples the disk only for files no hash pass in the same operation
-fingerprinted. On rotational media the eight sampled reads per file cost more
-than a minute per few thousand files once the pass has evicted them; the
+(`record_fresh_file_content_hashes` / `take_fresh_file_content_hash`). A
+delta-patched file is fingerprinted the same way by the patch orchestrator
+right after the output is promoted, and the fingerprint travels with its
+`PatchedFileSegments` so a segment-verified file (`hash_source=segments`) is
+never sampled either. The refresh samples the disk only for files no hash
+pass in the same operation fingerprinted. On rotational media the eight
+sampled reads per file cost more than a minute per few thousand files once the pass has evicted them; the
 fingerprint describes the same bytes the tree hash does either way.
 
 ### Download Target
@@ -1112,12 +1115,13 @@ Expected remote single-addon change path:
    files.
 5. Reuse existing local checksums and content hashes for all untouched addons.
 
-Rotational destinations use their own download profile (few concurrent large
-files, 32 MiB range chunks, two concurrent patch applies) chosen from the
-destination path's storage class; memory pressure keeps its conservative
-profile on any disk. The `SOL op=download` line then also reports a disk light
-(`disk_bytes`, `disk_light_bps`, `disk_sol`) so a low network ratio is not
-misread as a slow link.
+Rotational destinations keep the SSD network limits (throughput is bought
+with connections, and the fine range grid measured faster on spinning media
+than a coarse few-files profile) and only cap concurrent patch applies at two,
+chosen from the destination path's storage class; memory pressure keeps its
+conservative profile on any disk. The `SOL op=download` line then also reports
+a disk light (`disk_bytes`, `disk_light_bps`, `disk_sol`) so a low network
+ratio is not misread as a slow link.
 
 Expected full-download throughput path:
 

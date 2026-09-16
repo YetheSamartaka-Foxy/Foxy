@@ -1,0 +1,91 @@
+---
+source: testkit/runner/src/collect/mod.rs
+expression: "digest(&corpus(\"hdd-download\"))"
+---
+{
+  "run_metrics": {
+    "files": null,
+    "bytes": null,
+    "db_write_time_ms": null,
+    "lock_retries": null,
+    "total_backoff_ms": null,
+    "elapsed_ms": null,
+    "permit_wait_ms_total": null,
+    "write_calls_total": null,
+    "write_failures_total": null,
+    "write_retries_total": null,
+    "checkpoint_total_s": null,
+    "hash_work_bytes": 176889,
+    "hash_total_s": 0.016,
+    "tree_verify_runs": 0,
+    "fs_watcher_starts": 0,
+    "prepared_queue_reuses": 0,
+    "pipeline_outcome": "completed",
+    "failed_pipelines": 0,
+    "content_refresh_runs": 1,
+    "content_refresh_files_sampled": 0,
+    "hash_source_segments_files": 0,
+    "hash_source_reread_files": 96,
+    "hash_batches_after_download": 0,
+    "final_hash_flush_files": 0,
+    "download_large_files_limit": 12,
+    "download_small_files_limit": 48,
+    "download_patch_applies_limit": 2,
+    "first_download_start_ms": 97
+  },
+  "category_line_counts": {
+    "network": 0,
+    "disk": 0,
+    "hash": 3,
+    "hash_profile": 0,
+    "scan": 0,
+    "patch": 0,
+    "db": 0
+  },
+  "db_values": [],
+  "sol_operations": [
+    {
+      "op": "download",
+      "record": {
+        "op": "download",
+        "actual_s": 45.163,
+        "work_bytes": 4331121846.0,
+        "actual_bps": 95900648.0,
+        "light_bps": 118072770.0,
+        "ideal_s": 36.682,
+        "sol": 0.812,
+        "light_src": "peak_1s",
+        "files": 217.0,
+        "peak_1s_bps": 118072770.0,
+        "delta_savings_percent": 0.0,
+        "destination_storage": "Hdd",
+        "disk_bytes": 8662243692.0,
+        "disk_light_bps": 110000000.0,
+        "disk_ideal_s": 78.748,
+        "disk_sol": 1.0,
+        "disk_light_src": "nominal_hdd_sequential"
+      }
+    },
+    {
+      "op": "hash",
+      "record": {
+        "op": "hash",
+        "actual_s": 0.006,
+        "work_bytes": 38520.0,
+        "actual_bps": 6974218.0,
+        "sol": "na",
+        "light_src": "self_baseline",
+        "label": "sticky_auto",
+        "files": 32.0,
+        "parts": 35.0,
+        "compute_s": 0.03,
+        "wait_s": 0.0
+      }
+    },
+    {
+      "op": "quick_scan",
+      "record": null
+    }
+  ],
+  "sol_records": 5
+}
