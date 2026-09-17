@@ -234,6 +234,11 @@ A numeric gate (`min`, `max`, `between`) fails when the value is missing or not
 a finite number; add `optional: true` when the metric may legitimately be
 absent for that operation and the gate should then be skipped.
 
+The expectation view exposes the last aggregate patch action as `delta_patch`
+and its typed per-file stage records as `delta_patch_stages`, in addition to
+`summary`, `sol`, `breakdown`, and `elapsed_s`. Patch cases should assert the
+aggregate outcome, conservation state, and fallback or cancellation counters.
+
 The `mutate` operation adds `profile`, `seed`, `files`, `entries`, `bytes`,
 optional `path` and optional `preserve_mtime`. `path` defaults to the
 repository target. `restore` replays the run journals in reverse; several

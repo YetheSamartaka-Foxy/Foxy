@@ -1089,7 +1089,14 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                         0.0
                     });
                 }
-                let view = json!({"summary":summary,"sol":sol,"breakdown":breakdown,"elapsed_s":collected["elapsed_s"]});
+                let view = json!({
+                    "summary": summary,
+                    "sol": sol,
+                    "breakdown": breakdown,
+                    "delta_patch": sol::operation(&sol, "delta_patch"),
+                    "delta_patch_stages": sol::records(&sol, "delta_patch_stage"),
+                    "elapsed_s": collected["elapsed_s"],
+                });
                 let mut flags = Vec::new();
                 if !expect::expectations(&view, &operation["expect"]).is_empty() {
                     flags.push("assertion-failed");
