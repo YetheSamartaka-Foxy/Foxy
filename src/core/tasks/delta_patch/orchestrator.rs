@@ -136,6 +136,7 @@ pub(crate) async fn try_patch_first(
         );
         return Ok(None);
     };
+    let mut patch_telemetry = metrics.start_patch_attempt();
 
     let artifact = match load_patch_artifact(&patch_file.patch_json_path).await {
         Ok(artifact) => artifact,
@@ -193,6 +194,16 @@ pub(crate) async fn try_patch_first(
         .filter(|op| PatchOpType::InsertRemote.matches(op))
         .map(|op| op.length)
         .sum();
+    let source_copy_bytes: u64 = patch_ops
+        .iter()
+        .filter(|op| PatchOpType::CopyLocal.matches(op))
+        .map(|op| op.length)
+        .sum();
+    patch_telemetry.set_work(
+        artifact.new_file_expected_size,
+        planned_download_bytes,
+        source_copy_bytes,
+    );
     info!(
         "Delta patch attempt: file_id={} remote_url={} local_path={} ops={} copy_ops={} insert_ops={} planned_download_bytes={} full_bytes={} patch_blob={}",
         patch_file.file_id,
@@ -276,6 +287,7 @@ pub(crate) async fn try_patch_first(
     }
 
     let preflight_elapsed = patch_started.elapsed();
+    patch_telemetry.planning_finished();
 
     if let Err(err) =
         update_download_patch_file_status(context.clone(), file_id, PATCH_STATUS_DOWNLOADING, None)
@@ -311,6 +323,7 @@ pub(crate) async fn try_patch_first(
     .await
     {
         if *cancel_rx.borrow() {
+            patch_telemetry.cancelled();
             keep_patch_plan_after_cancel(context, &patch_file, "blob download").await;
             return Ok(None);
         }
@@ -324,6 +337,7 @@ pub(crate) async fn try_patch_first(
     }
 
     let download_elapsed = patch_started.elapsed();
+    patch_telemetry.fetch_finished();
 
     if let Err(err) =
         update_download_patch_file_status(context.clone(), file_id, PATCH_STATUS_READY, None).await
@@ -397,6 +411,7 @@ pub(crate) async fn try_patch_first(
                 );
             }
             if cancelled_for_apply {
+                patch_telemetry.cancelled();
                 keep_patch_plan_after_cancel(context, &patch_file, "apply").await;
                 return Ok(None);
             }
@@ -411,6 +426,7 @@ pub(crate) async fn try_patch_first(
     };
 
     let apply_elapsed = patch_started.elapsed();
+    patch_telemetry.apply_finished();
 
     let backup_path = match promote_temp_file_atomically(
         &artifact.local_target_path,
@@ -570,6 +586,7 @@ pub(crate) async fn try_patch_first(
         savings_bytes,
         savings_percent
     );
+    patch_telemetry.success();
     Ok(Some(PatchedFileSegments {
         file_id: patch_file.file_id,
         parts: patch_ops

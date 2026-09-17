@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-pub const BENCHMARK_RECORD_VERSION: u32 = 1;
+pub const BENCHMARK_RECORD_VERSION: u32 = 2;
 
 /// Which user action the benchmark measured.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
@@ -56,7 +56,10 @@ impl BenchmarkKind {
     pub fn transfers_files(self) -> bool {
         matches!(
             self,
-            BenchmarkKind::Update | BenchmarkKind::ForceRedownload | BenchmarkKind::AddonDownload
+            BenchmarkKind::Update
+                | BenchmarkKind::ForceRedownload
+                | BenchmarkKind::AddonDownload
+                | BenchmarkKind::AddonForceRedownload
         )
     }
 }
@@ -142,7 +145,55 @@ pub struct BenchmarkStage {
     pub details: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BenchmarkCompatibility {
+    #[serde(default)]
+    pub operation_label: String,
+    #[serde(default)]
+    pub initial_state: String,
+    #[serde(default)]
+    pub cache_preparation: String,
+    #[serde(default)]
+    pub origin_fingerprint: String,
+    #[serde(default)]
+    pub payload_fingerprint: String,
+    #[serde(default)]
+    pub algorithm: String,
+    #[serde(default)]
+    pub diagnostics: String,
+    #[serde(default)]
+    pub metric_version: u32,
+    #[serde(default)]
+    pub timer_scope: String,
+    #[serde(default)]
+    pub reference_ids: Vec<String>,
+    #[serde(default = "default_baseline_frozen")]
+    pub baseline_frozen: bool,
+}
+
+fn default_baseline_frozen() -> bool {
+    true
+}
+
+impl Default for BenchmarkCompatibility {
+    fn default() -> Self {
+        Self {
+            operation_label: String::new(),
+            initial_state: String::new(),
+            cache_preparation: String::new(),
+            origin_fingerprint: String::new(),
+            payload_fingerprint: String::new(),
+            algorithm: String::new(),
+            diagnostics: String::new(),
+            metric_version: 0,
+            timer_scope: String::new(),
+            reference_ids: Vec::new(),
+            baseline_frozen: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BenchmarkMetrics {
     pub downloaded_bytes: u64,
     pub planned_transfer_bytes: u64,
@@ -163,6 +214,37 @@ pub struct BenchmarkMetrics {
     pub hash_parts_total: u64,
     /// Pending updates the check found (0 for downloads).
     pub pending_updates: u64,
+    /// Conditions that must match before this record may be a measured-time
+    /// reference. Empty legacy fields are derived from the record and its SOL
+    /// lines when the comparison key is built.
+    #[serde(default)]
+    pub compatibility: BenchmarkCompatibility,
+}
+
+impl Default for BenchmarkMetrics {
+    fn default() -> Self {
+        Self {
+            downloaded_bytes: 0,
+            planned_transfer_bytes: 0,
+            full_download_bytes: 0,
+            patch_savings_bytes: 0,
+            patched_files: 0,
+            mods_updated: 0,
+            files_updated: 0,
+            parts_updated: 0,
+            download_stage_ms: 0,
+            hash_stage_ms: 0,
+            cumulative_hash_ms: 0,
+            avg_download_bps: 0.0,
+            peak_download_bps: 0.0,
+            peak_memory_bytes: 0,
+            avg_cpu_percent: 0.0,
+            hash_files_total: 0,
+            hash_parts_total: 0,
+            pending_updates: 0,
+            compatibility: BenchmarkCompatibility::default(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

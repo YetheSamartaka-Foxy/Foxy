@@ -14,7 +14,7 @@ use eframe::egui::{
 };
 use log::info;
 
-use crate::core::benchmarks::{BenchmarkKind, BenchmarkOutcome, BenchmarkRecord, best_comparable};
+use crate::core::benchmarks::{BenchmarkKind, BenchmarkRecord, best_comparable};
 use crate::ui::app::Foxy;
 use crate::ui::app::benchmarks::{BenchmarkOutcomeFilter, BenchmarkSort};
 use crate::ui::i18n::{fmt_bytes, tr, tr_fmt};
@@ -35,6 +35,25 @@ enum RowAction {
     Remove,
     ConfirmRemove,
     CancelRemove,
+}
+
+fn adjacent_row(ids: &[String], current: Option<&str>, direction: isize) -> Option<String> {
+    if ids.is_empty() {
+        return None;
+    }
+    let Some(index) = current.and_then(|current| ids.iter().position(|id| id == current)) else {
+        return if direction < 0 {
+            ids.last().cloned()
+        } else {
+            ids.first().cloned()
+        };
+    };
+    let next = if direction < 0 {
+        index.saturating_sub(1)
+    } else {
+        (index + 1).min(ids.len() - 1)
+    };
+    ids.get(next).cloned()
 }
 
 impl Foxy {
@@ -59,6 +78,27 @@ impl Foxy {
         if ids.is_empty() {
             self.render_benchmarks_empty_state(ui, card_height);
             return;
+        }
+        let row_has_focus = ids.iter().any(|id| {
+            ui.memory(|memory| {
+                memory.has_focus(ui.make_persistent_id(("benchmark_row_header", id)))
+            })
+        });
+        let direction = ui.input(|input| {
+            if input.key_pressed(egui::Key::ArrowUp) {
+                -1
+            } else if input.key_pressed(egui::Key::ArrowDown) {
+                1
+            } else {
+                0
+            }
+        });
+        if row_has_focus
+            && direction != 0
+            && let Some(next) =
+                adjacent_row(&ids, self.benchmarks_view.focused_row.as_deref(), direction)
+        {
+            self.benchmarks_view.focus_request = Some(next);
         }
         let mut action: Option<(String, RowAction)> = None;
         ScrollArea::vertical()
@@ -338,11 +378,20 @@ impl Foxy {
                 ui.make_persistent_id(("benchmark_row_header", id)),
                 Sense::click(),
             );
+            if self.benchmarks_view.focus_request.as_deref() == Some(id) {
+                header.request_focus();
+                self.benchmarks_view.focus_request = None;
+            }
             header_focused = header.has_focus();
+            if header_focused {
+                self.benchmarks_view.focused_row = Some(id.to_owned());
+            }
             if header.hovered() {
                 ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
             }
-            if header.clicked() {
+            if header.clicked()
+                || (header_focused && ui.input(|input| input.key_pressed(egui::Key::Enter)))
+            {
                 action = Some(RowAction::ToggleExpand);
             }
             ui.allocate_ui_with_layout(
@@ -392,9 +441,7 @@ impl Foxy {
                     .truncate()
                     .selectable(false),
                 );
-                if record.outcome != BenchmarkOutcome::Success {
-                    ui.label(self.outcome_text(&record.outcome).size(scale.small));
-                }
+                ui.label(self.outcome_text(&record.outcome).size(scale.small));
                 ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     if expanded {
@@ -418,7 +465,7 @@ impl Foxy {
                     } else {
                         self.benchmark_stat_chip(
                             ui,
-                            format!("{} {}", self.t("SoL"), record.headline_op()),
+                            format!("{} {}", self.t("SoL"), self.t(&record.operation_identity())),
                             "n/a",
                         );
                     }
@@ -631,4 +678,20 @@ fn open_directory(path: &std::path::Path) -> Result<(), String> {
 #[cfg(not(target_os = "windows"))]
 fn open_directory(path: &std::path::Path) -> Result<(), String> {
     crate::core::utils::platform::open_with_default_app(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::adjacent_row;
+
+    #[test]
+    fn arrow_navigation_stays_in_bounds_and_enters_at_an_endpoint() {
+        let ids = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
+        assert_eq!(adjacent_row(&ids, None, 1).as_deref(), Some("a"));
+        assert_eq!(adjacent_row(&ids, None, -1).as_deref(), Some("c"));
+        assert_eq!(adjacent_row(&ids, Some("a"), -1).as_deref(), Some("a"));
+        assert_eq!(adjacent_row(&ids, Some("a"), 1).as_deref(), Some("b"));
+        assert_eq!(adjacent_row(&ids, Some("c"), 1).as_deref(), Some("c"));
+        assert_eq!(adjacent_row(&[], None, 1), None);
+    }
 }

@@ -60,6 +60,7 @@ impl Foxy {
             ui.horizontal_wrapped(|ui| {
                 self.benchmark_kind_badge(ui, record.kind);
                 self.benchmark_outcome_dot(ui, &record.outcome);
+                ui.label(self.outcome_text(&record.outcome).size(scale.small));
                 ui.label(
                     RichText::new(&record.started_at_local)
                         .size(scale.small)
@@ -151,18 +152,29 @@ impl Foxy {
                             let summary = summaries.iter().find(|summary| summary.op == *op)?;
                             match part {
                                 None => Some((
-                                    summary.sol,
-                                    format!(
-                                        "{} \u{00B7} {}",
-                                        self.t(summary.metric_kind().label()),
-                                        self.t(summary.light_src.label())
-                                    ),
+                                    summary.display_sol(),
+                                    if summary.display_sol().is_some() {
+                                        format!(
+                                            "{} \u{00B7} {}",
+                                            self.t(summary.metric_kind().label()),
+                                            self.t(summary.light_src.label())
+                                        )
+                                    } else {
+                                        format!(
+                                            "{} \u{00B7} raw {}",
+                                            self.t(summary.unavailable_reason()),
+                                            summary.sol_raw.map_or_else(
+                                                || "n/a".to_owned(),
+                                                |raw| format!("{raw:.2}")
+                                            )
+                                        )
+                                    },
                                 )),
                                 Some(name) => {
                                     summary.sub_parts.iter().find(|sub| sub.name == *name).map(
                                         |sub| {
                                             (
-                                                sub.sol,
+                                                sub.display_sol(),
                                                 format!(
                                                     "{} \u{00B7} {}",
                                                     self.t(sub.metric_kind().label()),

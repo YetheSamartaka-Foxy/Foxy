@@ -162,37 +162,124 @@ pub fn parse_sol_lines<'a>(
 }
 
 /// The SOL grammar: space-separated `key=value` pairs, where a value may be
-/// double-quoted to carry spaces. The last occurrence of a repeated key wins,
-/// a token without `=` is skipped, and values keep their raw text so integer
-/// counters never round-trip through floating point here.
+/// double-quoted to carry spaces and `\"` or `\\` escapes. The last occurrence
+/// of a repeated key wins, and values keep their raw text so integer counters
+/// never round-trip through floating point here. Malformed input is retained
+/// where possible and marked with parser-owned status fields.
 pub fn parse_sol_body(body: &str) -> BTreeMap<String, String> {
+    let (mut map, errors) = parse_sol_fields(body);
+    if !errors.is_empty() {
+        map.insert("parse_status".to_owned(), "malformed".to_owned());
+        map.insert("parse_error".to_owned(), errors.join(","));
+    }
+    map
+}
+
+const RESERVED_SOL_KEYS: &[&str] = &[
+    "op",
+    "actual_s",
+    "work_bytes",
+    "actual_bps",
+    "light_bps",
+    "ideal_s",
+    "sol",
+    "light_src",
+    "actual_ns",
+    "sol_raw",
+    "metric_kind",
+    "reference_status",
+    "metric_version",
+    "parse_status",
+    "parse_error",
+];
+
+fn parse_sol_fields(body: &str) -> (BTreeMap<String, String>, Vec<&'static str>) {
     let mut map = BTreeMap::new();
     let mut rest = body.trim_start();
+    let mut errors = Vec::new();
     while !rest.is_empty() {
-        let Some(eq) = rest.find('=') else { break };
-        let key = &rest[..eq];
-        if key.is_empty() || key.contains(char::is_whitespace) {
-            rest = rest
-                .find(char::is_whitespace)
-                .map_or("", |at| rest[at..].trim_start());
+        let token_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let Some(eq) = rest.find('=') else {
+            push_parse_error(&mut errors, "malformed_token");
+            break;
+        };
+        if eq > token_end {
+            push_parse_error(&mut errors, "malformed_token");
+            rest = rest[token_end..].trim_start();
             continue;
         }
+        let key = &rest[..eq];
+        let valid_key = key
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_alphabetic())
+            && key
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '-'));
         let after = &rest[eq + 1..];
-        let (value, remainder) = if let Some(quoted) = after.strip_prefix('"') {
-            match quoted.find('"') {
-                Some(end) => (&quoted[..end], &quoted[end + 1..]),
-                None => (quoted, ""),
+        let (value, remainder) = if let Some(mut quoted) = after.strip_prefix('"') {
+            let mut value = String::new();
+            let mut closed = false;
+            while !quoted.is_empty() {
+                let ch = quoted.chars().next().expect("non-empty quoted value");
+                quoted = &quoted[ch.len_utf8()..];
+                match ch {
+                    '"' => {
+                        closed = true;
+                        break;
+                    }
+                    '\\' => match quoted.chars().next() {
+                        Some(escaped @ ('"' | '\\')) => {
+                            value.push(escaped);
+                            quoted = &quoted[escaped.len_utf8()..];
+                        }
+                        Some(other) => {
+                            push_parse_error(&mut errors, "invalid_escape");
+                            value.push('\\');
+                            value.push(other);
+                            quoted = &quoted[other.len_utf8()..];
+                        }
+                        None => {
+                            push_parse_error(&mut errors, "unterminated_escape");
+                            value.push('\\');
+                        }
+                    },
+                    _ => value.push(ch),
+                }
+            }
+            if !closed {
+                push_parse_error(&mut errors, "unterminated_quote");
+                (value, "")
+            } else if quoted.is_empty() || quoted.chars().next().is_some_and(char::is_whitespace) {
+                (value, quoted)
+            } else {
+                push_parse_error(&mut errors, "trailing_characters");
+                let end = quoted.find(char::is_whitespace).unwrap_or(quoted.len());
+                (value, &quoted[end..])
             }
         } else {
             match after.find(char::is_whitespace) {
-                Some(end) => (&after[..end], &after[end..]),
-                None => (after, ""),
+                Some(end) => (after[..end].to_owned(), &after[end..]),
+                None => (after.to_owned(), ""),
             }
         };
-        map.insert(key.to_owned(), value.to_owned());
+        if !valid_key {
+            push_parse_error(&mut errors, "invalid_key");
+        } else {
+            if map.contains_key(key) && RESERVED_SOL_KEYS.contains(&key) {
+                push_parse_error(&mut errors, "duplicate_reserved_key");
+            }
+            map.insert(key.to_owned(), value);
+        }
         rest = remainder.trim_start();
     }
-    map
+    (map, errors)
+}
+
+fn push_parse_error(errors: &mut Vec<&'static str>, error: &'static str) {
+    if !errors.contains(&error) {
+        errors.push(error);
+    }
 }
 
 /// The SOL lines a saved record owns: lines that carry an `op_id` belong to
@@ -372,6 +459,42 @@ mod tests {
         assert!(!map.contains_key("stray"));
         let unterminated = parse_sol_body("op=x label=\"open ended");
         assert_eq!(unterminated["label"], "open ended");
+        assert_eq!(unterminated["parse_status"], "malformed");
+        assert_eq!(unterminated["parse_error"], "unterminated_quote");
+    }
+
+    #[test]
+    fn shared_sol_grammar_corpus_is_byte_stable() {
+        let corpus: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../testkit/runner/tests/sol-grammar-corpus.json"
+        ))
+        .expect("SOL grammar corpus");
+        for case in corpus.as_array().expect("corpus array") {
+            let name = case["name"].as_str().expect("case name");
+            let input = case["input"].as_str().expect("case input");
+            let expected: BTreeMap<String, String> =
+                serde_json::from_value(case["fields"].clone()).expect("expected fields");
+            let expected_status = case["status"].as_str().expect("expected status");
+            let expected_error = case["error"].as_str().expect("expected error");
+            let first = parse_sol_fields(input);
+            let second = parse_sol_fields(input);
+            assert_eq!(first.0, expected, "{name}");
+            assert_eq!(
+                if first.1.is_empty() {
+                    "ok".to_owned()
+                } else {
+                    "malformed".to_owned()
+                },
+                expected_status,
+                "{name}"
+            );
+            assert_eq!(first.1.join(","), expected_error, "{name}");
+            assert_eq!(
+                serde_json::to_vec(&first).expect("serialize first parse"),
+                serde_json::to_vec(&second).expect("serialize second parse"),
+                "{name}"
+            );
+        }
     }
 
     #[test]

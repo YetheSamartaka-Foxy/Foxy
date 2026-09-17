@@ -180,19 +180,7 @@ pub fn headline_sol_text(record: &BenchmarkRecord, t: Translate<'_>) -> String {
             t(summary.metric_kind().label(), &[])
         ),
         None => {
-            let reason = if summary.sol.is_none() {
-                if summary.heterogeneous {
-                    "batches differ"
-                } else {
-                    "reference missing"
-                }
-            } else if !summary.completed() {
-                "not completed"
-            } else if summary.mixed_references {
-                "mixed references"
-            } else {
-                "partial coverage"
-            };
+            let reason = summary.unavailable_reason();
             format!("n/a \u{00B7} {}", t(reason, &[]))
         }
     }
@@ -233,13 +221,7 @@ pub fn headline_stats(
     t: Translate<'_>,
 ) -> Vec<(&'static str, String, bool)> {
     let m = &record.metrics;
-    let operation = match record
-        .headline_summary()
-        .and_then(|summary| summary.category())
-    {
-        Some((code, _)) => format!("{} ({code})", record.headline_op()),
-        None => record.headline_op().to_owned(),
-    };
+    let operation = t(&record.operation_identity(), &[]);
     let mut stats = vec![
         ("Operation", operation, false),
         ("Speed of light", headline_sol_text(record, t), true),
@@ -573,6 +555,16 @@ impl Foxy {
     /// Why an operation's ratio cannot stand for the whole operation, as a
     /// short sentence under its table; `None` when nothing needs saying.
     fn sol_caveat(&self, summary: &crate::core::benchmarks::SolOpSummary) -> Option<String> {
+        if summary.malformed_lines > 0
+            || summary.mixed_metric_versions
+            || summary.sol_raw.is_some_and(|raw| raw > 1.0)
+            || summary
+                .reference_statuses
+                .iter()
+                .any(|status| status != "ok")
+        {
+            return Some(self.t(summary.unavailable_reason()));
+        }
         if summary.heterogeneous && summary.sol.is_none() && summary.runs > 1 {
             return Some(self.t(
                 "Batches differ in profile or phase, so no fastest-batch reference is derived; totals still add.",
@@ -700,7 +692,7 @@ impl Foxy {
                             self.t(summary.main_part_name()),
                             summary.work_bytes,
                             summary.light_bps,
-                            summary.sol,
+                            summary.display_sol(),
                             summary.sol_raw,
                             summary.metric_kind(),
                             summary.light_src.label(),
@@ -712,7 +704,7 @@ impl Foxy {
                                 self.t(part.name),
                                 part.work_bytes,
                                 part.light_bps,
-                                part.sol,
+                                part.display_sol(),
                                 part.sol_raw,
                                 part.metric_kind(),
                                 part.light_src.label(),
@@ -976,7 +968,7 @@ mod tests {
                 "Files per second"
             ]
         );
-        assert_eq!(stats[0].1, "hash");
+        assert_eq!(stats[0].1, "O3 tree hash verification");
         assert_eq!(stats[1].1, "n/a \u{00B7} reference missing");
         assert_eq!(stats[2].1, "not comparable");
         assert_eq!(stats[5].1, "20");
@@ -1000,6 +992,8 @@ mod tests {
         let best = BestComparison {
             best_id: "other".into(),
             best_elapsed_s: 1.6,
+            fastest_id: "fastest".into(),
+            fastest_elapsed_s: 1.5,
             candidate_elapsed_s: 2.0,
             samples: 3,
         };
@@ -1017,11 +1011,11 @@ mod tests {
                 "Files checked"
             ]
         );
-        assert_eq!(stats[0].1, "download (O1)");
+        assert_eq!(stats[0].1, "O1 full-file download");
         assert_eq!(stats[1].1, "50% \u{00B7} peak consistency");
         assert_eq!(stats[2].1, "+0.40 s (25.0% slower than best of 3)");
         let alone = BestComparison {
-            samples: 1,
+            samples: 0,
             ..best.clone()
         };
         assert_eq!(versus_best_text(Some(&alone), &t), "no comparable run");

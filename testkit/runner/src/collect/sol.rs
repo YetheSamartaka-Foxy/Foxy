@@ -3,14 +3,128 @@ use serde_json::{Map, Value};
 /// `key=value` pairs of one log line. Integers stay exact (`u64`/`i64`), so a
 /// byte counter never round-trips through `f64`; decimals and unit-suffixed
 /// numbers (`0.125s`, `3x`, `97%`) become `f64`; anything else stays text.
+/// Malformed input is retained where possible and marked with parser-owned
+/// status fields.
 pub fn key_values(line: &str) -> Value {
-    let pattern = regex::Regex::new(r#"([A-Za-z][A-Za-z0-9_.-]*)=("[^"]*"|[^\s,()]+)"#).unwrap();
+    let (fields, errors) = parse_fields(line);
     let mut result = Map::new();
-    for capture in pattern.captures_iter(line) {
-        let raw = capture[2].trim_matches('"').trim_end_matches(',');
-        result.insert(capture[1].to_owned(), number_or_text(raw));
+    for (key, raw) in fields {
+        result.insert(key, number_or_text(&raw));
+    }
+    if !errors.is_empty() {
+        result.insert("parse_status".to_owned(), "malformed".into());
+        result.insert("parse_error".to_owned(), errors.join(",").into());
     }
     Value::Object(result)
+}
+
+const RESERVED_SOL_KEYS: &[&str] = &[
+    "op",
+    "actual_s",
+    "work_bytes",
+    "actual_bps",
+    "light_bps",
+    "ideal_s",
+    "sol",
+    "light_src",
+    "actual_ns",
+    "sol_raw",
+    "metric_kind",
+    "reference_status",
+    "metric_version",
+    "parse_status",
+    "parse_error",
+];
+
+fn parse_fields(line: &str) -> (Vec<(String, String)>, Vec<&'static str>) {
+    let mut fields: Vec<(String, String)> = Vec::new();
+    let mut rest = line.trim_start();
+    let mut errors = Vec::new();
+    while !rest.is_empty() {
+        let token_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let Some(eq) = rest.find('=') else {
+            push_parse_error(&mut errors, "malformed_token");
+            break;
+        };
+        if eq > token_end {
+            push_parse_error(&mut errors, "malformed_token");
+            rest = rest[token_end..].trim_start();
+            continue;
+        }
+        let key = &rest[..eq];
+        let valid_key = key
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_alphabetic())
+            && key
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '-'));
+        let after = &rest[eq + 1..];
+        let (value, remainder) = if let Some(mut quoted) = after.strip_prefix('"') {
+            let mut value = String::new();
+            let mut closed = false;
+            while !quoted.is_empty() {
+                let ch = quoted.chars().next().expect("non-empty quoted value");
+                quoted = &quoted[ch.len_utf8()..];
+                match ch {
+                    '"' => {
+                        closed = true;
+                        break;
+                    }
+                    '\\' => match quoted.chars().next() {
+                        Some(escaped @ ('"' | '\\')) => {
+                            value.push(escaped);
+                            quoted = &quoted[escaped.len_utf8()..];
+                        }
+                        Some(other) => {
+                            push_parse_error(&mut errors, "invalid_escape");
+                            value.push('\\');
+                            value.push(other);
+                            quoted = &quoted[other.len_utf8()..];
+                        }
+                        None => {
+                            push_parse_error(&mut errors, "unterminated_escape");
+                            value.push('\\');
+                        }
+                    },
+                    _ => value.push(ch),
+                }
+            }
+            if !closed {
+                push_parse_error(&mut errors, "unterminated_quote");
+                (value, "")
+            } else if quoted.is_empty() || quoted.chars().next().is_some_and(char::is_whitespace) {
+                (value, quoted)
+            } else {
+                push_parse_error(&mut errors, "trailing_characters");
+                let end = quoted.find(char::is_whitespace).unwrap_or(quoted.len());
+                (value, &quoted[end..])
+            }
+        } else {
+            match after.find(char::is_whitespace) {
+                Some(end) => (after[..end].to_owned(), &after[end..]),
+                None => (after.to_owned(), ""),
+            }
+        };
+        if !valid_key {
+            push_parse_error(&mut errors, "invalid_key");
+        } else if let Some((_, existing)) = fields.iter_mut().find(|(name, _)| name == key) {
+            if RESERVED_SOL_KEYS.contains(&key) {
+                push_parse_error(&mut errors, "duplicate_reserved_key");
+            }
+            *existing = value;
+        } else {
+            fields.push((key.to_owned(), value));
+        }
+        rest = remainder.trim_start();
+    }
+    (fields, errors)
+}
+
+fn push_parse_error(errors: &mut Vec<&'static str>, error: &'static str) {
+    if !errors.contains(&error) {
+        errors.push(error);
+    }
 }
 
 fn number_or_text(raw: &str) -> Value {
@@ -37,7 +151,7 @@ pub fn parse(text: &str) -> Vec<Value> {
         .filter_map(|line| {
             line.find("SOL op=").map(|index| {
                 let raw = line[index..].trim();
-                let mut record = key_values(raw);
+                let mut record = key_values(&raw["SOL ".len()..]);
                 record["raw"] = raw.into();
                 record
             })
@@ -54,6 +168,38 @@ pub fn operation(records: &[Value], name: &str) -> Value {
         .find(|row| row["op"] == name)
         .cloned()
         .unwrap_or(Value::Null)
+}
+
+fn interval_metrics(rows: &[&Value]) -> (Option<f64>, Option<f64>) {
+    let mut intervals: Vec<(u64, u64)> = rows
+        .iter()
+        .filter_map(|row| {
+            let start = row["start_offset_ns"].as_u64()?;
+            let end = row["end_offset_ns"].as_u64()?;
+            (end >= start).then_some((start, end))
+        })
+        .collect();
+    if intervals.is_empty() {
+        return (None, None);
+    }
+    intervals.sort_unstable();
+    let first = intervals[0].0;
+    let last = intervals.iter().map(|(_, end)| *end).max().unwrap_or(first);
+    let mut covered = 0_u64;
+    let (mut start, mut end) = intervals[0];
+    for (next_start, next_end) in intervals.into_iter().skip(1) {
+        if next_start <= end {
+            end = end.max(next_end);
+        } else {
+            covered = covered.saturating_add(end.saturating_sub(start));
+            (start, end) = (next_start, next_end);
+        }
+    }
+    covered = covered.saturating_add(end.saturating_sub(start));
+    (
+        Some(covered as f64 / 1e9),
+        Some(last.saturating_sub(first) as f64 / 1e9),
+    )
 }
 
 /// Totals over every record of `name`: run count, summed `actual_s` (service
@@ -78,6 +224,15 @@ pub fn aggregate(records: &[Value], name: &str) -> Value {
         .iter()
         .filter_map(|row| row["work_bytes"].as_u64())
         .sum();
+    let useful_work_bytes: u64 = rows
+        .iter()
+        .filter_map(|row| {
+            row["useful_output_bytes"]
+                .as_u64()
+                .or_else(|| row["work_bytes"].as_u64())
+        })
+        .sum();
+    let (interval_coverage_s, makespan_s) = interval_metrics(&rows);
     let rated = rows.iter().filter(|row| row["sol"].is_number()).count();
     let mut outcomes: Vec<&str> = Vec::new();
     for row in &rows {
@@ -91,12 +246,42 @@ pub fn aggregate(records: &[Value], name: &str) -> Value {
         .iter()
         .all(|outcome| !matches!(*outcome, "cancelled" | "failed"));
     let actual_bps = (work_bytes > 0 && actual_s > 0.0).then(|| work_bytes as f64 / actual_s);
+    let reference_statuses: Vec<&str> = rows
+        .iter()
+        .filter_map(|row| row["reference_status"].as_str())
+        .fold(Vec::new(), |mut values, value| {
+            if !values.contains(&value) {
+                values.push(value);
+            }
+            values
+        });
+    let metric_versions: Vec<u64> = rows
+        .iter()
+        .filter_map(|row| row["metric_version"].as_u64())
+        .fold(Vec::new(), |mut values, value| {
+            if !values.contains(&value) {
+                values.push(value);
+            }
+            values
+        });
+    let malformed_records = rows
+        .iter()
+        .filter(|row| row["parse_status"] == "malformed")
+        .count();
+    let mixed_metric_versions = metric_versions.len() > 1;
     serde_json::json!({
         "runs": rows.len(),
         "rated_runs": rated,
         "actual_s": (actual_s * 1e6).round_ties_even() / 1e6,
+        "interval_coverage_s": interval_coverage_s,
+        "makespan_s": makespan_s,
         "work_bytes": work_bytes,
+        "useful_work_bytes": useful_work_bytes,
         "actual_bps": actual_bps.map(|v| v.round()),
+        "reference_statuses": reference_statuses,
+        "metric_versions": metric_versions,
+        "mixed_metric_versions": mixed_metric_versions,
+        "malformed_records": malformed_records,
         "outcomes": outcomes,
         "completed": completed,
     })
@@ -121,6 +306,46 @@ mod tests {
         assert_eq!(row["bad"], "1.2.3");
         assert_eq!(row["na"], "na");
         assert_eq!(row["dup"], 2);
+    }
+    #[test]
+    fn shared_sol_grammar_corpus_is_byte_stable() {
+        let corpus: Value =
+            serde_json::from_str(include_str!("../../tests/sol-grammar-corpus.json"))
+                .expect("SOL grammar corpus");
+        for case in corpus.as_array().expect("corpus array") {
+            let name = case["name"].as_str().expect("case name");
+            let input = case["input"].as_str().expect("case input");
+            let expected: std::collections::BTreeMap<String, String> =
+                serde_json::from_value(case["fields"].clone()).expect("expected fields");
+            let expected_status = case["status"].as_str().expect("expected status");
+            let expected_error = case["error"].as_str().expect("expected error");
+            let first = parse_fields(input);
+            let second = parse_fields(input);
+            let actual: std::collections::BTreeMap<_, _> = first.0.iter().cloned().collect();
+            assert_eq!(actual, expected, "{name}");
+            assert_eq!(
+                if first.1.is_empty() {
+                    "ok".to_owned()
+                } else {
+                    "malformed".to_owned()
+                },
+                expected_status,
+                "{name}"
+            );
+            assert_eq!(first.1.join(","), expected_error, "{name}");
+            assert_eq!(
+                serde_json::to_vec(&first).expect("serialize first parse"),
+                serde_json::to_vec(&second).expect("serialize second parse"),
+                "{name}"
+            );
+            let public = key_values(input);
+            if expected_status == "malformed" {
+                assert_eq!(public["parse_status"], "malformed", "{name}");
+                assert_eq!(public["parse_error"], expected_error, "{name}");
+            } else {
+                assert!(public.get("parse_status").is_none(), "{name}");
+            }
+        }
     }
     #[test]
     fn last_operation_wins() {
@@ -159,5 +384,24 @@ mod tests {
         assert_eq!(total["rated_runs"], 1);
         assert_eq!(total["completed"], false);
         assert_eq!(total["outcomes"], serde_json::json!(["cancelled"]));
+    }
+
+    #[test]
+    fn aggregate_separates_service_coverage_and_makespan() {
+        let rows = parse(
+            "SOL op=hash actual_s=2 actual_ns=2000000000 work_bytes=20 start_offset_ns=0 end_offset_ns=2000000000 metric_version=2 reference_status=ok\n\
+             SOL op=hash actual_s=2 actual_ns=2000000000 work_bytes=20 start_offset_ns=1000000000 end_offset_ns=3000000000 metric_version=2 reference_status=ok\n\
+             SOL op=hash actual_s=1 actual_ns=1000000000 work_bytes=10 start_offset_ns=4000000000 end_offset_ns=5000000000 metric_version=2 reference_status=missing",
+        );
+        let total = aggregate(&rows, "hash");
+        assert_eq!(total["actual_s"], 5.0);
+        assert_eq!(total["interval_coverage_s"], 4.0);
+        assert_eq!(total["makespan_s"], 5.0);
+        assert_eq!(total["useful_work_bytes"], 50);
+        assert_eq!(
+            total["reference_statuses"],
+            serde_json::json!(["ok", "missing"])
+        );
+        assert_eq!(total["mixed_metric_versions"], false);
     }
 }

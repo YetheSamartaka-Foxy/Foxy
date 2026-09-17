@@ -56,6 +56,37 @@ fn db_metric(breakdown: &Value, names: &[&str]) -> Value {
         .max_by(f64::total_cmp)
         .map_or(Value::Null, Value::from)
 }
+
+fn operation_identity(metadata: &Value) -> &str {
+    let requested_op = metadata["op"].as_str().unwrap_or("unknown");
+    if requested_op == "startup" {
+        "O8 startup"
+    } else if requested_op == "recheck-integrity" {
+        "O3 tree hash verification"
+    } else if requested_op.starts_with("quick-check") {
+        "O4 quick scan"
+    } else if requested_op == "remote-refresh" {
+        "O5 remote metadata refresh"
+    } else if requested_op == "recheck" {
+        "O6 no-change sync"
+    } else if !metadata["delta_patch"].is_null() {
+        let fallbacks = metadata["delta_patch"]["fallbacks"].as_u64().unwrap_or(0);
+        let patched = metadata["delta_patch"]["patched_files"]
+            .as_u64()
+            .unwrap_or(0);
+        if fallbacks > 0 {
+            "O2 delta patch + O1 full-download fallback"
+        } else if patched > 0 {
+            "O2 delta patch"
+        } else {
+            "O2 delta patch attempt"
+        }
+    } else if !metadata["download"].is_null() {
+        "O1 full-file download"
+    } else {
+        requested_op
+    }
+}
 pub fn build_row(
     mut metadata: Value,
     summary: &Value,
@@ -78,6 +109,7 @@ pub fn build_row(
     let mut aggregate = json!({});
     for (field, op) in [
         ("download", "download"),
+        ("delta_patch", "delta_patch"),
         ("hash", "hash"),
         ("quick_scan", "quick_scan"),
         ("startup", "startup"),
@@ -93,6 +125,7 @@ pub fn build_row(
         aggregate[field] = sol::aggregate(sol, op);
     }
     metadata["sol_aggregate"] = aggregate;
+    metadata["operation_identity"] = operation_identity(&metadata).into();
     let mut sums = json!({"delta_savings_percent":round(delta_savings(summary),4)});
     for key in [
         "download_stage_ms",
@@ -270,6 +303,15 @@ pub const PROFILE_KEYS: &[&str] = &[
 /// expires an accepted baseline: the numbers were measured on other hardware
 /// or against another origin and are not a reference for this one.
 pub const ENVIRONMENT_KEYS: &[&str] = &["cpu", "os", "memory_gb", "origin"];
+const BASELINE_FORMAT_VERSION: u64 = 2;
+const BASELINE_REQUIRED_ROW_KEYS: &[&str] = &[
+    "mutation_profile",
+    "mutation_seed",
+    "origin_checksum",
+    "references",
+    "diagnostics",
+    "cache_state",
+];
 
 pub fn profile_of(row: &Value) -> Value {
     let mut profile = json!({});
@@ -299,6 +341,41 @@ pub fn op_key(row: &Value) -> String {
     }
 }
 
+fn operation_compatibility(row: &Value) -> Value {
+    json!({
+        "op": row["op"],
+        "label": row["label"],
+        "cache_state": row["cache_state"],
+        "mutation_profile": row["mutation_profile"],
+        "mutation_seed": row["mutation_seed"],
+        "origin_checksum": row["origin_checksum"],
+        "references": crate::references::ids(&row["references"]),
+        "diagnostics": row["diagnostics"],
+    })
+}
+
+fn terminal_outcome(row: &Value) -> Value {
+    for record in ["sync_action", "download", "hash", "quick_scan", "startup"] {
+        if let Some(outcome) = row[record]["outcome"].as_str() {
+            return outcome.into();
+        }
+    }
+    row["verdict"].clone()
+}
+
+fn oracle_outcome(row: &Value) -> String {
+    if row["flags"]
+        .as_array()
+        .is_some_and(|flags| flags.iter().any(|flag| flag == "oracle-failed"))
+    {
+        "failed".to_owned()
+    } else if let Some(outcome) = row["oracle_outcome"].as_str() {
+        outcome.to_owned()
+    } else {
+        "not-recorded".to_owned()
+    }
+}
+
 /// Medians per operation key over the steady-state rows: warm rows and
 /// evicted rows, each in its own lane; cold iteration-zero rows and invalid
 /// rows are left out.
@@ -312,6 +389,7 @@ pub fn warm_medians(rows: &[Value]) -> Value {
     let mut result = json!({});
     for (op, rows) in groups {
         let mut metrics = json!({});
+        let mut spread = json!({});
         for path in DEFINITIONS
             .iter()
             .map(|d| d.0)
@@ -323,9 +401,29 @@ pub fn warm_medians(rows: &[Value]) -> Value {
                 .collect();
             if let Some(value) = median(&values) {
                 metrics[path] = value.into();
+                let min = values.iter().copied().reduce(f64::min).unwrap_or(value);
+                let max = values.iter().copied().reduce(f64::max).unwrap_or(value);
+                spread[path] = json!({"min":min,"max":max,"absolute_range":max-min});
             }
         }
-        result[op] = json!({"samples":rows.len(),"cache_state":rows[0]["cache_state"],"op":rows[0]["op"],"label":rows[0]["label"],"metrics":metrics});
+        let mut outcomes: Vec<Value> = rows.iter().map(|row| terminal_outcome(row)).collect();
+        outcomes.sort_by_key(Value::to_string);
+        outcomes.dedup();
+        let mut oracle_outcomes: BTreeMap<String, usize> = BTreeMap::new();
+        for row in &rows {
+            *oracle_outcomes.entry(oracle_outcome(row)).or_default() += 1;
+        }
+        result[op] = json!({
+            "samples": rows.len(),
+            "cache_state": rows[0]["cache_state"],
+            "op": rows[0]["op"],
+            "label": rows[0]["label"],
+            "compatibility": operation_compatibility(rows[0]),
+            "metrics": metrics,
+            "spread": spread,
+            "outcomes": outcomes,
+            "oracle_outcomes": oracle_outcomes,
+        });
     }
     result
 }
@@ -342,6 +440,18 @@ pub fn save_baseline(rows: &[Value], path: &Path, case_hash: &str, git_sha: &str
     }
     let profile = profile_of(rows.first().unwrap_or(&Value::Null));
     ensure!(
+        profile["build_kind"] == "release",
+        "Baseline acceptance requires a release build"
+    );
+    for row in rows {
+        for key in BASELINE_REQUIRED_ROW_KEYS {
+            ensure!(
+                row.get(*key).is_some(),
+                "Baseline row is missing compatibility field {key}"
+            );
+        }
+    }
+    ensure!(
         rows.iter().all(|row| profile_of(row) == profile),
         "Cannot accept a baseline from rows with different run profiles"
     );
@@ -353,15 +463,69 @@ pub fn save_baseline(rows: &[Value], path: &Path, case_hash: &str, git_sha: &str
     );
     for (op, entry) in operations {
         ensure!(
-            entry["samples"].as_u64().unwrap_or(0) >= 2,
-            "Baseline operation {op} needs at least two warm samples"
+            entry["samples"].as_u64().unwrap_or(0) >= 5,
+            "Baseline operation {op} needs at least five compatible successful samples"
+        );
+        let expected = &entry["compatibility"];
+        ensure!(
+            rows.iter()
+                .filter(|row| op_key(row) == *op && row["verdict"] != "invalid")
+                .all(|row| operation_compatibility(row) == *expected),
+            "Baseline operation {op} contains incompatible samples"
         );
     }
     let first = rows.first().unwrap_or(&Value::Null);
     crate::case::write_json(
         path,
-        &json!({"accepted_utc":chrono::Utc::now().to_rfc3339(),"git_sha":git_sha,"case_hash":case_hash,"origin_checksum":first["origin_checksum"],"references":crate::references::ids(&first["references"]),"profile":profile,"operations":medians,"tolerances":{"sol":0.08,"duration":0.12,"correctness":0.0}}),
+        &json!({"format_version":BASELINE_FORMAT_VERSION,"accepted_utc":chrono::Utc::now().to_rfc3339(),"git_sha":git_sha,"case_hash":case_hash,"origin_checksum":first["origin_checksum"],"references":crate::references::ids(&first["references"]),"profile":profile,"operations":medians,"tolerances":{"sol":0.08,"duration":0.12,"correctness":0.0}}),
     )
+}
+
+/// Validate the global and operation-specific identity of an accepted baseline.
+/// Older baselines remain readable, but cannot silently compare as current.
+pub fn compatibility(baseline: &Value, current: &Value, operation: Option<&Value>) -> Value {
+    if baseline["format_version"].as_u64() != Some(BASELINE_FORMAT_VERSION) {
+        return json!({"verdict":"rebaseline-required","flags":["baseline-format-missing"]});
+    }
+    if baseline["case_hash"] != current["case_hash"] {
+        return json!({"verdict":"case-hash-changed","flags":["case-hash-changed"]});
+    }
+    if baseline["profile"].is_null() {
+        return json!({"verdict":"rebaseline-required","flags":["baseline-profile-missing"]});
+    }
+    let mismatched: Vec<String> = PROFILE_KEYS
+        .iter()
+        .filter(|key| baseline["profile"][**key] != current[**key])
+        .map(|key| format!("profile-mismatch:{key}"))
+        .collect();
+    if !mismatched.is_empty() {
+        return json!({"verdict":"profile-mismatch","flags":mismatched});
+    }
+    if baseline["origin_checksum"] != current["origin_checksum"] {
+        return json!({"verdict":"case-hash-changed","flags":["origin-changed"]});
+    }
+    let current_ids = crate::references::ids(&current["references"]);
+    if baseline["references"] != current_ids {
+        return json!({"verdict":"rebaseline-required","flags":["reference-changed"]});
+    }
+    if !baseline["profile"]["environment"].is_null() {
+        let expired: Vec<String> = ENVIRONMENT_KEYS
+            .iter()
+            .filter(|key| {
+                baseline["profile"]["environment"][**key] != current["environment"][**key]
+            })
+            .map(|key| format!("environment-changed:{key}"))
+            .collect();
+        if !expired.is_empty() {
+            return json!({"verdict":"rebaseline-required","flags":expired});
+        }
+    }
+    if let Some(operation) = operation
+        && operation["compatibility"] != operation_compatibility(current)
+    {
+        return json!({"verdict":"rebaseline-required","flags":["operation-profile-changed"]});
+    }
+    json!({"verdict":"compatible","flags":[]})
 }
 /// Absolute change below which a duration metric is noise whatever the percent
 /// says: a 12 percent band over a 9 ms hash stage, a 4 ms quick scan or a 63 ms
@@ -400,61 +564,11 @@ pub fn compare(rows: &[Value], baseline_path: &Path, ledger_path: &Path) -> Resu
     }
     let baseline = crate::case::read_json(baseline_path)?;
     let current = rows.first().unwrap_or(&Value::Null);
-    if baseline["case_hash"] != current["case_hash"] {
+    let compatible = compatibility(&baseline, current, None);
+    if compatible["verdict"] != "compatible" {
         return Ok(
-            json!({"verdict":"case-hash-changed","deltas":[],"flags":["case-hash-changed"]}),
+            json!({"verdict":compatible["verdict"],"deltas":[],"flags":compatible["flags"]}),
         );
-    }
-    // A baseline without its run profile predates profile validation; it
-    // cannot prove it was measured under these conditions, so it is retired
-    // explicitly rather than trusted.
-    if baseline["profile"].is_null() {
-        return Ok(
-            json!({"verdict":"rebaseline-required","deltas":[],"flags":["baseline-profile-missing"]}),
-        );
-    }
-    let mismatched: Vec<String> = PROFILE_KEYS
-        .iter()
-        .filter(|key| baseline["profile"][**key] != current[**key])
-        .map(|key| format!("profile-mismatch:{key}"))
-        .collect();
-    if !mismatched.is_empty() {
-        return Ok(json!({"verdict":"profile-mismatch","deltas":[],"flags":mismatched}));
-    }
-    // The origin's payload identity is a comparison key like the case hash:
-    // a re-mirrored origin is a different workload.
-    if !baseline["origin_checksum"].is_null()
-        && baseline["origin_checksum"] != current["origin_checksum"]
-    {
-        return Ok(json!({"verdict":"case-hash-changed","deltas":[],"flags":["origin-changed"]}));
-    }
-    // The references a baseline's calibrated ratios were taken against are an
-    // expiry rule: recalibrating retires the baseline instead of comparing
-    // ratios against two different references.
-    if let Some(cited) = baseline["references"].as_object() {
-        let current_ids = crate::references::ids(&current["references"]);
-        let recalibrated: Vec<String> = cited
-            .iter()
-            .filter(|(lane, id)| current_ids[lane.as_str()] != **id)
-            .map(|(lane, _)| format!("reference-changed:{lane}"))
-            .collect();
-        if !recalibrated.is_empty() {
-            return Ok(json!({"verdict":"rebaseline-required","deltas":[],"flags":recalibrated}));
-        }
-    }
-    // The environment is an expiry rule, not a comparison key: a baseline
-    // accepted on another CPU, OS, memory size or origin is retired.
-    if !baseline["profile"]["environment"].is_null() {
-        let expired: Vec<String> = ENVIRONMENT_KEYS
-            .iter()
-            .filter(|key| {
-                baseline["profile"]["environment"][**key] != current["environment"][**key]
-            })
-            .map(|key| format!("environment-changed:{key}"))
-            .collect();
-        if !expired.is_empty() {
-            return Ok(json!({"verdict":"rebaseline-required","deltas":[],"flags":expired}));
-        }
     }
     let history: Vec<Value> = read(ledger_path)?
         .into_iter()
@@ -484,6 +598,23 @@ pub fn compare(rows: &[Value], baseline_path: &Path, ledger_path: &Path) -> Resu
             // recorded before lanes existed, a new label); say so instead of
             // passing an unmeasured operation.
             flags.push(format!("baseline-missing-op:{op}"));
+            rebaseline = true;
+            continue;
+        }
+        let operation_row = rows
+            .iter()
+            .find(|row| op_key(row) == *op)
+            .unwrap_or(current);
+        let compatible = compatibility(&baseline, operation_row, Some(base));
+        if compatible["verdict"] != "compatible" {
+            flags.extend(
+                compatible["flags"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned),
+            );
             rebaseline = true;
             continue;
         }
@@ -526,7 +657,7 @@ pub fn compare(rows: &[Value], baseline_path: &Path, ledger_path: &Path) -> Resu
                 if bad && !flags.iter().any(|flag| flag == "memory-advisory") {
                     flags.push("memory-advisory".to_owned());
                 }
-                deltas.push(json!({"op":op,"metric":path,"baseline":was,"current":now,"change_percent":round(100.0*change,2),"previous_run_change_percent":prior.map(|p|round(100.0*p,2)),"status":status}));
+                deltas.push(json!({"op":op,"metric":path,"baseline":was,"current":now,"absolute_difference":round(now-was,6),"change_percent":round(100.0*change,2),"previous_run_change_percent":prior.map(|p|round(100.0*p,2)),"status":status}));
                 continue;
             }
             regression |= bad;
@@ -544,7 +675,7 @@ pub fn compare(rows: &[Value], baseline_path: &Path, ledger_path: &Path) -> Resu
             } else {
                 "within-tolerance"
             };
-            deltas.push(json!({"op":op,"metric":path,"baseline":was,"current":now,"change_percent":round(100.0*change,2),"previous_run_change_percent":prior.map(|p|round(100.0*p,2)),"status":status}));
+            deltas.push(json!({"op":op,"metric":path,"baseline":was,"current":now,"absolute_difference":round(now-was,6),"change_percent":round(100.0*change,2),"previous_run_change_percent":prior.map(|p|round(100.0*p,2)),"status":status}));
         }
         if improvement {
             for &counter in COUNTERS {
@@ -588,6 +719,18 @@ mod tests {
             delta_savings(&json!({"full_download_bytes":100,"patch_savings_bytes":97})),
             97.0
         );
+    }
+
+    #[test]
+    fn operation_identity_uses_the_requested_action_before_incidental_stages() {
+        let startup = json!({"op":"startup","quick_scan":{},"remote_refresh":{}});
+        assert_eq!(operation_identity(&startup), "O8 startup");
+
+        let recheck = json!({"op":"recheck-integrity","remote_refresh":{},"hash":{}});
+        assert_eq!(operation_identity(&recheck), "O3 tree hash verification");
+
+        let no_change = json!({"op":"recheck","remote_refresh":{},"quick_scan":{}});
+        assert_eq!(operation_identity(&no_change), "O6 no-change sync");
     }
     #[test]
     fn duration_verdicts_need_both_the_band_and_the_floor() {
@@ -651,19 +794,40 @@ mod tests {
         assert_eq!(medians["download"]["metrics"]["elapsed_s"], 29.0);
     }
     fn row(elapsed: f64) -> Value {
-        json!({"run_id":"r2","op":"download","cache_state":"warm","verdict":"ok","elapsed_s":elapsed,"case_hash":"h","harness":"cli","build_kind":"release","database_mode":"wal","db_write_gate":4,"db_pool_idle":1,"storage_class":"ssd"})
+        json!({"run_id":"r2","op":"download","cache_state":"warm","verdict":"ok","flags":[],"elapsed_s":elapsed,"case_hash":"h","harness":"cli","build_kind":"release","database_mode":"wal","db_write_gate":4,"db_pool_idle":1,"storage_class":"ssd","diagnostics":"none","mutation_profile":null,"mutation_seed":null,"origin_checksum":"origin","references":{}})
+    }
+    fn five(elapsed: f64) -> Vec<Value> {
+        (0..5)
+            .map(|offset| row(elapsed + f64::from(offset) / 10.0))
+            .collect()
     }
     #[test]
     fn baselines_persist_and_validate_the_run_profile() {
         let dir = tempfile::tempdir().unwrap();
         let baseline = dir.path().join("baseline.json");
         let ledger = dir.path().join("ledger.jsonl");
-        let rows = vec![row(10.0), row(10.5)];
+        assert!(
+            save_baseline(&five(9.0)[..4], &dir.path().join("short.json"), "h", "sha").is_err()
+        );
+        let mut debug_rows = five(9.0);
+        for row in &mut debug_rows {
+            row["build_kind"] = "debug".into();
+        }
+        assert!(save_baseline(&debug_rows, &dir.path().join("debug.json"), "h", "sha").is_err());
+        let rows = five(10.0);
         save_baseline(&rows, &baseline, "h", "sha").unwrap();
         let saved = crate::case::read_json(&baseline).unwrap();
         assert_eq!(saved["profile"]["build_kind"], "release");
         assert_eq!(saved["profile"]["storage_class"], "ssd");
         assert_eq!(saved["operations"]["download"]["cache_state"], "warm");
+        assert_eq!(
+            saved["operations"]["download"]["spread"]["elapsed_s"]["min"],
+            10.0
+        );
+        assert_eq!(
+            saved["operations"]["download"]["spread"]["elapsed_s"]["max"],
+            10.4
+        );
 
         let same = compare(&rows, &baseline, &ledger).unwrap();
         assert_eq!(same["verdict"], "ok");
@@ -689,7 +853,10 @@ mod tests {
             row["environment"] = env.clone();
             row
         };
-        save_baseline(&[with_env(10.0), with_env(10.5)], &baseline, "h", "sha").unwrap();
+        let rows: Vec<Value> = (0..5)
+            .map(|offset| with_env(10.0 + f64::from(offset) / 10.0))
+            .collect();
+        save_baseline(&rows, &baseline, "h", "sha").unwrap();
         let saved = crate::case::read_json(&baseline).unwrap();
         assert_eq!(
             saved["profile"]["environment"]["origin"],
@@ -723,13 +890,10 @@ mod tests {
             row["memory"] = json!({"peak_private_bytes":peak,"retained_private_bytes":peak/2.0});
             row
         };
-        save_baseline(
-            &[with_memory(10.0, 4.0e8), with_memory(10.5, 4.0e8)],
-            &baseline,
-            "h",
-            "sha",
-        )
-        .unwrap();
+        let rows: Vec<Value> = (0..5)
+            .map(|offset| with_memory(10.0 + f64::from(offset) / 10.0, 4.0e8))
+            .collect();
+        save_baseline(&rows, &baseline, "h", "sha").unwrap();
         // Twice the memory at the same speed: reported, not a regression.
         let heavier = compare(&[with_memory(10.2, 8.0e8)], &baseline, &ledger).unwrap();
         assert_eq!(heavier["verdict"], "ok");
@@ -760,9 +924,9 @@ mod tests {
         .unwrap();
         let legacy = compare(&[row(10.0)], &baseline, &ledger).unwrap();
         assert_eq!(legacy["verdict"], "rebaseline-required");
-        assert_eq!(legacy["flags"], json!(["baseline-profile-missing"]));
+        assert_eq!(legacy["flags"], json!(["baseline-format-missing"]));
 
-        save_baseline(&[row(10.0), row(10.5)], &baseline, "h", "sha").unwrap();
+        save_baseline(&five(10.0), &baseline, "h", "sha").unwrap();
         let mut evicted = row(58.0);
         evicted["cache_state"] = "evicted".into();
         let lane = compare(&[evicted], &baseline, &ledger).unwrap();

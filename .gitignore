@@ -46,3 +46,4 @@ testkit/ledger/
 testkit/runs/
 testkit/origin/data/
 testkit/private/
+.local/

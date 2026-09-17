@@ -1,7 +1,7 @@
 use crate::core::api::ProgressEvent;
 use log::debug;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 use tokio::sync::Semaphore;
@@ -28,6 +28,163 @@ pub(crate) struct DownloadMetrics {
     series: Mutex<Vec<SeriesPoint>>,
     sampler_stop: AtomicBool,
     sampler_wake: tokio::sync::Notify,
+    patch: PatchCounters,
+}
+
+struct PatchCounters {
+    first_start_ns: AtomicU64,
+    last_end_ns: AtomicU64,
+    attempts: AtomicUsize,
+    successes: AtomicUsize,
+    fallbacks: AtomicUsize,
+    cancellations: AtomicUsize,
+    requests: AtomicUsize,
+    retries: AtomicUsize,
+    useful_output_bytes: AtomicU64,
+    unique_insert_bytes: AtomicU64,
+    actual_received_bytes: AtomicU64,
+    source_copy_bytes: AtomicU64,
+    staging_bytes: AtomicU64,
+    planning_ns: AtomicU64,
+    fetch_ns: AtomicU64,
+    apply_ns: AtomicU64,
+    verify_promote_ns: AtomicU64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PatchSummary {
+    pub(crate) start_offset_ns: u64,
+    pub(crate) end_offset_ns: u64,
+    pub(crate) attempts: usize,
+    pub(crate) successes: usize,
+    pub(crate) fallbacks: usize,
+    pub(crate) cancellations: usize,
+    pub(crate) requests: usize,
+    pub(crate) retries: usize,
+    pub(crate) useful_output_bytes: u64,
+    pub(crate) unique_insert_bytes: u64,
+    pub(crate) actual_received_bytes: u64,
+    pub(crate) source_copy_bytes: u64,
+    pub(crate) staging_bytes: u64,
+    pub(crate) planning_ns: u64,
+    pub(crate) fetch_ns: u64,
+    pub(crate) apply_ns: u64,
+    pub(crate) verify_promote_ns: u64,
+}
+
+impl PatchSummary {
+    pub(crate) fn makespan(&self) -> Duration {
+        Duration::from_nanos(self.end_offset_ns.saturating_sub(self.start_offset_ns))
+    }
+
+    pub(crate) fn outcome(&self) -> &'static str {
+        if self.cancellations > 0 {
+            "cancelled"
+        } else if self.successes == 0 && self.fallbacks > 0 {
+            "fallback"
+        } else if self.fallbacks > 0 {
+            "completed_with_fallback"
+        } else {
+            "completed"
+        }
+    }
+}
+
+pub(crate) struct PatchAttemptTelemetry {
+    metrics: Arc<DownloadMetrics>,
+    started: Instant,
+    planning_done: Option<Instant>,
+    fetch_done: Option<Instant>,
+    apply_done: Option<Instant>,
+    outcome: PatchAttemptOutcome,
+}
+
+#[derive(Clone, Copy)]
+enum PatchAttemptOutcome {
+    Fallback,
+    Success,
+    Cancelled,
+}
+
+impl PatchAttemptTelemetry {
+    pub(crate) fn set_work(
+        &self,
+        useful_output_bytes: u64,
+        unique_insert_bytes: u64,
+        source_copy_bytes: u64,
+    ) {
+        self.metrics
+            .patch
+            .useful_output_bytes
+            .fetch_add(useful_output_bytes, Ordering::Relaxed);
+        self.metrics
+            .patch
+            .unique_insert_bytes
+            .fetch_add(unique_insert_bytes, Ordering::Relaxed);
+        self.metrics
+            .patch
+            .source_copy_bytes
+            .fetch_add(source_copy_bytes, Ordering::Relaxed);
+        self.metrics.patch.staging_bytes.fetch_add(
+            useful_output_bytes.saturating_add(unique_insert_bytes),
+            Ordering::Relaxed,
+        );
+    }
+
+    pub(crate) fn planning_finished(&mut self) {
+        self.planning_done = Some(Instant::now());
+    }
+
+    pub(crate) fn fetch_finished(&mut self) {
+        self.fetch_done = Some(Instant::now());
+    }
+
+    pub(crate) fn apply_finished(&mut self) {
+        self.apply_done = Some(Instant::now());
+    }
+
+    pub(crate) fn success(&mut self) {
+        self.outcome = PatchAttemptOutcome::Success;
+    }
+
+    pub(crate) fn cancelled(&mut self) {
+        self.outcome = PatchAttemptOutcome::Cancelled;
+    }
+}
+
+impl Drop for PatchAttemptTelemetry {
+    fn drop(&mut self) {
+        let ended = Instant::now();
+        let planning_done = self.planning_done.unwrap_or(ended);
+        let fetch_done = self.fetch_done.unwrap_or(planning_done);
+        let apply_done = self.apply_done.unwrap_or(fetch_done);
+        self.metrics.patch.planning_ns.fetch_add(
+            planning_done.duration_since(self.started).as_nanos() as u64,
+            Ordering::Relaxed,
+        );
+        self.metrics.patch.fetch_ns.fetch_add(
+            fetch_done.duration_since(planning_done).as_nanos() as u64,
+            Ordering::Relaxed,
+        );
+        self.metrics.patch.apply_ns.fetch_add(
+            apply_done.duration_since(fetch_done).as_nanos() as u64,
+            Ordering::Relaxed,
+        );
+        self.metrics.patch.verify_promote_ns.fetch_add(
+            ended.duration_since(apply_done).as_nanos() as u64,
+            Ordering::Relaxed,
+        );
+        self.metrics.patch.last_end_ns.fetch_max(
+            ended.duration_since(self.metrics.started_at).as_nanos() as u64,
+            Ordering::Relaxed,
+        );
+        match self.outcome {
+            PatchAttemptOutcome::Fallback => &self.metrics.patch.fallbacks,
+            PatchAttemptOutcome::Success => &self.metrics.patch.successes,
+            PatchAttemptOutcome::Cancelled => &self.metrics.patch.cancellations,
+        }
+        .fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -314,7 +471,80 @@ impl DownloadMetrics {
             series: Mutex::new(Vec::new()),
             sampler_stop: AtomicBool::new(false),
             sampler_wake: tokio::sync::Notify::new(),
+            patch: PatchCounters {
+                first_start_ns: AtomicU64::new(u64::MAX),
+                last_end_ns: AtomicU64::new(0),
+                attempts: AtomicUsize::new(0),
+                successes: AtomicUsize::new(0),
+                fallbacks: AtomicUsize::new(0),
+                cancellations: AtomicUsize::new(0),
+                requests: AtomicUsize::new(0),
+                retries: AtomicUsize::new(0),
+                useful_output_bytes: AtomicU64::new(0),
+                unique_insert_bytes: AtomicU64::new(0),
+                actual_received_bytes: AtomicU64::new(0),
+                source_copy_bytes: AtomicU64::new(0),
+                staging_bytes: AtomicU64::new(0),
+                planning_ns: AtomicU64::new(0),
+                fetch_ns: AtomicU64::new(0),
+                apply_ns: AtomicU64::new(0),
+                verify_promote_ns: AtomicU64::new(0),
+            },
         }
+    }
+
+    pub(crate) fn start_patch_attempt(self: &Arc<Self>) -> PatchAttemptTelemetry {
+        let started = Instant::now();
+        self.patch.attempts.fetch_add(1, Ordering::Relaxed);
+        self.patch.first_start_ns.fetch_min(
+            started.duration_since(self.started_at).as_nanos() as u64,
+            Ordering::Relaxed,
+        );
+        PatchAttemptTelemetry {
+            metrics: Arc::clone(self),
+            started,
+            planning_done: None,
+            fetch_done: None,
+            apply_done: None,
+            outcome: PatchAttemptOutcome::Fallback,
+        }
+    }
+
+    pub(crate) fn record_patch_request(&self) {
+        self.patch.requests.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_patch_retry(&self) {
+        self.patch.retries.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_patch_received_bytes(&self, bytes: u64) {
+        self.patch
+            .actual_received_bytes
+            .fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    pub(crate) fn patch_summary(&self) -> Option<PatchSummary> {
+        let attempts = self.patch.attempts.load(Ordering::Relaxed);
+        (attempts > 0).then(|| PatchSummary {
+            start_offset_ns: self.patch.first_start_ns.load(Ordering::Relaxed),
+            end_offset_ns: self.patch.last_end_ns.load(Ordering::Relaxed),
+            attempts,
+            successes: self.patch.successes.load(Ordering::Relaxed),
+            fallbacks: self.patch.fallbacks.load(Ordering::Relaxed),
+            cancellations: self.patch.cancellations.load(Ordering::Relaxed),
+            requests: self.patch.requests.load(Ordering::Relaxed),
+            retries: self.patch.retries.load(Ordering::Relaxed),
+            useful_output_bytes: self.patch.useful_output_bytes.load(Ordering::Relaxed),
+            unique_insert_bytes: self.patch.unique_insert_bytes.load(Ordering::Relaxed),
+            actual_received_bytes: self.patch.actual_received_bytes.load(Ordering::Relaxed),
+            source_copy_bytes: self.patch.source_copy_bytes.load(Ordering::Relaxed),
+            staging_bytes: self.patch.staging_bytes.load(Ordering::Relaxed),
+            planning_ns: self.patch.planning_ns.load(Ordering::Relaxed),
+            fetch_ns: self.patch.fetch_ns.load(Ordering::Relaxed),
+            apply_ns: self.patch.apply_ns.load(Ordering::Relaxed),
+            verify_promote_ns: self.patch.verify_promote_ns.load(Ordering::Relaxed),
+        })
     }
 
     pub(super) fn record_destination(&self, description: String) {

@@ -5,7 +5,7 @@
 
 use crate::{
     collect::expect::dotted,
-    ledger::{self, ENVIRONMENT_KEYS, median, op_key, round},
+    ledger::{self, median, op_key, round},
 };
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
@@ -167,20 +167,26 @@ pub fn rows_for_case(
                     let entry = &baseline["operations"][&op];
                     if entry.is_null() {
                         "no lane".to_owned()
-                    } else if baseline["profile"].is_null() {
-                        "legacy (rebaseline)".to_owned()
-                    } else if ENVIRONMENT_KEYS.iter().any(|key| {
-                        !baseline["profile"]["environment"].is_null()
-                            && baseline["profile"]["environment"][*key]
-                                != first["environment"][*key]
-                    }) {
-                        "expired (environment)".to_owned()
                     } else {
-                        format!(
-                            "{:.2} s median of {}",
-                            entry["metrics"]["elapsed_s"].as_f64().unwrap_or(0.0),
-                            entry["samples"].as_u64().unwrap_or(0)
-                        )
+                        let compatibility = ledger::compatibility(baseline, first, Some(entry));
+                        if compatibility["verdict"] != "compatible" {
+                            let reason = compatibility["flags"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .filter_map(Value::as_str)
+                                .collect::<Vec<_>>()
+                                .join(",");
+                            format!("unavailable ({reason})")
+                        } else {
+                            format!(
+                                "{:.2} s median of {} [{:.2}-{:.2}]",
+                                entry["metrics"]["elapsed_s"].as_f64().unwrap_or(0.0),
+                                entry["samples"].as_u64().unwrap_or(0),
+                                entry["spread"]["elapsed_s"]["min"].as_f64().unwrap_or(0.0),
+                                entry["spread"]["elapsed_s"]["max"].as_f64().unwrap_or(0.0)
+                            )
+                        }
                     }
                 }
             };
@@ -192,7 +198,11 @@ pub fn rows_for_case(
             MeasurementRow {
                 date: text(&first["started_utc"]).chars().take(10).collect(),
                 case_id: case_id.to_owned(),
-                op,
+                op: if first["operation_identity"].is_string() {
+                    format!("{} ({})", op, text(&first["operation_identity"]))
+                } else {
+                    op
+                },
                 cache_state: text(&first["cache_state"]),
                 storage_class: text(&first["storage_class"]),
                 build: format!(
@@ -310,7 +320,7 @@ mod tests {
     use super::*;
 
     fn row(run: &str, op: &str, label: Option<&str>, cache: &str, elapsed: f64) -> Value {
-        let mut row = json!({"run_id":run,"iteration":0,"started_utc":"2026-09-16T11:19:54Z","op":op,"cache_state":cache,"verdict":"ok","elapsed_s":elapsed,"git_sha":"6cbfc25abcdef","git_dirty":true,"storage_class":"ssd","environment":{"cpu":"x","os":"Windows 11","memory_gb":96,"origin":"o"},"summary":{"files_updated":40,"downloaded_bytes":424266472},"download":{"sol":0.47,"metric_kind":"peak_consistency","outcome":"completed"},"breakdown":{"run_metrics":{"hash_work_bytes":0}}});
+        let mut row = json!({"run_id":run,"iteration":0,"started_utc":"2026-09-16T11:19:54Z","op":op,"cache_state":cache,"verdict":"ok","elapsed_s":elapsed,"git_sha":"6cbfc25abcdef","git_dirty":true,"case_hash":"h","harness":"gui","build_kind":"release","database_mode":"wal","db_write_gate":4,"db_pool_idle":null,"storage_class":"ssd","diagnostics":"none","mutation_profile":null,"mutation_seed":null,"origin_checksum":"origin","references":{},"environment":{"cpu":"x","os":"Windows 11","memory_gb":96,"origin":"o"},"summary":{"files_updated":40,"downloaded_bytes":424266472},"download":{"sol":0.47,"metric_kind":"peak_consistency","outcome":"completed"},"breakdown":{"run_metrics":{"hash_work_bytes":0}}});
         if let Some(label) = label {
             row["label"] = label.into();
         }
@@ -327,7 +337,7 @@ mod tests {
             row("r2", "download", None, "evicted", 58.0),
             row("r2", "download", None, "cold", 20.0),
         ];
-        let baseline = json!({"profile":{"harness":"gui","environment":{"cpu":"x","os":"Windows 11","memory_gb":96,"origin":"o"}},"operations":{"download":{"samples":2,"metrics":{"elapsed_s":16.5}}}});
+        let baseline = json!({"format_version":2,"case_hash":"h","origin_checksum":"origin","references":{},"profile":{"harness":"gui","build_kind":"release","database_mode":"wal","db_write_gate":4,"db_pool_idle":null,"storage_class":"ssd","diagnostics":"none","environment":{"cpu":"x","os":"Windows 11","memory_gb":96,"origin":"o"}},"operations":{"download":{"samples":2,"compatibility":{"op":"download","label":null,"cache_state":"warm","mutation_profile":null,"mutation_seed":null,"origin_checksum":"origin","references":{},"diagnostics":"none"},"metrics":{"elapsed_s":16.5},"spread":{"elapsed_s":{"min":16.0,"max":17.0,"absolute_range":1.0}}}}});
         let table = rows_for_case("perf-x", &rows, Some(&baseline));
         let ops: Vec<&str> = table.iter().map(|r| r.op.as_str()).collect();
         assert_eq!(
@@ -343,7 +353,7 @@ mod tests {
         assert_eq!(table[0].elapsed_s, Some(12.15));
         assert_eq!(table[0].sol, Some(0.47));
         assert_eq!(table[0].sol_kind, "peak consistency");
-        assert_eq!(table[0].baseline, "16.50 s median of 2");
+        assert_eq!(table[0].baseline, "16.50 s median of 2 [16.00-17.00]");
         assert_eq!(table[1].baseline, "no lane");
         assert_eq!(table[0].work, "40 files, 0.42 GB");
         assert_eq!(table[0].build, "6cbfc25-dirty");
@@ -358,12 +368,12 @@ mod tests {
         let legacy = json!({"operations":{"download":{"samples":2,"metrics":{"elapsed_s":1.0}}}});
         assert_eq!(
             rows_for_case("c", &rows, Some(&legacy))[0].baseline,
-            "legacy (rebaseline)"
+            "unavailable (baseline-format-missing)"
         );
-        let moved = json!({"profile":{"environment":{"cpu":"other","os":"Windows 11","memory_gb":96,"origin":"o"}},"operations":{"download":{"samples":2,"metrics":{"elapsed_s":1.0}}}});
+        let moved = json!({"format_version":2,"case_hash":"h","origin_checksum":"origin","references":{},"profile":{"harness":"gui","build_kind":"release","database_mode":"wal","db_write_gate":4,"db_pool_idle":null,"storage_class":"ssd","diagnostics":"none","environment":{"cpu":"other","os":"Windows 11","memory_gb":96,"origin":"o"}},"operations":{"download":{"samples":2,"compatibility":{"op":"download","label":null,"cache_state":"warm","mutation_profile":null,"mutation_seed":null,"origin_checksum":"origin","references":{},"diagnostics":"none"},"metrics":{"elapsed_s":1.0},"spread":{"elapsed_s":{"min":1.0,"max":1.0}}}}});
         assert_eq!(
             rows_for_case("c", &rows, Some(&moved))[0].baseline,
-            "expired (environment)"
+            "unavailable (environment-changed:cpu)"
         );
         assert_eq!(rows_for_case("c", &rows, None)[0].baseline, "none");
         assert!(rows_for_case("c", &[], None).is_empty());

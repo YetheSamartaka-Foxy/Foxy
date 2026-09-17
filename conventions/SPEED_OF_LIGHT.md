@@ -194,10 +194,14 @@ correctness gates.
    the run's own peak window (peak consistency). Independently calibrated
    path throughput (B1) is the reference for a physical statement and is not
    emitted in-app.
-3. **Comparisons**: saved benchmarks compare with the fastest compatible
-   record (same kind, repository instance, storage class, build kind,
-   `files_updated` and `full_download_bytes`); the test kit with the accepted
-   baseline medians. Status: measurements file section 1.
+3. **Comparisons**: saved benchmarks compare against the reproducible median
+   of compatible prior frozen records and retain the fastest compatible prior
+   run as secondary evidence. Compatibility includes operation and initial
+   state, cache preparation, repository instance, origin/payload fingerprint,
+   storage/build/algorithm/diagnostics, useful work, metric/model version,
+   timer scope and reference IDs. The candidate is never part of its own
+   reference set, so a genuine improvement may exceed 100%. The test kit uses
+   accepted baseline medians. Status: measurements file section 1.
 4. **Work**: selected output bytes (`full_bytes`), successful response-body
    bytes credited to files (`credited_bytes`), the shared transfer counter
    (`work_bytes`, an application counter, not TCP/IP traffic with headers),
@@ -511,17 +515,26 @@ SOL op=<name> actual_s=<secs> [work_bytes=<n> actual_bps=<n>]
     metric_version=2 [key=value ...]
 ```
 
-Values may be double-quoted to carry spaces; the last occurrence of a repeated
-key wins; integer counters are printed and parsed as integers. Legacy meaning
-of `sol` (clamped) is preserved; `sol_raw` keeps the unclamped ratio and
-`actual_ns` the unrounded duration. `metric_version=1` lines (before
-2026-09-16) lack the four appended keys; parsers treat them as
-`metric_kind` inferred from `light_src` and `sol_raw` recomputed from
-`ideal_s / actual_s` when both are present.
+Keys start with an ASCII letter and continue with ASCII letters, digits, `_`,
+`.` or `-`. Unknown keys are accepted so the grammar remains append-only.
+Values may be double-quoted to carry spaces; inside quotes, `\"` represents a
+quote and `\\` represents a backslash. The last occurrence of a repeated key
+wins. Repeating a reserved contract key (`op`, the timing/work/reference keys
+shown above, or the parser-owned status keys) also marks the record malformed.
+Unterminated quotes or escapes, unsupported escapes, invalid keys, bare tokens
+and characters after a closing quote are malformed. Both parsers retain all
+fields they can recover and append `parse_status=malformed` plus a stable,
+comma-separated `parse_error`; valid legacy records do not gain either field.
+Integer counters are printed and parsed as integers. Legacy meaning of `sol`
+(clamped) is preserved; `sol_raw` keeps the unclamped ratio and `actual_ns` the
+unrounded duration. `metric_version=1` lines (before 2026-09-16) lack the four
+appended keys; parsers treat them as `metric_kind` inferred from `light_src` and
+`sol_raw` recomputed from `ideal_s / actual_s` when both are present.
 
 | Line | Extra keys |
 | --- | --- |
 | `SOL op=download` (end of the transfer stage) | `files`, `peak_1s_bps`, `delta_savings_percent`, `destination_storage`, `op_id`, `outcome` (`completed`, `failed`, `cancelled`), `mods_succeeded`, `mods_failed`, `mods_cancelled`, `full_bytes`, `delta_savings_bytes`, `expected_bytes`, `credited_bytes`, `range_retries`, `peak_window_s`, and once a plateau window exists `ramp_s`, `plateau_s`, `tail_s`, `ramp_deficit_bytes`, `tail_deficit_bytes`; on rotational destinations `disk_bytes`, `disk_light_bps`, `disk_ideal_s`, `disk_sol`, `disk_light_src=nominal_hdd_sequential`, `disk_sol_raw`, `disk_reference_status=nominal` |
+| `SOL op=delta_patch` (one aggregate action artifact) | `op_id`, `parent_op_id`, `span_id`, monotonic `start_offset_ns`/`end_offset_ns`, attempts, successful patched files, fallbacks, cancellations, requests, retries, useful output, unique insert, actual received, source-copy and staging bytes, planning/fetch/apply/verify-promote service times, byte-conservation status, terminal outcome and `timer_scope=action_wall` |
 | `SOL op=hash` (every part-hash batch) | `label`, `files`, `parts`, `compute_s`, `wait_s` (legacy names), `blocking_elapsed_s`, `permit_wait_s`, `file_elapsed_max_s`, `missing_files`, `profile`, `algorithm` (`blake3`, `md5`, `mixed`, `unknown`), `timer_scope=batch_wall`, `outcome` (`completed`, `cancelled`), `op_id` (when run inside an action) |
 | `SOL op=quick_scan` | `repo`, `addons_total`, `addons_hashed`, `cache_hits_shared`, `cache_hits_persistent`, `deep_scan_files`, `entries` (directory entries the fingerprint walks enumerated), `addons_per_s`, `outcome`, `op_id` (the owning sync action or quick-scan sweep) |
 | `SOL op=remote_refresh` (every remote metadata refresh) | `outcome` (`skipped_clean`, `graph_unchanged`, `rebuilt`, `failed`), `index_requests`, `manifest_requests`, `mods`, `files`, `parts`, `response_bytes`, `fetch_sum_s`, `parse_sum_s`, `persist_sum_s`, `fan_out_wall_s`, `timer_scope=action_wall`, `op_id` |

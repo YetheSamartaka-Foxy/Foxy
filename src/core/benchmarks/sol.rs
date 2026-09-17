@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 
-use super::record::BenchmarkRecord;
+use super::record::{BenchmarkKind, BenchmarkRecord};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SolLightSource {
@@ -120,6 +120,7 @@ pub struct SolSubPart {
     /// Unclamped; above one means the reference was not a bound.
     pub sol_raw: Option<f64>,
     pub light_src: SolLightSource,
+    pub reference_status: String,
 }
 
 impl SolSubPart {
@@ -133,6 +134,15 @@ impl SolSubPart {
         } else {
             self.light_src.metric_kind()
         }
+    }
+
+    pub fn display_sol(&self) -> Option<f64> {
+        (self.reference_status != "above_bound"
+            && self.reference_status != "invalid_actual"
+            && self.reference_status != "invalid_reference"
+            && self.sol_raw.is_none_or(|raw| raw <= 1.0))
+        .then_some(self.sol)
+        .flatten()
     }
 }
 
@@ -166,6 +176,9 @@ pub struct SolOpSummary {
     pub rated_runs: usize,
     /// Service sum of the lines' `actual_s`, not the action makespan.
     pub actual_s: f64,
+    pub interval_coverage_s: Option<f64>,
+    pub makespan_s: Option<f64>,
+    pub useful_work_bytes: u64,
     pub work_bytes: u64,
     pub actual_bps: Option<f64>,
     pub light_bps: Option<f64>,
@@ -184,6 +197,10 @@ pub struct SolOpSummary {
     /// Distinct `label`/`profile` values differed across lines, so the
     /// batches are not comparable work and no fastest-batch light is derived.
     pub heterogeneous: bool,
+    pub reference_statuses: Vec<String>,
+    pub metric_versions: Vec<u32>,
+    pub mixed_metric_versions: bool,
+    pub malformed_lines: usize,
     /// Distinct `outcome` values the lines reported, first-seen order.
     pub outcomes: Vec<String>,
     pub sub_parts: Vec<SolSubPart>,
@@ -227,7 +244,53 @@ impl SolOpSummary {
     /// Whether the ratio may stand as the action's headline: the reference is
     /// one kind, it covers every line, and the operation completed.
     pub fn headline_worthy(&self) -> bool {
-        self.sol.is_some() && self.full_coverage() && !self.mixed_references && self.completed()
+        self.display_sol().is_some()
+            && self.full_coverage()
+            && !self.mixed_references
+            && !self.mixed_metric_versions
+            && self.malformed_lines == 0
+            && self.completed()
+    }
+
+    pub fn display_sol(&self) -> Option<f64> {
+        let valid_status = self.reference_statuses.iter().all(|status| status == "ok");
+        ((self.reference_statuses.is_empty() || valid_status)
+            && self.sol_raw.is_none_or(|raw| raw <= 1.0))
+        .then_some(self.sol)
+        .flatten()
+    }
+
+    pub fn unavailable_reason(&self) -> &'static str {
+        if self.malformed_lines > 0 {
+            "malformed data"
+        } else if self.sol_raw.is_some_and(|raw| raw > 1.0)
+            || self
+                .reference_statuses
+                .iter()
+                .any(|status| status == "above_bound")
+        {
+            "above bound"
+        } else if self
+            .reference_statuses
+            .iter()
+            .any(|status| status.starts_with("invalid"))
+        {
+            "invalid reference"
+        } else if self.mixed_metric_versions {
+            "metric versions differ"
+        } else if self.sol.is_none() {
+            if self.heterogeneous {
+                "batches differ"
+            } else {
+                "reference missing"
+            }
+        } else if !self.completed() {
+            "not completed"
+        } else if self.mixed_references {
+            "mixed references"
+        } else {
+            "partial coverage"
+        }
     }
 
     /// Crucial-operation number and name from `conventions/SPEED_OF_LIGHT.md`,
@@ -235,6 +298,7 @@ impl SolOpSummary {
     pub fn category(&self) -> Option<(&'static str, &'static str)> {
         Some(match self.op.as_str() {
             "download" => ("O1", "Full-file download"),
+            "delta_patch" => ("O2", "Delta patch"),
             "hash" => ("O3", "Tree hash verification"),
             "quick_scan" => ("O4", "Quick scan"),
             "remote_refresh" => ("O5", "Remote metadata refresh"),
@@ -303,6 +367,24 @@ fn detail_specs(op: &str) -> &'static [(&'static str, &'static str, Kind, Fold)]
                 "Destination storage",
                 Kind::Text,
                 Fold::Distinct,
+            ),
+            ("outcome", "Outcome", Kind::Text, Fold::Distinct),
+        ],
+        "delta_patch" => &[
+            ("attempts", "Attempts", Kind::Count, Fold::Sum),
+            ("patched_files", "Patched files", Kind::Count, Fold::Sum),
+            ("fallbacks", "Fallbacks", Kind::Count, Fold::Sum),
+            ("cancellations", "Cancellations", Kind::Count, Fold::Sum),
+            ("requests", "Requests", Kind::Count, Fold::Sum),
+            ("retries", "Retries", Kind::Count, Fold::Sum),
+            ("planning_s", "Planning", Kind::Secs, Fold::Sum),
+            ("fetch_s", "Fetch", Kind::Secs, Fold::Sum),
+            ("apply_s", "Apply", Kind::Secs, Fold::Sum),
+            (
+                "verify_promote_s",
+                "Verify and promote",
+                Kind::Secs,
+                Fold::Sum,
             ),
             ("outcome", "Outcome", Kind::Text, Fold::Distinct),
         ],
@@ -429,6 +511,38 @@ fn sum_of(maps: &[&BTreeMap<String, String>], key: &str) -> Option<f64> {
     (!values.is_empty()).then(|| values.iter().sum())
 }
 
+fn interval_metrics(maps: &[&BTreeMap<String, String>]) -> (Option<f64>, Option<f64>) {
+    let mut intervals: Vec<(u64, u64)> = maps
+        .iter()
+        .filter_map(|map| {
+            let start = map.get("start_offset_ns")?.parse::<u64>().ok()?;
+            let end = map.get("end_offset_ns")?.parse::<u64>().ok()?;
+            (end >= start).then_some((start, end))
+        })
+        .collect();
+    if intervals.is_empty() {
+        return (None, None);
+    }
+    intervals.sort_unstable();
+    let first = intervals[0].0;
+    let last = intervals.iter().map(|(_, end)| *end).max().unwrap_or(first);
+    let mut covered = 0_u64;
+    let (mut start, mut end) = intervals[0];
+    for (next_start, next_end) in intervals.into_iter().skip(1) {
+        if next_start <= end {
+            end = end.max(next_end);
+        } else {
+            covered = covered.saturating_add(end.saturating_sub(start));
+            (start, end) = (next_start, next_end);
+        }
+    }
+    covered = covered.saturating_add(end.saturating_sub(start));
+    (
+        Some(covered as f64 / 1e9),
+        Some(last.saturating_sub(first) as f64 / 1e9),
+    )
+}
+
 /// Work-weighted mean of a per-line ratio, for legacy lines that carry the
 /// percentage but not the counters it was derived from.
 fn weighted_mean(maps: &[&BTreeMap<String, String>], key: &str) -> Option<f64> {
@@ -551,6 +665,16 @@ fn disk_sub_part(maps: &[&BTreeMap<String, String>]) -> Option<SolSubPart> {
         sol: sol_raw.map(|value| value.clamp(0.0, 1.0)),
         sol_raw,
         light_src: SolLightSource::parse(rated[0].get("disk_light_src").map(String::as_str)),
+        reference_status: rated[0]
+            .get("disk_reference_status")
+            .cloned()
+            .unwrap_or_else(|| {
+                if sol_raw.is_some_and(|raw| raw > 1.0) {
+                    "above_bound".to_owned()
+                } else {
+                    "nominal".to_owned()
+                }
+            }),
     })
 }
 
@@ -562,6 +686,9 @@ struct SolLine {
     ideal_s: Option<f64>,
     sol_raw: Option<f64>,
     light_src: SolLightSource,
+    reference_status: Option<String>,
+    metric_version: Option<u32>,
+    malformed: bool,
 }
 
 fn number(map: &BTreeMap<String, String>, key: &str) -> Option<f64> {
@@ -592,6 +719,11 @@ fn parse_line(map: &BTreeMap<String, String>) -> SolLine {
         ideal_s,
         sol_raw,
         light_src: SolLightSource::parse(map.get("light_src").map(String::as_str)),
+        reference_status: map.get("reference_status").cloned(),
+        metric_version: map
+            .get("metric_version")
+            .and_then(|value| value.parse::<u32>().ok()),
+        malformed: map.get("parse_status").is_some_and(|status| status != "ok"),
     }
 }
 
@@ -600,6 +732,15 @@ fn summarize(op: &str, maps: &[&BTreeMap<String, String>]) -> SolOpSummary {
     let lines = lines.as_slice();
     let actual_s: f64 = lines.iter().filter_map(|line| line.actual_s).sum();
     let work_bytes: u64 = lines.iter().filter_map(|line| line.work_bytes).sum();
+    let useful_work_bytes = maps
+        .iter()
+        .filter_map(|map| {
+            map.get("useful_output_bytes")
+                .or_else(|| map.get("work_bytes"))
+                .and_then(|value| value.parse::<u64>().ok())
+        })
+        .sum();
+    let (interval_coverage_s, makespan_s) = interval_metrics(maps);
     let actual_bps = if work_bytes > 0 && actual_s > 0.0 {
         Some(work_bytes as f64 / actual_s)
     } else if let [single] = lines {
@@ -613,11 +754,32 @@ fn summarize(op: &str, maps: &[&BTreeMap<String, String>]) -> SolOpSummary {
         .into_iter()
         .map(str::to_owned)
         .collect();
+    let reference_statuses: Vec<String> = lines
+        .iter()
+        .filter_map(|line| line.reference_status.clone())
+        .fold(Vec::new(), |mut statuses, status| {
+            if !statuses.contains(&status) {
+                statuses.push(status);
+            }
+            statuses
+        });
+    let metric_versions: Vec<u32> = lines.iter().filter_map(|line| line.metric_version).fold(
+        Vec::new(),
+        |mut versions, version| {
+            if !versions.contains(&version) {
+                versions.push(version);
+            }
+            versions
+        },
+    );
     let mut summary = SolOpSummary {
         op: op.to_owned(),
         runs: lines.len(),
         rated_runs: 0,
         actual_s,
+        interval_coverage_s,
+        makespan_s,
+        useful_work_bytes,
         work_bytes,
         actual_bps,
         light_bps: None,
@@ -629,6 +791,10 @@ fn summarize(op: &str, maps: &[&BTreeMap<String, String>]) -> SolOpSummary {
             .map_or(SolLightSource::SelfBaseline, |line| line.light_src.clone()),
         mixed_references: false,
         heterogeneous,
+        mixed_metric_versions: metric_versions.len() > 1,
+        reference_statuses,
+        metric_versions,
+        malformed_lines: lines.iter().filter(|line| line.malformed).count(),
         outcomes,
         sub_parts: if op == "download" {
             disk_sub_part(maps).into_iter().collect()
@@ -721,11 +887,70 @@ impl BenchmarkRecord {
     /// transfers, hashing for checks. No other operation stands in for it:
     /// a rated app-update probe in the frame is not the benchmark's ratio.
     pub fn headline_op(&self) -> &'static str {
-        if self.kind.transfers_files() {
+        if self
+            .sol
+            .iter()
+            .any(|line| line.get("op").is_some_and(|op| op == "sync_action"))
+        {
+            "sync_action"
+        } else if self.kind.transfers_files() {
             "download"
         } else {
             "hash"
         }
+    }
+
+    pub fn operation_identity(&self) -> String {
+        match self.kind {
+            BenchmarkKind::QuickCheck => return "O4 quick scan".to_owned(),
+            BenchmarkKind::IntegrityCheck => return "O3 tree hash verification".to_owned(),
+            BenchmarkKind::Recheck
+                if self
+                    .sol
+                    .iter()
+                    .any(|line| line.get("op").is_some_and(|op| op == "hash"))
+                    || self.metrics.hash_files_total > 0 =>
+            {
+                return "O3 tree hash verification".to_owned();
+            }
+            BenchmarkKind::Recheck => return "O6 no-change sync".to_owned(),
+            BenchmarkKind::Update
+            | BenchmarkKind::ForceRedownload
+            | BenchmarkKind::AddonDownload
+            | BenchmarkKind::AddonForceRedownload => {}
+        }
+        let delta_lines: Vec<&BTreeMap<String, String>> = self
+            .sol
+            .iter()
+            .filter(|line| line.get("op").is_some_and(|op| op == "delta_patch"))
+            .collect();
+        if !delta_lines.is_empty() {
+            let patched: u64 = delta_lines
+                .iter()
+                .filter_map(|line| line.get("patched_files"))
+                .filter_map(|value| value.parse::<u64>().ok())
+                .sum();
+            let fallbacks: u64 = delta_lines
+                .iter()
+                .filter_map(|line| line.get("fallbacks"))
+                .filter_map(|value| value.parse::<u64>().ok())
+                .sum();
+            return if fallbacks > 0 {
+                "O2 delta patch + O1 full-download fallback".to_owned()
+            } else if patched > 0 {
+                "O2 delta patch".to_owned()
+            } else {
+                "O2 delta patch attempt".to_owned()
+            };
+        }
+        if self
+            .sol
+            .iter()
+            .any(|line| line.get("op").is_some_and(|op| op == "download"))
+        {
+            return "O1 full-file download".to_owned();
+        }
+        self.headline_op().to_owned()
     }
 
     /// The summary of the headline operation, when it exists at all.
@@ -739,7 +964,9 @@ impl BenchmarkRecord {
     /// The ratio that summarises the action, only when it is trustworthy as
     /// a headline: one reference kind, full coverage, completed outcome.
     pub fn headline_sol(&self) -> Option<SolOpSummary> {
-        self.headline_summary()
+        (self.outcome == crate::core::benchmarks::BenchmarkOutcome::Success)
+            .then(|| self.headline_summary())
+            .flatten()
             .filter(SolOpSummary::headline_worthy)
     }
 }
@@ -910,6 +1137,41 @@ mod tests {
     }
 
     #[test]
+    fn intervals_keep_service_coverage_and_makespan_distinct() {
+        let record = record(
+            BenchmarkKind::Recheck,
+            vec![
+                line(&[
+                    ("op", "hash"),
+                    ("actual_s", "2"),
+                    ("work_bytes", "20"),
+                    ("start_offset_ns", "0"),
+                    ("end_offset_ns", "2000000000"),
+                ]),
+                line(&[
+                    ("op", "hash"),
+                    ("actual_s", "2"),
+                    ("work_bytes", "20"),
+                    ("start_offset_ns", "1000000000"),
+                    ("end_offset_ns", "3000000000"),
+                ]),
+                line(&[
+                    ("op", "hash"),
+                    ("actual_s", "1"),
+                    ("work_bytes", "10"),
+                    ("start_offset_ns", "4000000000"),
+                    ("end_offset_ns", "5000000000"),
+                ]),
+            ],
+        );
+        let summary = &record.sol_summaries()[0];
+        assert_eq!(summary.actual_s, 5.0);
+        assert_eq!(summary.interval_coverage_s, Some(4.0));
+        assert_eq!(summary.makespan_s, Some(5.0));
+        assert_eq!(summary.useful_work_bytes, 50);
+    }
+
+    #[test]
     fn raw_ratio_above_one_is_kept_and_flags_the_reference() {
         let record = record(
             BenchmarkKind::Update,
@@ -929,6 +1191,149 @@ mod tests {
         assert_eq!(summary.sol_raw, Some(2.0));
         assert_eq!(summary.metric_kind(), SolMetricKind::ModeledBound);
         assert_eq!(summary.gap_to_reference_s(), Some(-10.0));
+        assert_eq!(summary.display_sol(), None);
+        assert_eq!(summary.unavailable_reason(), "above bound");
+        assert!(record.headline_sol().is_none());
+    }
+
+    #[test]
+    fn malformed_mixed_version_and_failed_summaries_cannot_be_headlines() {
+        for (extra, reason) in [
+            (vec![("parse_status", "malformed")], "malformed data"),
+            (
+                vec![("reference_status", "invalid_actual")],
+                "invalid reference",
+            ),
+        ] {
+            let mut pairs = vec![
+                ("op", "download"),
+                ("actual_s", "1"),
+                ("ideal_s", "0.5"),
+                ("sol", "0.5"),
+                ("sol_raw", "0.5"),
+            ];
+            pairs.extend(extra);
+            let record = record(BenchmarkKind::Update, vec![line(&pairs)]);
+            let summary = &record.sol_summaries()[0];
+            assert_eq!(summary.unavailable_reason(), reason);
+            assert!(record.headline_sol().is_none());
+        }
+
+        let mixed = record(
+            BenchmarkKind::Update,
+            vec![
+                line(&[
+                    ("op", "download"),
+                    ("actual_s", "1"),
+                    ("ideal_s", "0.5"),
+                    ("sol", "0.5"),
+                    ("metric_version", "1"),
+                ]),
+                line(&[
+                    ("op", "download"),
+                    ("actual_s", "1"),
+                    ("ideal_s", "0.5"),
+                    ("sol", "0.5"),
+                    ("metric_version", "2"),
+                ]),
+            ],
+        );
+        let summary = &mixed.sol_summaries()[0];
+        assert!(summary.mixed_metric_versions);
+        assert_eq!(summary.unavailable_reason(), "metric versions differ");
+        assert!(mixed.headline_sol().is_none());
+
+        let mut failed = record(
+            BenchmarkKind::Update,
+            vec![line(&[
+                ("op", "download"),
+                ("actual_s", "1"),
+                ("ideal_s", "0.5"),
+                ("sol", "0.5"),
+            ])],
+        );
+        failed.outcome = BenchmarkOutcome::Failed {
+            message: "failed after transfer".into(),
+        };
+        assert!(failed.headline_sol().is_none());
+    }
+
+    #[test]
+    fn terminal_sync_action_owns_the_headline() {
+        let record = record(
+            BenchmarkKind::Update,
+            vec![
+                line(&[("op", "download"), ("actual_s", "1"), ("sol", "0.8")]),
+                line(&[
+                    ("op", "sync_action"),
+                    ("actual_s", "2"),
+                    ("outcome", "completed"),
+                ]),
+            ],
+        );
+        assert_eq!(record.headline_op(), "sync_action");
+        assert_eq!(record.headline_summary().unwrap().op, "sync_action");
+        assert!(record.headline_sol().is_none());
+    }
+
+    #[test]
+    fn patch_identity_keeps_success_and_fallback_attempts_distinct() {
+        let pure = record(
+            BenchmarkKind::Update,
+            vec![line(&[
+                ("op", "delta_patch"),
+                ("patched_files", "4"),
+                ("fallbacks", "0"),
+                ("outcome", "completed"),
+            ])],
+        );
+        assert_eq!(pure.operation_identity(), "O2 delta patch");
+        assert_eq!(
+            pure.sol_summaries()[0].category(),
+            Some(("O2", "Delta patch"))
+        );
+
+        let fallback = record(
+            BenchmarkKind::Update,
+            vec![
+                line(&[
+                    ("op", "delta_patch"),
+                    ("patched_files", "3"),
+                    ("fallbacks", "1"),
+                    ("outcome", "completed_with_fallback"),
+                ]),
+                line(&[("op", "download"), ("actual_s", "2")]),
+            ],
+        );
+        assert_eq!(
+            fallback.operation_identity(),
+            "O2 delta patch + O1 full-download fallback"
+        );
+        assert_eq!(fallback.sol_summaries().len(), 2);
+    }
+
+    #[test]
+    fn non_transfer_identity_uses_the_requested_benchmark_action() {
+        let incidental = vec![
+            line(&[("op", "remote_refresh"), ("outcome", "graph_unchanged")]),
+            line(&[("op", "quick_scan"), ("outcome", "no_changes")]),
+        ];
+        assert_eq!(
+            record(BenchmarkKind::Recheck, incidental.clone()).operation_identity(),
+            "O6 no-change sync"
+        );
+        assert_eq!(
+            record(BenchmarkKind::QuickCheck, incidental.clone()).operation_identity(),
+            "O4 quick scan"
+        );
+        assert_eq!(
+            record(
+                BenchmarkKind::IntegrityCheck,
+                vec![line(&[("op", "hash"), ("outcome", "completed")])],
+            )
+            .operation_identity(),
+            "O3 tree hash verification"
+        );
     }
 
     #[test]

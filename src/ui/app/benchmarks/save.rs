@@ -87,6 +87,7 @@ fn save_draft_blocking(mut draft: BenchmarkDraft) -> Result<BenchmarkRecord, Str
     }
     draft.record.sol =
         owned_sol_lines(parse_sol_lines(frame), draft.record.operation_id.as_deref());
+    crate::core::benchmarks::best::populate_compatibility(&mut draft.record);
     draft.record.log_line_count = slice.line_count();
     draft.record.log_file = (slice.line_count() > 0).then(|| store::LOG_FILE.to_owned());
     describe_machine(&mut draft.record);

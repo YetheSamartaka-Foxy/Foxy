@@ -1549,6 +1549,71 @@ pub(crate) async fn download_files(
             &sol_extras
         )
     );
+    if let Some(patch) = metrics.patch_summary() {
+        let conservation = if patch.fallbacks == 0
+            && patch.cancellations == 0
+            && patch.useful_output_bytes
+                == patch
+                    .unique_insert_bytes
+                    .saturating_add(patch.source_copy_bytes)
+        {
+            "ok"
+        } else {
+            "partial"
+        };
+        let patch_extras = vec![
+            ("op_id", operation_id.to_string()),
+            ("parent_op_id", operation_id.to_string()),
+            ("span_id", format!("{operation_id}-delta-patch")),
+            (
+                "stage_ids",
+                "planning,fetch,apply,verify_promote".to_owned(),
+            ),
+            ("start_offset_ns", patch.start_offset_ns.to_string()),
+            ("end_offset_ns", patch.end_offset_ns.to_string()),
+            ("attempts", patch.attempts.to_string()),
+            ("patched_files", patch.successes.to_string()),
+            ("fallbacks", patch.fallbacks.to_string()),
+            ("cancellations", patch.cancellations.to_string()),
+            ("requests", patch.requests.to_string()),
+            ("retries", patch.retries.to_string()),
+            ("useful_output_bytes", patch.useful_output_bytes.to_string()),
+            ("unique_insert_bytes", patch.unique_insert_bytes.to_string()),
+            (
+                "actual_received_bytes",
+                patch.actual_received_bytes.to_string(),
+            ),
+            ("source_copy_bytes", patch.source_copy_bytes.to_string()),
+            ("staging_bytes", patch.staging_bytes.to_string()),
+            ("planning_ns", patch.planning_ns.to_string()),
+            (
+                "planning_s",
+                format!("{:.6}", patch.planning_ns as f64 / 1e9),
+            ),
+            ("fetch_ns", patch.fetch_ns.to_string()),
+            ("fetch_s", format!("{:.6}", patch.fetch_ns as f64 / 1e9)),
+            ("apply_ns", patch.apply_ns.to_string()),
+            ("apply_s", format!("{:.6}", patch.apply_ns as f64 / 1e9)),
+            ("verify_promote_ns", patch.verify_promote_ns.to_string()),
+            (
+                "verify_promote_s",
+                format!("{:.6}", patch.verify_promote_ns as f64 / 1e9),
+            ),
+            ("byte_conservation", conservation.to_owned()),
+            ("outcome", patch.outcome().to_owned()),
+            ("timer_scope", "action_wall".to_owned()),
+        ];
+        info!(
+            "{}",
+            sol_line(
+                "delta_patch",
+                patch.useful_output_bytes,
+                patch.makespan(),
+                &SolLight::SelfBaseline,
+                &patch_extras,
+            )
+        );
+    }
 
     let report = metrics.build_report(&mod_outcomes);
 

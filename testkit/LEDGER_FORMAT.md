@@ -22,9 +22,13 @@ Baselines are explicit and variant-specific:
 ledger/<case-id>.<harness>.<build>.<database-mode>.gate-<n>.baseline.json
 ```
 
-`--accept` refuses a dirty tree, invalid rows, case-hash changes, and fewer than
-two warm samples. A baseline stores the accepted Git SHA, case hash, sample
-size, warm medians, and tolerances.
+`--accept` refuses a dirty tree, non-release builds, invalid rows, case-hash
+changes, incompatible operation profiles, and fewer than five successful warm
+or explicitly evicted samples per lane. A version 2 baseline stores the
+accepted Git SHA, case and origin identity, calibration references, complete
+run and operation compatibility, sample size, medians, min/max spread, terminal
+and oracle outcomes, and tolerances. Older baseline files remain readable but
+produce `rebaseline-required` instead of silently comparing.
 
 `breakdown.run_metrics` grows over time (`hash_work_bytes`, `tree_verify_runs`,
 `fs_watcher_starts`, `prepared_queue_reuses` were added on 2026-09-14; the

@@ -720,6 +720,7 @@ async fn download_op_chunk(
             Ok(bytes) if bytes == chunk.len() => return Ok(bytes),
             Ok(bytes) => {
                 retry_count += 1;
+                metrics.record_patch_retry();
                 if retry_count > PATCH_DOWNLOAD_MAX_RETRIES {
                     return Err(anyhow!(
                         "insert chunk {}-{} received {}/{} bytes after {} retries",
@@ -740,6 +741,7 @@ async fn download_op_chunk(
                     return Err(err);
                 }
                 retry_count += 1;
+                metrics.record_patch_retry();
                 if retry_count > PATCH_DOWNLOAD_MAX_RETRIES {
                     return Err(err).context(format!(
                         "insert chunk {}-{} exceeded retry limit",
@@ -766,6 +768,7 @@ async fn download_op_chunk_once(
     rate_limiter: &Arc<AdaptiveBandwidthLimiter>,
     metrics: &Arc<DownloadMetrics>,
 ) -> anyhow::Result<u64> {
+    metrics.record_patch_request();
     let mut resp =
         request_exact_range(context, remote_url, chunk.dest_start, chunk.dest_end).await?;
     let expected = chunk.len();
@@ -787,6 +790,7 @@ async fn download_op_chunk_once(
         }
         pending.extend_from_slice(&piece[..take]);
         metrics.record_bytes(take as u64);
+        metrics.record_patch_received_bytes(take as u64);
         received += take as u64;
         if received >= expected {
             break;
@@ -850,6 +854,7 @@ async fn download_insert_run(
     while next_op < run.op_indices.len() {
         wait_for_download_resume(&mut pause_rx, &mut cancel_rx).await?;
         let first = &ops[run.op_indices[next_op]];
+        metrics.record_patch_request();
         let response = match request_exact_range(
             context.clone(),
             remote_url,
@@ -861,6 +866,7 @@ async fn download_insert_run(
             Ok(resp) => resp,
             Err(err) => {
                 retry_count += 1;
+                metrics.record_patch_retry();
                 if retry_count > PATCH_DOWNLOAD_MAX_RETRIES {
                     return Err(err).context(format!(
                         "insert run starting at op {} exceeded retry limit",
@@ -898,6 +904,7 @@ async fn download_insert_run(
                 Ok(Err(err)) => return Err(err).context("failed to read insert run chunk"),
                 Err(_) => {
                     retry_count += 1;
+                    metrics.record_patch_retry();
                     if retry_count > PATCH_DOWNLOAD_MAX_RETRIES {
                         return Err(anyhow!(
                             "delta insert run chunk timed out after {} retries",
@@ -914,6 +921,7 @@ async fn download_insert_run(
             };
             rate_limiter.acquire_and_record(chunk.len()).await;
             metrics.record_bytes(chunk.len() as u64);
+            metrics.record_patch_received_bytes(chunk.len() as u64);
 
             let mut slice: &[u8] = &chunk;
             while !slice.is_empty() && op_cursor < run.op_indices.len() {

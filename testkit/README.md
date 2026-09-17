@@ -61,6 +61,10 @@ Accept a performance baseline only from a clean worktree:
 foxy-testkit run --case .\testkit\cases\perf-repo.json --accept
 ```
 
+Acceptance also requires a release build and at least five compatible,
+successful warm or explicitly evicted samples for every recorded operation
+lane. Noisy HDD and network cases should use seven or more repetitions.
+
 Compare WAL and MVCC without changing the case workload:
 
 ```powershell

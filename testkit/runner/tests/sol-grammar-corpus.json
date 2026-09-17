@@ -1,0 +1,54 @@
+[
+  {
+    "name": "escaped quoted value",
+    "input": "op=hash label=\"two \\\"words\\\\tail\" note=\"a=b\"",
+    "fields": {
+      "label": "two \"words\\tail",
+      "note": "a=b",
+      "op": "hash"
+    },
+    "status": "ok",
+    "error": ""
+  },
+  {
+    "name": "unterminated quote",
+    "input": "op=hash label=\"open ended",
+    "fields": {
+      "label": "open ended",
+      "op": "hash"
+    },
+    "status": "malformed",
+    "error": "unterminated_quote"
+  },
+  {
+    "name": "duplicate reserved keys",
+    "input": "op=hash op=download actual_s=1 actual_s=2",
+    "fields": {
+      "actual_s": "2",
+      "op": "download"
+    },
+    "status": "malformed",
+    "error": "duplicate_reserved_key"
+  },
+  {
+    "name": "large integer and unknown key",
+    "input": "op=hash work_bytes=18446744073709551615 future_counter=340282366920938463463374607431768211455",
+    "fields": {
+      "future_counter": "340282366920938463463374607431768211455",
+      "op": "hash",
+      "work_bytes": "18446744073709551615"
+    },
+    "status": "ok",
+    "error": ""
+  },
+  {
+    "name": "malformed token and invalid escape",
+    "input": "op=hash stray label=\"bad\\q\"",
+    "fields": {
+      "label": "bad\\q",
+      "op": "hash"
+    },
+    "status": "malformed",
+    "error": "malformed_token,invalid_escape"
+  }
+]

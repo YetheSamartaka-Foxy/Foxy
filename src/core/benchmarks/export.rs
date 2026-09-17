@@ -63,9 +63,12 @@ pub fn summary_text(record: &BenchmarkRecord, best: Option<&BestComparison>) -> 
         out.push_str(&value);
         out.push('\n');
     };
-    line("operation", record.headline_op().to_owned());
+    line("operation", record.operation_identity());
     let headline = record.headline_summary();
-    match record.headline_sol().and_then(|summary| summary.sol) {
+    match record
+        .headline_sol()
+        .and_then(|summary| summary.display_sol())
+    {
         Some(sol) => {
             line("sol", format!("{:.3}", sol));
             line(
@@ -82,21 +85,7 @@ pub fn summary_text(record: &BenchmarkRecord, best: Option<&BestComparison>) -> 
                 "sol_kind",
                 headline
                     .as_ref()
-                    .map_or("reference missing", |summary| {
-                        if summary.sol.is_none() {
-                            if summary.heterogeneous {
-                                "batches differ"
-                            } else {
-                                "reference missing"
-                            }
-                        } else if !summary.completed() {
-                            "not completed"
-                        } else if summary.mixed_references {
-                            "mixed references"
-                        } else {
-                            "partial coverage"
-                        }
-                    })
+                    .map_or("reference missing", |summary| summary.unavailable_reason())
                     .to_owned(),
             );
         }
@@ -198,7 +187,7 @@ pub fn summary_text(record: &BenchmarkRecord, best: Option<&BestComparison>) -> 
         out.push_str("\noperations:\n");
         for summary in &summaries {
             let sol = summary
-                .sol
+                .display_sol()
                 .map_or_else(|| "na".to_owned(), |sol| format!("{sol:.3}"));
             let mut fields = vec![
                 format!("op={}", summary.op),
@@ -213,6 +202,25 @@ pub fn summary_text(record: &BenchmarkRecord, best: Option<&BestComparison>) -> 
             }
             if let Some(raw) = summary.sol_raw {
                 fields.push(format!("sol_raw={raw:.4}"));
+            }
+            fields.push(format!(
+                "reference_status={}",
+                if summary.headline_worthy() {
+                    "ok"
+                } else {
+                    summary.unavailable_reason()
+                }
+            ));
+            if !summary.metric_versions.is_empty() {
+                fields.push(format!(
+                    "metric_versions={}",
+                    summary
+                        .metric_versions
+                        .iter()
+                        .map(u32::to_string)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ));
             }
             if let Some(gap) = summary.gap_to_reference_s() {
                 fields.push(format!("gap_to_reference_s={gap:+.3}"));
@@ -294,6 +302,30 @@ best_measured: not comparable
         assert!(text.contains("elapsed_s: 1.50"));
         assert!(text.contains("download"));
         assert!(text.contains("notes:\nnote"));
+    }
+
+    #[test]
+    fn above_bound_ratio_is_exported_as_warning_not_normal_percentage() {
+        let mut record = record();
+        record.sol = vec![
+            [
+                ("op", "download"),
+                ("actual_s", "1"),
+                ("ideal_s", "2"),
+                ("sol", "1"),
+                ("sol_raw", "2"),
+                ("reference_status", "above_bound"),
+                ("metric_version", "2"),
+            ]
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect(),
+        ];
+        let text = summary_text(&record, None);
+        assert!(text.contains("sol: na\nsol_kind: above bound\n"));
+        assert!(text.contains("sol_raw: 2.0000"));
+        assert!(text.contains("reference_status=above bound"));
+        assert!(!text.contains("sol: 1.000\n"));
     }
 
     #[test]
