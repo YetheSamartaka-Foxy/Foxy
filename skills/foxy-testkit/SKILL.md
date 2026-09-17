@@ -67,7 +67,7 @@ flagship lanes and read the correctness counters and memory guardrails on the
 same rows (`conventions/SPEED_OF_LIGHT.md`, Maintenance):
 
 ```powershell
-foxy-testkit suite --filter "perf-redownload-small-ssd,perf-startup-arma3-live" --no-build
+foxy-testkit suite --filter "perf-redownload-small-ssd,perf-startup-arma3-live" --db-write-gate 4 --no-build
 ```
 
 `compare` retires a baseline whose run profile (including `diagnostics`),

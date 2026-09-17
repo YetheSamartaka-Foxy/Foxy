@@ -42,7 +42,7 @@ foxy-testkit suite --filter "ux-*" --no-build
 foxy-testkit suite --tag database --no-build
 # the flagship lanes: O1 download and O6 clean recheck (small-ssd), O8 startup; rerun
 # them after any change that can touch download, sync or startup paths
-foxy-testkit suite --filter "perf-redownload-small-ssd,perf-startup-arma3-live" --no-build
+foxy-testkit suite --filter "perf-redownload-small-ssd,perf-startup-arma3-live" --db-write-gate 4 --no-build
 ```
 
 A filter is a glob, or several globs separated by commas (any may match), so
