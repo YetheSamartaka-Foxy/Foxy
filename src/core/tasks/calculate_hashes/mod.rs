@@ -58,8 +58,7 @@ pub(crate) use file_hashes::{
 };
 pub use persistence::calculate_hash_from_items;
 pub(crate) use pipeline::{
-    HashCalculationResult, calculate_hashes, calculate_hashes_with_profile,
-    calculate_hashes_with_tree_and_profile_cancellable,
+    HashCalculationResult, calculate_hashes, calculate_hashes_with_tree_and_profile_cancellable,
 };
 pub(crate) use propagation::{
     finalize_repository_content_hashes_from_mods, finalize_repository_hashes_from_mods,

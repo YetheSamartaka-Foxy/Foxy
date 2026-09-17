@@ -3,6 +3,22 @@ use anyhow::{Result, ensure};
 use serde_json::{Value, json};
 use std::path::Path;
 
+/// Row fields the kit added after runs were recorded (top level, plus the
+/// calibrated ratios a later reference derives on an operation record). A rebuilt
+/// row carries them (null, or derived from retained lines); the recorded row
+/// cannot, and that is not a derivation difference.
+const ADDED_FIELDS: &[&str] = &[
+    "sol_aggregate",
+    "remote_refresh",
+    "sync_action",
+    "db_persist",
+    "db_purge",
+    "space_switch",
+    "references",
+    "diagnostics",
+    "origin_checksum",
+];
+
 fn differences(expected: &Value, actual: &Value, path: &str, out: &mut Vec<Value>) {
     if matches!(path, "case_hash" | "started_utc") {
         return;
@@ -13,7 +29,11 @@ fn differences(expected: &Value, actual: &Value, path: &str, out: &mut Vec<Value
             // A key the recorded row never had is a metric that was added to
             // the kit after the run was recorded, not a derivation change; a
             // key the rebuilt row lost is still a difference.
-            if !a.contains_key(key) && path.starts_with("breakdown.run_metrics") {
+            if !a.contains_key(key)
+                && (path.starts_with("breakdown.run_metrics")
+                    || (path.is_empty() && ADDED_FIELDS.contains(&key.as_str()))
+                    || matches!(key.as_str(), "sol_calibrated" | "reference_id"))
+            {
                 continue;
             }
             differences(

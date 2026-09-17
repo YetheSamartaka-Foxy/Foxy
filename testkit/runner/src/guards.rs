@@ -112,7 +112,94 @@ pub fn check(case: &Value, root: &Path, config: &Path) -> Result<Value> {
             );
         }
     }
-    Ok(json!({"git":git,"storage_class":storage}))
+    let origin = case["repository"]["address"]
+        .as_str()
+        .map(origin_host)
+        .unwrap_or_default();
+    Ok(json!({"git":git,"storage_class":storage,"environment":environment_fingerprint(&origin)}))
+}
+
+/// The environment properties a baseline is only valid under: the CPU, the
+/// OS family and major version, the memory size bucket, and the origin the
+/// case measured against. A change in any of them expires accepted baselines
+/// instead of letting them stand as references for different hardware.
+pub fn environment_fingerprint(origin: &str) -> Value {
+    let mut system = sysinfo::System::new();
+    system.refresh_cpu_list(sysinfo::CpuRefreshKind::nothing());
+    system.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
+    let cpu = system
+        .cpus()
+        .first()
+        .map(|cpu| cpu.brand().trim().to_owned())
+        .unwrap_or_default();
+    let os = format!(
+        "{} {}",
+        sysinfo::System::name().unwrap_or_default(),
+        sysinfo::System::os_version()
+            .unwrap_or_default()
+            .split(['.', ' '])
+            .next()
+            .unwrap_or_default()
+    )
+    .trim()
+    .to_owned();
+    json!({
+        "cpu": cpu,
+        "os": os,
+        "memory_gb": memory_bucket_gb(system.total_memory()),
+        "origin": origin,
+    })
+}
+
+/// Total memory rounded to the nearest 8 GiB, so a few hundred megabytes
+/// reserved by a driver do not read as a different machine.
+pub fn memory_bucket_gb(total_bytes: u64) -> u64 {
+    let gib = total_bytes as f64 / 1_073_741_824.0;
+    ((gib / 8.0).round() as u64) * 8
+}
+
+/// The host (and port) of a repository address; a loopback origin served by
+/// the kit itself is reported as `loopback`.
+pub fn origin_host(address: &str) -> String {
+    let rest = address.split_once("://").map_or(address, |(_, rest)| rest);
+    let host = rest.split('/').next().unwrap_or_default();
+    if host.starts_with("127.") || host.starts_with("localhost") || host.starts_with("[::1]") {
+        "loopback".to_owned()
+    } else {
+        host.to_owned()
+    }
+}
+
+#[cfg(test)]
+mod environment_tests {
+    use super::*;
+
+    #[test]
+    fn memory_buckets_round_to_eight_gib() {
+        assert_eq!(memory_bucket_gb(100_546_396_160), 96);
+        assert_eq!(memory_bucket_gb(17_000_000_000), 16);
+        assert_eq!(memory_bucket_gb(0), 0);
+    }
+
+    #[test]
+    fn origin_hosts_keep_the_port_and_fold_loopback() {
+        assert_eq!(
+            origin_host("http://a3.example.test:8080/mody/Repo/"),
+            "a3.example.test:8080"
+        );
+        assert_eq!(origin_host("http://127.0.0.1:53211/repo/"), "loopback");
+        assert_eq!(origin_host("http://localhost/repo/"), "loopback");
+        assert_eq!(origin_host(""), "");
+    }
+
+    #[test]
+    fn fingerprint_has_every_key() {
+        let fingerprint = environment_fingerprint("loopback");
+        for key in ["cpu", "os", "memory_gb", "origin"] {
+            assert!(!fingerprint[key].is_null(), "{key}");
+        }
+        assert_eq!(fingerprint["origin"], "loopback");
+    }
 }
 
 pub fn storage_class(path: &Path) -> &'static str {

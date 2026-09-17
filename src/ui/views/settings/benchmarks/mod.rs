@@ -14,7 +14,7 @@ use eframe::egui::{
 };
 use log::info;
 
-use crate::core::benchmarks::{BenchmarkKind, BenchmarkOutcome, BenchmarkRecord};
+use crate::core::benchmarks::{BenchmarkKind, BenchmarkOutcome, BenchmarkRecord, best_comparable};
 use crate::ui::app::Foxy;
 use crate::ui::app::benchmarks::{BenchmarkOutcomeFilter, BenchmarkSort};
 use crate::ui::i18n::{fmt_bytes, tr, tr_fmt};
@@ -403,8 +403,34 @@ impl Foxy {
                     if record.hidden {
                         self.benchmark_stat_chip(ui, self.t("Hidden"), "\u{1F6AB}");
                     }
-                    if let Some(sol) = record.headline_sol().and_then(|summary| summary.sol) {
-                        self.benchmark_stat_chip(ui, self.t("SoL"), fmt_sol(sol));
+                    // Operation and ratio lead, then the best-measured
+                    // comparison, then the secondary counters.
+                    if let Some(summary) = record.headline_sol() {
+                        self.benchmark_stat_chip(
+                            ui,
+                            format!("{} {}", self.t("SoL"), summary.op),
+                            format!(
+                                "{} \u{00B7} {}",
+                                fmt_sol(summary.sol.unwrap_or(0.0)),
+                                self.t(summary.metric_kind().label())
+                            ),
+                        );
+                    } else {
+                        self.benchmark_stat_chip(
+                            ui,
+                            format!("{} {}", self.t("SoL"), record.headline_op()),
+                            "n/a",
+                        );
+                    }
+                    if let Some(best) = best_comparable(&record, &self.benchmarks_view.records)
+                        && !best.is_alone()
+                    {
+                        let text = if best.is_best() {
+                            self.t_fmt("best of {count}", &[("count", best.samples.to_string())])
+                        } else {
+                            format!("{:+.2} s", best.gap_s())
+                        };
+                        self.benchmark_stat_chip(ui, self.t("vs best"), text);
                     }
                     if record.kind.transfers_files() && record.metrics.downloaded_bytes > 0 {
                         self.benchmark_stat_chip(

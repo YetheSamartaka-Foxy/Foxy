@@ -33,6 +33,9 @@ pub(crate) struct SqlitePerfSnapshot {
     pub(crate) lock_retries: u64,
     pub(crate) lock_backoff_ms_total: u64,
     pub(crate) db_write_time_ns_total: u64,
+    /// Rows changed by every write statement the seam ran (the engine's own
+    /// count), so a persistence record has a work model beside its windows.
+    pub(crate) rows_affected: u64,
 }
 
 impl SqlitePerfSnapshot {
@@ -45,6 +48,7 @@ impl SqlitePerfSnapshot {
             db_write_time_ns_total: self
                 .db_write_time_ns_total
                 .saturating_sub(baseline.db_write_time_ns_total),
+            rows_affected: self.rows_affected.saturating_sub(baseline.rows_affected),
         }
     }
 
@@ -70,6 +74,7 @@ struct SqlitePerfCounters {
     lock_retries: AtomicU64,
     lock_backoff_ms_total: AtomicU64,
     db_write_time_ns_total: AtomicU64,
+    rows_affected: AtomicU64,
 }
 
 impl SqlitePerfCounters {
@@ -78,6 +83,7 @@ impl SqlitePerfCounters {
             lock_retries: self.lock_retries.load(Ordering::Relaxed),
             lock_backoff_ms_total: self.lock_backoff_ms_total.load(Ordering::Relaxed),
             db_write_time_ns_total: self.db_write_time_ns_total.load(Ordering::Relaxed),
+            rows_affected: self.rows_affected.load(Ordering::Relaxed),
         }
     }
 
@@ -88,6 +94,10 @@ impl SqlitePerfCounters {
             .fetch_add(backoff_ms, Ordering::Relaxed);
     }
 
+    fn record_rows_affected(&self, rows: u64) {
+        self.rows_affected.fetch_add(rows, Ordering::Relaxed);
+    }
+
     fn record_db_write_time(&self, elapsed: Duration) {
         let elapsed_ns = elapsed.as_nanos().min(u128::from(u64::MAX)) as u64;
         self.db_write_time_ns_total
@@ -96,6 +106,11 @@ impl SqlitePerfCounters {
 }
 
 static SQLITE_PERF_COUNTERS: Lazy<SqlitePerfCounters> = Lazy::new(SqlitePerfCounters::default);
+
+/// Credit rows a write statement changed to the process-wide counter.
+pub(crate) fn record_sqlite_rows_affected(rows: u64) {
+    SQLITE_PERF_COUNTERS.record_rows_affected(rows);
+}
 static SQLITE_WRITE_METRICS: Lazy<Mutex<HashMap<String, SqliteWriteMetricSnapshot>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 

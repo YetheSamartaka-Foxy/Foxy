@@ -17,9 +17,9 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 use tokio::sync::watch;
 
 use super::types::{
-    COPY_BUFFER_SIZE, CopySourcePreflightStats, INSERT_RUN_MAX_BYTES, InsertRun,
-    PATCH_CHUNK_TIMEOUT, PATCH_DOWNLOAD_MAX_RETRIES, PATCH_PREFLIGHT_COPY_SAMPLE_OPS,
-    PatchArtifact, PatchOpType, checksum_matches, insert_run_gap_budget, plan_insert_runs,
+    COPY_BUFFER_SIZE, CopySourcePreflightStats, InsertRun, OpChunk, PATCH_CHUNK_TIMEOUT,
+    PATCH_DOWNLOAD_MAX_RETRIES, PATCH_PREFLIGHT_COPY_SAMPLE_OPS, PatchArtifact, PatchOpType,
+    PatchRequestBudget, checksum_matches, insert_run_gap_budget, plan_insert_requests,
     sampled_copy_op_indices,
 };
 
@@ -394,8 +394,10 @@ async fn download_range_to_output_once(
 /// Download delta patch insert-ops concurrently into non-overlapping blob offsets.
 ///
 /// Each InsertRemote op targets a unique `(blob_offset, length)` region, so they
-/// can safely be written in parallel using random-access writes. This function
-/// limits concurrency to `max_concurrent` tasks.
+/// can safely be written in parallel using random-access writes. A run holds
+/// one of the file's `per_file_requests` slots and one global range permit
+/// while its request is in flight, so patched files fill the link the way
+/// full downloads do without oversubscribing it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn download_patch_blob_ranges_parallel(
     context: Arc<FoxyContext>,
@@ -404,7 +406,7 @@ pub(crate) async fn download_patch_blob_ranges_parallel(
     patch_ops: &mut [DownloadPatchOp],
     download_pause_rx: watch::Receiver<bool>,
     cancel_rx: watch::Receiver<bool>,
-    max_concurrent: usize,
+    budget: PatchRequestBudget,
     rate_limiter: Arc<AdaptiveBandwidthLimiter>,
     metrics: Arc<DownloadMetrics>,
 ) -> anyhow::Result<()> {
@@ -417,11 +419,22 @@ pub(crate) async fn download_patch_blob_ranges_parallel(
     }
 
     let gap_budget = insert_run_gap_budget(metrics.peak_network_bps());
-    let runs = plan_insert_runs(patch_ops, gap_budget, INSERT_RUN_MAX_BYTES);
-    if runs.is_empty() {
+    let max_run_bytes = budget.max_run_bytes.max(1);
+    let plan = plan_insert_requests(patch_ops, gap_budget, max_run_bytes);
+    if plan.runs.is_empty() && plan.chunks.is_empty() {
         return Ok(());
     }
-    let insert_ops: usize = runs.iter().map(|run| run.op_indices.len()).sum();
+    let insert_ops: usize = plan
+        .runs
+        .iter()
+        .map(|run| run.op_indices.len())
+        .sum::<usize>()
+        + plan
+            .chunks
+            .iter()
+            .map(|chunk| chunk.op_index)
+            .collect::<std::collections::HashSet<_>>()
+            .len();
 
     // Open the blob file for random-access writing (std::fs::File for write_at)
     let blob_file = Arc::new(
@@ -438,7 +451,9 @@ pub(crate) async fn download_patch_blob_ranges_parallel(
     );
 
     let blob_download_started = std::time::Instant::now();
-    let concurrency_semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
+    let per_file_requests = budget.per_file_requests.max(1);
+    let concurrency_semaphore = Arc::new(tokio::sync::Semaphore::new(per_file_requests));
+    let range_permits = budget.range_permits.clone();
 
     let ops_shared: Arc<Vec<InsertOpSnapshot>> = Arc::new(
         patch_ops
@@ -457,9 +472,10 @@ pub(crate) async fn download_patch_blob_ranges_parallel(
     let remote_url: Arc<str> = Arc::from(artifact.remote_url.as_str());
     let mut tasks = FuturesUnordered::new();
 
-    for run in runs {
+    for run in plan.runs {
         let ctx = context.clone();
         let sem = concurrency_semaphore.clone();
+        let global = range_permits.clone();
         let blob = blob_file.clone();
         let url = remote_url.clone();
         let pause_rx = download_pause_rx.clone();
@@ -473,6 +489,10 @@ pub(crate) async fn download_patch_blob_ranges_parallel(
                 .acquire_owned()
                 .await
                 .map_err(|_| anyhow!("patch concurrency semaphore closed"))?;
+            let _range_permit = global
+                .acquire_owned()
+                .await
+                .map_err(|_| anyhow!("range permit semaphore closed"))?;
 
             download_insert_run(
                 ctx,
@@ -486,7 +506,45 @@ pub(crate) async fn download_patch_blob_ranges_parallel(
                 task_metrics,
             )
             .await
-            .map(|bytes| (run, bytes))
+            .map(|bytes| InsertRequestDone::Run(run, bytes))
+        }));
+    }
+
+    for chunk in plan.chunks {
+        let ctx = context.clone();
+        let sem = concurrency_semaphore.clone();
+        let global = range_permits.clone();
+        let blob = blob_file.clone();
+        let url = remote_url.clone();
+        let pause_rx = download_pause_rx.clone();
+        let cancel_rx = cancel_rx.clone();
+        let limiter = rate_limiter.clone();
+        let task_metrics = metrics.clone();
+        let file_id = artifact.file_id as i64;
+
+        tasks.push(tokio::spawn(async move {
+            let _permit = sem
+                .acquire_owned()
+                .await
+                .map_err(|_| anyhow!("patch concurrency semaphore closed"))?;
+            let _range_permit = global
+                .acquire_owned()
+                .await
+                .map_err(|_| anyhow!("range permit semaphore closed"))?;
+
+            download_op_chunk(
+                ctx,
+                &url,
+                blob,
+                file_id,
+                &chunk,
+                pause_rx,
+                cancel_rx,
+                limiter,
+                task_metrics,
+            )
+            .await
+            .map(|bytes| InsertRequestDone::Chunk(chunk, bytes))
         }));
     }
 
@@ -494,11 +552,14 @@ pub(crate) async fn download_patch_blob_ranges_parallel(
     let mut gap_bytes = 0u64;
     let mut ops_completed = 0usize;
     let mut runs_completed = 0usize;
+    let mut chunks_completed = 0usize;
+    let mut chunk_bytes_done: std::collections::HashMap<usize, u64> =
+        std::collections::HashMap::new();
     let mut first_error: Option<anyhow::Error> = None;
 
     while let Some(result) = tasks.next().await {
         match result {
-            Ok(Ok((run, bytes))) => {
+            Ok(Ok(InsertRequestDone::Run(run, bytes))) => {
                 for &index in &run.op_indices {
                     patch_ops[index].downloaded_bytes = patch_ops[index].length;
                 }
@@ -506,6 +567,11 @@ pub(crate) async fn download_patch_blob_ranges_parallel(
                 total_bytes += bytes;
                 ops_completed += run.op_indices.len();
                 runs_completed += 1;
+            }
+            Ok(Ok(InsertRequestDone::Chunk(chunk, bytes))) => {
+                total_bytes += bytes;
+                chunks_completed += 1;
+                *chunk_bytes_done.entry(chunk.op_index).or_default() += bytes;
             }
             Ok(Err(err)) => {
                 if first_error.is_none() {
@@ -524,6 +590,41 @@ pub(crate) async fn download_patch_blob_ranges_parallel(
         return Err(err);
     }
 
+    // A chunked op was written by several connections, none of which saw the
+    // whole op, so its checksum is taken from the blob once every chunk has
+    // landed. The region is what the writes just produced, normally still in
+    // the page cache.
+    let mut chunked_indices: Vec<usize> = chunk_bytes_done.keys().copied().collect();
+    chunked_indices.sort_unstable();
+    for index in chunked_indices {
+        let op = &ops_shared[index];
+        let received = chunk_bytes_done[&index];
+        if received != op.length {
+            return Err(anyhow!(
+                "insert op {} received {}/{} bytes across its chunks",
+                op.data_order,
+                received,
+                op.length
+            ));
+        }
+        let actual = hash_blob_region(
+            blob_file.clone(),
+            op.blob_offset,
+            op.length,
+            &op.target_checksum,
+        )
+        .await?;
+        if !checksum_matches(&op.target_checksum, &actual) {
+            return Err(anyhow!(
+                "insert op {} checksum mismatch after chunked download (expected {}, got {})",
+                op.data_order,
+                op.target_checksum,
+                actual
+            ));
+        }
+        patch_ops[index].downloaded_bytes = patch_ops[index].length;
+        ops_completed += 1;
+    }
     // Batch-persist all completed op progress
     for op in patch_ops
         .iter()
@@ -547,16 +648,19 @@ pub(crate) async fn download_patch_blob_ranges_parallel(
             0.0
         };
         info!(
-            "Parallel delta blob download: file_id={} ops={}/{} requests={} bytes={} gap_bytes={} gap_budget={} elapsed={:.2?} speed={:.2} MB/s",
+            "Parallel delta blob download: file_id={} ops={}/{} requests={} chunk_requests={} bytes={} gap_bytes={} gap_budget={} elapsed={:.2?} speed={:.2} MB/s requests_cap={} run_max_bytes={}",
             artifact.file_id,
             ops_completed,
             insert_ops,
             runs_completed,
+            chunks_completed,
             total_bytes,
             gap_bytes,
             gap_budget,
             elapsed,
-            speed
+            speed,
+            per_file_requests,
+            max_run_bytes
         );
     }
 
@@ -576,6 +680,147 @@ struct InsertOpSnapshot {
 
 /// Output bytes buffered per op before one positional write into the blob.
 const INSERT_RUN_WRITE_BUFFER: usize = 1024 * 1024;
+
+/// What one insert request task produced.
+enum InsertRequestDone {
+    Run(InsertRun, u64),
+    Chunk(OpChunk, u64),
+}
+
+/// Fetch one chunk of a large insert op and write it at its blob offset. No
+/// hashing here: the op is verified from the blob after all its chunks
+/// landed. A failed or stalled attempt rewrites the chunk from its start.
+#[allow(clippy::too_many_arguments)]
+async fn download_op_chunk(
+    context: Arc<FoxyContext>,
+    remote_url: &str,
+    blob_file: Arc<std::fs::File>,
+    file_id: i64,
+    chunk: &OpChunk,
+    mut pause_rx: watch::Receiver<bool>,
+    mut cancel_rx: watch::Receiver<bool>,
+    rate_limiter: Arc<AdaptiveBandwidthLimiter>,
+    metrics: Arc<DownloadMetrics>,
+) -> anyhow::Result<u64> {
+    let mut retry_count = 0u32;
+    loop {
+        wait_for_download_resume(&mut pause_rx, &mut cancel_rx).await?;
+        let attempt = download_op_chunk_once(
+            context.clone(),
+            remote_url,
+            &blob_file,
+            chunk,
+            &mut pause_rx,
+            &mut cancel_rx,
+            &rate_limiter,
+            &metrics,
+        )
+        .await;
+        match attempt {
+            Ok(bytes) if bytes == chunk.len() => return Ok(bytes),
+            Ok(bytes) => {
+                retry_count += 1;
+                if retry_count > PATCH_DOWNLOAD_MAX_RETRIES {
+                    return Err(anyhow!(
+                        "insert chunk {}-{} received {}/{} bytes after {} retries",
+                        chunk.dest_start,
+                        chunk.dest_end,
+                        bytes,
+                        chunk.len(),
+                        PATCH_DOWNLOAD_MAX_RETRIES
+                    ));
+                }
+                warn!(
+                    "Delta insert chunk ended early: file_id={} range={}-{} received={} retries={}",
+                    file_id, chunk.dest_start, chunk.dest_end, bytes, retry_count
+                );
+            }
+            Err(err) => {
+                if err.to_string().contains("download cancelled") {
+                    return Err(err);
+                }
+                retry_count += 1;
+                if retry_count > PATCH_DOWNLOAD_MAX_RETRIES {
+                    return Err(err).context(format!(
+                        "insert chunk {}-{} exceeded retry limit",
+                        chunk.dest_start, chunk.dest_end
+                    ));
+                }
+                warn!(
+                    "Delta insert chunk request failed: file_id={} range={}-{} retries={} error={}",
+                    file_id, chunk.dest_start, chunk.dest_end, retry_count, err
+                );
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn download_op_chunk_once(
+    context: Arc<FoxyContext>,
+    remote_url: &str,
+    blob_file: &Arc<std::fs::File>,
+    chunk: &OpChunk,
+    pause_rx: &mut watch::Receiver<bool>,
+    cancel_rx: &mut watch::Receiver<bool>,
+    rate_limiter: &Arc<AdaptiveBandwidthLimiter>,
+    metrics: &Arc<DownloadMetrics>,
+) -> anyhow::Result<u64> {
+    let mut resp =
+        request_exact_range(context, remote_url, chunk.dest_start, chunk.dest_end).await?;
+    let expected = chunk.len();
+    let mut received = 0u64;
+    let mut pending: Vec<u8> = Vec::with_capacity(INSERT_RUN_WRITE_BUFFER);
+    let mut pending_at = chunk.blob_at;
+    loop {
+        wait_for_download_resume(pause_rx, cancel_rx).await?;
+        let piece = match tokio::time::timeout(PATCH_CHUNK_TIMEOUT, resp.chunk()).await {
+            Ok(Ok(Some(piece))) => piece,
+            Ok(Ok(None)) => break,
+            Ok(Err(err)) => return Err(err).context("failed to read insert chunk"),
+            Err(_) => return Err(anyhow!("insert chunk read timed out")),
+        };
+        rate_limiter.acquire_and_record(piece.len()).await;
+        let take = (expected - received).min(piece.len() as u64) as usize;
+        if pending.len() + take > INSERT_RUN_WRITE_BUFFER && !pending.is_empty() {
+            flush_insert_pending(blob_file, &mut pending, &mut pending_at).await?;
+        }
+        pending.extend_from_slice(&piece[..take]);
+        metrics.record_bytes(take as u64);
+        received += take as u64;
+        if received >= expected {
+            break;
+        }
+    }
+    flush_insert_pending(blob_file, &mut pending, &mut pending_at).await?;
+    Ok(received)
+}
+
+/// Checksum of `length` bytes of the blob at `offset`, with the algorithm the
+/// expected checksum implies.
+async fn hash_blob_region(
+    blob_file: Arc<std::fs::File>,
+    offset: u64,
+    length: u64,
+    expected_checksum: &str,
+) -> anyhow::Result<String> {
+    let mut hasher = FlexHasher::from_checksum(expected_checksum);
+    tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+        let mut buffer = vec![0u8; COPY_BUFFER_SIZE];
+        let mut at = offset;
+        let mut remaining = length;
+        while remaining > 0 {
+            let take = remaining.min(buffer.len() as u64) as usize;
+            crate::core::utils::file_io::read_at(&blob_file, at, &mut buffer[..take])
+                .with_context(|| format!("failed to read blob region at {at}"))?;
+            hasher.update(&buffer[..take]);
+            at += take as u64;
+            remaining -= take as u64;
+        }
+        Ok(hasher.finalize_hex())
+    })
+    .await?
+}
 
 /// Fetch one insert run with a single range request, splitting the stream
 /// into its ops as it arrives: each op's bytes are hashed and written at its
@@ -668,6 +913,7 @@ async fn download_insert_run(
                 }
             };
             rate_limiter.acquire_and_record(chunk.len()).await;
+            metrics.record_bytes(chunk.len() as u64);
 
             let mut slice: &[u8] = &chunk;
             while !slice.is_empty() && op_cursor < run.op_indices.len() {
@@ -686,7 +932,6 @@ async fn download_insert_run(
                     flush_insert_pending(&blob_file, &mut pending, &mut pending_at).await?;
                 }
                 pending.extend_from_slice(bytes);
-                metrics.record_bytes(take as u64);
                 written_this_attempt += take as u64;
                 op_done += take as u64;
                 stream_pos += take as u64;

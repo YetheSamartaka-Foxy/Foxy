@@ -61,8 +61,9 @@ lines that the kit parses into `profile-<iteration>-<operation>.json`:
 - `stages`: the app's own `PIPELINE SUMMARY` table, parsed; present whether or
   not profiling was on
 
-Per-call timing costs roughly 5-10% of wall clock, so a profiled row is **not**
-comparable with an unprofiled one. Keep a profiled case under its own id, as
+Per-call timing can cost roughly 5-10% on database- and filesystem-bound
+lanes, while a network-bound lane may show no separable cost. Measure it per
+lane, and never compare a profiled row with an unprofiled one. Keep a profiled case under its own id, as
 `perf-db-parts-bulk-profiled` does, rather than turning the flag on and off
 inside one case history. Profiling locates cost; the unprofiled twin tracks it.
 
@@ -90,7 +91,7 @@ no unallowlisted WARN or ERROR entries.
 | Field | Required | Default | Meaning |
 | --- | --- | --- | --- |
 | `repository` | yes | none | `{name,address,path,space_id}` |
-| `extra_repositories` | no | `[]` | Further `{name,address,path,space_id}` entries written after `repository` |
+| `extra_repositories` | no | `[]` | Further `{name,address,path,space_id}` entries written after `repository`; an entry with `"unreachable": true` skips the manifest probe and gets no addons (an offline host in a startup graph) |
 | `space` | no | `null` | Repository-space fixture object |
 | `operations` | yes | none | Ordered operation objects |
 | `repetitions` | no | `3` | Recorded passes |
@@ -98,10 +99,13 @@ no unallowlisted WARN or ERROR entries.
 | `metrics` | no | all | Dotted metrics included in reports |
 | `thresholds` | no | `{}` | Per-metric `{min,max}` hard gates |
 | `guards` | no | defaults below | Precondition object |
+| `settings` | no | none | object merged into the generated `settings.json` (a bandwidth cap, a hash profile); ignored with `fixture.files` or a `config_seed` |
+| `origin` | no | none | `{root, port}` served in-process for the run; `delay_ms` holds every response back that long (an adverse-origin lane) |
 
-Supported operations are `startup`, `ui-walk`, `remote-refresh`, `quick-check`,
-`recheck`, `recheck-integrity`, `force-redownload`, `download`, `wipe-db`,
-`mutate`, `restore`, and `evict-cache`. Each operation may contain `wait_timeout_s`,
+Supported operations are `startup`, `ui-walk`, `switch-game-space`,
+`remote-refresh`, `quick-check`, `recheck`, `recheck-integrity`,
+`force-redownload`, `download`, `wipe-db`, `mutate`, `restore`, and
+`evict-cache`. Each operation may contain `wait_timeout_s`,
 `expect`, `label`, and `repository`. `repository` names the fixture repository
 the operation acts on (the CLI `--repo-name`, or the GUI row with that name);
 it defaults to the case `repository`. `extra_repositories` is what puts a
@@ -120,6 +124,17 @@ toolbar recheck, which also prepares the download queue so the following
 `remote-refresh` is `repo sync --mode remote-refresh` and prepares nothing. The
 GUI `quick-check` is the toolbar quick check and `wipe-db` is the repository's
 "wipe database entries" action (busy reason `repository-db-wipe`).
+
+GUI sync operations handled by the common download/check/refresh/wipe path may
+carry `ui_probe_ms`: a frame probe then polls the
+app's `fps` intent at that cadence for the whole operation (the probe keeps
+the app repainting, so frame intervals are real) and the row records
+`summary.ui_probe`: `frame_ms_max` and `frame_ms_p95_worst` (the worst
+figures the app reported from its last 240 frames across the reads),
+`fps_min`, and the probe's own `rtt_ms_p50` / `rtt_ms_p95` (process spawn
+included, so an upper bound on input latency, not a frame time). Expect on
+`summary.ui_probe.frame_ms_max` to fail an operation that bought its
+throughput by blocking the UI thread.
 
 `run_metrics` also carries the redundant-work counters the checker cases
 assert on: `hash_work_bytes` (bytes read by every `SOL op=hash` run in the
@@ -173,8 +188,9 @@ the outer bracket and includes the driver's readiness polling. The row carries:
 | `verdict_ms` | dispatch to the last repository's verdict |
 
 Because the operation restarts the app, the config directory persists across
-iterations: iteration 0 is the cold pass and later iterations are warm, exactly
-as for every other perf case.
+iterations: iteration 0 is the unprepared first pass and later iterations are
+warm. The ledger retains the historical `cold` label for that first pass, but
+only an explicit `evict-cache` operation establishes a device-cold read lane.
 
 ## Memory
 
@@ -214,10 +230,21 @@ live sample and only `peak_private_bytes` is meaningful.
 
 An expectation is `{path, equals}`, `{path, min}`, `{path, max}`, or
 `{path, between:[low,high]}`. Dotted paths resolve against the collected result.
+A numeric gate (`min`, `max`, `between`) fails when the value is missing or not
+a finite number; add `optional: true` when the metric may legitimately be
+absent for that operation and the gate should then be skipped.
 
-The `mutate` operation adds `profile`, `seed`, `files`, `entries`, `bytes`, and
-optional `path`. `path` defaults to the repository target. `restore` replays the
-run journal. Supported profiles are documented by `foxy-testkit-mutate --help`.
+The `mutate` operation adds `profile`, `seed`, `files`, `entries`, `bytes`,
+optional `path` and optional `preserve_mtime`. `path` defaults to the
+repository target. `restore` replays the run journals in reverse; several
+`mutate` operations in one iteration each get their own journal. Supported
+profiles are documented by `foxy-testkit-mutate --help`; `scattered` spreads
+`entries` changes across `files` files, `adjacent` puts one contiguous run of
+`entries / files` changed entries in each file (the locality counterpart).
+`preserve_mtime` puts every mutated file's modification time back afterwards,
+so a size-and-mtime fingerprint cannot see the change: that is how a prepared
+patch plan is made to reach the apply stage against a source that no longer
+matches, the apply-time fallback lane.
 
 `evict-cache` drops the OS page cache for every file under `path` (default: the
 repository target) by opening each one non-cached, and is not ledgered. Without
@@ -283,3 +310,30 @@ The case stays frozen while `--database-mode wal|mvcc` selects a runtime variant
 Rows and baselines are partitioned by `database_mode` and `db_write_gate` so
 unlike modes are never treated as regressions of each other. The runner records
 and verifies Foxy's effective startup `journal_mode` and `mvcc_enabled` values.
+
+## Cancellation and game-space switch operations
+
+A `download` or `force-redownload` operation with `cancel_after_s` lets the
+transfer run that long, invokes `cancel-download`, and waits for the `core-sync`
+busy reason to clear; the row's `summary.cancel_quiescent_ms` is the
+cancel-to-quiescent latency and the app's `sync_action` record carries
+`outcome=cancelled`. Give such an operation `"expect_outcome": "cancelled"` so
+the runner requires that exact owned pipeline outcome and skips the
+`expected_files` gate and oracle for it; a mismatch adds `outcome-mismatch`.
+The download that follows is the recovery gate and the oracle verifies the
+payload; rollback policy may leave no files reusable. `patch_fallbacks` and `patch_applies` in `breakdown.run_metrics`
+count apply-time delta fallbacks and successful patch applies on any download
+row, `patch_cancelled` the attempts a cancel interrupted (their plans stay
+`planned` for the resume); `patch_range_requests`, `patch_gap_bytes` and `patch_copy_bytes` sum the
+blob range requests, the bytes over-fetched to coalesce them and the bytes
+copied from the local source, so an adjacent mutation and a scattered one are
+told apart by resource cost, not only elapsed. `cancel_after_s` works on every
+GUI sync operation (a `recheck-integrity` cancelled in its hash stage, a
+patching `download` cancelled while applying), not only on full downloads.
+
+`switch-game-space` (GUI harness, `config_seed` with several game spaces) takes
+`game_space` (the target space id from `games.json`), invokes the app's
+`switch-game-space` intent, waits for the `SOL op=space_switch` record and then
+for the target space's startup work to settle (`settle_timeout_s`, default
+120). The row's `space_switch` record splits the request-to-visible time into
+`drain_s`, `reset_s` and `reload_s`.

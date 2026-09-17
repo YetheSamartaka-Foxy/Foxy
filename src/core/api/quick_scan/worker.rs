@@ -498,12 +498,18 @@ async fn startup_remote_changed_repositories(
     let probed = join_set.len();
     let mut probe = empty();
     let mut answered = 0usize;
+    // When the first and the last branch answered: a slow host shows up as
+    // the gap between the two, not as a slow probe overall.
+    let mut first_answer: Option<Duration> = None;
+    let mut last_answer: Option<Duration> = None;
     let deadline = tokio::time::Instant::now() + STARTUP_REMOTE_PROBE_BUDGET;
     loop {
         match tokio::time::timeout_at(deadline, join_set.join_next()).await {
             Ok(None) => break,
             Ok(Some(Ok((repository, freshness)))) => {
                 answered += 1;
+                first_answer.get_or_insert(started.elapsed());
+                last_answer = Some(started.elapsed());
                 match freshness {
                     RemoteFreshness::Changed => {
                         probe.changed.insert(repository);
@@ -553,6 +559,29 @@ async fn startup_remote_changed_repositories(
                 ("answered", answered.to_string()),
                 ("changed", probe.changed.len().to_string()),
                 ("unknown", (probe.unknown.len() + unanswered).to_string()),
+                (
+                    "first_answer_s",
+                    first_answer
+                        .map_or_else(|| "na".to_string(), |d| format!("{:.3}", d.as_secs_f64())),
+                ),
+                (
+                    "last_answer_s",
+                    last_answer
+                        .map_or_else(|| "na".to_string(), |d| format!("{:.3}", d.as_secs_f64())),
+                ),
+                (
+                    "outcome",
+                    if probe.unknown.is_empty() && unanswered == 0 {
+                        "complete"
+                    } else {
+                        "partial"
+                    }
+                    .to_string(),
+                ),
+                (
+                    "op_id",
+                    super::super::logging::startup_operation_id().to_string(),
+                ),
             ],
         )
     );
@@ -922,6 +951,11 @@ pub fn spawn_quick_local_scan_instances(
             }
             let worker_started_at = Instant::now();
             let operation_id = next_operation_id("quick-scan");
+            let context = Arc::new(
+                (*context)
+                    .clone()
+                    .with_operation_id(operation_id.as_str()),
+            );
             let repo_total = repositories.len();
             let mut summary = PipelineSummary::new(
                 operation_id.clone(),

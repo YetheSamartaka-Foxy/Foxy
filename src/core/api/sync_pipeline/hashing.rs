@@ -405,6 +405,7 @@ pub(super) fn render_hash_total_summary(
 
 pub(super) struct SqlitePerfRunGuard {
     pub repository_url: String,
+    pub operation_id: String,
     pub mode: SyncMode,
     pub started_at: Instant,
     pub baseline: crate::core::tasks::init_database::SqlitePerfSnapshot,
@@ -417,6 +418,7 @@ impl Drop for SqlitePerfRunGuard {
         if self.final_report_logged {
             return;
         }
+        self.log_sol("early_exit");
         let delta = sqlite_perf_snapshot().delta_since(self.baseline);
         let (conn_opened, conn_reused) = crate::core::tasks::db_turso::connection_counters();
         info!(
@@ -440,9 +442,15 @@ impl Drop for SqlitePerfRunGuard {
 }
 
 impl SqlitePerfRunGuard {
-    pub(super) fn start(repository_url: String, mode: SyncMode, started_at: Instant) -> Self {
+    pub(super) fn start(
+        repository_url: String,
+        operation_id: String,
+        mode: SyncMode,
+        started_at: Instant,
+    ) -> Self {
         Self {
             repository_url,
+            operation_id,
             mode,
             started_at,
             baseline: sqlite_perf_snapshot(),
@@ -453,6 +461,63 @@ impl SqlitePerfRunGuard {
 
     pub(super) fn mark_final_report_logged(&mut self) {
         self.final_report_logged = true;
+        self.log_sol("completed");
+    }
+
+    /// The `SOL op=db_persist` action record (conventions/SPEED_OF_LIGHT.md,
+    /// O7): the gated write windows this action opened, summed over every
+    /// category, against the action wall time. Window sums are not wall time
+    /// and are only comparable at the printed `write_gate`.
+    fn log_sol(&self, outcome: &str) {
+        let delta = sqlite_perf_snapshot().delta_since(self.baseline);
+        let categories = sqlite_write_metrics_snapshot()
+            .into_iter()
+            .map(|(label, metric)| {
+                metric.delta_since(
+                    self.write_metric_baseline
+                        .get(&label)
+                        .copied()
+                        .unwrap_or_default(),
+                )
+            })
+            .filter(|delta| delta.calls > 0)
+            .collect::<Vec<_>>();
+        let sum = |f: fn(&SqliteWriteMetricSnapshot) -> u64| categories.iter().map(f).sum::<u64>();
+        let permit_wait_ns: u64 = sum(|m| m.permit_wait_ns_total);
+        let (conn_opened, conn_reused) = crate::core::tasks::db_turso::connection_counters();
+        info!(
+            "{}",
+            crate::core::utils::speed_of_light::sol_line(
+                "db_persist",
+                0,
+                self.started_at.elapsed(),
+                &crate::core::utils::speed_of_light::SolLight::SelfBaseline,
+                &[
+                    ("op_id", self.operation_id.clone()),
+                    ("mode", format!("{:?}", self.mode)),
+                    ("outcome", outcome.to_string()),
+                    ("write_time_ms", format!("{:.1}", delta.db_write_time_ms())),
+                    ("rows_affected", delta.rows_affected.to_string()),
+                    (
+                        "permit_wait_ms",
+                        format!("{:.1}", permit_wait_ns as f64 / 1e6)
+                    ),
+                    ("write_calls", sum(|m| m.calls).to_string()),
+                    ("write_committed", sum(|m| m.committed).to_string()),
+                    ("write_failed", sum(|m| m.failed).to_string()),
+                    ("lock_retries", delta.lock_retries.to_string()),
+                    ("backoff_ms", delta.lock_backoff_ms_total.to_string()),
+                    ("categories", categories.len().to_string()),
+                    (
+                        "write_gate",
+                        crate::core::tasks::init_database::DB_WRITE_GATE_PERMITS.to_string(),
+                    ),
+                    ("conn_opened", conn_opened.to_string()),
+                    ("conn_reused", conn_reused.to_string()),
+                    ("timer_scope", "action_wall".to_string()),
+                ],
+            )
+        );
     }
 
     pub(super) fn render_summary(&self) -> String {

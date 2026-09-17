@@ -11,7 +11,7 @@ pub fn sweep(rows: &[Value], op: Option<&str>, cache: &str) -> Result<Value> {
     for row in rows.iter().filter(|r| {
         r["verdict"] != "invalid"
             && (cache == "all" || r["cache_state"] == cache)
-            && op.is_none_or(|op| r["op"] == op)
+            && op.is_none_or(|op| r["op"] == op || crate::ledger::op_key(r) == op)
     }) {
         groups
             .entry((
@@ -134,12 +134,15 @@ pub fn compare(
         values
     };
     let hashes = unique(&|row| row["case_hash"].as_str().unwrap_or("").to_owned());
+    // The cache lane is part of the workload: an evicted download and a warm
+    // one are not the same measurement even when "all" lanes are requested.
     let profiles = unique(&|row| {
         format!(
-            "{}/{}/{}",
+            "{}/{}/{}/{}",
             row["harness"].as_str().unwrap_or(""),
             row["build_kind"].as_str().unwrap_or(""),
-            row["storage_class"].as_str().unwrap_or("")
+            row["storage_class"].as_str().unwrap_or(""),
+            row["cache_state"].as_str().unwrap_or("")
         )
     });
     let builds = unique(&|row| {
@@ -153,10 +156,12 @@ pub fn compare(
             }
         )
     });
-    let mut operations: BTreeMap<&str, Vec<&Value>> = BTreeMap::new();
+    // Grouped by operation label, so two `quick-check` steps with different
+    // initial states are compared each against its own counterpart.
+    let mut operations: BTreeMap<String, Vec<&Value>> = BTreeMap::new();
     for row in &rows {
         operations
-            .entry(row["op"].as_str().unwrap_or(""))
+            .entry(crate::ledger::op_key(row))
             .or_default()
             .push(row);
     }
@@ -259,6 +264,40 @@ mod tests {
         );
         assert!(compare(&rows, "c", "wal/gate-1", "wal/gate-1", "warm").is_err());
         assert!(compare(&rows, "c", "wal/gate-1", "mvcc/gate-4", "warm").is_err());
+    }
+    #[test]
+    fn labels_and_lanes_do_not_merge() {
+        let row = |mode: &str, label: Option<&str>, cache: &str, elapsed: f64| {
+            let mut row = json!({"database_mode":mode,"db_write_gate":1,"cache_state":cache,"verdict":"ok","op":"quick-check","case_hash":"h","harness":"cli","build_kind":"release","storage_class":"ssd","git_sha":"a","git_dirty":false,"elapsed_s":elapsed});
+            if let Some(label) = label {
+                row["label"] = label.into();
+            }
+            row
+        };
+        let rows = vec![
+            row("wal", None, "warm", 0.1),
+            row("mvcc", None, "warm", 0.1),
+            row("wal", Some("quick-check-stale"), "warm", 0.4),
+            row("mvcc", Some("quick-check-stale"), "warm", 0.8),
+        ];
+        let report = compare(&rows, "c", "wal/gate-1", "mvcc/gate-1", "warm").unwrap();
+        let ops: Vec<&str> = report["comparisons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["metric"] == "elapsed_s")
+            .map(|c| c["op"].as_str().unwrap())
+            .collect();
+        assert_eq!(ops, ["quick-check", "quick-check-stale"]);
+        let stale = &report["comparisons"].as_array().unwrap()[1];
+        assert_eq!(stale["verdict"], "candidate-worse");
+        // Mixed lanes under "all" are flagged as not comparable.
+        let mixed = vec![
+            row("wal", None, "evicted", 1.0),
+            row("mvcc", None, "warm", 1.0),
+        ];
+        let report = compare(&mixed, "c", "wal/gate-1", "mvcc/gate-1", "all").unwrap();
+        assert_eq!(report["comparable"], false);
     }
     #[test]
     fn isolates_variants() {

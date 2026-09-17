@@ -1,5 +1,6 @@
 ---
 source: testkit/runner/src/collect/mod.rs
+assertion_line: 80
 expression: "digest(&corpus(\"remote-refresh\"))"
 ---
 {
@@ -31,7 +32,13 @@ expression: "digest(&corpus(\"remote-refresh\"))"
     "download_large_files_limit": null,
     "download_small_files_limit": null,
     "download_patch_applies_limit": null,
-    "first_download_start_ms": null
+    "first_download_start_ms": null,
+    "patch_fallbacks": 0,
+    "patch_applies": 0,
+    "patch_range_requests": 0,
+    "patch_gap_bytes": 0,
+    "patch_copy_bytes": 0,
+    "patch_cancelled": 0
   },
   "category_line_counts": {
     "network": 14,
@@ -46,11 +53,11 @@ expression: "digest(&corpus(\"remote-refresh\"))"
     {
       "repo": "http://127.0.0.1:8132/",
       "mode": "RemoteRefreshOnly",
-      "lock_retries": 0.0,
+      "lock_retries": 0,
       "avg_backoff_ms": 0.0,
-      "total_backoff_ms": 0.0,
+      "total_backoff_ms": 0,
       "db_write_time_ms": 284.1,
-      "elapsed_ms": 1844.0
+      "elapsed_ms": 1844
     },
     {
       "txn": 0.08,
@@ -59,13 +66,13 @@ expression: "digest(&corpus(\"remote-refresh\"))"
     {
       "repo": "http://127.0.0.1:8132/",
       "mode": "RemoteRefreshOnly",
-      "lock_retries": 0.0,
+      "lock_retries": 0,
       "avg_backoff_ms": 0.0,
-      "total_backoff_ms": 0.0,
+      "total_backoff_ms": 0,
       "db_write_time_ms": 904.5,
-      "conn_opened": 732.0,
-      "conn_reused": 0.0,
-      "elapsed_ms": 1577.0
+      "conn_opened": 732,
+      "conn_reused": 0,
+      "elapsed_ms": 1577
     }
   ],
   "sol_operations": [
@@ -85,11 +92,11 @@ expression: "digest(&corpus(\"remote-refresh\"))"
         "sol": "na",
         "light_src": "self_baseline",
         "repo": "http://127.0.0.1:8132/",
-        "addons_total": 96.0,
-        "addons_hashed": 0.0,
-        "cache_hits_shared": 0.0,
-        "cache_hits_persistent": 0.0,
-        "deep_scan_files": 0.0,
+        "addons_total": 96,
+        "addons_hashed": 0,
+        "cache_hits_shared": 0,
+        "cache_hits_persistent": 0,
+        "deep_scan_files": 0,
         "addons_per_s": 1646.7,
         "outcome": "updates"
       }

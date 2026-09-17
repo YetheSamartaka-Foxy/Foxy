@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use eframe::egui::{
@@ -10,6 +11,21 @@ use crate::core::api::SyncMode;
 use crate::ui::app::debug_modals::DebugModal;
 use crate::ui::app::{Foxy, FoxyView};
 use crate::ui::tray::{TrayEvent, TrayManager};
+
+/// Frames kept for the stall percentiles: a few seconds at a probe-driven
+/// repaint rate.
+const FRAME_INTERVAL_WINDOW: usize = 240;
+
+/// `(p50, p95, max)` of the recent frame intervals in milliseconds.
+pub(crate) fn frame_interval_stats(intervals: &VecDeque<f32>) -> Option<(f32, f32, f32)> {
+    if intervals.is_empty() {
+        return None;
+    }
+    let mut sorted: Vec<f32> = intervals.iter().copied().collect();
+    sorted.sort_by(f32::total_cmp);
+    let at = |pct: usize| sorted[((sorted.len() - 1) * pct) / 100];
+    Some((at(50), at(95), sorted[sorted.len() - 1]))
+}
 
 impl Foxy {
     fn handle_tray_events(&mut self, ctx: &egui::Context) {
@@ -78,11 +94,16 @@ impl Foxy {
         let agent_gui_probe = self.agent_gui.is_some();
         if !self.settings_view_state.show_fps_counter && !agent_gui_probe {
             self.fps_ema = 0.0;
+            self.frame_intervals_ms.clear();
             return;
         }
 
         let dt = ctx.input(|i| i.stable_dt);
         if dt > 0.0 {
+            if self.frame_intervals_ms.len() >= FRAME_INTERVAL_WINDOW {
+                self.frame_intervals_ms.pop_front();
+            }
+            self.frame_intervals_ms.push_back(dt * 1000.0);
             let instant_fps = 1.0 / dt;
             self.fps_ema = if self.fps_ema <= 0.0 {
                 instant_fps
@@ -975,5 +996,26 @@ impl eframe::App for Foxy {
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         Foxy::update(self, ui, frame);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_interval_stats_report_percentiles_and_the_worst_frame() {
+        let mut intervals = VecDeque::new();
+        assert_eq!(frame_interval_stats(&intervals), None);
+        for value in [16.0, 17.0, 16.5, 16.2, 16.8, 16.4, 16.6, 16.1, 16.9, 250.0] {
+            intervals.push_back(value);
+        }
+        let (p50, p95, max) = frame_interval_stats(&intervals).unwrap();
+        assert!((16.0..=17.0).contains(&p50));
+        assert!((16.0..=17.0).contains(&p95));
+        assert_eq!(max, 250.0);
+        intervals.push_back(300.0);
+        let (_, _, max) = frame_interval_stats(&intervals).unwrap();
+        assert_eq!(max, 300.0);
     }
 }

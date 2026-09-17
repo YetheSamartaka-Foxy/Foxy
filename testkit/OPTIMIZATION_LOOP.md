@@ -1,7 +1,9 @@
 # Optimization loop
 
-1. Validate the case, establish at least two warm baseline samples, and accept
-   only from a clean worktree.
+1. Validate the case, calibrate every required reference lane, establish the
+   two warm samples required to store a baseline, and use at least five
+   comparable successful repetitions for a performance claim. Accept only
+   from a clean worktree.
 2. Read the latest ledger rows, SOL records, and attribution breakdown.
 3. Select one hypothesis from `HYPOTHESES.md`. Record the expected metric and
    rough effect before editing.
@@ -23,13 +25,19 @@ Hard rules:
 - Never edit a case during a loop. A new case hash starts a new history.
 - Never compare GUI with CLI, debug with release, WAL with MVCC, different write
   gates, different storage classes, or cold with warm.
+- Never compare different diagnostics modes, cache preparation, environment or
+  origin checksum, reference ids, or metric models. `rebaseline-required` and
+  `profile-mismatch` mean incomparable evidence, not a performance verdict.
 - Faster because fewer bytes, files, or parts were processed is invalid.
 - Correctness counters and the independent oracle outrank timing.
 - Instrumentation changes require a new baseline.
+- Memory movement is advisory unless longer runs show unbounded growth.
 - Never edit a runtime database, user config, logs, caches, or backups.
 - Never commit or push without an explicit request.
 - Restore every mutation journal, including after a failed measured operation.
 - Do not retry rust-lld or sccache experiments already rejected by the repo.
+- After accepted runs, render `foxy-testkit measurements` and use that output
+  to refresh the curated measurement table.
 
 Commands: `foxy-testkit run` for one case, `foxy-testkit suite` for several,
 `foxy-testkit compare` for a deliberate variant A/B (database mode and

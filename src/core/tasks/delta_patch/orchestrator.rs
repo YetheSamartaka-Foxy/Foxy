@@ -28,9 +28,35 @@ use super::planning::load_patch_artifact;
 use super::transfer::{download_patch_blob_ranges_parallel, preflight_copy_sources};
 use super::types::{
     PATCH_STATUS_APPLYING, PATCH_STATUS_DONE, PATCH_STATUS_DOWNLOADING, PATCH_STATUS_FALLBACK_FULL,
-    PATCH_STATUS_READY, PatchOpType, checksum_matches,
+    PATCH_STATUS_PLANNED, PATCH_STATUS_READY, PatchOpType, PatchRequestBudget, checksum_matches,
     compute_tree_checksum_from_segment_checksums, keep_patch_artifacts_for_diagnostics,
 };
+/// A cancelled attempt is not a failed plan: leave the plan `planned` so the
+/// next download patches instead of fetching the whole file.
+async fn keep_patch_plan_after_cancel(
+    context: Arc<FoxyContext>,
+    patch_file: &DownloadPatchFile,
+    stage: &str,
+) {
+    info!(
+        "Delta patch cancelled for file_id={} during {}; plan kept for the next run",
+        patch_file.file_id, stage
+    );
+    if let Err(err) = update_download_patch_file_status(
+        context,
+        patch_file.file_id as i64,
+        PATCH_STATUS_PLANNED,
+        None,
+    )
+    .await
+    {
+        warn!(
+            "Failed to reset patch status after cancellation for file_id={}: {}",
+            patch_file.file_id, err
+        );
+    }
+}
+
 async fn mark_patch_fallback(
     context: Arc<FoxyContext>,
     patch_file: &DownloadPatchFile,
@@ -95,6 +121,7 @@ pub(crate) async fn try_patch_first(
     rate_limiter: Arc<AdaptiveBandwidthLimiter>,
     metrics: Arc<DownloadMetrics>,
     apply_permits: Arc<tokio::sync::Semaphore>,
+    request_budget: PatchRequestBudget,
 ) -> anyhow::Result<Option<PatchedFileSegments>> {
     let file_id = download_target.file_id as i64;
     let patch_started = std::time::Instant::now();
@@ -267,9 +294,9 @@ pub(crate) async fn try_patch_first(
         );
     }
 
-    // Use parallel insert-op downloads - non-overlapping blob offsets allow
-    // concurrent random-access writes, improving throughput for patchable files.
-    const PATCH_PARALLEL_CONCURRENCY: usize = 4;
+    // Insert-op downloads run in parallel: non-overlapping blob offsets allow
+    // concurrent random-access writes, and the request budget is the same
+    // global range budget full downloads draw from.
     if let Err(err) = download_patch_blob_ranges_parallel(
         context.clone(),
         &artifact,
@@ -277,12 +304,16 @@ pub(crate) async fn try_patch_first(
         &mut patch_ops,
         download_pause_rx.clone(),
         cancel_rx.clone(),
-        PATCH_PARALLEL_CONCURRENCY,
+        request_budget,
         rate_limiter,
         metrics,
     )
     .await
     {
+        if *cancel_rx.borrow() {
+            keep_patch_plan_after_cancel(context, &patch_file, "blob download").await;
+            return Ok(None);
+        }
         mark_patch_fallback(
             context,
             &patch_file,
@@ -341,6 +372,7 @@ pub(crate) async fn try_patch_first(
     }
 
     let tmp_path_for_cleanup = PathBuf::from(format!("{}.foxy.tmp", artifact.local_target_path));
+    let cancel_probe = cancel_rx.clone();
     let (temp_path, segment_checksums) = match apply_patch_to_temp_file(
         context.clone(),
         &artifact,
@@ -353,6 +385,7 @@ pub(crate) async fn try_patch_first(
     {
         Ok(result) => result,
         Err(err) => {
+            let cancelled_for_apply = *cancel_probe.borrow();
             // Clean up the orphaned .foxy.tmp file before falling back
             if let Err(cleanup_err) = fs::remove_file(&tmp_path_for_cleanup).await
                 && cleanup_err.kind() != std::io::ErrorKind::NotFound
@@ -362,6 +395,10 @@ pub(crate) async fn try_patch_first(
                     tmp_path_for_cleanup.display(),
                     cleanup_err
                 );
+            }
+            if cancelled_for_apply {
+                keep_patch_plan_after_cancel(context, &patch_file, "apply").await;
+                return Ok(None);
             }
             mark_patch_fallback(
                 context,

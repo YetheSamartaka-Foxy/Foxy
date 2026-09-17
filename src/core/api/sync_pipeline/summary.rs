@@ -1,4 +1,5 @@
 use crate::core::utils::format::sanitize_log_url;
+use crate::core::utils::speed_of_light::{SolLight, sol_line};
 use log::info;
 use std::time::{Duration, Instant};
 
@@ -123,6 +124,7 @@ impl PipelineSummary {
         lines.push(sep);
 
         info!("{}", lines.join("\n"));
+        info!("{}", self.sol_line(outcome));
 
         // Every pipeline exit path lands here, success or failure, so this is the
         // one place a profiled run is guaranteed to report from.
@@ -133,10 +135,86 @@ impl PipelineSummary {
     }
 }
 
+impl PipelineSummary {
+    /// The complete-action record (conventions/SPEED_OF_LIGHT.md): one
+    /// `SOL op=sync_action` per pipeline exit, whatever the outcome, with the
+    /// stage service times so the critical path can be read without the table.
+    fn sol_line(&self, outcome: &str) -> String {
+        let mut extras = vec![
+            ("op_id", self.operation_id.clone()),
+            ("mode", self.mode.clone()),
+            ("outcome", outcome.to_string()),
+            ("stages", self.stages.len().to_string()),
+            ("timer_scope", "action_wall".to_string()),
+        ];
+        let names: Vec<String> = self
+            .stages
+            .iter()
+            .map(|stage| stage_key(&stage.name))
+            .collect();
+        for (stage, name) in self.stages.iter().zip(&names) {
+            extras.push((
+                name.as_str(),
+                format!("{:.3}", stage.duration.as_secs_f64()),
+            ));
+        }
+        sol_line(
+            "sync_action",
+            0,
+            self.overall_start.elapsed(),
+            &SolLight::SelfBaseline,
+            &extras,
+        )
+    }
+}
+
+/// `stage_<name>_s`, with the stage name reduced to the grammar's key charset.
+fn stage_key(name: &str) -> String {
+    let name: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("stage_{name}_s")
+}
+
 fn format_details(details: &[(&str, String)]) -> String {
     details
         .iter()
         .map(|(k, v)| format!("{}={}", k, v))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stage_keys_use_the_grammar_charset() {
+        assert_eq!(stage_key("remote_repository"), "stage_remote_repository_s");
+        assert_eq!(stage_key("Quick Verify/2"), "stage_quick_verify_2_s");
+    }
+
+    #[test]
+    fn action_record_carries_owner_outcome_and_stage_times() {
+        let mut summary =
+            PipelineSummary::new("sync-0007", "Download", "http://x/", Instant::now());
+        summary.push(StageEntry::new(
+            "remote_repository",
+            Duration::from_millis(1500),
+        ));
+        summary.push(StageEntry::new("download", Duration::from_secs(7)));
+        let line = summary.sol_line("completed");
+        assert!(line.starts_with("SOL op=sync_action actual_s="));
+        assert!(line.contains(
+            " op_id=sync-0007 mode=Download outcome=completed stages=2 timer_scope=action_wall"
+        ));
+        assert!(line.contains(" stage_remote_repository_s=1.500 stage_download_s=7.000"));
+    }
 }

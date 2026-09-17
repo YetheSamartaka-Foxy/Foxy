@@ -1,6 +1,11 @@
 //! Speed-of-light summary of the `SOL op=...` lines a benchmark captured,
 //! folded to one row per operation so a run that logged dozens of hash
 //! batches still reads as a single ratio. See `conventions/SPEED_OF_LIGHT.md`.
+//!
+//! The folded `actual_s` is a service sum over the operation's lines, not the
+//! action's wall time: batches that overlapped (hashing during a download)
+//! add up to more than the action took. The record's `elapsed_ms` is the
+//! makespan.
 
 use std::collections::BTreeMap;
 
@@ -8,9 +13,9 @@ use super::record::BenchmarkRecord;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SolLightSource {
-    /// The user's bandwidth cap is the light (exact ceiling).
+    /// The user's bandwidth cap is the light (policy ceiling).
     LimiterCap,
-    /// The best 1-second sample of the same run is the light.
+    /// The best sampler window of the same run is the light.
     Peak1s,
     /// No absolute light is computable; the line carries `sol=na`.
     SelfBaseline,
@@ -37,11 +42,66 @@ impl SolLightSource {
     pub fn label(&self) -> &'static str {
         match self {
             Self::LimiterCap => "bandwidth limit",
-            Self::Peak1s => "same-run peak second",
+            Self::Peak1s => "same-run peak window",
             Self::SelfBaseline => "no absolute light",
             Self::SameRunBest => "fastest batch of this run",
             Self::NominalHddSequential => "nominal HDD sequential rate",
             Self::Other(_) => "unknown light",
+        }
+    }
+
+    /// The comparison a ratio against this light answers.
+    pub fn metric_kind(&self) -> SolMetricKind {
+        match self {
+            Self::LimiterCap => SolMetricKind::ModeledBound,
+            Self::Peak1s | Self::SameRunBest => SolMetricKind::PeakConsistency,
+            Self::NominalHddSequential => SolMetricKind::Nominal,
+            Self::SelfBaseline | Self::Other(_) => SolMetricKind::None,
+        }
+    }
+}
+
+/// What a displayed percentage means (convention section 2.1). A modeled
+/// bound, a same-run peak and a nominal device rate are different questions
+/// and must not be read as one "efficiency".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SolMetricKind {
+    /// `T_bound / T_actual` against a policy or modeled lower bound.
+    ModeledBound,
+    /// `R_average / R_peak` of the same run: consistency, not physics.
+    PeakConsistency,
+    /// Against a nominal device constant that was not calibrated here.
+    Nominal,
+    /// No valid reference; only the actual time is meaningful.
+    None,
+}
+
+impl SolMetricKind {
+    /// Translation key, short enough to sit beside the percentage.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ModeledBound => "vs bound",
+            Self::PeakConsistency => "peak consistency",
+            Self::Nominal => "vs nominal",
+            Self::None => "reference missing",
+        }
+    }
+
+    /// Translation key for the long explanation.
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::ModeledBound => {
+                "Ratio of the modeled lower-bound time to the actual time. Above 100% means the bound was not a bound for this run."
+            }
+            Self::PeakConsistency => {
+                "Average rate against the best window of the same run. It shows whether the run held its own peak, not how close it came to physics."
+            }
+            Self::Nominal => {
+                "Ratio against a nominal device rate that was not calibrated on this machine. A reading aid, not a bound."
+            }
+            Self::None => {
+                "No valid reference exists for this operation; compare the actual time with the best measured run instead."
+            }
         }
     }
 }
@@ -55,13 +115,24 @@ pub struct SolSubPart {
     pub work_bytes: u64,
     pub light_bps: Option<f64>,
     pub ideal_s: Option<f64>,
+    /// Clamped to `[0, 1]`.
     pub sol: Option<f64>,
+    /// Unclamped; above one means the reference was not a bound.
+    pub sol_raw: Option<f64>,
     pub light_src: SolLightSource,
 }
 
 impl SolSubPart {
     pub fn headroom(&self) -> Option<f64> {
         self.sol.filter(|sol| *sol > 0.0).map(|sol| 1.0 / sol)
+    }
+
+    pub fn metric_kind(&self) -> SolMetricKind {
+        if self.sol.is_none() {
+            SolMetricKind::None
+        } else {
+            self.light_src.metric_kind()
+        }
     }
 }
 
@@ -90,23 +161,73 @@ pub struct SolDetail {
 pub struct SolOpSummary {
     pub op: String,
     pub runs: usize,
+    /// Lines that carried a usable ratio; below `runs` means the summary's
+    /// ratio describes only part of the operation's work.
+    pub rated_runs: usize,
+    /// Service sum of the lines' `actual_s`, not the action makespan.
     pub actual_s: f64,
     pub work_bytes: u64,
     pub actual_bps: Option<f64>,
     pub light_bps: Option<f64>,
     pub ideal_s: Option<f64>,
+    /// Service sum of the lines behind `ideal_s`, so the gap to the
+    /// reference compares like with like when coverage is partial.
+    pub rated_actual_s: Option<f64>,
     /// Ratio in `[0, 1]`; `None` when no light is knowable.
     pub sol: Option<f64>,
+    /// Unclamped ratio; above one is evidence about the reference.
+    pub sol_raw: Option<f64>,
     pub light_src: SolLightSource,
+    /// The lines disagreed on where their light came from; the ratio mixes
+    /// reference kinds and should not be read as one number.
+    pub mixed_references: bool,
+    /// Distinct `label`/`profile` values differed across lines, so the
+    /// batches are not comparable work and no fastest-batch light is derived.
+    pub heterogeneous: bool,
+    /// Distinct `outcome` values the lines reported, first-seen order.
+    pub outcomes: Vec<String>,
     pub sub_parts: Vec<SolSubPart>,
     pub details: Vec<SolDetail>,
 }
 
 impl SolOpSummary {
-    /// How many times faster the operation could run before physics
-    /// objects (E3 of the convention).
+    /// How many times faster the operation could run before its reference
+    /// objects (E3 of the convention): a distance to the named reference,
+    /// not a promise of achievable speedup.
     pub fn headroom(&self) -> Option<f64> {
         self.sol.filter(|sol| *sol > 0.0).map(|sol| 1.0 / sol)
+    }
+
+    pub fn metric_kind(&self) -> SolMetricKind {
+        if self.sol.is_none() {
+            SolMetricKind::None
+        } else {
+            self.light_src.metric_kind()
+        }
+    }
+
+    /// `T_actual - T_reference` in seconds for the rated lines.
+    pub fn gap_to_reference_s(&self) -> Option<f64> {
+        let ideal = self.ideal_s?;
+        (self.rated_runs > 0).then(|| self.rated_actual_s.unwrap_or(self.actual_s) - ideal)
+    }
+
+    /// Every line carried a ratio.
+    pub fn full_coverage(&self) -> bool {
+        self.runs > 0 && self.rated_runs == self.runs
+    }
+
+    /// No line reported a terminal outcome other than success.
+    pub fn completed(&self) -> bool {
+        self.outcomes
+            .iter()
+            .all(|outcome| outcome != "cancelled" && !outcome.starts_with("failed"))
+    }
+
+    /// Whether the ratio may stand as the action's headline: the reference is
+    /// one kind, it covers every line, and the operation completed.
+    pub fn headline_worthy(&self) -> bool {
+        self.sol.is_some() && self.full_coverage() && !self.mixed_references && self.completed()
     }
 
     /// Crucial-operation number and name from `conventions/SPEED_OF_LIGHT.md`,
@@ -119,6 +240,10 @@ impl SolOpSummary {
             "remote_refresh" => ("O5", "Remote metadata refresh"),
             "startup" | "startup_probe" => ("O8", "Startup to first sync verdict"),
             "app_update_check" => ("O5", "App update check"),
+            "db_persist" => ("O7", "Turso persistence"),
+            "sync_action" => ("A", "Complete sync action"),
+            "db_purge" => ("O7", "Turso purge"),
+            "space_switch" => ("S", "Game space switch"),
             _ => return None,
         })
     }
@@ -130,6 +255,7 @@ impl SolOpSummary {
             "hash" => "disk and CPU",
             "quick_scan" => "directory walk",
             "startup" | "startup_probe" | "remote_refresh" | "app_update_check" => "round trips",
+            "db_persist" | "db_purge" => "writer",
             _ => "overall",
         }
     }
@@ -139,8 +265,13 @@ impl SolOpSummary {
 enum Fold {
     Sum,
     Max,
-    Mean,
     Distinct,
+    /// `100 * sum(numerator) / sum(denominator)`; falls back to the
+    /// work-weighted mean of the raw percentages on lines without the
+    /// byte counters.
+    PercentOf(&'static str, &'static str),
+    /// `sum(key) / sum(actual_s)` over the lines carrying `key`.
+    PerSecondOf(&'static str),
 }
 
 #[derive(Clone, Copy)]
@@ -159,25 +290,28 @@ fn detail_specs(op: &str) -> &'static [(&'static str, &'static str, Kind, Fold)]
     match op {
         "download" => &[
             ("files", "Files", Kind::Count, Fold::Sum),
-            ("peak_1s_bps", "Peak second", Kind::BytesPerSec, Fold::Max),
+            ("peak_1s_bps", "Peak window", Kind::BytesPerSec, Fold::Max),
             (
                 "delta_savings_percent",
                 "Delta savings",
                 Kind::Percent,
-                Fold::Mean,
+                Fold::PercentOf("delta_savings_bytes", "full_bytes"),
             ),
+            ("range_retries", "Range retries", Kind::Count, Fold::Sum),
             (
                 "destination_storage",
                 "Destination storage",
                 Kind::Text,
                 Fold::Distinct,
             ),
+            ("outcome", "Outcome", Kind::Text, Fold::Distinct),
         ],
         "hash" => &[
             ("files", "Files", Kind::Count, Fold::Sum),
             ("parts", "Parts", Kind::Count, Fold::Sum),
-            ("compute_s", "Hash compute (CPU)", Kind::Secs, Fold::Sum),
-            ("wait_s", "I/O wait", Kind::Secs, Fold::Sum),
+            ("compute_s", "Blocking task time", Kind::Secs, Fold::Sum),
+            ("wait_s", "Permit wait", Kind::Secs, Fold::Sum),
+            ("missing_files", "Missing files", Kind::Count, Fold::Sum),
             ("label", "Profile", Kind::Text, Fold::Distinct),
         ],
         "quick_scan" => &[
@@ -205,7 +339,7 @@ fn detail_specs(op: &str) -> &'static [(&'static str, &'static str, Kind, Fold)]
                 "addons_per_s",
                 "Scan rate",
                 Kind::Rate("addons/s"),
-                Fold::Mean,
+                Fold::PerSecondOf("addons_total"),
             ),
             ("outcome", "Outcome", Kind::Text, Fold::Distinct),
         ],
@@ -231,44 +365,138 @@ fn detail_specs(op: &str) -> &'static [(&'static str, &'static str, Kind, Fold)]
             ("mode", "Mode", Kind::Text, Fold::Distinct),
             ("outcome", "Outcome", Kind::Text, Fold::Distinct),
         ],
+        "remote_refresh" => &[
+            ("index_requests", "Index requests", Kind::Count, Fold::Sum),
+            (
+                "manifest_requests",
+                "Manifest requests",
+                Kind::Count,
+                Fold::Sum,
+            ),
+            ("mods", "Mods", Kind::Count, Fold::Sum),
+            ("files", "Files", Kind::Count, Fold::Sum),
+            ("parts", "Parts", Kind::Count, Fold::Sum),
+            ("fetch_sum_s", "Manifest fetch", Kind::Secs, Fold::Sum),
+            ("parse_sum_s", "Manifest parse", Kind::Secs, Fold::Sum),
+            ("persist_sum_s", "Persist", Kind::Secs, Fold::Sum),
+            ("outcome", "Outcome", Kind::Text, Fold::Distinct),
+        ],
+        "db_persist" => &[
+            ("write_calls", "Write calls", Kind::Count, Fold::Sum),
+            ("write_failed", "Failed writes", Kind::Count, Fold::Sum),
+            ("lock_retries", "Lock retries", Kind::Count, Fold::Sum),
+            ("categories", "Categories", Kind::Count, Fold::Max),
+            ("write_gate", "Write gate", Kind::Count, Fold::Max),
+            ("mode", "Mode", Kind::Text, Fold::Distinct),
+            ("outcome", "Outcome", Kind::Text, Fold::Distinct),
+        ],
+        "sync_action" => &[
+            ("stages", "Stages", Kind::Count, Fold::Max),
+            ("mode", "Mode", Kind::Text, Fold::Distinct),
+            ("outcome", "Outcome", Kind::Text, Fold::Distinct),
+        ],
+        "db_purge" => &[
+            ("steps", "Statements", Kind::Count, Fold::Sum),
+            ("rows_affected", "Rows affected", Kind::Count, Fold::Sum),
+            ("txn_s", "Transaction", Kind::Secs, Fold::Sum),
+            ("checkpoint_s", "Checkpoint", Kind::Secs, Fold::Sum),
+            ("kind", "Kind", Kind::Text, Fold::Distinct),
+            ("outcome", "Outcome", Kind::Text, Fold::Distinct),
+        ],
+        "space_switch" => &[
+            ("drain_s", "Drain", Kind::Secs, Fold::Sum),
+            ("reset_s", "Reset", Kind::Secs, Fold::Sum),
+            ("reload_s", "Reload", Kind::Secs, Fold::Sum),
+            ("repositories", "Repositories", Kind::Count, Fold::Max),
+            ("outcome", "Outcome", Kind::Text, Fold::Distinct),
+        ],
         _ => &[],
     }
+}
+
+fn distinct_values<'a>(maps: &[&'a BTreeMap<String, String>], key: &str) -> Vec<&'a str> {
+    let mut distinct: Vec<&str> = Vec::new();
+    for value in maps.iter().filter_map(|map| map.get(key)) {
+        if !distinct.iter().any(|known| known == value) {
+            distinct.push(value);
+        }
+    }
+    distinct
+}
+
+fn sum_of(maps: &[&BTreeMap<String, String>], key: &str) -> Option<f64> {
+    let values: Vec<f64> = maps.iter().filter_map(|map| number(map, key)).collect();
+    (!values.is_empty()).then(|| values.iter().sum())
+}
+
+/// Work-weighted mean of a per-line ratio, for legacy lines that carry the
+/// percentage but not the counters it was derived from.
+fn weighted_mean(maps: &[&BTreeMap<String, String>], key: &str) -> Option<f64> {
+    let mut total_weight = 0.0;
+    let mut total = 0.0;
+    for map in maps {
+        let Some(value) = number(map, key) else {
+            continue;
+        };
+        let weight = number(map, "work_bytes")
+            .or_else(|| number(map, "full_bytes"))
+            .map_or(1.0, |bytes| bytes.max(1.0));
+        total_weight += weight;
+        total += weight * value;
+    }
+    (total_weight > 0.0).then(|| total / total_weight)
 }
 
 fn fold_details(op: &str, maps: &[&BTreeMap<String, String>]) -> Vec<SolDetail> {
     let mut out = Vec::new();
     for (key, label, kind, fold) in detail_specs(op) {
-        let raw: Vec<&str> = maps
-            .iter()
-            .filter_map(|map| map.get(*key).map(String::as_str))
-            .collect();
-        if raw.is_empty() {
+        let present = maps.iter().any(|map| map.contains_key(*key));
+        if !present {
             continue;
         }
-        let value = match kind {
-            Kind::Text => {
-                let mut distinct: Vec<&str> = Vec::new();
-                for value in raw {
-                    if !distinct.contains(&value) {
-                        distinct.push(value);
-                    }
-                }
-                SolDetailValue::Text(distinct.join(", "))
+        let value = match (kind, fold) {
+            (Kind::Text, _) => SolDetailValue::Text(distinct_values(maps, key).join(", ")),
+            (_, Fold::PercentOf(numerator, denominator)) => {
+                let derived = match (sum_of(maps, numerator), sum_of(maps, denominator)) {
+                    (Some(saved), Some(full)) if full > 0.0 => Some(100.0 * saved / full),
+                    _ => weighted_mean(maps, key),
+                };
+                let Some(percent) = derived else { continue };
+                SolDetailValue::Percent(percent)
             }
-            _ => {
-                let numbers: Vec<f64> = raw
+            (Kind::Rate(unit), Fold::PerSecondOf(count_key)) => {
+                let counted: Vec<&&BTreeMap<String, String>> = maps
                     .iter()
-                    .filter_map(|value| value.parse::<f64>().ok())
-                    .filter(|value| value.is_finite())
+                    .filter(|map| number(map, count_key).is_some())
                     .collect();
+                let count: f64 = counted
+                    .iter()
+                    .filter_map(|map| number(map, count_key))
+                    .sum();
+                let secs: f64 = counted
+                    .iter()
+                    .filter_map(|map| number(map, "actual_s"))
+                    .sum();
+                let rate = if secs > 0.0 {
+                    count / secs
+                } else if let Some(mean) = weighted_mean(maps, key) {
+                    mean
+                } else {
+                    continue;
+                };
+                SolDetailValue::Rate(rate, unit)
+            }
+            (_, Fold::PerSecondOf(_)) => continue,
+            _ => {
+                let numbers: Vec<f64> = maps.iter().filter_map(|map| number(map, key)).collect();
                 if numbers.is_empty() {
                     continue;
                 }
                 let folded = match fold {
                     Fold::Sum => numbers.iter().sum(),
                     Fold::Max => numbers.iter().copied().fold(0.0_f64, f64::max),
-                    Fold::Mean => numbers.iter().sum::<f64>() / numbers.len() as f64,
                     Fold::Distinct => numbers[0],
+                    Fold::PercentOf(..) | Fold::PerSecondOf(_) => unreachable!(),
                 };
                 match kind {
                     Kind::Count => SolDetailValue::Count(folded),
@@ -305,10 +533,10 @@ fn disk_sub_part(maps: &[&BTreeMap<String, String>]) -> Option<SolSubPart> {
         .filter_map(|map| number(map, "disk_ideal_s"))
         .sum();
     let actual: f64 = rated.iter().filter_map(|map| number(map, "actual_s")).sum();
-    let sol = if ideal > 0.0 && actual > 0.0 {
-        Some((ideal / actual).clamp(0.0, 1.0))
+    let sol_raw = if ideal > 0.0 && actual > 0.0 {
+        Some(ideal / actual)
     } else {
-        number(rated[0], "disk_sol").map(|value| value.clamp(0.0, 1.0))
+        number(rated[0], "disk_sol_raw").or_else(|| number(rated[0], "disk_sol"))
     };
     Some(SolSubPart {
         name: "disk",
@@ -320,7 +548,8 @@ fn disk_sub_part(maps: &[&BTreeMap<String, String>]) -> Option<SolSubPart> {
                 Some(best.map_or(value, |best| best.max(value)))
             }),
         ideal_s: (ideal > 0.0).then_some(ideal),
-        sol,
+        sol: sol_raw.map(|value| value.clamp(0.0, 1.0)),
+        sol_raw,
         light_src: SolLightSource::parse(rated[0].get("disk_light_src").map(String::as_str)),
     })
 }
@@ -331,7 +560,7 @@ struct SolLine {
     actual_bps: Option<f64>,
     light_bps: Option<f64>,
     ideal_s: Option<f64>,
-    sol: Option<f64>,
+    sol_raw: Option<f64>,
     light_src: SolLightSource,
 }
 
@@ -342,13 +571,26 @@ fn number(map: &BTreeMap<String, String>, key: &str) -> Option<f64> {
 }
 
 fn parse_line(map: &BTreeMap<String, String>) -> SolLine {
+    let actual_s = number(map, "actual_ns")
+        .map(|ns| ns / 1e9)
+        .or_else(|| number(map, "actual_s"));
+    let ideal_s = number(map, "ideal_s");
+    // Prefer the unclamped field; older lines only carry the clamped `sol`,
+    // which is recomputed from ideal/actual when both are present.
+    let sol_raw = number(map, "sol_raw")
+        .or_else(|| match (ideal_s, actual_s) {
+            (Some(ideal), Some(actual)) if actual > 0.0 => Some(ideal / actual),
+            _ => None,
+        })
+        .or_else(|| number(map, "sol"))
+        .filter(|value| *value >= 0.0);
     SolLine {
-        actual_s: number(map, "actual_s"),
+        actual_s,
         work_bytes: number(map, "work_bytes").map(|value| value.max(0.0) as u64),
         actual_bps: number(map, "actual_bps"),
         light_bps: number(map, "light_bps"),
-        ideal_s: number(map, "ideal_s"),
-        sol: number(map, "sol").map(|value| value.clamp(0.0, 1.0)),
+        ideal_s,
+        sol_raw,
         light_src: SolLightSource::parse(map.get("light_src").map(String::as_str)),
     }
 }
@@ -365,49 +607,67 @@ fn summarize(op: &str, maps: &[&BTreeMap<String, String>]) -> SolOpSummary {
     } else {
         None
     };
+    let labels = distinct_values(maps, "label");
+    let heterogeneous = labels.len() > 1;
+    let outcomes: Vec<String> = distinct_values(maps, "outcome")
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
     let mut summary = SolOpSummary {
         op: op.to_owned(),
         runs: lines.len(),
+        rated_runs: 0,
         actual_s,
         work_bytes,
         actual_bps,
         light_bps: None,
         ideal_s: None,
         sol: None,
+        sol_raw: None,
         light_src: lines
             .first()
             .map_or(SolLightSource::SelfBaseline, |line| line.light_src.clone()),
+        mixed_references: false,
+        heterogeneous,
+        outcomes,
         sub_parts: if op == "download" {
             disk_sub_part(maps).into_iter().collect()
         } else {
             Vec::new()
         },
         details: fold_details(op, maps),
+        rated_actual_s: None,
     };
-    let rated: Vec<&SolLine> = lines.iter().filter(|line| line.sol.is_some()).collect();
+    let rated: Vec<&SolLine> = lines.iter().filter(|line| line.sol_raw.is_some()).collect();
     if !rated.is_empty() {
+        summary.rated_runs = rated.len();
+        summary.mixed_references = rated
+            .iter()
+            .any(|line| line.light_src != rated[0].light_src);
         // Serial stages add (E5): the ideal of the whole is the sum of the
         // ideals, measured against the sum of the actuals.
         let with_ideal: Vec<&&SolLine> = rated
             .iter()
             .filter(|line| line.ideal_s.is_some() && line.actual_s.is_some())
             .collect();
-        summary.sol = if !with_ideal.is_empty() {
+        summary.sol_raw = if !with_ideal.is_empty() {
             let ideal: f64 = with_ideal.iter().filter_map(|line| line.ideal_s).sum();
             let actual: f64 = with_ideal.iter().filter_map(|line| line.actual_s).sum();
             summary.ideal_s = Some(ideal);
-            (actual > 0.0).then(|| (ideal / actual).clamp(0.0, 1.0))
+            summary.rated_actual_s = Some(actual);
+            (actual > 0.0).then(|| ideal / actual)
         } else {
             let weight = |line: &SolLine| line.work_bytes.map_or(1.0, |bytes| bytes.max(1) as f64);
             let total: f64 = rated.iter().map(|line| weight(line)).sum();
             Some(
                 rated
                     .iter()
-                    .map(|line| weight(line) * line.sol.unwrap_or(0.0))
+                    .map(|line| weight(line) * line.sol_raw.unwrap_or(0.0))
                     .sum::<f64>()
                     / total,
             )
         };
+        summary.sol = summary.sol_raw.map(|value| value.clamp(0.0, 1.0));
         summary.light_bps = rated
             .iter()
             .filter_map(|line| line.light_bps)
@@ -417,10 +677,12 @@ fn summarize(op: &str, maps: &[&BTreeMap<String, String>]) -> SolOpSummary {
         summary.light_src = rated[0].light_src.clone();
         return summary;
     }
-    // No line knew its light: the fastest batch of the run is the best
-    // demonstrated rate, which the convention allows as the light until
-    // physics says otherwise.
+    // No line knew its light. When the batches are the same kind of work,
+    // the fastest batch is a same-run peak: a consistency figure, never a
+    // physical light. Batches of different profiles or phases (calibration
+    // trials against production hashing) are not comparable and get no ratio.
     if lines.len() >= 2
+        && !heterogeneous
         && let Some(aggregate) = actual_bps
     {
         let best = lines
@@ -429,7 +691,9 @@ fn summarize(op: &str, maps: &[&BTreeMap<String, String>]) -> SolOpSummary {
             .filter_map(|line| line.actual_bps)
             .fold(0.0_f64, f64::max);
         if best > 0.0 {
+            summary.rated_runs = lines.len();
             summary.light_bps = Some(best);
+            summary.sol_raw = Some(aggregate / best);
             summary.sol = Some((aggregate / best).clamp(0.0, 1.0));
             summary.light_src = SolLightSource::SameRunBest;
         }
@@ -453,20 +717,30 @@ impl BenchmarkRecord {
         ops.iter().map(|(op, maps)| summarize(op, maps)).collect()
     }
 
-    /// The ratio that summarises the action: the download operation for
-    /// transfers, hashing for checks, else the first operation with a light.
-    pub fn headline_sol(&self) -> Option<SolOpSummary> {
-        let summaries = self.sol_summaries();
-        let preferred = if self.kind.transfers_files() {
+    /// The operation whose ratio describes the action: the download for
+    /// transfers, hashing for checks. No other operation stands in for it:
+    /// a rated app-update probe in the frame is not the benchmark's ratio.
+    pub fn headline_op(&self) -> &'static str {
+        if self.kind.transfers_files() {
             "download"
         } else {
             "hash"
-        };
-        summaries
-            .iter()
-            .find(|summary| summary.op == preferred && summary.sol.is_some())
-            .or_else(|| summaries.iter().find(|summary| summary.sol.is_some()))
-            .cloned()
+        }
+    }
+
+    /// The summary of the headline operation, when it exists at all.
+    pub fn headline_summary(&self) -> Option<SolOpSummary> {
+        let op = self.headline_op();
+        self.sol_summaries()
+            .into_iter()
+            .find(|summary| summary.op == op)
+    }
+
+    /// The ratio that summarises the action, only when it is trustworthy as
+    /// a headline: one reference kind, full coverage, completed outcome.
+    pub fn headline_sol(&self) -> Option<SolOpSummary> {
+        self.headline_summary()
+            .filter(SolOpSummary::headline_worthy)
     }
 }
 
@@ -529,14 +803,17 @@ mod tests {
         let summary = record.headline_sol().expect("download summary");
         assert_eq!(summary.op, "download");
         assert_eq!(summary.runs, 1);
+        assert_eq!(summary.rated_runs, 1);
         assert!((summary.sol.unwrap() - 36.545 / 39.904).abs() < 1e-6);
         assert_eq!(summary.light_bps, Some(118_513_659.0));
         assert_eq!(summary.light_src, SolLightSource::Peak1s);
+        assert_eq!(summary.metric_kind(), SolMetricKind::PeakConsistency);
         assert!((summary.headroom().unwrap() - 1.0919).abs() < 1e-3);
+        assert!((summary.gap_to_reference_s().unwrap() - 3.359).abs() < 1e-6);
     }
 
     #[test]
-    fn hash_batches_fold_to_best_batch_light() {
+    fn hash_batches_of_one_profile_fold_to_a_same_run_peak() {
         let record = record(
             BenchmarkKind::Recheck,
             vec![
@@ -547,6 +824,7 @@ mod tests {
                     ("actual_bps", "1000"),
                     ("sol", "na"),
                     ("light_src", "self_baseline"),
+                    ("label", "sticky_auto"),
                 ]),
                 line(&[
                     ("op", "hash"),
@@ -555,6 +833,7 @@ mod tests {
                     ("actual_bps", "3000"),
                     ("sol", "na"),
                     ("light_src", "self_baseline"),
+                    ("label", "sticky_auto"),
                 ]),
             ],
         );
@@ -565,10 +844,111 @@ mod tests {
         assert_eq!(summary.light_bps, Some(3000.0));
         assert!((summary.sol.unwrap() - 2.0 / 3.0).abs() < 1e-9);
         assert_eq!(summary.light_src, SolLightSource::SameRunBest);
+        assert_eq!(summary.metric_kind(), SolMetricKind::PeakConsistency);
+        assert!(!summary.heterogeneous);
     }
 
     #[test]
-    fn download_disk_keys_become_a_sub_part_and_details_fold() {
+    fn heterogeneous_hash_batches_get_totals_but_no_fastest_batch_light() {
+        // A calibration trial and the production pass are different work; the
+        // trial's page-cache rate must not become the light for the whole run.
+        let record = record(
+            BenchmarkKind::Recheck,
+            vec![
+                line(&[
+                    ("op", "hash"),
+                    ("actual_s", "0.1"),
+                    ("work_bytes", "700000000"),
+                    ("actual_bps", "7000000000"),
+                    ("sol", "na"),
+                    ("label", "auto_benchmark_sample"),
+                ]),
+                line(&[
+                    ("op", "hash"),
+                    ("actual_s", "35.0"),
+                    ("work_bytes", "3600000000"),
+                    ("actual_bps", "102857142"),
+                    ("sol", "na"),
+                    ("label", "selected_remaining"),
+                ]),
+            ],
+        );
+        let summary = &record.sol_summaries()[0];
+        assert!(summary.heterogeneous);
+        assert_eq!(summary.sol, None);
+        assert_eq!(summary.rated_runs, 0);
+        assert_eq!(summary.metric_kind(), SolMetricKind::None);
+        assert_eq!(summary.work_bytes, 4_300_000_000);
+        assert!((summary.actual_s - 35.1).abs() < 1e-9);
+        assert!(record.headline_sol().is_none());
+    }
+
+    #[test]
+    fn service_sum_can_exceed_the_action_makespan_without_becoming_a_share() {
+        // Three overlapped 1 s batches inside a 1.2 s action: the folded
+        // `actual_s` is occupancy (3 s), and nothing here divides it by the
+        // record's elapsed time.
+        let mut record = record(
+            BenchmarkKind::Update,
+            (0..3)
+                .map(|_| {
+                    line(&[
+                        ("op", "hash"),
+                        ("actual_s", "1.0"),
+                        ("work_bytes", "100"),
+                        ("actual_bps", "100"),
+                        ("label", "incremental"),
+                    ])
+                })
+                .collect(),
+        );
+        record.elapsed_ms = 1200;
+        let summary = &record.sol_summaries()[0];
+        assert_eq!(summary.actual_s, 3.0);
+        assert!(summary.actual_s > record.elapsed_secs());
+        assert_eq!(summary.sol, Some(1.0));
+    }
+
+    #[test]
+    fn raw_ratio_above_one_is_kept_and_flags_the_reference() {
+        let record = record(
+            BenchmarkKind::Update,
+            vec![line(&[
+                ("op", "download"),
+                ("actual_s", "10.0"),
+                ("work_bytes", "1000"),
+                ("light_bps", "50"),
+                ("ideal_s", "20.0"),
+                ("sol", "1.000"),
+                ("sol_raw", "2.0000"),
+                ("light_src", "limiter_cap"),
+            ])],
+        );
+        let summary = &record.sol_summaries()[0];
+        assert_eq!(summary.sol, Some(1.0));
+        assert_eq!(summary.sol_raw, Some(2.0));
+        assert_eq!(summary.metric_kind(), SolMetricKind::ModeledBound);
+        assert_eq!(summary.gap_to_reference_s(), Some(-10.0));
+    }
+
+    #[test]
+    fn precise_duration_field_wins_over_the_rounded_seconds() {
+        let record = record(
+            BenchmarkKind::Recheck,
+            vec![line(&[
+                ("op", "hash"),
+                ("actual_s", "0.000"),
+                ("actual_ns", "250000"),
+                ("work_bytes", "1000"),
+            ])],
+        );
+        let summary = &record.sol_summaries()[0];
+        assert!((summary.actual_s - 0.00025).abs() < 1e-12);
+        assert_eq!(summary.actual_bps, Some(4_000_000.0));
+    }
+
+    #[test]
+    fn download_disk_keys_become_a_nominal_sub_part_and_details_fold() {
         let record = record(
             BenchmarkKind::Update,
             vec![line(&[
@@ -581,6 +961,7 @@ mod tests {
                 ("peak_1s_bps", "5000"),
                 ("delta_savings_percent", "40"),
                 ("destination_storage", "Hdd"),
+                ("outcome", "completed"),
                 ("disk_bytes", "2000"),
                 ("disk_light_bps", "40"),
                 ("disk_ideal_s", "50.0"),
@@ -595,18 +976,84 @@ mod tests {
         assert_eq!(disk.work_bytes, 2000);
         assert_eq!(disk.sol, Some(0.5));
         assert_eq!(disk.light_src, SolLightSource::NominalHddSequential);
+        assert_eq!(disk.metric_kind(), SolMetricKind::Nominal);
         let labels: Vec<&str> = summary.details.iter().map(|d| d.label).collect();
         assert_eq!(
             labels,
             [
                 "Files",
-                "Peak second",
+                "Peak window",
                 "Delta savings",
-                "Destination storage"
+                "Destination storage",
+                "Outcome"
             ]
         );
         assert_eq!(summary.details[0].value, SolDetailValue::Count(7.0));
+        assert_eq!(summary.details[2].value, SolDetailValue::Percent(40.0));
         assert_eq!(summary.details[3].value, SolDetailValue::Text("Hdd".into()));
+        assert_eq!(summary.outcomes, ["completed"]);
+        assert!(summary.completed());
+    }
+
+    #[test]
+    fn savings_fold_from_summed_bytes_not_the_mean_of_percentages() {
+        // 90% of 100 bytes and 10% of 900 bytes is 18% overall, not 50%.
+        let record = record(
+            BenchmarkKind::Update,
+            vec![
+                line(&[
+                    ("op", "download"),
+                    ("actual_s", "1"),
+                    ("delta_savings_percent", "90"),
+                    ("delta_savings_bytes", "90"),
+                    ("full_bytes", "100"),
+                ]),
+                line(&[
+                    ("op", "download"),
+                    ("actual_s", "1"),
+                    ("delta_savings_percent", "10"),
+                    ("delta_savings_bytes", "90"),
+                    ("full_bytes", "900"),
+                ]),
+            ],
+        );
+        let summary = &record.sol_summaries()[0];
+        let savings = summary
+            .details
+            .iter()
+            .find(|d| d.label == "Delta savings")
+            .unwrap();
+        assert_eq!(savings.value, SolDetailValue::Percent(18.0));
+    }
+
+    #[test]
+    fn scan_rate_folds_from_summed_addons_over_summed_time() {
+        // 100 addons in 0.1 s and 100 addons in 0.9 s is 200 addons/s, not
+        // the mean of 1000 and 111.
+        let record = record(
+            BenchmarkKind::QuickCheck,
+            vec![
+                line(&[
+                    ("op", "quick_scan"),
+                    ("actual_s", "0.1"),
+                    ("addons_total", "100"),
+                    ("addons_per_s", "1000"),
+                ]),
+                line(&[
+                    ("op", "quick_scan"),
+                    ("actual_s", "0.9"),
+                    ("addons_total", "100"),
+                    ("addons_per_s", "111.1"),
+                ]),
+            ],
+        );
+        let summary = &record.sol_summaries()[0];
+        let rate = summary
+            .details
+            .iter()
+            .find(|d| d.label == "Scan rate")
+            .unwrap();
+        assert_eq!(rate.value, SolDetailValue::Rate(200.0, "addons/s"));
     }
 
     #[test]
@@ -647,7 +1094,7 @@ mod tests {
         let compute = summary
             .details
             .iter()
-            .find(|d| d.label == "Hash compute (CPU)")
+            .find(|d| d.label == "Blocking task time")
             .unwrap();
         assert_eq!(compute.value, SolDetailValue::Secs(1.0));
         let profile = summary
@@ -676,26 +1123,90 @@ mod tests {
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].sol, None);
         assert_eq!(summaries[0].light_src, SolLightSource::SelfBaseline);
+        assert_eq!(summaries[0].metric_kind(), SolMetricKind::None);
         assert!(record.headline_sol().is_none());
+        assert!(record.headline_summary().is_some());
     }
 
     #[test]
-    fn headline_falls_back_to_any_rated_operation() {
+    fn headline_never_falls_back_to_another_operation() {
         let record = record(
             BenchmarkKind::Update,
             vec![
                 line(&[("op", "hash"), ("actual_s", "1.0"), ("sol", "na")]),
                 line(&[
-                    ("op", "download"),
-                    ("actual_s", "2.0"),
-                    ("sol", "0.5"),
+                    ("op", "app_update_check"),
+                    ("actual_s", "0.1"),
+                    ("sol", "0.9"),
                     ("light_src", "limiter_cap"),
                 ]),
             ],
         );
-        let summary = record.headline_sol().expect("download fallback");
-        assert_eq!(summary.op, "download");
+        assert_eq!(record.headline_op(), "download");
+        assert!(record.headline_sol().is_none());
+        assert!(record.headline_summary().is_none());
+    }
+
+    #[test]
+    fn partial_coverage_and_failed_outcomes_are_not_headlines() {
+        let partial = record(
+            BenchmarkKind::Update,
+            vec![
+                line(&[
+                    ("op", "download"),
+                    ("actual_s", "2.0"),
+                    ("ideal_s", "1.0"),
+                    ("sol", "0.5"),
+                    ("light_src", "limiter_cap"),
+                ]),
+                line(&[("op", "download"), ("actual_s", "2.0"), ("sol", "na")]),
+            ],
+        );
+        let summary = &partial.sol_summaries()[0];
         assert_eq!(summary.sol, Some(0.5));
-        assert_eq!(summary.light_src, SolLightSource::LimiterCap);
+        assert_eq!(summary.rated_runs, 1);
+        assert!(!summary.full_coverage());
+        assert!(partial.headline_sol().is_none());
+
+        let cancelled = record(
+            BenchmarkKind::Update,
+            vec![line(&[
+                ("op", "download"),
+                ("actual_s", "2.0"),
+                ("ideal_s", "1.0"),
+                ("sol", "0.5"),
+                ("light_src", "limiter_cap"),
+                ("outcome", "cancelled"),
+            ])],
+        );
+        let summary = &cancelled.sol_summaries()[0];
+        assert!(!summary.completed());
+        assert!(cancelled.headline_sol().is_none());
+    }
+
+    #[test]
+    fn mixed_reference_kinds_are_flagged() {
+        let record = record(
+            BenchmarkKind::Update,
+            vec![
+                line(&[
+                    ("op", "download"),
+                    ("actual_s", "2.0"),
+                    ("ideal_s", "1.0"),
+                    ("sol", "0.5"),
+                    ("light_src", "limiter_cap"),
+                ]),
+                line(&[
+                    ("op", "download"),
+                    ("actual_s", "2.0"),
+                    ("ideal_s", "1.0"),
+                    ("sol", "0.5"),
+                    ("light_src", "peak_1s"),
+                ]),
+            ],
+        );
+        let summary = &record.sol_summaries()[0];
+        assert!(summary.mixed_references);
+        assert!(record.headline_sol().is_none());
     }
 }

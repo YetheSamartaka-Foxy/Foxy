@@ -163,6 +163,8 @@ impl Foxy {
                         secs(tracker.eligibility_elapsed.unwrap_or_default()),
                     ),
                     ("verdict_s", secs(verdict)),
+                    ("outcome", "settled".to_string()),
+                    ("op_id", api::startup_operation_id().to_string()),
                 ],
             )
         );

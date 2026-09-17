@@ -7,6 +7,21 @@ use tokio::{net::TcpListener, sync::oneshot, task::JoinSet};
 use tower::ServiceExt;
 use tower_http::services::ServeDir;
 
+/// Response-shape controls for an adverse-origin lane: every response is
+/// held back by `delay_ms` before the first byte.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Impairment {
+    pub delay_ms: u64,
+}
+
+impl Impairment {
+    pub fn from_case(origin: &Value) -> Self {
+        Self {
+            delay_ms: origin["delay_ms"].as_u64().unwrap_or(0),
+        }
+    }
+}
+
 pub struct Origin {
     address: SocketAddr,
     shutdown: Option<oneshot::Sender<()>>,
@@ -15,6 +30,10 @@ pub struct Origin {
 
 impl Origin {
     pub fn start(root: &Path, port: u16) -> Result<Self> {
+        Self::start_impaired(root, port, Impairment::default())
+    }
+
+    pub fn start_impaired(root: &Path, port: u16, impairment: Impairment) -> Result<Self> {
         ensure!(root.is_dir(), "Origin root must be an existing directory");
         let root = root.to_owned();
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
@@ -49,6 +68,9 @@ impl Origin {
                                 let service = service_fn(move |mut request: hyper::Request<hyper::body::Incoming>| {
                                     let service = service.clone();
                                     async move {
+                                        if impairment.delay_ms > 0 {
+                                            tokio::time::sleep(std::time::Duration::from_millis(impairment.delay_ms)).await;
+                                        }
                                         // ServeDir rejects oversized suffixes; clamp through its own safe HEAD lookup.
                                         if let Some(suffix) = request.headers().get("range").and_then(|v| v.to_str().ok())
                                             .and_then(|v| v.strip_prefix("bytes=-")).filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
@@ -197,6 +219,23 @@ mod tests {
         );
         drop(origin);
         assert!(client.get(format!("{url}bytes")).send().is_err());
+        Ok(())
+    }
+    #[test]
+    fn delay_impairment_holds_every_response() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        std::fs::write(directory.path().join("bytes"), b"0123456789")?;
+        let origin = Origin::start_impaired(directory.path(), 0, Impairment { delay_ms: 300 })?;
+        let client = reqwest::blocking::Client::new();
+        let started = Instant::now();
+        let response = client.get(format!("{}bytes", origin.url())).send()?;
+        assert_eq!(response.text()?, "0123456789");
+        assert!(started.elapsed() >= std::time::Duration::from_millis(300));
+        assert_eq!(
+            Impairment::from_case(&json!({"delay_ms": 7})),
+            Impairment { delay_ms: 7 }
+        );
+        assert_eq!(Impairment::from_case(&json!({})), Impairment::default());
         Ok(())
     }
 }

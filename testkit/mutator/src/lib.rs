@@ -14,6 +14,9 @@ const JOURNAL_VERSION: u32 = 1;
 pub enum MutationProfile {
     SingleEntry,
     Scattered,
+    /// One contiguous run of entries per file, so the patch plan can coalesce
+    /// its ranges; the locality counterpart of `Scattered`.
+    Adjacent,
     TailTruncate,
     HeaderCorrupt,
     WholeFile,
@@ -30,6 +33,10 @@ pub struct MutateOptions {
     pub entry_count: usize,
     pub file_count: usize,
     pub truncate_by: u64,
+    /// Put every mutated file's modification time back afterwards, so a
+    /// size-and-mtime fingerprint cannot see the change (a silently changed
+    /// patch source).
+    pub preserve_mtime: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -95,7 +102,19 @@ pub fn mutate(options: &MutateOptions, journal_path: &Path) -> Result<MutationJo
     );
     let journal = plan_mutations(options)?;
     write_journal(journal_path, &journal)?;
+    let stamps = if options.preserve_mtime {
+        modification_times(&options.root, &journal)?
+    } else {
+        Vec::new()
+    };
     apply_mutations(&options.root, &journal)?;
+    for (path, modified) in stamps {
+        File::options()
+            .write(true)
+            .open(&path)
+            .with_context(|| format!("failed to open {} to restore its mtime", path.display()))?
+            .set_modified(modified)?;
+    }
     Ok(journal)
 }
 
@@ -122,6 +141,13 @@ pub fn plan_mutations(options: &MutateOptions) -> Result<MutationJournal> {
     let mutations = match options.profile {
         MutationProfile::SingleEntry => plan_single_entry(&candidates, options.seed, &mut rng)?,
         MutationProfile::Scattered => plan_scattered(
+            &candidates,
+            options.entry_count,
+            options.file_count,
+            options.seed,
+            &mut rng,
+        )?,
+        MutationProfile::Adjacent => plan_adjacent(
             &candidates,
             options.entry_count,
             options.file_count,
@@ -401,6 +427,69 @@ fn plan_scattered(
         .collect()
 }
 
+fn modification_times(
+    root: &Path,
+    journal: &MutationJournal,
+) -> Result<Vec<(PathBuf, std::time::SystemTime)>> {
+    let mut stamps: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
+    for mutation in &journal.mutations {
+        let path = resolve_journal_path(root, &mutation.path)?;
+        if stamps.iter().any(|(known, _)| *known == path) {
+            continue;
+        }
+        let modified = fs::metadata(&path)
+            .and_then(|metadata| metadata.modified())
+            .with_context(|| format!("failed to read modified time for {}", path.display()))?;
+        stamps.push((path, modified));
+    }
+    Ok(stamps)
+}
+
+fn plan_adjacent(
+    candidates: &[PboCandidate],
+    entry_count: usize,
+    file_count: usize,
+    seed: u64,
+    rng: &mut DeterministicRng,
+) -> Result<Vec<MutationRecord>> {
+    ensure!(entry_count > 0, "adjacent entry count must be positive");
+    ensure!(file_count > 0, "adjacent file count must be positive");
+    ensure!(
+        entry_count >= file_count,
+        "adjacent entry count must be at least the file count"
+    );
+    let per_file = entry_count / file_count;
+    let mut eligible_files: Vec<usize> = candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, candidate)| entry_parts(candidate).count() >= per_file)
+        .map(|(index, _)| index)
+        .collect();
+    ensure!(
+        eligible_files.len() >= file_count,
+        "requested {file_count} files with {per_file} adjacent entries but only {} qualify",
+        eligible_files.len()
+    );
+    shuffle(&mut eligible_files, rng);
+    eligible_files.truncate(file_count);
+
+    let mut mutations = Vec::with_capacity(entry_count);
+    for file_index in eligible_files {
+        let entries: Vec<EntryCandidate<'_>> = entry_parts(&candidates[file_index])
+            .map(|(part_index, part)| EntryCandidate {
+                candidate: &candidates[file_index],
+                part_index,
+                part,
+            })
+            .collect();
+        let start = rng.index(entries.len() - per_file + 1);
+        for entry in &entries[start..start + per_file] {
+            mutations.push(flip_entry(entry, seed, rng)?);
+        }
+    }
+    Ok(mutations)
+}
+
 fn plan_tail_truncate(
     candidates: &[PboCandidate],
     truncate_by: u64,
@@ -669,6 +758,7 @@ mod tests {
             entry_count: 4,
             file_count: 2,
             truncate_by: 3,
+            preserve_mtime: false,
         }
     }
 
@@ -725,6 +815,60 @@ mod tests {
                 .iter()
                 .all(|path| PboFormat.parse_parts(&temp.path().join(path)).is_ok())
         );
+        assert_restores(&temp, &originals, &journal_path);
+    }
+
+    #[test]
+    fn adjacent_changes_a_contiguous_run_per_file() {
+        let (temp, originals) = fixture();
+        let journal_path = temp.path().join("mutations.json");
+        let journal = mutate(
+            &options(temp.path(), MutationProfile::Adjacent),
+            &journal_path,
+        )
+        .unwrap();
+
+        assert_eq!(journal.mutations.len(), 4);
+        let mut by_path: BTreeMap<&PathBuf, Vec<usize>> = BTreeMap::new();
+        for item in &journal.mutations {
+            by_path.entry(&item.path).or_default().push(item.part_index);
+        }
+        assert_eq!(by_path.len(), 2);
+        for indexes in by_path.values() {
+            assert_eq!(indexes.len(), 2);
+            assert_eq!(indexes[1], indexes[0] + 1, "entries must be adjacent");
+        }
+        assert_restores(&temp, &originals, &journal_path);
+    }
+
+    #[test]
+    fn preserve_mtime_hides_the_change_from_a_timestamp_fingerprint() {
+        let (temp, originals) = fixture();
+        let journal_path = temp.path().join("mutations.json");
+        let before: BTreeMap<_, _> = originals
+            .keys()
+            .map(|path| {
+                (
+                    path.clone(),
+                    fs::metadata(temp.path().join(path))
+                        .unwrap()
+                        .modified()
+                        .unwrap(),
+                )
+            })
+            .collect();
+        std::thread::sleep(Duration::from_millis(20));
+        let mut options = options(temp.path(), MutationProfile::Scattered);
+        options.preserve_mtime = true;
+        let journal = mutate(&options, &journal_path).unwrap();
+        for item in &journal.mutations {
+            let full = temp.path().join(&item.path);
+            assert_ne!(fs::read(&full).unwrap(), originals[&item.path]);
+            assert_eq!(
+                fs::metadata(&full).unwrap().modified().unwrap(),
+                before[&item.path]
+            );
+        }
         assert_restores(&temp, &originals, &journal_path);
     }
 

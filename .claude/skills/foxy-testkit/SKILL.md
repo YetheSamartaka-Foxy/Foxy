@@ -21,7 +21,8 @@ Follow its instructions exactly. Use this project skill as `/foxy-testkit` in Cl
 The kit is the `foxy-testkit` binary (`cargo build -p foxy-testkit`); there is no PowerShell or Python in it.
 
 - **One case:** `foxy-testkit run --case .\testkit\cases\<id>.json --no-build`
-- **Suite:** `foxy-testkit suite --filter "ux-*" --no-build` or `--tag database`
+- **Suite:** `foxy-testkit suite --filter "ux-*" --no-build` or `--tag database`; comma-separated globs run a fixed lane list (flagship: `--filter "perf-redownload-small-ssd,perf-startup-arma3-live"`)
+- **Measurement table:** `foxy-testkit measurements [--filter <text>] [--json]` renders the curated rows for `conventions/SPEED_OF_LIGHT_MEASUREMENTS.md`
 - **Validate only:** add `--validate-only` (no build, no launch, no disk writes to the target)
 - **Database variants:** `--database-mode wal|mvcc`, then `foxy-testkit compare --case-id <id>`
 - **Kit changes:** verify with `foxy-testkit replay --all` before running a case

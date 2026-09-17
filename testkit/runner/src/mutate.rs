@@ -10,8 +10,11 @@ use std::{
 pub struct Mutation {
     pub executable: PathBuf,
     pub root: PathBuf,
+    /// The first journal is `mutations.json`; every further `mutate` in the
+    /// same iteration gets its own numbered journal, restored in reverse.
     pub journal: PathBuf,
     pub timeout: Duration,
+    pub journals: Vec<PathBuf>,
 }
 
 impl Mutation {
@@ -19,13 +22,19 @@ impl Mutation {
         if let Some(path) = operation["path"].as_str() {
             self.root = PathBuf::from(path);
         }
+        let journal = if self.journals.is_empty() {
+            self.journal.clone()
+        } else {
+            self.journal
+                .with_file_name(format!("mutations-{}.json", self.journals.len()))
+        };
         let mut command = Command::new(&self.executable);
         command
             .arg("mutate")
             .arg("--root")
             .arg(&self.root)
             .arg("--journal")
-            .arg(&self.journal)
+            .arg(&journal)
             .arg("--profile")
             .arg(operation["profile"].as_str().unwrap_or("single-entry"))
             .arg("--seed")
@@ -44,6 +53,9 @@ impl Mutation {
                 );
             }
         }
+        if operation["preserve_mtime"].as_bool().unwrap_or(false) {
+            command.arg("--preserve-mtime");
+        }
         for target in operation["targets"].as_array().into_iter().flatten() {
             command.arg("--target").arg(
                 target
@@ -57,13 +69,16 @@ impl Mutation {
             "Mutation failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+        self.journals.push(journal);
         Ok(serde_json::from_slice(&output.stdout)?)
     }
-    pub fn restore(&self) -> Result<()> {
-        if !self.journal.exists() {
-            return Ok(());
+    pub fn restore(&mut self) -> Result<()> {
+        while let Some(journal) = self.journals.pop() {
+            if journal.exists() {
+                restore(&self.executable, &self.root, &journal, self.timeout)?;
+            }
         }
-        restore(&self.executable, &self.root, &self.journal, self.timeout)
+        Ok(())
     }
 }
 

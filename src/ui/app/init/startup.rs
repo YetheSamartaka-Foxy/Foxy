@@ -501,6 +501,7 @@ impl Foxy {
             last_incomplete_config_sync_toast_at: None,
             show_memory_diagnostics_window: false,
             fps_ema: 0.0,
+            frame_intervals_ms: VecDeque::new(),
             memory_diagnostics_history: VecDeque::new(),
             memory_diagnostics_pinned_baseline: None,
             memory_diagnostics_last_sample_at: None,
@@ -555,6 +556,7 @@ impl Foxy {
             game_space_settings_view_state:
                 crate::ui::views::game_spaces::settings::GameSpaceSettingsViewState::default(),
             pending_game_space_switch: None,
+            game_space_switch_requested_at: None,
             // Steam Workshop
             workshop_view_state: crate::ui::views::workshop::WorkshopViewState::default(),
             workshop_task_rx: None,

@@ -8,6 +8,7 @@ use std::time::Duration;
 use eframe::egui;
 use log::{info, warn};
 
+use crate::core::api;
 use crate::core::game::spaces::{self, GameSpaceEntry};
 use crate::ui::app::Foxy;
 use crate::ui::types::{FoxyView, RepositorySettingsTab, RepositoryViewState};
@@ -54,6 +55,7 @@ impl Foxy {
         }
         info!("Game space switch requested: {}", entry.id);
         self.pending_game_space_switch = Some(entry.clone());
+        self.game_space_switch_requested_at = Some(std::time::Instant::now());
         self.needs_repaint = true;
     }
 
@@ -97,12 +99,55 @@ impl Foxy {
         // is first opened, mirroring the startup ordering in main.rs.
         crate::core::tasks::init_database::check_and_wipe_database();
 
+        let switch_started = std::time::Instant::now();
         self.stop_fs_watcher();
         self.reset_space_scoped_state();
+        let reset_elapsed = switch_started.elapsed();
         self.reload_active_game_space(ctx);
 
         self.current_view = FoxyView::RepositoryList;
         self.last_view = FoxyView::None;
+        // The action record: request to the new space's state visible, with
+        // the drain wait (queued saves landing in the old space) separated
+        // from the reset and reload.
+        let requested = self.game_space_switch_requested_at.take();
+        let total = requested.map_or(switch_started.elapsed(), |at| at.elapsed());
+        info!(
+            "{}",
+            crate::core::utils::speed_of_light::sol_line(
+                "space_switch",
+                0,
+                total,
+                &crate::core::utils::speed_of_light::SolLight::SelfBaseline,
+                &[
+                    ("op_id", api::next_operation_id("space-switch")),
+                    ("outcome", "completed".to_string()),
+                    (
+                        "drain_s",
+                        format!(
+                            "{:.3}",
+                            total.saturating_sub(switch_started.elapsed()).as_secs_f64()
+                        ),
+                    ),
+                    ("reset_s", format!("{:.3}", reset_elapsed.as_secs_f64())),
+                    (
+                        "reload_s",
+                        format!(
+                            "{:.3}",
+                            switch_started
+                                .elapsed()
+                                .saturating_sub(reset_elapsed)
+                                .as_secs_f64()
+                        ),
+                    ),
+                    (
+                        "repositories",
+                        self.repository_view_state.repositories.len().to_string(),
+                    ),
+                    ("timer_scope", "action_wall".to_string()),
+                ],
+            )
+        );
         self.show_success_toast(self.t_fmt(
             "Game space {name} is now active.",
             &[("name", opened.display_name.clone())],
@@ -517,6 +562,7 @@ const APP_GLOBAL_FOXY_FIELDS: &[&str] = &[
     "current_help_tab",
     "current_about_tab",
     "fps_ema",
+    "frame_intervals_ms",
     "last_applied_palette",
     "cached_color32",
     "last_font_image_size",
@@ -541,6 +587,7 @@ const APP_GLOBAL_FOXY_FIELDS: &[&str] = &[
     "storage_compat_notice",
     "game_spaces_view_state",
     "pending_game_space_switch",
+    "game_space_switch_requested_at",
     // Worker channel endpoints; the view state they feed is reset above.
     "workshop_task_rx",
     "workshop_task_worker",

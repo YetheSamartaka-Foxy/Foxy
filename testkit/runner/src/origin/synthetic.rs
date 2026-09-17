@@ -28,6 +28,9 @@ pub struct SyntheticOptions {
     pub seed: i32,
     #[arg(long, default_value = "TestKit Synthetic Writes")]
     pub repo_name: String,
+    /// Generator mode: `foxy` (BLAKE3 parts), `swifty` (MD5, legacy `mod.srf`) or `hybrid`.
+    #[arg(long, default_value = "foxy")]
+    pub mode: String,
     #[arg(long)]
     pub force: bool,
 }
@@ -104,7 +107,7 @@ impl SyntheticOptions {
         fs::remove_dir(&output)?;
         prepare_target(&source, self.force)?;
         let mut random = DotNetRandom::new(self.seed);
-        let mut buffer = vec![0; self.file_bytes];
+        let mut buffer = vec![0; self.file_bytes.min(8 << 20)];
         let mut names = Vec::new();
         for index in 0..self.mods {
             let name = format!("@synthetic_{index:03}");
@@ -118,11 +121,16 @@ impl SyntheticOptions {
                         &bytes,
                     )?;
                 } else {
-                    random.fill(&mut buffer);
-                    fs::write(
+                    let mut output = fs::File::create(
                         directory.join("addons").join(format!("part_{file:05}.bin")),
-                        &buffer,
                     )?;
+                    let mut remaining = self.file_bytes;
+                    while remaining > 0 {
+                        let chunk = remaining.min(buffer.len());
+                        random.fill(&mut buffer[..chunk]);
+                        std::io::Write::write_all(&mut output, &buffer[..chunk])?;
+                        remaining -= chunk;
+                    }
                 }
             }
             fs::write(directory.join("meta.cpp"), format!("name = \"{name}\";\n"))?;
@@ -157,22 +165,29 @@ impl SyntheticOptions {
             .args(["--no-progress", "create"])
             .arg(&config_path)
             .arg(&output)
-            .args(["--threads", &threads])
+            .args(["--threads", &threads, "--mode", &self.mode])
             .status()?;
         if !status.success() {
             bail!("repository generation failed: {status}");
         }
         let (mut files, mut parts) = (0_u64, 0_u64);
         for name in &names {
-            let manifest: Value =
-                serde_json::from_slice(&fs::read(output.join(name).join("foxy_addon.json"))?)?;
-            if let Some(entries) = manifest["files"].as_array() {
+            let manifest: Value = match fs::read(output.join(name).join("foxy_addon.json")) {
+                Ok(bytes) => serde_json::from_slice(&bytes)?,
+                Err(_) => serde_json::from_slice(&fs::read(output.join(name).join("mod.srf"))?)?,
+            };
+            // `mod.srf` (swifty mode) spells the same keys in PascalCase.
+            let entries = manifest["files"]
+                .as_array()
+                .or_else(|| manifest["Files"].as_array());
+            if let Some(entries) = entries {
                 files += entries.len() as u64;
                 parts += entries
                     .iter()
                     .map(|entry| {
                         entry["parts"]
                             .as_array()
+                            .or_else(|| entry["Parts"].as_array())
                             .map_or(0, |parts| parts.len() as u64)
                     })
                     .sum::<u64>();
@@ -190,7 +205,7 @@ impl SyntheticOptions {
                     })
             },
         )?;
-        let summary = json!({"kind": "synthetic", "generated_utc": chrono::Utc::now().to_rfc3339(), "seed": self.seed, "mods": names.len(), "files": files, "parts": parts, "payload_bytes": bytes});
+        let summary = json!({"kind": "synthetic", "generated_utc": chrono::Utc::now().to_rfc3339(), "seed": self.seed, "mode": self.mode, "mods": names.len(), "files": files, "parts": parts, "payload_bytes": bytes});
         write_json(&output.join("origin.json"), &summary)?;
         fs::remove_dir_all(&source)?;
         Ok(summary)

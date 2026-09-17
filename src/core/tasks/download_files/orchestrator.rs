@@ -73,8 +73,10 @@ fn download_limits_for_profile(
     }
 }
 
-/// Nominal sequential rate of a 7200 rpm disk; the disk light is a floor for
-/// reading the ratio, not a measured ceiling.
+/// Nominal sequential rate of a 7200 rpm disk. A reading aid, not a
+/// calibrated device bound: the traffic model counts logical bytes and cannot
+/// tell a platter read from a page-cache hit, so its ratio is labelled
+/// nominal and may legitimately exceed one on a warm run.
 const ROTATIONAL_SEQUENTIAL_BPS: u64 = 110_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -82,12 +84,16 @@ struct DiskLight {
     bytes: u64,
     light_bps: u64,
     ideal_secs: f64,
+    /// `ideal / actual` unclamped; `None` when the elapsed time is zero.
+    ratio_raw: Option<f64>,
+    /// Legacy clamped ratio, `0.0` when no ratio is computable.
     ratio: f64,
 }
 
-/// Disk traffic of a download stage on rotational media: `full_bytes` written
-/// once, the patch sources (`delta_savings_bytes`) read once, and every byte
-/// that was not delta patched read back by the on-arrival hash.
+/// Logical disk traffic of a download stage on rotational media: `full_bytes`
+/// written once, the patch sources (`delta_savings_bytes`) read once, and every
+/// byte that was not delta patched read back by the on-arrival hash. Logical,
+/// not physical: a reread served from the page cache is counted all the same.
 fn rotational_disk_light(
     full_bytes: u64,
     delta_savings_bytes: u64,
@@ -99,17 +105,30 @@ fn rotational_disk_light(
         .saturating_add(delta_savings_bytes)
         .saturating_add(hash_reread_bytes);
     let ideal_secs = bytes as f64 / ROTATIONAL_SEQUENTIAL_BPS as f64;
-    let actual_secs = elapsed.as_secs_f64();
-    let ratio = if actual_secs > 0.0 {
-        (ideal_secs / actual_secs).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
+    let ratio_raw =
+        crate::core::utils::speed_of_light::sol_ratio_raw(ideal_secs, elapsed.as_secs_f64());
     DiskLight {
         bytes,
         light_bps: ROTATIONAL_SEQUENTIAL_BPS,
         ideal_secs,
-        ratio,
+        ratio_raw,
+        ratio: ratio_raw.map_or(0.0, |ratio| ratio.clamp(0.0, 1.0)),
+    }
+}
+
+/// Terminal outcome of the download stage as carried on its `SOL` line, so
+/// consumers can keep cancelled and failed runs out of best-case selection.
+fn download_sol_outcome(
+    cancelled: bool,
+    mods_failed: usize,
+    mods_cancelled: usize,
+) -> &'static str {
+    if cancelled || mods_cancelled > 0 {
+        "cancelled"
+    } else if mods_failed > 0 {
+        "failed"
+    } else {
+        "completed"
     }
 }
 
@@ -1420,16 +1439,80 @@ pub(crate) async fn download_files(
         _ if peak_bps > 0 => SolLight::PeakSample(peak_bps),
         _ => SolLight::SelfBaseline,
     };
+    let cancelled = cancellation_requested(&cancel_rx);
     let mut sol_extras = vec![
         ("files", total_files.to_string()),
         ("peak_1s_bps", peak_bps.to_string()),
         ("delta_savings_percent", delta_savings_percent.to_string()),
         ("destination_storage", format!("{destination_storage:?}")),
+        ("op_id", operation_id.to_string()),
+        (
+            "outcome",
+            download_sol_outcome(cancelled, mods_failed, mods_cancelled).to_string(),
+        ),
+        ("mods_succeeded", mods_succeeded.to_string()),
+        ("mods_failed", mods_failed.to_string()),
+        ("mods_cancelled", mods_cancelled.to_string()),
+        ("full_bytes", total_full_bytes.to_string()),
+        ("delta_savings_bytes", delta_savings_bytes.to_string()),
+        ("expected_bytes", total_expected_bytes.to_string()),
+        ("credited_bytes", total_downloaded_bytes.to_string()),
+        (
+            "range_retries",
+            metrics
+                .counters
+                .range_retries
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .to_string(),
+        ),
+        (
+            "peak_window_s",
+            format!("{:.3}", metrics.peak_window().as_secs_f64()),
+        ),
     ];
-    // On a rotational destination the disk, not the link, bounds the stage:
-    // every byte is written once, patch sources are read once, and full
-    // downloads are read back by the hash. Report that light too so a low
-    // network ratio is not misread as a slow link.
+    // The ramp before the first plateau window and the tail after the last
+    // one are the two terms between the plateau rate and the wall time.
+    let series = metrics.series();
+    let shape = super::metrics::ramp_tail_profile(&series, peak_bps, download_elapsed);
+    if shape.reached {
+        sol_extras.push(("ramp_s", format!("{:.3}", shape.ramp.as_secs_f64())));
+        sol_extras.push(("plateau_s", format!("{:.3}", shape.plateau.as_secs_f64())));
+        sol_extras.push(("tail_s", format!("{:.3}", shape.tail.as_secs_f64())));
+        sol_extras.push(("ramp_deficit_bytes", shape.ramp_deficit_bytes.to_string()));
+        sol_extras.push(("tail_deficit_bytes", shape.tail_deficit_bytes.to_string()));
+        let describe = |point: &super::metrics::SeriesPoint| {
+            format!(
+                "{:.1}s:{:.1}MB/s:{}f/{}r",
+                point.end_offset.as_secs_f64(),
+                point.network_delta as f64 / point.elapsed.as_secs_f64().max(1e-9) / 1e6,
+                point.active_files,
+                point.active_ranges
+            )
+        };
+        let ramp: Vec<String> = series
+            .iter()
+            .take(shape.ramp_windows + 1)
+            .take(12)
+            .map(describe)
+            .collect();
+        let tail: Vec<String> = series.iter().rev().take(4).map(describe).collect();
+        info!(
+            "Download shape: op={} ramp={:.2}s plateau={:.2}s tail={:.2}s ramp_deficit={} tail_deficit={} ramp_windows=[{}] tail_windows=[{}]",
+            operation_id,
+            shape.ramp.as_secs_f64(),
+            shape.plateau.as_secs_f64(),
+            shape.tail.as_secs_f64(),
+            metrics_format_bytes(shape.ramp_deficit_bytes),
+            metrics_format_bytes(shape.tail_deficit_bytes),
+            ramp.join(" "),
+            tail.join(" ")
+        );
+    }
+    // On a rotational destination the disk, not the link, is the likelier
+    // bound: every byte is written once, patch sources are read once, and full
+    // downloads are read back by the hash. Report that nominal light too so a
+    // low network ratio is not misread as a slow link; it is logical traffic
+    // against a nominal rate, not a calibrated device bound.
     if matches!(
         destination_storage,
         HashStorageClass::Hdd | HashStorageClass::Removable
@@ -1449,6 +1532,12 @@ pub(crate) async fn download_files(
         sol_extras.push(("disk_ideal_s", format!("{:.3}", disk.ideal_secs)));
         sol_extras.push(("disk_sol", format!("{:.3}", disk.ratio)));
         sol_extras.push(("disk_light_src", "nominal_hdd_sequential".to_string()));
+        sol_extras.push((
+            "disk_sol_raw",
+            disk.ratio_raw
+                .map_or_else(|| "na".to_string(), |ratio| format!("{ratio:.4}")),
+        ));
+        sol_extras.push(("disk_reference_status", "nominal".to_string()));
     }
     info!(
         "{}",
@@ -1619,8 +1708,28 @@ mod tests {
         assert_eq!(disk.bytes, 23_200_000_000 + 11_400_000_000 + 11_800_000_000);
         assert!((disk.ideal_secs - 421.8).abs() < 1.0);
         assert!(disk.ratio > 0.56 && disk.ratio < 0.57);
+        assert_eq!(disk.ratio_raw.map(|r| (r * 1000.0).round()), Some(564.0));
         let zero = rotational_disk_light(0, 0, 0, std::time::Duration::ZERO);
         assert_eq!(zero.ratio, 0.0);
+        assert_eq!(zero.ratio_raw, None);
+    }
+
+    #[test]
+    fn rotational_disk_light_keeps_a_warm_run_above_one_in_the_raw_ratio() {
+        // 4.33 GB written plus a presumed full reread is 78.7 s at the nominal
+        // rate; a warm run finishing in 45 s is faster than the nominal bound,
+        // which the raw ratio must show instead of reading as "at the light".
+        let disk = rotational_disk_light(4_331_121_846, 0, 0, std::time::Duration::from_secs(45));
+        assert_eq!(disk.ratio, 1.0);
+        assert!(disk.ratio_raw.unwrap() > 1.7);
+    }
+
+    #[test]
+    fn download_sol_outcome_prefers_cancelled_then_failed() {
+        assert_eq!(download_sol_outcome(false, 0, 0), "completed");
+        assert_eq!(download_sol_outcome(false, 2, 0), "failed");
+        assert_eq!(download_sol_outcome(false, 2, 1), "cancelled");
+        assert_eq!(download_sol_outcome(true, 0, 0), "cancelled");
     }
 
     #[test]

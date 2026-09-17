@@ -368,6 +368,7 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
         progress_tx,
         total_files,
         None,
+        context.operation_id(),
     )
     .await;
     phase_timings.hash_wall += hash_started.elapsed();

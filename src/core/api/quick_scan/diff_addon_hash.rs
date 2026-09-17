@@ -43,6 +43,9 @@ pub(super) struct AddonHashResult {
     pub addon_hash_calculated: usize,
     pub persistent_cache_entry_count: usize,
     pub enabled_addons: usize,
+    /// Directory entries enumerated and stat-ed by the fingerprint walks of
+    /// this scan (files plus directories), the work unit of O4.
+    pub entries_walked: u64,
     pub phase1_addon_content_mismatch_count: usize,
     pub missing_addon_path_samples: Vec<String>,
 }
@@ -59,6 +62,7 @@ pub(super) async fn resolve_addon_hashes(
     let mut addon_hash_hits_shared_memory = 0usize;
     let mut addon_hash_hits_persistent = 0usize;
     let mut addon_hash_calculated = 0usize;
+    let mut entries_walked = 0u64;
     let persistent_cache_entry_count = if let Some(shared) = shared_cache {
         match shared.lock() {
             Ok(guard) => guard.persistent_addon_hash_by_path.len(),
@@ -160,6 +164,7 @@ pub(super) async fn resolve_addon_hashes(
         else {
             continue;
         };
+        entries_walked += fingerprint.relevant_file_count + fingerprint.relevant_dir_count;
 
         if !fingerprint.exists || !fingerprint.is_dir {
             if missing_addon_path_samples.len() < MISSING_ADDON_PATH_SAMPLE_LIMIT {
@@ -415,6 +420,7 @@ pub(super) async fn resolve_addon_hashes(
         addon_hash_calculated,
         persistent_cache_entry_count,
         enabled_addons,
+        entries_walked,
         phase1_addon_content_mismatch_count,
         missing_addon_path_samples,
     }

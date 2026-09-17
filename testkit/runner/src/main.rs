@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
+mod calibrate;
 mod case;
 mod collect;
 mod driver;
@@ -10,8 +11,10 @@ mod fixture;
 mod guards;
 mod launch;
 mod ledger;
+mod measurements;
 mod mutate;
 mod origin;
+mod references;
 mod replay;
 mod report;
 mod run;
@@ -93,6 +96,43 @@ enum Command {
         candidate_gate: u32,
         #[arg(long, default_value = "warm")]
         cache_state: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Measure the independent references (origin throughput and latency,
+    /// repository volume disk rates, compute-only hash capacity) a case's rows
+    /// cite for calibrated ratios; results land in testkit/ledger/calibration.json.
+    Calibrate {
+        #[arg(long)]
+        case: PathBuf,
+        /// Comma-separated lanes: network, latency, disk, hash, metadata, db, hosts (default: all).
+        #[arg(long)]
+        lanes: Option<String>,
+        /// Seconds of sustained origin load for the network lane.
+        #[arg(long, default_value_t = 20)]
+        seconds: u64,
+        /// Size of the disk calibration file in MiB.
+        #[arg(long, default_value_t = 1024)]
+        disk_mib: u64,
+        /// Concurrent range requests for the aggregate network lane.
+        #[arg(long, default_value_t = 96)]
+        connections: usize,
+        /// Range request size in bytes for the network lane.
+        #[arg(long, default_value_t = 2_097_152)]
+        chunk_bytes: u64,
+        /// Comma-separated URLs for the `hosts` lane (HTTP or HTTPS); the case
+        /// address when omitted.
+        #[arg(long)]
+        hosts: Option<String>,
+    },
+    /// Render the curated measurement table (Markdown by default) from the
+    /// latest valid run of every case and its accepted baseline.
+    Measurements {
+        /// Only cases whose id contains this text.
+        #[arg(long)]
+        filter: Option<String>,
+        #[arg(long, default_value = "testkit/ledger")]
+        ledger_dir: PathBuf,
         #[arg(long)]
         json: bool,
     },
@@ -271,6 +311,55 @@ fn main() -> Result<()> {
             } else {
                 print!("{}", report::compare_table(&report));
             }
+        }
+        Command::Calibrate {
+            case,
+            lanes,
+            seconds,
+            disk_mib,
+            connections,
+            chunk_bytes,
+            hosts,
+        } => {
+            let lanes = lanes
+                .map(|list| {
+                    list.split(',')
+                        .map(|lane| lane.trim().to_owned())
+                        .filter(|lane| !lane.is_empty())
+                        .collect()
+                })
+                .unwrap_or_else(|| calibrate::LANES.iter().map(|l| (*l).to_owned()).collect());
+            print_json(&calibrate::execute(
+                repo_root,
+                &calibrate::Options {
+                    case,
+                    lanes,
+                    seconds,
+                    disk_mib,
+                    connections,
+                    chunk_bytes,
+                    hosts: hosts
+                        .map(|list| {
+                            list.split(',')
+                                .map(|url| url.trim().to_owned())
+                                .filter(|url| !url.is_empty())
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                },
+            )?)?;
+        }
+        Command::Measurements {
+            filter,
+            ledger_dir,
+            json,
+        } => {
+            let dir = if ledger_dir.is_absolute() {
+                ledger_dir
+            } else {
+                repo_root.join(ledger_dir)
+            };
+            print!("{}", measurements::render(&dir, filter.as_deref(), json)?);
         }
         Command::Replay { run_dir, all, json } => {
             let report = replay::corpus(repo_root, run_dir.as_deref(), all)?;

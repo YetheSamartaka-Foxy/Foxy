@@ -56,8 +56,107 @@ the runner emits a confirmed verdict; the first occurrence is `candidate`.
 
 Rows from iteration 0 are marked `cold` and excluded from warm medians. With
 `warmup:true`, the warmup pass is not ledgered and every recorded pass is
-`warm`. Comparisons never cross case hash, harness, build kind, database mode,
-write-gate size, or storage class.
+`warm`. An operation that follows an `evict-cache` step in the same iteration
+is marked `evicted` instead, whatever its iteration number (since 2026-09-16;
+before that such rows were `warm` after iteration zero). Evicted rows form
+their own lane: medians and baselines key them as `<op>@evicted`, and a
+comparison between a warm and an evicted lane is refused rather than
+averaged. Comparisons never cross case hash, harness, build kind, database
+mode, write-gate size, storage class, or cache lane.
+
+Medians are grouped by operation label when the case gives one (`label`,
+otherwise `op`), so two `quick-check` steps with different initial states are
+compared each against its own counterpart.
+
+A baseline accepted since 2026-09-16 also stores the run `profile` (harness,
+build kind, database mode, write gate, pool policy, storage class) and each
+operation's `cache_state`. `compare` validates that profile before any metric:
+a mismatch yields the verdict `profile-mismatch` with `profile-mismatch:<key>`
+flags, and a baseline recorded without a profile yields `rebaseline-required`
+with `baseline-profile-missing`. A current lane the baseline never measured
+(`baseline-missing-op:<key>`) or a lane recorded under another cache state
+(`cache-lane-mismatch:<key>`) is likewise reported instead of passing
+unmeasured. Older baselines therefore need a fresh `--accept` on a clean
+revision; their numbers are still readable in the file.
+
+Each row carries `environment` (CPU brand, OS family and major version, total
+memory rounded to 8 GiB, origin host or `loopback`); a baseline accepted since
+2026-09-16 stores it under `profile.environment`, and `compare` retires the
+baseline with `rebaseline-required` and `environment-changed:<key>` flags when
+any of them differs. This is an expiry rule, not a comparison key: rows from
+another machine or origin never inherit this machine's reference.
+
+Each row also carries `diagnostics` (`profile` when the case ran with
+`FOXY_PROFILE`, else `none`; a profile key, so profiled and unprofiled rows
+never compare), `origin_checksum` (the `checksum` the origin published at run
+start; a baseline accepted under another one is refused with
+`origin-changed`, the same verdict as a changed case hash) and `references`:
+the calibration lanes from `testkit/ledger/calibration.json`
+(`foxy-testkit calibrate`) that match the row's machine, origin, storage
+class and repository volume, by id and the numbers the ratios use. From them
+`build_row` derives `download.sol_calibrated` (body bytes at the origin's
+sustained aggregate rate over the transfer's `actual_s`),
+`hash.sol_calibrated` (hashed bytes at the slower of the disk read lane and
+the matching all-core algorithm lane, BLAKE3 or MD5, over `hash_total_s`; the
+read lane is the faster of the single-reader and parallel page-cache lanes
+for a warm row and of the device lanes for an explicitly evicted one; a cold
+iteration-0 row without an `evict-cache` is unrated because its cache state
+is unknown),
+`startup_probe.sol_calibrated` (one fresh request) and, on a no-change exit,
+`sync_action.sol_calibrated` (one fresh index request plus a reused one per
+further index request), each beside a `reference_id`. These are calibrated
+estimates: unclamped, and above one when the reference was not a bound for
+that run. A baseline stores the ids it cited; recalibrating retires it with
+`reference-changed:<lane>`. Rows without a matching lane keep their records
+untouched, and `replay` reproduces the ratios because the selected
+references travel with the row.
+
+Memory metrics (`memory.*`) are advisory (conventions/SPEED_OF_LIGHT.md,
+resource trade policy): a move outside tolerance is reported as
+`advisory-regression` / `advisory-improvement` with a `memory-advisory` flag
+and never sets the run's verdict.
+
+The complete-action records `remote_refresh`, `sync_action`, `db_persist`,
+`db_purge` and `space_switch` (added 2026-09-16) sit beside the legacy
+per-operation fields with the same last-record shape; `remote_refresh.actual_s`
+and `sync_action.actual_s` are compared as durations. `quick_scan.sol_calibrated`
+(entries at the B5 metadata rate) joins the calibrated metrics; the DB lane
+rides on the row as a reference (`references.db`, insert, keyed-update and
+delete rows per second) but `db_purge` and `db_persist` get no ratio while
+their counters mix statement kinds; `summary.cancel_quiescent_ms`
+is the cancel-to-quiescent latency of a `cancel_after_s` lane, and
+`breakdown.run_metrics.patch_fallbacks` / `patch_applies` count apply-time
+delta fallbacks and successful applies (2026-09-16).
+
+Added later on 2026-09-16: `db_persist.rows_affected` (rows the engine
+changed during the action, the work count a future per-kind ratio needs);
+`download.ramp_s`, `plateau_s`, `tail_s`, `ramp_deficit_bytes` and
+`tail_deficit_bytes` (the transfer stage split around its plateau, present
+once a window reached 90% of the peak); `summary.ui_probe` (`samples`,
+`frame_ms_max`, `frame_ms_p95_worst`, `fps_min`, `rtt_ms_p50`, `rtt_ms_p95`)
+on an operation that ran with `ui_probe_ms`; and
+`breakdown.run_metrics.patch_range_requests` / `patch_gap_bytes` /
+`patch_copy_bytes` for the locality of a patch fetch and `patch_cancelled`
+for attempts a cancel interrupted; `startup_probe.first_answer_s` /
+`last_answer_s` for the spread between the fastest and slowest branch of a
+startup probe. `sync_action` gains a
+`stage_prepared_queue_prune_s` stage when a reused queue dropped files a
+cancelled run had already verified.
+
+Each row also carries `sol_aggregate.<op>`: the run count, rated-run count,
+summed `actual_s` (service time over every batch, not the action makespan),
+summed `work_bytes`, the derived rate, and the set of `outcome` values with a
+`completed` flag. The per-operation field (`hash`, `download`, ...) keeps the
+legacy last-record view so recorded rows replay byte-identical. SOL records are
+parsed from canonical event lines only: a GUI-harness slice echoes every event
+once without a timestamp, and those echoes no longer double the aggregate.
+Integer counters in SOL and DB key/value records are kept as exact integers
+(previously every number was a float; replay treats `100` and `100.0` as equal).
+
+An `expect` entry or a `thresholds` gate with `min`, `max` or `between` fails
+when the value is missing, null or not a finite number, instead of treating it
+as zero. Declare `"optional": true` on a gate whose metric may legitimately be
+absent on some operations.
 
 The runner marks rows invalid for failed assertions, a detected DB wipe,
 incomplete expected payload, a failed independent oracle, runaway bytes, or an

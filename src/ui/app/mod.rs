@@ -485,6 +485,9 @@ pub struct Foxy {
     /// Smoothed frames-per-second estimate driving the optional on-screen FPS
     /// counter. Runtime-only; not persisted.
     pub fps_ema: f32,
+    /// Recent frame intervals in milliseconds while a frame probe keeps the
+    /// UI repainting, so the agent probe can report stalls, not only an average.
+    pub frame_intervals_ms: VecDeque<f32>,
     pub memory_diagnostics_history: VecDeque<MemoryDiagnosticsSample>,
     pub memory_diagnostics_pinned_baseline: Option<MemoryDiagnosticsSample>,
     pub memory_diagnostics_last_sample_at: Option<Instant>,
@@ -552,6 +555,9 @@ pub struct Foxy {
     /// Runtime game-space switch waiting for pending saves to drain before it
     /// swaps the active space and reloads.
     pub pending_game_space_switch: Option<crate::core::game::spaces::GameSpaceEntry>,
+    /// When the pending switch was requested, for the `SOL op=space_switch`
+    /// record (request to the new space visible).
+    pub game_space_switch_requested_at: Option<std::time::Instant>,
     // Steam Workshop
     pub workshop_view_state: crate::ui::views::workshop::WorkshopViewState,
     /// Result channel of the Workshop worker. Workshop actions download through

@@ -2,6 +2,7 @@ use crate::core::models::download_patch_op::DownloadPatchOp;
 use crate::core::models::modification_file_part::FoxyModFilePart;
 use crate::core::utils::content_hash::FlexHasher;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 pub(super) const PATCH_SCHEMA_VERSION: u32 = 1;
 pub(super) const PATCH_STATUS_PLANNED: &str = "planned";
 pub(super) const PATCH_STATUS_DOWNLOADING: &str = "downloading";
@@ -31,9 +32,37 @@ const INSERT_RUN_GAP_BUDGET_MS: u64 = 8;
 /// Gap bridged before any throughput sample exists (a stage that starts with
 /// patches plans them all at once): one small entry, break-even at ~4 MB/s.
 const INSERT_RUN_MIN_GAP_BYTES: u64 = 32 * 1024;
-/// Upper bound on one coalesced insert request, so a retry repeats at most
-/// this much.
+/// Upper bound on one coalesced insert request for a budget outside the
+/// download orchestrator (tests); the orchestrator passes its chunk size.
+#[cfg(test)]
 pub(super) const INSERT_RUN_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Request capacity a patched file's insert-run downloads draw from. The
+/// origin caps every connection at a low rate, so aggregate throughput is
+/// bought with concurrent requests; patched files therefore share the same
+/// global range budget and chunk size as full downloads instead of a fixed
+/// handful of connections per file.
+#[derive(Clone)]
+pub(crate) struct PatchRequestBudget {
+    /// Global permits shared with full-download range requests.
+    pub(crate) range_permits: Arc<tokio::sync::Semaphore>,
+    /// Requests one file may hold at once (the per-file fair-share cap).
+    pub(crate) per_file_requests: usize,
+    /// Upper bound on one coalesced insert request.
+    pub(crate) max_run_bytes: u64,
+}
+
+#[cfg(test)]
+impl PatchRequestBudget {
+    /// A budget of `requests` connections for one file with no global cap.
+    pub(crate) fn standalone(requests: usize) -> Self {
+        Self {
+            range_permits: Arc::new(tokio::sync::Semaphore::new(requests.max(1))),
+            per_file_requests: requests.max(1),
+            max_run_bytes: INSERT_RUN_MAX_BYTES,
+        }
+    }
+}
 pub(super) const PATCH_PREFLIGHT_COPY_SAMPLE_OPS: usize = 24;
 pub(super) const PATCH_COPY_FALLBACK_ABORT_MIN_ATTEMPTED_OPS: usize = 12;
 const PATCH_COPY_FALLBACK_ABORT_PERCENT: u64 = 75;
@@ -356,16 +385,27 @@ pub(super) fn insert_run_gap_budget(peak_network_bps: u64) -> u64 {
 /// Group insert ops into runs: ops adjacent in the output (or separated by at
 /// most `max_gap` bytes of copy ops) share one request, up to `max_bytes` of
 /// remote range per run. Ops without a blob offset are skipped.
+#[cfg(test)]
 pub(super) fn plan_insert_runs(
     ops: &[DownloadPatchOp],
     max_gap: u64,
     max_bytes: u64,
+) -> Vec<InsertRun> {
+    plan_insert_runs_where(ops, max_gap, max_bytes, |_| true)
+}
+
+fn plan_insert_runs_where(
+    ops: &[DownloadPatchOp],
+    max_gap: u64,
+    max_bytes: u64,
+    include: impl Fn(usize) -> bool,
 ) -> Vec<InsertRun> {
     let mut runs: Vec<InsertRun> = Vec::new();
     for (idx, op) in ops.iter().enumerate() {
         if PatchOpType::from_str(&op.op_type) != Some(PatchOpType::InsertRemote)
             || op.blob_offset.is_none()
             || op.length == 0
+            || !include(idx)
         {
             continue;
         }
@@ -386,6 +426,71 @@ pub(super) fn plan_insert_runs(
         });
     }
     runs
+}
+
+/// One request-sized slice of an insert op too large to travel as a single
+/// request: fetched on its own connection and written straight into the
+/// blob; the op is verified from the blob once every slice has landed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct OpChunk {
+    pub(super) op_index: usize,
+    /// Inclusive remote range, in output coordinates.
+    pub(super) dest_start: u64,
+    pub(super) dest_end: u64,
+    pub(super) blob_at: u64,
+}
+
+impl OpChunk {
+    pub(super) fn len(&self) -> u64 {
+        self.dest_end - self.dest_start + 1
+    }
+}
+
+/// The requests for a file's insert ops: coalesced runs for ops that fit a
+/// request, and chunks for ops larger than one, so a file whose plan is a
+/// few huge inserts still spreads over as many connections as the budget
+/// grants.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(super) struct InsertRequestPlan {
+    pub(super) runs: Vec<InsertRun>,
+    pub(super) chunks: Vec<OpChunk>,
+}
+
+pub(super) fn plan_insert_requests(
+    ops: &[DownloadPatchOp],
+    max_gap: u64,
+    max_bytes: u64,
+) -> InsertRequestPlan {
+    let max_bytes = max_bytes.max(1);
+    let mut chunks = Vec::new();
+    let mut runnable: Vec<bool> = vec![true; ops.len()];
+    for (idx, op) in ops.iter().enumerate() {
+        if PatchOpType::from_str(&op.op_type) != Some(PatchOpType::InsertRemote)
+            || op.length <= max_bytes
+        {
+            continue;
+        }
+        let Some(blob_offset) = op.blob_offset else {
+            continue;
+        };
+        runnable[idx] = false;
+        let mut start = op.dest_start;
+        let end = op.dest_start + op.length - 1;
+        while start <= end {
+            let chunk_end = (start + max_bytes - 1).min(end);
+            chunks.push(OpChunk {
+                op_index: idx,
+                dest_start: start,
+                dest_end: chunk_end,
+                blob_at: blob_offset + (start - op.dest_start),
+            });
+            start = chunk_end + 1;
+        }
+    }
+    InsertRequestPlan {
+        runs: plan_insert_runs_where(ops, max_gap, max_bytes, |idx| runnable[idx]),
+        chunks,
+    }
 }
 
 pub(super) fn should_abort_copy_fallback(
@@ -480,6 +585,75 @@ mod tests {
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0].op_indices, vec![0]);
         assert_eq!(runs[1].op_indices, vec![1]);
+    }
+
+    #[test]
+    fn chunk_sized_budget_splits_a_large_blob_into_many_requests() {
+        // 32 adjacent 2 MiB ops: one 64 MiB run under the legacy cap, 32
+        // requests under the full-download chunk size, so the file can hold
+        // as many connections as the range budget grants it.
+        let ops: Vec<DownloadPatchOp> = (0..32)
+            .map(|i| op(i, PatchOpType::InsertRemote, i as u64 * (2 << 20), 2 << 20))
+            .collect();
+        assert_eq!(plan_insert_runs(&ops, 0, INSERT_RUN_MAX_BYTES).len(), 1);
+        let runs = plan_insert_runs(&ops, 0, 2 << 20);
+        assert_eq!(runs.len(), 32);
+        assert!(runs.iter().all(|run| run.request_len() == 2 << 20));
+        // `plan_insert_runs` alone cannot split an op; the request plan
+        // chunks it so it can travel over as many connections as the budget.
+        let big = vec![op(0, PatchOpType::InsertRemote, 0, 30 << 20)];
+        let runs = plan_insert_runs(&big, 0, 2 << 20);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].request_len(), 30 << 20);
+        let plan = plan_insert_requests(&big, 0, 2 << 20);
+        assert!(plan.runs.is_empty());
+        assert_eq!(plan.chunks.len(), 15);
+        assert!(plan.chunks.iter().all(|chunk| chunk.len() == 2 << 20));
+        assert_eq!(plan.chunks[14].dest_end, (30 << 20) - 1);
+    }
+
+    #[test]
+    fn request_plan_chunks_large_ops_and_runs_the_rest() {
+        let mut ops = vec![
+            op(0, PatchOpType::InsertRemote, 0, 100),
+            op(1, PatchOpType::CopyLocal, 100, 50),
+            op(2, PatchOpType::InsertRemote, 150, 1_000),
+            op(3, PatchOpType::InsertRemote, 1_150, 100),
+            op(4, PatchOpType::InsertRemote, 1_250, 450),
+        ];
+        ops[2].blob_offset = Some(100);
+        ops[4].blob_offset = Some(1_200);
+        let plan = plan_insert_requests(&ops, 60, 400);
+        // The 1,000-byte op becomes three chunks of 400/400/200 at blob
+        // offsets 100/500/900; the 450-byte op two chunks; the 100-byte ops
+        // stay runs (op 0 and op 3 are separated by the chunked op, so they
+        // do not coalesce across it).
+        assert_eq!(plan.chunks.len(), 5);
+        assert_eq!(
+            plan.chunks[..3]
+                .iter()
+                .map(|c| (c.op_index, c.dest_start, c.dest_end, c.blob_at))
+                .collect::<Vec<_>>(),
+            [(2, 150, 549, 100), (2, 550, 949, 500), (2, 950, 1_149, 900)]
+        );
+        assert_eq!(plan.chunks[3].op_index, 4);
+        assert_eq!(plan.chunks[3].len() + plan.chunks[4].len(), 450);
+        assert_eq!(plan.runs.len(), 2);
+        assert_eq!(plan.runs[0].op_indices, vec![0]);
+        assert_eq!(plan.runs[1].op_indices, vec![3]);
+        // An op without a blob offset is neither chunked nor run.
+        ops[2].blob_offset = None;
+        let plan = plan_insert_requests(&ops, 60, 400);
+        assert_eq!(plan.chunks.len(), 2);
+        assert_eq!(plan.runs.len(), 2);
+    }
+
+    #[test]
+    fn standalone_budget_never_has_zero_capacity() {
+        let budget = PatchRequestBudget::standalone(0);
+        assert_eq!(budget.per_file_requests, 1);
+        assert_eq!(budget.range_permits.available_permits(), 1);
+        assert_eq!(budget.max_run_bytes, INSERT_RUN_MAX_BYTES);
     }
 
     #[test]

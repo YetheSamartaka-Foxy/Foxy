@@ -239,6 +239,13 @@ pub fn logger_health() -> LoggerHealth {
     }
 }
 
+/// The one action id the O8 startup timeline and its remote probe share, so
+/// `SOL op=startup` and `SOL op=startup_probe` correlate by `op_id`.
+pub fn startup_operation_id() -> &'static str {
+    static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ID.get_or_init(|| next_operation_id("startup"))
+}
+
 pub fn next_operation_id(prefix: &str) -> String {
     let prefix = prefix
         .chars()

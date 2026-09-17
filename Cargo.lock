@@ -2213,6 +2213,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "insta",
+ "md-5",
  "percent-encoding",
  "regex",
  "reqwest",
@@ -2226,6 +2227,7 @@ dependencies = [
  "tokio-util",
  "tower",
  "tower-http",
+ "turso",
  "walkdir",
  "windows-sys 0.61.2",
 ]

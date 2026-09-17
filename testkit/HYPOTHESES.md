@@ -3,26 +3,33 @@
 Entries are append-only during an optimization loop. Close one with its ledger
 row; do not delete rejected ideas.
 
+Direction is stated for the metric named: a SoL ratio improves when it goes
+*higher*, a duration when it goes *lower*. Since 2026-09-16 the hash rows
+gate on the summed hash wall time rather than `hash.sol`, which for a
+self-baseline operation is never a ratio; four open rows were corrected from
+"lower" ratio to the direction they actually mean, without changing their
+claims.
+
 | Status | Claim | Primary metric | Expected direction | Cheapest case |
 | --- | --- | --- | --- | --- |
 | accepted | A wave-aligned range grid plus a per-file ceiling equal to the global budget removes the straggler wave that is the download tail | `download.sol` | higher | `perf-redownload-small-ssd` |
 | accepted | The download stage waits out the checkpoint and sampler sleeps before reading their stop flags | `summary.download_stage_ms` | lower | `perf-redownload-small-ssd` |
 | accepted | Largest-file-first within a mod, and half as many concurrent large files, shorten the makespan tail | `download.sol` | higher | `perf-redownload-small-ssd` |
-| accepted | The largest range chunk bounds the download tail, because a chunk in flight when the queue empties runs alone at one connection's rate | `download.sol` | higher | `perf-redownload-small-ssd` |
+| accepted | Reducing the range chunk from 8 MiB to 2 MiB reduced the measured tail deficit from 1.1-2.1 s to 0.25-0.54 s on the reference lane | `download.tail_deficit_bytes`, `download.tail_s` | lower | `perf-redownload-small-ssd` |
 | rejected | More than 96 concurrent range requests buys aggregate throughput | `download.sol` | higher | probe against the reference origin |
-| open | Tune per-file range count and global range budget against RTT | `download.sol` | lower | delta scattered |
-| open | Coalesce small writes without increasing retries | `download.sol`, `breakdown.disk` | lower | delta scattered |
+| open | Tune per-file range count and global range budget against RTT | `download.sol` | higher | delta scattered |
+| open | Coalesce small writes without increasing retries | `download.sol` (higher), `breakdown.disk` write time | higher ratio, lower time | delta scattered |
 | open | Reuse TLS connections more effectively | `breakdown.network.permit_wait_s` | lower | force redownload |
 | open | Tune patch copy buffer for spinning disks | `summary.total_ms` | lower | delta single-entry HDD |
 | open | Improve persistent quick-scan cache key hit rate | `quick_scan.actual_s` | lower | touch-only quick check |
-| open | Use BLAKE3 mmap rayon for large SSD files | `hash.sol` | lower | SSD recheck |
+| open | Use BLAKE3 mmap rayon for large SSD files | `breakdown.run_metrics.hash_total_s` | lower | SSD recheck |
 | open | Replace manual compaction with `VACUUM INTO` after the large probe | DB compaction elapsed | lower | large bloated DB probe |
 | rejected | Retune Turso 0.7 bulk-write chunks | DB write elapsed | lower | remote refresh |
 | accepted | Pooling tuned connections and caching their compiled statements cuts DB time | DB write elapsed | lower | `perf-db-refresh-main` |
 | rejected | Turso 0.7 MVCC can beat WAL for Foxy's metadata rebuild | DB write elapsed and correctness | lower, no failures | `perf-db-refresh-main` |
 | rejected | MVCC wins once the per-call `journal_mode` pragma is no longer paid (retest on the pooled build) | `summary.total_ms` | lower | `perf-db-refresh-main` |
 | accepted | `DB_WRITE_GATE` above 1 is worth ~18% on the metadata refresh | `summary.total_ms` | lower | `perf-db-refresh-main` |
-| open | Improve hash profile auto-selection by storage class | `hash.sol` | lower | SSD/HDD recheck pair |
+| open | Improve hash profile auto-selection by storage class | `breakdown.run_metrics.hash_total_s` | lower | SSD/HDD recheck pair |
 | closed | Cover the deferred 433k-row `subfiles` bulk insert with a payload-bearing origin | DB write elapsed | n/a, coverage gap | `perf-db-parts-bulk` |
 | accepted | Sorting the deferred part buffer into index key order speeds the bulk insert | deferred insert elapsed | lower | `perf-db-parts-bulk` |
 | rejected | Dropping and rebuilding the `subfiles` indexes around the download-overlapped flush pays | deferred insert elapsed | lower | `bench_subfiles_index_cost` |
@@ -38,8 +45,124 @@ row; do not delete rejected ideas.
 | open | Extend filesystem profiling to stat, exists, read_dir and buffered flush | profile `neither` column | shrink | `perf-db-parts-bulk-profiled` |
 | rejected | A rotational download profile with 3 concurrent large files, 16 small files and 32 MiB range chunks keeps range writes sequential and shortens the HDD download | `download.sol` | higher | `perf-redownload-small-hdd` |
 | accepted | Delta-patched files hand their promotion-time fingerprint to the content-hash refresh, so the post-download pass samples nothing from disk | `run_metrics.content_refresh_files_sampled` | zero | `perf-tfr-scifi-delta-patch-hdd` |
+| accepted | Delta insert requests share the full-download range budget and chunk size, and ops larger than a chunk travel as parallel chunks verified from the blob, so a patched file fills the link like a full download does | `summary.download_stage_ms`, `download.sol` | lower, higher | `perf-tfr-scifi-stale-check-ssd` |
+| accepted | Each hash calibration profile trials its own disjoint sample group, so a first check hashes every byte once and no trial reads what an earlier trial warmed | `breakdown.run_metrics.hash_work_bytes` | equal to the payload | `perf-tfr-scifi-first-check-ssd` |
+| closed | The stale-check lane has a fixed sub-second overhead worth removing | `quick_scan.actual_s` | n/a, measurement artifact | `perf-tfr-scifi-stale-check-ssd` |
+| closed | The `perf-startup-arma3-live` memory peak (+13-19 MB over Sept 10) is a code regression worth chasing | `memory.peak_private_bytes` | n/a, advisory by policy | `perf-memory-arma3-live` |
+| rejected | The HDD 40-file delta stage drifted from 28.7-30.0 s to 32.3-32.6 s across today's builds because chunked blob writes fragment the staging file on rotational media, not because of payload wear | `summary.download_stage_ms` | n/a, a fresh payload measured 28.4 s (`20260916T164216Z`), so the drift was payload wear; each mutate-and-patch cycle rewrites outputs on rotational media | `perf-tfr-scifi-stale-check-hdd` |
+| closed | Persisting the auto hash profile across restarts removes a calibration cost on the first check | `breakdown.run_metrics.hash_total_s` | n/a, evidence says the cost is 0.2-0.3 s on NVMe and nothing on HDD | `perf-tfr-scifi-first-check-ssd` |
+| closed | A download after a cancelled force redownload re-fetches every file instead of resuming the 4-5 mods the cancelled run completed and hashed | `summary.downloaded_bytes` of the resume | n/a, the cancel reverts every promoted file, finished mods included, so there is nothing on disk to resume; the reused queue now prunes verified files, but only a policy change can leave them | `perf-tfr-scifi-cancel-resume-ssd` |
+| open | Committing the rollback entries of mods that finished before a cancel (instead of reverting them with the half-done ones) lets the next download resume, at the cost of a repository that is partly new after a cancel | `summary.downloaded_bytes` of the resume | lower (only the unfinished mods) | `perf-tfr-scifi-cancel-resume-ssd`, `perf-tfr-scifi-cancel-patch-ssd`; a product decision, not taken here |
+| rejected | Doubling the range budget for the first seconds of a transfer shortens the 4 s ramp (250 MB of deficit against the plateau) when the ramp is per-connection growth at the origin rather than a path-level effect | `download.ramp_s`, `download.ramp_deficit_bytes` | n/a, the calibration lane ramps identically at 96 and 192 connections (3, 8, 16-19, 26-29, 43-48, 62-65, 84-86, 105-106 MB/s per 500 ms) while one connection is at full rate inside 0.5 s: the ramp is the path, not the client | `foxy-testkit calibrate --lanes network --connections 192` against 96, 2026-09-16 |
+| accepted | The rollback session rewrites its whole manifest on every promoted file, so an update of many small files pays a cost that grows with the file count | `summary.download_stage_ms` | lower, linear in files | `perf-synthetic-tiny-files-ssd` |
+| accepted | A cancelled sync leaves the incremental hash flush running detached, so reverted files keep the checksums of bytes the disk no longer has | oracle after a resume | pass | `perf-tfr-scifi-cancel-patch-ssd` |
+| accepted | A cancelled patch attempt is recorded as a fallback, so the next download fetches the whole file instead of applying the plan it still has | `summary.downloaded_bytes` of the resume | lower (the plan bytes) | `perf-tfr-scifi-cancel-patch-ssd` |
+| accepted | The integrity recheck runs its hash pass without a cancel receiver, so a cancel lands only after the last byte is hashed | `summary.cancel_quiescent_ms` | lower (seconds, not the whole pass) | `perf-tfr-scifi-cancel-hash-hdd` |
+| closed | A cap above the path makes the cap-relative download ratio read as a regression | `download.sol` (cap) beside `download.sol_calibrated` (B1) | n/a, the kit shows both: 0.42 against 2000 Mbps, 0.90 against B1, same 40.6-40.8 s stage | `perf-redownload-small-ssd-limited-above` |
+| closed | The MD5 all-core calibration lane (one 256 MiB buffer) bounds an MD5 integrity recheck | `hash.sol_calibrated` | n/a, 400 x 1 MiB files hash at 4.3-4.5 GB/s against the lane's 2.3 GB/s (ratio 1.35-1.40); the single-buffer lane is a floor for per-file parallel MD5, kept as such | `perf-synthetic-md5-check-ssd` |
+| closed | Deep profiling (`FOXY_PROFILE`) costs enough on a network-bound download to need its own comparison lane | `summary.download_stage_ms` | n/a, inside noise on this lane | `perf-redownload-small-ssd-profiled` |
 
 ## Closed entries
+
+### accepted: an append-only rollback journal
+
+`perf-synthetic-tiny-files-ssd` (32,016 files of 8 KiB from the loopback
+origin, `20260916T175205Z`) took 822 s for 256 MB: 0.3 MB/s on a path that
+serves a 2 GiB file at 1.0 GB/s. The log cadence gave it away, 32 files
+every 0.6 s and slower as the run went on: `UpdateRollbackSession` rewrote
+its whole manifest (pretty JSON of every entry) on every `prepare_replace`
+and `promote_file`, and looked entries up with a linear scan, so the cost per
+file grew with the files already promoted. The session now writes the
+manifest once as a header and appends one line per change to
+`journal.jsonl` (`Register`, `Promoted`, `Restored`, `Committed`), keeps a
+path index, and `cleanup_stale_sessions` replays the journal (a torn last
+line from a crash is ignored). Same case afterwards (`20260916T203538Z`):
+22.6-32.6 s for the same 32,016 files, 25-36x, with the remaining time in
+the 293-357k rows of download-progress and hash persistence (10.9-14.1 s of
+write windows) and 1,000 incremental hash batches (6.0-10.6 s).
+
+### accepted: cancellation keeps its promises
+
+Three cancel lanes found three ways a cancel left work behind. A cancelled
+download rolled its promoted files back while the incremental hash worker's
+final flush was still running detached, so reverted files kept the checksums
+of bytes the disk no longer had and the next download skipped them
+(`perf-tfr-scifi-cancel-patch-ssd` `20260916T175048Z`, oracle: six patched
+files wrong). The pipeline now joins the worker instead of aborting it, the
+worker skips its final flush once a cancel is pending, and every rollback
+clears the local hash baseline of the files it reverted. A cancelled patch
+attempt was recorded as `fallback_full`, so the resume fetched the whole
+file (2.44 GB for 40 files whose plan needed 424 MB); a cancelled attempt now
+puts the plan back to `planned` (`Delta patch cancelled for file_id=`,
+counted as `patch_cancelled`). The integrity recheck hashed the whole payload
+before noticing the cancel (`perf-tfr-scifi-cancel-hash-hdd`, 26 s to
+quiescence on a 31 s pass); it now runs the cancellable hash entry and exits
+with `outcome=cancelled`.
+
+### accepted: prune verified files from a reused download queue
+
+`perf-tfr-scifi-cancel-resume-ssd` (`20260916T163019Z`) cancelled a force
+redownload 8 s in with 4-5 mods complete and hashed, and the plain download
+that followed reused the confirmation-prepared queue as it stood: all 217
+files, 4.33 GB moved again. The reuse path now drops every queued file
+whose `local_checksum` equals its `remote_checksum` and whose bytes are on
+disk at full length (`prepared_queue_prune`, `prune_verified_download_targets`
+in `tasks/truncate_download_targets.rs`), and a queue that empties out is
+handed to the quick verify instead of failing on "no queue". The first run
+of the change exposed the reason the stat is part of the rule: a cancelled
+run rolls its promoted files back to their pre-download state, finished mods
+included, but the incremental hash had already persisted their checksums, so
+162-164 "verified" files were missing on disk and the oracle failed
+(`20260916T173221Z`). A rollback now clears the local hash baseline of every
+reverted file (`forget_reverted_hashes`, every `restore_all` site), which is
+a correctness fix on its own: nothing may trust a checksum the disk no longer
+carries. With that in place the resume moved the whole 4.33 GB again
+(`20260916T174716Z`, `Reverted 161-165 files after cancel`), which is the
+rollback policy at work, not a queue defect; the prune is the half of a
+resume the queue can do, the other half is the open policy row above.
+
+### accepted: delta insert requests on the full-download budget
+
+The 40-file delta lane (`perf-tfr-scifi-stale-check-ssd`, 424 MB of insert
+bytes) took 16.2-17.4 s on 2026-09-16 while the same origin serves full
+downloads at 118 MB/s. The per-file spans in `Delta patch applied
+successfully:` summed to 143 s of `download` inside a 16 s stage and the
+largest file alone took 13.3 s: `PATCH_PARALLEL_CONCURRENCY = 4` gave every
+file four connections at the origin's ~1.2-1.6 MB/s per-connection cap, one
+request per 64 MiB run. Sharing the global 96-permit range budget with the
+2 MiB run cap took the stage to 11.6-12.7 s (`20260916T111954Z`); files whose
+plan is a few multi-megabyte inserts still ran at 4-7 MB/s because a run
+cannot split an op whose MD5 is verified from the stream. Chunking those ops
+into parallel requests written straight into the blob, with the op verified
+from the blob afterwards, took the stage to 6.9-7.5 s with the sampler peak
+at 113.6 MB/s (`20260916T113531Z`): 231 run requests plus 129 chunk requests,
+`patched_files=40`, `content_refresh_files_sampled=0`, oracle pass. A chunked
+op whose blob bytes miss the plan checksum fails the patch and falls back to a
+full download exactly as a stream mismatch does.
+
+### accepted: disjoint calibration groups
+
+On `perf-tfr-scifi-first-check-ssd` (`20260916T083021Z`) the auto benchmark
+hashed its 707 MB sample three times, once per candidate profile, and picked
+Balanced at 9.7 GB/s over Aggressive at 8.5 GB/s: all three trials read the
+page cache, so the choice measured warmth and noise. On HDD
+(`20260916T081256Z`) the large-part guard left one candidate, so the sample
+was hashed once and the 5.6 s trial plus 35.2 s remainder is the disk at
+~105 MB/s; the "13.8 s of benchmark" the audit quoted was not in that run's
+log. Each profile now trials its own group of the sample (round-robin from
+the part-heaviest files), the groups are hashed exactly once and all count
+as results, and the selection compares cold data with cold data. Measured
+after the change on the same case (`20260916T114141Z`): `hash_work_bytes`
+equal to the payload (1.0x, was 1.33x), `hash_total_s` 0.47 s against
+0.55-0.60 s; the HDD lane was already single-trial and is unchanged.
+
+### closed: stale-check fixed overhead is a measurement artifact
+
+The 0.445 s quoted for the outdated-but-untouched quick check is the runner's
+`elapsed_s`, which includes the driver round trips; the app's own
+`SOL op=quick_scan actual_s=0.021` and `Quick scan timings: total=20.74ms`
+(16 ms of it `tree_part_stats_load`) leave nothing worth a change. Read
+sub-second lanes through the app line, as the startup lane already does.
 
 ### rejected: a few-files, big-chunks download profile for rotational destinations
 
@@ -369,3 +492,47 @@ is not a valid uncontended reference for a populated one.
 
 The log line now prints `txn_ms` rather than `total_ms` and carries
 `write_gate=` so the number cannot be read without its context.
+
+### closed: memory footprint is advisory, not a gate (2026-09-16)
+
+The +13-19 MB startup peak read on 2026-09-16 against the Sept 10 memory lane
+came with a changed seeded configuration, and by the resource trade policy in
+`conventions/SPEED_OF_LIGHT.md` a footprint move beside unchanged or faster
+operations is the accepted price, not a defect. The kit now reports memory
+deltas as `advisory-regression` / `advisory-improvement` with a
+`memory-advisory` flag and never lets them decide a verdict; the only memory
+finding that reopens an entry is unbounded growth (`memory.growth_private_bytes`
+continuing across longer UI walks) or a cost paid with no speed in return.
+
+### closed: persist the auto hash profile across restarts (2026-09-16)
+
+With disjoint calibration groups every trial byte is useful work, so what a
+persisted profile could still save is the trial's scheduling overhead: 0.22-0.27
+s on the NVMe first check (`20260916T083021Z` shipped, 0.39 s total hash time
+after the change), and nothing on the HDD lane, where the large-part guard
+leaves a single candidate and the sample is hashed once anyway. A persisted
+profile would have to be keyed by volume, storage class and CPU, invalidated on
+any of them changing and re-benchmarked on the download milestones regardless;
+a stale choice on a moved payload costs more than the trial it skips. Not
+pursued; reopen only with a workload whose calibration costs seconds.
+
+### closed: default rollback leaves nothing resumable (2026-09-16)
+
+`perf-tfr-scifi-cancel-resume-ssd` (`20260916T162820Z`): cancelling the force
+redownload 8 s in reaches quiescence in 563-661 ms (`cancel_quiescent_ms`),
+with 4-5 mods complete and 592-667 MB credited. The download that follows
+moves the full 4,331,121,846 bytes again (217 files, 40.4-40.7 s): none of
+the completed, incrementally hashed files were reused. The cancellation itself
+is clean. The reused queue now prunes only files that still match their
+persisted fingerprint, but the default rollback restores all promoted files,
+including completed mods, so this run has nothing to prune. Keeping completed
+mods is the separate open product-policy decision in the table.
+
+### closed: deep profiling overhead on the download lane (2026-09-16)
+
+`perf-redownload-small-ssd-profiled` against `perf-redownload-small-ssd` on
+the same build and day: download stage 40.1-40.7 s profiled versus
+40.4-41.0 s unprofiled, peak commit 581-583 MB versus 556-608 MB. On a
+network-bound lane the per-call timing is inside the noise; the 5-10%
+figure in `CASE_FORMAT.md` applies to database- and filesystem-bound lanes
+(`perf-db-parts-bulk-profiled`), and profiled rows keep their own case id.

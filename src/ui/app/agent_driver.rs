@@ -1517,6 +1517,10 @@ impl Foxy {
                 json!({
                     "fps": self.fps_ema,
                     "fps_counter_visible": self.settings_view_state.show_fps_counter,
+                    // Recent frame intervals: a stall shows up in p95/max long
+                    // after the smoothed fps has recovered.
+                    "frame_ms": crate::ui::app::runtime::update_loop::frame_interval_stats(&self.frame_intervals_ms)
+                        .map(|(p50, p95, max)| json!({"p50": p50, "p95": p95, "max": max, "samples": self.frame_intervals_ms.len()})),
                     // Diff these across two reads to detect multi-pass: if
                     // (pass_delta - frame_delta) > 0 between two scroll samples,
                     // egui is running extra layout passes (the cost behind the
@@ -5168,6 +5172,33 @@ impl Foxy {
             "pause-download" => self.set_download_paused(true),
             "resume-download" => self.set_download_paused(false),
             "cancel-download" => self.cancel_sync(),
+            "switch-game-space" => {
+                let space_id = params
+                    .get("game-space")
+                    .or_else(|| params.get("game_space"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        (
+                            "invalid-params".to_string(),
+                            "Provide game-space (the target space id)".to_string(),
+                        )
+                    })?;
+                let entry = crate::core::game::spaces::load_registry()
+                    .map_err(|err| ("space-registry".to_string(), err))?
+                    .game_spaces
+                    .into_iter()
+                    .find(|entry| entry.id == space_id)
+                    .ok_or_else(|| {
+                        (
+                            "invalid-params".to_string(),
+                            format!("No game space with id '{space_id}'"),
+                        )
+                    })?;
+                if let Some(reason) = self.game_space_switch_block_reason() {
+                    return Err(("busy".to_string(), reason.to_string()));
+                }
+                self.start_game_space_switch(&entry);
+            }
             "launch-game" => {
                 let index = self.agent_gui_resolve_repo_index(params)?;
                 self.agent_gui_launch_repository(ctx, index)?;
@@ -5448,6 +5479,12 @@ const AGENT_ACTIONS: &[AgentAction] = &[
         destructive: false,
         params: "",
         summary: "Resume the paused download",
+    },
+    AgentAction {
+        name: "switch-game-space",
+        destructive: true,
+        params: "game-space",
+        summary: "Switch the active game space at runtime (drains saves, resets, reloads)",
     },
     AgentAction {
         name: "cancel-download",

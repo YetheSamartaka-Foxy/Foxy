@@ -14,6 +14,8 @@ clap = { version = "4.6", features = ["derive"] }
 hex = "0.4"
 http-body-util = "0.1"
 hyper = { version = "1.9", features = ["server", "http1"] }
+md-5 = "0.11"
+turso = { version = "0.7.2", default-features = false }
 hyper-util = { version = "0.1", features = ["tokio", "service"] }
 percent-encoding = "2"
 regex = "1"

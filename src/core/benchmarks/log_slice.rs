@@ -155,14 +155,61 @@ pub fn parse_sol_lines<'a>(
         .into_iter()
         .filter_map(|line| {
             let start = line.find("SOL op=")?;
-            let body = &line[start + "SOL ".len()..];
-            let map: BTreeMap<String, String> = body
-                .split_whitespace()
-                .filter_map(|token| token.split_once('='))
-                .map(|(key, value)| (key.to_owned(), value.to_owned()))
-                .collect();
+            let map = parse_sol_body(&line[start + "SOL ".len()..]);
             (!map.is_empty()).then_some(map)
         })
+        .collect()
+}
+
+/// The SOL grammar: space-separated `key=value` pairs, where a value may be
+/// double-quoted to carry spaces. The last occurrence of a repeated key wins,
+/// a token without `=` is skipped, and values keep their raw text so integer
+/// counters never round-trip through floating point here.
+pub fn parse_sol_body(body: &str) -> BTreeMap<String, String> {
+    let mut map = BTreeMap::new();
+    let mut rest = body.trim_start();
+    while !rest.is_empty() {
+        let Some(eq) = rest.find('=') else { break };
+        let key = &rest[..eq];
+        if key.is_empty() || key.contains(char::is_whitespace) {
+            rest = rest
+                .find(char::is_whitespace)
+                .map_or("", |at| rest[at..].trim_start());
+            continue;
+        }
+        let after = &rest[eq + 1..];
+        let (value, remainder) = if let Some(quoted) = after.strip_prefix('"') {
+            match quoted.find('"') {
+                Some(end) => (&quoted[..end], &quoted[end + 1..]),
+                None => (quoted, ""),
+            }
+        } else {
+            match after.find(char::is_whitespace) {
+                Some(end) => (&after[..end], &after[end..]),
+                None => (after, ""),
+            }
+        };
+        map.insert(key.to_owned(), value.to_owned());
+        rest = remainder.trim_start();
+    }
+    map
+}
+
+/// The SOL lines a saved record owns: lines that carry an `op_id` belong to
+/// the record only when it matches the record's own operation id; lines
+/// without one (hash batches, quick scans, startup) are kept on the strength
+/// of the time frame alone. A record without an operation id keeps everything
+/// in its frame, as before ownership existed.
+pub fn owned_sol_lines(
+    lines: Vec<BTreeMap<String, String>>,
+    operation_id: Option<&str>,
+) -> Vec<BTreeMap<String, String>> {
+    let Some(operation_id) = operation_id else {
+        return lines;
+    };
+    lines
+        .into_iter()
+        .filter(|line| line.get("op_id").is_none_or(|op_id| op_id == operation_id))
         .collect()
 }
 
@@ -307,6 +354,39 @@ mod tests {
         assert_eq!(sol.len(), 1);
         assert_eq!(sol[0]["op"], "download");
         assert_eq!(sol[0]["work_bytes"], "104857600");
+    }
+
+    #[test]
+    fn sol_grammar_handles_quotes_equals_utf8_large_integers_and_duplicates() {
+        let map = parse_sol_body(
+            "op=hash label=\"two words\" note=a=b name=\u{e9}t\u{e9} bytes=18446744073709551615 malformed=1.2.3 dup=1 dup=2 stray k=",
+        );
+        assert_eq!(map["label"], "two words");
+        assert_eq!(map["note"], "a=b");
+        assert_eq!(map["name"], "\u{e9}t\u{e9}");
+        assert_eq!(map["bytes"], "18446744073709551615");
+        assert_eq!(map["bytes"].parse::<u64>().unwrap(), u64::MAX);
+        assert_eq!(map["malformed"], "1.2.3");
+        assert_eq!(map["dup"], "2");
+        assert_eq!(map["k"], "");
+        assert!(!map.contains_key("stray"));
+        let unterminated = parse_sol_body("op=x label=\"open ended");
+        assert_eq!(unterminated["label"], "open ended");
+    }
+
+    #[test]
+    fn owned_sol_lines_drop_other_operations_but_keep_unowned_lines() {
+        let lines = parse_sol_lines([
+            "SOL op=download actual_s=1 op_id=repo-sync-0002",
+            "SOL op=app_update_check actual_s=0.1 op_id=app-update-check-0001",
+            "SOL op=download actual_s=2 op_id=repo-sync-0003",
+            "SOL op=hash actual_s=1 work_bytes=5",
+        ]);
+        let owned = owned_sol_lines(lines.clone(), Some("repo-sync-0002"));
+        let ops: Vec<&str> = owned.iter().map(|l| l["op"].as_str()).collect();
+        assert_eq!(ops, ["download", "hash"]);
+        assert_eq!(owned[0]["actual_s"], "1");
+        assert_eq!(owned_sol_lines(lines, None).len(), 4);
     }
 
     #[test]

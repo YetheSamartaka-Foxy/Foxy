@@ -7,6 +7,7 @@ use crate::{
     launch::{self, Environment},
     ledger,
     mutate::Mutation,
+    references,
 };
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
@@ -15,6 +16,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
+    sync::Arc,
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -43,6 +45,95 @@ struct ContextRun<'a> {
     gui: &'a RefCell<Option<launch::ManagedChild>>,
     /// The pid the memory sampler follows, kept in step with `gui`.
     pid: &'a memory::Target,
+}
+
+/// A frame probe that runs beside an operation: `fps` reads at a fixed
+/// cadence, so a UI stall under work lands on the operation's own row.
+struct UiProbe {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<thread::JoinHandle<Vec<Value>>>,
+}
+
+impl UiProbe {
+    fn start(exe: &Path, config: &Path, env: &Environment, interval: Duration) -> Self {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (exe, config, env, flag) = (
+            exe.to_owned(),
+            config.to_owned(),
+            env.clone(),
+            Arc::clone(&stop),
+        );
+        let thread = thread::spawn(move || {
+            let mut samples = Vec::new();
+            while !flag.load(std::sync::atomic::Ordering::Relaxed) {
+                let started = Instant::now();
+                if let Ok(response) = driver::call(
+                    &exe,
+                    &config,
+                    &["fps".to_owned()],
+                    &env,
+                    Duration::from_secs(30),
+                ) {
+                    let mut sample = response.data;
+                    sample["rtt_ms"] = json!(started.elapsed().as_secs_f64() * 1000.0);
+                    samples.push(sample);
+                }
+                thread::sleep(interval);
+            }
+            samples
+        });
+        Self {
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    fn finish(mut self) -> Value {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let samples = self
+            .thread
+            .take()
+            .and_then(|thread| thread.join().ok())
+            .unwrap_or_default();
+        ui_probe_summary(&samples)
+    }
+}
+
+/// Fold the probe reads: the worst frame and worst p95 the app reported,
+/// and the round trip of the probe itself (process spawn included, so it is
+/// an upper bound on input latency, not a frame time).
+fn ui_probe_summary(samples: &[Value]) -> Value {
+    let mut rtts: Vec<f64> = samples
+        .iter()
+        .filter_map(|sample| sample["rtt_ms"].as_f64())
+        .collect();
+    rtts.sort_by(f64::total_cmp);
+    let pick = |pct: usize| {
+        rtts.get((rtts.len().saturating_sub(1)) * pct / 100)
+            .copied()
+    };
+    let worst = |key: &str| {
+        samples
+            .iter()
+            .filter_map(|sample| sample["frame_ms"][key].as_f64())
+            .fold(None, |best: Option<f64>, value| {
+                Some(best.map_or(value, |b| b.max(value)))
+            })
+    };
+    let mut fps: Vec<f64> = samples
+        .iter()
+        .filter_map(|sample| sample["fps"].as_f64())
+        .filter(|fps| *fps > 0.0)
+        .collect();
+    fps.sort_by(f64::total_cmp);
+    json!({
+        "samples": samples.len(),
+        "frame_ms_p95_worst": worst("p95"),
+        "frame_ms_max": worst("max"),
+        "fps_min": fps.first(),
+        "rtt_ms_p50": pick(50),
+        "rtt_ms_p95": pick(95),
+    })
 }
 
 impl ContextRun<'_> {
@@ -76,6 +167,7 @@ impl ContextRun<'_> {
         match operation["op"].as_str() {
             Some("startup") => return self.startup_operation(operation),
             Some("ui-walk") => return self.ui_walk_operation(operation),
+            Some("switch-game-space") => return self.switch_space_operation(operation),
             _ => {}
         }
         if self.case["harness"].as_str().unwrap_or("gui") == "cli" {
@@ -224,6 +316,80 @@ impl ContextRun<'_> {
             json!({"elapsed_s":elapsed,"summary":summary,"progress":progress,"snapshot":snapshot,"logs":null,"log_text":log,"database_profile":null}),
         )
     }
+    /// Switch the active game space at runtime and measure request to the new
+    /// space's repository list settled; the app's `SOL op=space_switch` line
+    /// carries the drain/reset/reload split.
+    fn switch_space_operation(&self, operation: &Value) -> Result<Value> {
+        ensure!(
+            self.case["harness"].as_str().unwrap_or("gui") == "gui",
+            "The switch-game-space operation requires the gui harness"
+        );
+        let target = operation["game_space"]
+            .as_str()
+            .context("A switch-game-space operation needs a game_space id")?;
+        let generation = self.data(&["logs", "--limit", "1"])?["generation"]
+            .as_u64()
+            .context("Missing log generation")?;
+        let offsets = logs::offsets(self.run, self.config)?;
+        let params = json!({"game-space": target}).to_string();
+        let started = Instant::now();
+        self.data(&[
+            "invoke",
+            "switch-game-space",
+            "--params",
+            &params,
+            "--allow-destructive",
+        ])?;
+        let deadline = Instant::now()
+            + Duration::from_secs(operation["wait_timeout_s"].as_u64().unwrap_or(120));
+        let mut switched = false;
+        while Instant::now() < deadline {
+            if self.logged_since(generation, "SOL op=space_switch")? {
+                switched = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        ensure!(switched, "The game space switch never reported its record");
+        // The new space's startup work (quick scans, rechecks) settles like a
+        // startup does; wait for it so the next operation measures a quiet app.
+        let wait = operation["settle_timeout_s"].as_u64().unwrap_or(120);
+        let _ = self.driver(
+            &[
+                "wait".into(),
+                "--busy-reason-cleared".into(),
+                "startup-sync".into(),
+                "--timeout-ms".into(),
+                (wait * 1000).to_string(),
+            ],
+            Duration::from_secs(wait + 10),
+        );
+        let elapsed = started.elapsed().as_secs_f64();
+        let progress = self.data(&["progress"])?;
+        let snapshot = self.data(&["snapshot"])?;
+        let captured = self.data(&[
+            "logs",
+            "--since-generation",
+            &generation.to_string(),
+            "--limit",
+            "2000",
+        ])?;
+        let messages = captured["entries"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v["message"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let log = format!(
+            "{}\n{messages}",
+            logs::delta(&offsets, self.run, self.config)?
+        );
+        let summary = json!({"total_ms": (elapsed * 1000.0).round(), "game_space": target});
+        Ok(
+            json!({"elapsed_s":elapsed,"summary":summary,"progress":progress,"snapshot":snapshot,"logs":captured,"log_text":log,"database_profile":null}),
+        )
+    }
     /// The repository an operation acts on: `operation.repository` names one of
     /// the fixture's repositories (a sibling in a shared folder, for example),
     /// otherwise it is the case repository.
@@ -330,6 +496,10 @@ impl ContextRun<'_> {
             .context("Missing log generation")?;
         let repo_index = self.gui_repository_index(operation)?.to_string();
         let offsets = logs::offsets(self.run, self.config)?;
+        let probe = operation["ui_probe_ms"]
+            .as_u64()
+            .filter(|ms| *ms > 0)
+            .map(|ms| UiProbe::start(self.exe, self.config, self.env, Duration::from_millis(ms)));
         let started = Instant::now();
         self.data(&[
             "invoke",
@@ -365,6 +535,31 @@ impl ContextRun<'_> {
                 "Operation never reported busy reason '{busy_reason}'; timing may not cover the real work"
             );
         }
+        // A cancellation lane: let the transfer run for `cancel_after_s`, then
+        // cancel and measure cancel-to-quiescent (the busy reason clearing).
+        let mut cancel_quiescent_ms = Value::Null;
+        if let Some(after) = operation["cancel_after_s"].as_f64()
+            && !finished_between_polls
+        {
+            thread::sleep(Duration::from_secs_f64(after));
+            let cancel_started = Instant::now();
+            self.data(&["invoke", "cancel-download"])?;
+            let wait = operation["wait_timeout_s"].as_u64().unwrap_or(300);
+            self.driver(
+                &[
+                    "wait".into(),
+                    "--busy-reason-cleared".into(),
+                    busy_reason.into(),
+                    "--timeout-ms".into(),
+                    (wait * 1000).to_string(),
+                ],
+                Duration::from_secs(wait + 10),
+            )?;
+            cancel_quiescent_ms = (cancel_started.elapsed().as_secs_f64() * 1000.0)
+                .round()
+                .into();
+            finished_between_polls = true;
+        }
         if !finished_between_polls {
             let wait = operation["wait_timeout_s"]
                 .as_u64()
@@ -379,7 +574,14 @@ impl ContextRun<'_> {
             self.driver(&args, Duration::from_secs(wait + 10))?;
         }
         let elapsed = started.elapsed().as_secs_f64();
-        let summary = self.data(&["download-summary", "--include-telemetry"])?;
+        let ui_probe = probe.map(UiProbe::finish);
+        let mut summary = self.data(&["download-summary", "--include-telemetry"])?;
+        if !cancel_quiescent_ms.is_null() {
+            summary["cancel_quiescent_ms"] = cancel_quiescent_ms;
+        }
+        if let Some(ui_probe) = ui_probe {
+            summary["ui_probe"] = ui_probe;
+        }
         let progress = self.data(&["progress"])?;
         let snapshot = self.data(&["snapshot"])?;
         let captured = self.data(&[
@@ -649,10 +851,18 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
             .as_str()
             .context("Case origin requires a root directory")?;
         let port = u16::try_from(origin["port"].as_u64().unwrap_or(0))?;
-        Some(crate::origin::server::Origin::start(Path::new(path), port)?)
+        Some(crate::origin::server::Origin::start_impaired(
+            Path::new(path),
+            port,
+            crate::origin::server::Impairment::from_case(origin),
+        )?)
     } else {
         None
     };
+    // The origin's published checksum is the payload identity the case hash
+    // cannot see: a re-mirrored origin under an unchanged case JSON is a
+    // different workload and must not inherit the old baseline.
+    let mut origin_checksum = Value::Null;
     if kind == "perf" {
         let address = resolved["repository"]["address"]
             .as_str()
@@ -662,11 +872,32 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
             fixture::mod_count(&manifest) > 0,
             "Repository publishes no mods; refusing an empty performance workload"
         );
+        origin_checksum = manifest["checksum"].clone();
         write_json(
             &run.join("manifest-probe.json"),
-            &json!({"url":address,"mods":fixture::mod_count(&manifest)}),
+            &json!({"url":address,"mods":fixture::mod_count(&manifest),"checksum":origin_checksum}),
         )?;
     }
+    let diagnostics = if resolved["profile"].as_bool().unwrap_or(false) {
+        "profile"
+    } else {
+        "none"
+    };
+    let calibration_path = crate::calibrate::path(root);
+    let references = if calibration_path.exists() {
+        let volume = resolved["repository"]["path"]
+            .as_str()
+            .and_then(|path| Path::new(path).components().next())
+            .map(|component| component.as_os_str().to_string_lossy().into_owned());
+        references::select(
+            &crate::case::read_json(&calibration_path)?,
+            &guard["environment"],
+            guard["storage_class"].as_str().unwrap_or("unknown"),
+            volume.as_deref(),
+        )
+    } else {
+        json!({})
+    };
     if let Some(source) = resolved.get("config_seed").and_then(Value::as_str) {
         let bytes = fixture::seed(Path::new(source), &config)?;
         write_json(
@@ -691,6 +922,7 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                     .context("Mutation requires a repository path")?,
             ),
             journal: run.join("mutations.json"),
+            journals: Vec::new(),
             timeout,
         })
     } else {
@@ -770,6 +1002,10 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
         let passes = resolved["repetitions"].as_u64().unwrap_or(3);
         let mut rows = Vec::new();
         let mut mutation_info = Value::Null;
+        // An `evict-cache` step marks the next measured operation as the
+        // evicted lane; the operation after that sees whatever the first one
+        // left in the page cache, which is the warm lane again.
+        let mut evicted_pending = false;
         for pass in 0..passes + u64::from(warmup) {
             let record = !(warmup && pass == 0);
             let iteration = pass.saturating_sub(u64::from(warmup));
@@ -787,12 +1023,13 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                         continue;
                     }
                     "restore" => {
-                        mutation.as_ref().context("Missing mutator")?.restore()?;
+                        mutation.as_mut().context("Missing mutator")?.restore()?;
                         mutation_info = Value::Null;
                         continue;
                     }
                     "evict-cache" => {
                         evict(operation)?;
+                        evicted_pending = true;
                         continue;
                     }
                     _ => {}
@@ -802,6 +1039,7 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                     effective_gate = gate as u32;
                 }
                 if !record {
+                    evicted_pending = false;
                     continue;
                 }
                 let text = collected["log_text"]
@@ -871,8 +1109,17 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                 {
                     flags.push("runaway-bytes");
                 }
+                // A cancellation lane leaves the payload incomplete by design;
+                // its correctness gate is the resume that follows.
+                let expected_outcome = operation["expect_outcome"].as_str();
+                let observed_outcome = breakdown["run_metrics"]["pipeline_outcome"].as_str();
+                if !outcome_matches(expected_outcome, observed_outcome) {
+                    flags.push("outcome-mismatch");
+                }
+                let cancelled_on_purpose = expected_outcome == Some("cancelled");
                 if let Some(expected) = g["expected_files"].as_i64()
                     && matches!(name, "download" | "force-redownload")
+                    && !cancelled_on_purpose
                     && summary["files_updated"].as_i64().unwrap_or(-1) != expected
                 {
                     flags.push("incomplete-payload");
@@ -881,11 +1128,12 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                 // the operations that produce one; a check between a
                 // mutation and its repair sees the mutated bytes on purpose.
                 if matches!(name, "download" | "force-redownload")
+                    && !cancelled_on_purpose
                     && !oracle(&resolved, root, &run, timeout)?
                 {
                     flags.push("oracle-failed");
                 }
-                let mut metadata = json!({"run_id":run_id,"iteration":iteration,"started_utc":chrono::Utc::now().to_rfc3339(),"elapsed_s":collected["elapsed_s"],"git_sha":guard["git"]["sha"],"git_dirty":guard["git"]["dirty"],"build_kind":profile,"case_id":id,"case_hash":hash,"harness":harness,"op":name,"storage_class":guard["storage_class"],"cache_state":if warmup || iteration > 0 {"warm"} else {"cold"},"database_mode":options.database_mode,"db_write_gate":effective_gate,"db_pool_idle":pool_idle,"flags":flags,"verdict":if flags.is_empty() {"ok"} else {"invalid"}});
+                let mut metadata = json!({"run_id":run_id,"iteration":iteration,"started_utc":chrono::Utc::now().to_rfc3339(),"elapsed_s":collected["elapsed_s"],"git_sha":guard["git"]["sha"],"git_dirty":guard["git"]["dirty"],"build_kind":profile,"case_id":id,"case_hash":hash,"harness":harness,"op":name,"storage_class":guard["storage_class"],"environment":guard["environment"],"cache_state":cache_state(warmup, iteration, evicted_pending),"database_mode":options.database_mode,"db_write_gate":effective_gate,"db_pool_idle":pool_idle,"diagnostics":diagnostics,"origin_checksum":origin_checksum,"references":references,"flags":flags,"verdict":if flags.is_empty() {"ok"} else {"invalid"}});
                 if label != name {
                     metadata["label"] = label.into();
                 }
@@ -900,6 +1148,7 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                     &breakdown,
                     &mutation_info,
                 ));
+                evicted_pending = false;
             }
         }
         let directory = root.join("testkit/ledger");
@@ -952,8 +1201,48 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
     if let Some(gui) = gui.borrow_mut().as_mut() {
         launch::stop_gui(gui, &exe, &config, &env);
     }
-    if let Some(mutation) = &mutation {
+    if let Some(mutation) = &mut mutation {
         mutation.restore()?;
     }
     result
+}
+
+/// The cache lane a measured operation ran in. Iteration zero without a
+/// warmup pass is cold; a run preceded by an `evict-cache` step is the
+/// evicted lane whatever the iteration number, so repeated evictions never
+/// masquerade as warm runs.
+fn cache_state(warmup: bool, iteration: u64, evicted: bool) -> &'static str {
+    if evicted {
+        "evicted"
+    } else if warmup || iteration > 0 {
+        "warm"
+    } else {
+        "cold"
+    }
+}
+
+fn outcome_matches(expected: Option<&str>, observed: Option<&str>) -> bool {
+    expected.is_none() || expected == observed
+}
+
+#[cfg(test)]
+mod cache_state_tests {
+    use super::{cache_state, outcome_matches};
+
+    #[test]
+    fn eviction_wins_over_the_iteration_number() {
+        assert_eq!(cache_state(false, 0, false), "cold");
+        assert_eq!(cache_state(false, 1, false), "warm");
+        assert_eq!(cache_state(true, 0, false), "warm");
+        assert_eq!(cache_state(false, 0, true), "evicted");
+        assert_eq!(cache_state(true, 3, true), "evicted");
+    }
+
+    #[test]
+    fn explicit_outcome_must_match_the_owned_pipeline_result() {
+        assert!(outcome_matches(None, Some("completed")));
+        assert!(outcome_matches(Some("cancelled"), Some("cancelled")));
+        assert!(!outcome_matches(Some("cancelled"), Some("completed")));
+        assert!(!outcome_matches(Some("cancelled"), None));
+    }
 }

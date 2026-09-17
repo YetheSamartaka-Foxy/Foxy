@@ -9,8 +9,11 @@ use crate::core::tasks::calculate_hashes::{
     pre_propagate_sibling_checksums,
 };
 use crate::core::tasks::init_database::{DB_WRITE_PERMITS, DB_WRITE_SEMAPHORE};
-use crate::core::tasks::remote_mods::{remote_mods_with_data, resolve_mod_local_path};
+use crate::core::tasks::remote_mods::{
+    RemoteRebuildWork, remote_mods_with_data, resolve_mod_local_path,
+};
 use crate::core::utils::fetch_json::fetch_json;
+use crate::core::utils::speed_of_light::{SolLight, op_id_extra, sol_line};
 use crate::ui::types::HashAlgorithmPreference;
 use log::{debug, error, info, warn};
 use serde::Deserialize;
@@ -479,6 +482,45 @@ pub(crate) async fn probe_remote_repository_checksum(
     }
 }
 
+/// Emit the `SOL op=remote_refresh` action record (conventions/SPEED_OF_LIGHT.md,
+/// O5): one line per refresh with its branch as `outcome`, the index requests
+/// it made, and the manifest work when the graph was rebuilt.
+fn log_remote_refresh_sol(
+    context: &FoxyContext,
+    started: std::time::Instant,
+    outcome: &str,
+    index_requests: usize,
+    work: Option<RemoteRebuildWork>,
+) {
+    let work = work.unwrap_or_default();
+    let secs = |d: std::time::Duration| format!("{:.3}", d.as_secs_f64());
+    let mut extras = vec![
+        ("outcome", outcome.to_string()),
+        ("index_requests", index_requests.to_string()),
+        ("manifest_requests", work.mods.to_string()),
+        ("mods", work.mods.to_string()),
+        ("files", work.files.to_string()),
+        ("parts", work.parts.to_string()),
+        ("response_bytes", work.response_bytes.to_string()),
+        ("fetch_sum_s", secs(work.fetch)),
+        ("parse_sum_s", secs(work.parse)),
+        ("persist_sum_s", secs(work.persist)),
+        ("fan_out_wall_s", secs(work.fan_out_wall)),
+        ("timer_scope", "action_wall".to_string()),
+    ];
+    extras.extend(op_id_extra(context.operation_id()));
+    info!(
+        "{}",
+        sol_line(
+            "remote_refresh",
+            0,
+            started.elapsed(),
+            &SolLight::SelfBaseline,
+            &extras,
+        )
+    );
+}
+
 /// Acquire repository information from URL, process addons if local and remote repository checksums differ
 pub(crate) async fn remote_repository(
     context: Arc<FoxyContext>,
@@ -490,6 +532,8 @@ pub(crate) async fn remote_repository(
 ) -> Option<RemoteRepositoryMetadata> {
     // Normalize remote URL to always have trailing slash for consistent path joins
     let normalized_url = crate::core::models::repository::normalize_repository_url(repository_url);
+    let refresh_started = std::time::Instant::now();
+    let mut index_requests = 1usize;
     let repo_url = format!("{}repo.json", normalized_url);
     info!("Loading repository metadata from: {}", repo_url);
 
@@ -500,6 +544,7 @@ pub(crate) async fn remote_repository(
                 "Error fetching addons for repository {}: {}",
                 repository_url, e
             );
+            log_remote_refresh_sol(&context, refresh_started, "failed", index_requests, None);
             return None;
         }
     };
@@ -567,6 +612,7 @@ pub(crate) async fn remote_repository(
     // stable. The fetched payload is reused below as the mod metadata source.
     let foxy_addons_data = if foxy_mode.is_foxy() {
         let foxy_addons_url = format!("{}foxy_addons.json", normalized_url);
+        index_requests += 1;
         info!(
             "FoxyMode detected - loading mod metadata from: {}",
             foxy_addons_url
@@ -653,6 +699,7 @@ pub(crate) async fn remote_repository(
                 "Failed to upsert repository metadata for {}: {}",
                 normalized_url, err
             );
+            log_remote_refresh_sol(&context, refresh_started, "failed", index_requests, None);
             return None;
         }
     };
@@ -730,6 +777,13 @@ pub(crate) async fn remote_repository(
         force_refresh || !remote_addon_links_match || !repository_space_paths_match,
     ) {
         info!("Up-to-date: Repository {}.", repository.remote_url.clone());
+        log_remote_refresh_sol(
+            &context,
+            refresh_started,
+            "skipped_clean",
+            index_requests,
+            None,
+        );
         return Some(RemoteRepositoryMetadata {
             foxy_mode,
             app_update_url,
@@ -750,6 +804,13 @@ pub(crate) async fn remote_repository(
         info!(
             "Repository {} remote graph unchanged (repo.json checksum matches stored remote checksum); using existing DB metadata for local verification",
             repository.remote_url
+        );
+        log_remote_refresh_sol(
+            &context,
+            refresh_started,
+            "graph_unchanged",
+            index_requests,
+            None,
         );
         return Some(RemoteRepositoryMetadata {
             foxy_mode,
@@ -792,6 +853,7 @@ pub(crate) async fn remote_repository(
             "Repository {}: Local path is not set, please set the value and run recheck again",
             repository.name
         );
+        log_remote_refresh_sol(&context, refresh_started, "failed", index_requests, None);
         return None;
     }
 
@@ -814,7 +876,7 @@ pub(crate) async fn remote_repository(
         *DB_WRITE_PERMITS + extra_permits
     );
 
-    remote_mods_with_data(
+    let rebuild_work = remote_mods_with_data(
         context.clone(),
         repository.clone(),
         mods_data,
@@ -854,6 +916,13 @@ pub(crate) async fn remote_repository(
         &final_repository,
         final_has_linked_addons,
         final_has_remote_state,
+    );
+    log_remote_refresh_sol(
+        &context,
+        refresh_started,
+        "rebuilt",
+        index_requests,
+        Some(rebuild_work),
     );
 
     Some(RemoteRepositoryMetadata {

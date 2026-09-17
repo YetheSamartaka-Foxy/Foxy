@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use zip::CompressionMethod;
 use zip::write::SimpleFileOptions;
 
+use super::best::BestComparison;
 use super::record::BenchmarkRecord;
 use crate::core::utils::format::redact_log_text;
 
@@ -19,6 +20,7 @@ pub struct ExportImage {
 pub fn write_zip(
     dest: &Path,
     record: &BenchmarkRecord,
+    best: Option<&BestComparison>,
     log_text: Option<&str>,
     images: &[ExportImage],
 ) -> Result<()> {
@@ -31,7 +33,7 @@ pub fn write_zip(
     zip.write_all(&serde_json::to_vec_pretty(record)?)?;
 
     zip.start_file("summary.txt", deflate)?;
-    zip.write_all(summary_text(record).as_bytes())?;
+    zip.write_all(summary_text(record, best).as_bytes())?;
 
     if let Some(text) = log_text {
         zip.start_file("benchmark.log", deflate)?;
@@ -51,7 +53,9 @@ pub fn write_zip(
 }
 
 /// Human-readable digest of the record for people who do not open the JSON.
-pub fn summary_text(record: &BenchmarkRecord) -> String {
+/// Operation and ratio come first, then the best-measured comparison, then
+/// the run metadata and counters.
+pub fn summary_text(record: &BenchmarkRecord, best: Option<&BestComparison>) -> String {
     let mut out = String::new();
     let mut line = |key: &str, value: String| {
         out.push_str(key);
@@ -59,6 +63,70 @@ pub fn summary_text(record: &BenchmarkRecord) -> String {
         out.push_str(&value);
         out.push('\n');
     };
+    line("operation", record.headline_op().to_owned());
+    let headline = record.headline_summary();
+    match record.headline_sol().and_then(|summary| summary.sol) {
+        Some(sol) => {
+            line("sol", format!("{:.3}", sol));
+            line(
+                "sol_kind",
+                headline
+                    .as_ref()
+                    .map_or("none", |summary| summary.metric_kind().label())
+                    .to_owned(),
+            );
+        }
+        None => {
+            line("sol", "na".to_owned());
+            line(
+                "sol_kind",
+                headline
+                    .as_ref()
+                    .map_or("reference missing", |summary| {
+                        if summary.sol.is_none() {
+                            if summary.heterogeneous {
+                                "batches differ"
+                            } else {
+                                "reference missing"
+                            }
+                        } else if !summary.completed() {
+                            "not completed"
+                        } else if summary.mixed_references {
+                            "mixed references"
+                        } else {
+                            "partial coverage"
+                        }
+                    })
+                    .to_owned(),
+            );
+        }
+    }
+    if let Some(summary) = headline.as_ref() {
+        if let Some(raw) = summary.sol_raw {
+            line("sol_raw", format!("{raw:.4}"));
+        }
+        line("sol_light_source", summary.light_src.label().to_owned());
+        line(
+            "sol_coverage",
+            format!("{}/{}", summary.rated_runs, summary.runs),
+        );
+    }
+    match best {
+        Some(best) if !best.is_alone() => {
+            line("best_measured_id", best.best_id.clone());
+            line(
+                "best_measured_elapsed_s",
+                format!("{:.2}", best.best_elapsed_s),
+            );
+            line("gap_to_best_s", format!("{:+.2}", best.gap_s()));
+            if let Some(ratio) = best.ratio() {
+                line("best_measured_ratio", format!("{ratio:.3}"));
+            }
+            line("compatible_runs", best.samples.to_string());
+        }
+        Some(_) => line("best_measured", "no comparable run".to_owned()),
+        None => line("best_measured", "not comparable".to_owned()),
+    }
     line("name", record.name.clone());
     line("kind", record.kind.label().to_owned());
     line("outcome", record.outcome.slug().to_owned());
@@ -125,6 +193,38 @@ pub fn summary_text(record: &BenchmarkRecord) -> String {
             ));
         }
     }
+    let summaries = record.sol_summaries();
+    if !summaries.is_empty() {
+        out.push_str("\noperations:\n");
+        for summary in &summaries {
+            let sol = summary
+                .sol
+                .map_or_else(|| "na".to_owned(), |sol| format!("{sol:.3}"));
+            let mut fields = vec![
+                format!("op={}", summary.op),
+                format!("sol={sol}"),
+                format!("kind={}", summary.metric_kind().label()),
+                format!("runs={}", summary.runs),
+                format!("rated_runs={}", summary.rated_runs),
+                format!("service_s={:.3}", summary.actual_s),
+            ];
+            if summary.work_bytes > 0 {
+                fields.push(format!("work_bytes={}", summary.work_bytes));
+            }
+            if let Some(raw) = summary.sol_raw {
+                fields.push(format!("sol_raw={raw:.4}"));
+            }
+            if let Some(gap) = summary.gap_to_reference_s() {
+                fields.push(format!("gap_to_reference_s={gap:+.3}"));
+            }
+            if !summary.outcomes.is_empty() {
+                fields.push(format!("outcome={}", summary.outcomes.join(",")));
+            }
+            out.push_str("  ");
+            out.push_str(&fields.join(" "));
+            out.push('\n');
+        }
+    }
     if !record.sol.is_empty() {
         out.push_str("\nspeed of light:\n");
         for sol in &record.sol {
@@ -183,7 +283,14 @@ mod tests {
 
     #[test]
     fn summary_lists_stages_and_notes() {
-        let text = summary_text(&record());
+        let text = summary_text(&record(), None);
+        assert!(text.starts_with(
+            "operation: download
+sol: na
+sol_kind: reference missing
+best_measured: not comparable
+"
+        ));
         assert!(text.contains("elapsed_s: 1.50"));
         assert!(text.contains("download"));
         assert!(text.contains("notes:\nnote"));
@@ -196,6 +303,7 @@ mod tests {
         write_zip(
             &dest,
             &record(),
+            None,
             Some("[x] line one\n"),
             &[ExportImage {
                 file_name: "rates.png".into(),

@@ -29,6 +29,10 @@ pub(crate) struct FoxyContext {
     pub(crate) force_download_targets: bool,
     pub(crate) target_local_path: Option<String>,
     pub(crate) repository_space_shared_path: Option<String>,
+    /// Opaque id of the user action this context serves (a sync pipeline, a
+    /// quick-scan sweep), stamped as `op_id` on every SOL line the action
+    /// emits so a saved benchmark can keep only the records it owns.
+    pub(crate) operation_id: Option<Arc<str>>,
     /// Set by the metadata rebuild when the `subfiles` table is globally empty at
     /// rebuild start (the post-whole-wipe force-redownload / first-download case),
     /// so the per-mod part insert can use a plain `INSERT` into an index-deferred
@@ -81,6 +85,7 @@ impl FoxyContext {
             force_download_targets: false,
             target_local_path: None,
             repository_space_shared_path: None,
+            operation_id: None,
             fresh_subfiles_load: Arc::new(AtomicBool::new(false)),
             defer_part_inserts: Arc::new(AtomicBool::new(false)),
             deferred_part_inserts: Arc::new(Mutex::new(Vec::new())),
@@ -267,6 +272,15 @@ impl FoxyContext {
     pub(crate) fn with_repository_space_shared_path(mut self, shared_path: Option<String>) -> Self {
         self.repository_space_shared_path = shared_path;
         self
+    }
+
+    pub(crate) fn with_operation_id(mut self, operation_id: impl Into<Arc<str>>) -> Self {
+        self.operation_id = Some(operation_id.into());
+        self
+    }
+
+    pub(crate) fn operation_id(&self) -> Option<&str> {
+        self.operation_id.as_deref()
     }
 
     /// Storage-neutral DB handle for the seam (plan.md §5.1). Converted call

@@ -6,7 +6,10 @@ use eframe::egui::{self, RichText, ScrollArea, TextEdit, Ui};
 use super::charts::{ChartTheme, bar_chart, fmt_duration, line_chart};
 use super::series::{charts_for, cpu_scale, cpu_title, stage_rows};
 use super::widgets::{panel, text_scale};
-use crate::core::benchmarks::{BenchmarkOutcome, BenchmarkRecord, SolDetailValue};
+use crate::core::benchmarks::{
+    BenchmarkOutcome, BenchmarkRecord, BestComparison, SolDetailValue, SolMetricKind,
+    best_comparable,
+};
 use crate::ui::app::Foxy;
 use crate::ui::i18n::fmt_bytes;
 use crate::ui::palette;
@@ -155,16 +158,94 @@ pub fn metric_rows(record: &BenchmarkRecord) -> Vec<MetricRow> {
     ]
 }
 
-/// The figures worth a headline tile for this record: caption key, value
-/// text and whether it is a rate (accent coloured).
 /// A speed-of-light ratio as a percentage; 100% is running at the light.
 pub fn fmt_sol(sol: f64) -> String {
     format!("{:.0}%", (sol.clamp(0.0, 1.0) * 100.0).round())
 }
 
-pub fn headline_stats(record: &BenchmarkRecord) -> Vec<(&'static str, String, bool)> {
+/// Translation callback for pure formatting helpers: `key` plus its
+/// `{placeholder}` replacements, the shape of `Foxy::t_fmt`.
+pub type Translate<'a> = &'a dyn Fn(&str, &[(&str, String)]) -> String;
+
+/// The percentage and its kind for the action's headline operation:
+/// "92%" with "peak consistency", or "n/a" with "reference missing".
+pub fn headline_sol_text(record: &BenchmarkRecord, t: Translate<'_>) -> String {
+    let Some(summary) = record.headline_summary() else {
+        return format!("n/a \u{00B7} {}", t("reference missing", &[]));
+    };
+    match record.headline_sol().and_then(|summary| summary.sol) {
+        Some(sol) => format!(
+            "{} \u{00B7} {}",
+            fmt_sol(sol),
+            t(summary.metric_kind().label(), &[])
+        ),
+        None => {
+            let reason = if summary.sol.is_none() {
+                if summary.heterogeneous {
+                    "batches differ"
+                } else {
+                    "reference missing"
+                }
+            } else if !summary.completed() {
+                "not completed"
+            } else if summary.mixed_references {
+                "mixed references"
+            } else {
+                "partial coverage"
+            };
+            format!("n/a \u{00B7} {}", t(reason, &[]))
+        }
+    }
+}
+
+/// How the record's elapsed time compares with the fastest compatible
+/// saved run: "best of 3", "+0.30 s (0.8% slower than best of 3)", or why
+/// there is nothing to compare with.
+pub fn versus_best_text(best: Option<&BestComparison>, t: Translate<'_>) -> String {
+    let Some(best) = best else {
+        return t("not comparable", &[]);
+    };
+    if best.is_alone() {
+        return t("no comparable run", &[]);
+    }
+    let samples = best.samples.to_string();
+    if best.is_best() {
+        return t("best of {count}", &[("count", samples)]);
+    }
+    t(
+        "+{gap} s ({percent}% slower than best of {count})",
+        &[
+            ("gap", format!("{:.2}", best.gap_s())),
+            (
+                "percent",
+                format!("{:.1}", best.slower_percent().unwrap_or(0.0)),
+            ),
+            ("count", samples),
+        ],
+    )
+}
+
+/// The figures worth a headline tile for this record, operation and ratio
+/// first: caption key, value text and whether it is a rate (accent coloured).
+pub fn headline_stats(
+    record: &BenchmarkRecord,
+    best: Option<&BestComparison>,
+    t: Translate<'_>,
+) -> Vec<(&'static str, String, bool)> {
     let m = &record.metrics;
-    let mut stats = vec![("Elapsed", format!("{:.1} s", record.elapsed_secs()), false)];
+    let operation = match record
+        .headline_summary()
+        .and_then(|summary| summary.category())
+    {
+        Some((code, _)) => format!("{} ({code})", record.headline_op()),
+        None => record.headline_op().to_owned(),
+    };
+    let mut stats = vec![
+        ("Operation", operation, false),
+        ("Speed of light", headline_sol_text(record, t), true),
+        ("Versus best measured", versus_best_text(best, t), false),
+        ("Elapsed", format!("{:.1} s", record.elapsed_secs()), false),
+    ];
     if record.kind.transfers_files() && m.avg_download_bps > 0.0 {
         stats.push((
             "Average download speed",
@@ -195,9 +276,6 @@ pub fn headline_stats(record: &BenchmarkRecord) -> Vec<(&'static str, String, bo
             m.pending_updates.to_string(),
             false,
         ));
-    }
-    if let Some(sol) = record.headline_sol().and_then(|summary| summary.sol) {
-        stats.push(("Speed of light", fmt_sol(sol), true));
     }
     if m.peak_memory_bytes > 0 {
         stats.push(("Peak memory", fmt_bytes(m.peak_memory_bytes), false));
@@ -398,12 +476,31 @@ impl Foxy {
         });
     }
 
-    fn sol_hover(&self, light_src_label: &str, headroom: Option<f64>) -> String {
+    fn sol_hover(
+        &self,
+        kind: SolMetricKind,
+        light_src_label: &str,
+        sol_raw: Option<f64>,
+        headroom: Option<f64>,
+    ) -> String {
         let mut text = format!("{}: {}", self.t("Light source"), self.t(light_src_label));
-        if let Some(headroom) = headroom {
+        text.push('\n');
+        text.push_str(&self.t(kind.description()));
+        if let Some(raw) = sol_raw
+            && raw > 1.0
+        {
             text.push('\n');
             text.push_str(&self.t_fmt(
-                "Could be up to {factor}x faster before physics objects.",
+                "Raw ratio {ratio}: the reference is not a bound for this run.",
+                &[("ratio", format!("{raw:.2}"))],
+            ));
+        }
+        if let Some(headroom) = headroom
+            && kind != SolMetricKind::None
+        {
+            text.push('\n');
+            text.push_str(&self.t_fmt(
+                "{factor}x away from this reference; not a promised speedup.",
                 &[("factor", format!("{headroom:.2}"))],
             ));
         }
@@ -422,7 +519,9 @@ impl Foxy {
     }
 
     /// One resource row of the speed-of-light table: its work, its light,
-    /// the ratio and where the light came from.
+    /// the ratio, what kind of comparison that is, and where the light came
+    /// from. The kind is text in its own column so it reads without colour
+    /// or a tooltip.
     #[allow(clippy::too_many_arguments)]
     fn sol_part_row(
         &self,
@@ -431,12 +530,14 @@ impl Foxy {
         work_bytes: u64,
         light_bps: Option<f64>,
         sol: Option<f64>,
+        sol_raw: Option<f64>,
+        kind: SolMetricKind,
         light_src_label: &str,
         headroom: Option<f64>,
     ) {
         let scale = text_scale(ui);
         let dim = self.color_text_dim();
-        let hover = self.sol_hover(light_src_label, headroom);
+        let hover = self.sol_hover(kind, light_src_label, sol_raw, headroom);
         ui.label(RichText::new(name).size(scale.small));
         ui.label(
             RichText::new(if work_bytes > 0 {
@@ -455,12 +556,49 @@ impl Foxy {
             .size(scale.small),
         );
         self.sol_cell(ui, sol, &hover);
+        let kind_text = match sol_raw {
+            Some(raw) if raw > 1.0 => format!("{} ({raw:.2})", self.t(kind.label())),
+            _ => self.t(kind.label()),
+        };
+        ui.label(RichText::new(kind_text).size(scale.small))
+            .on_hover_text(&hover);
         ui.label(
             RichText::new(self.t(light_src_label))
                 .size(scale.small)
                 .color(dim),
         );
         ui.end_row();
+    }
+
+    /// Why an operation's ratio cannot stand for the whole operation, as a
+    /// short sentence under its table; `None` when nothing needs saying.
+    fn sol_caveat(&self, summary: &crate::core::benchmarks::SolOpSummary) -> Option<String> {
+        if summary.heterogeneous && summary.sol.is_none() && summary.runs > 1 {
+            return Some(self.t(
+                "Batches differ in profile or phase, so no fastest-batch reference is derived; totals still add.",
+            ));
+        }
+        if !summary.completed() {
+            return Some(self.t_fmt(
+                "Outcome {outcome}: not a successful run, excluded from best-case comparison.",
+                &[("outcome", summary.outcomes.join(", "))],
+            ));
+        }
+        if summary.mixed_references {
+            return Some(
+                self.t("Lines used different reference kinds; the folded ratio mixes them."),
+            );
+        }
+        if summary.sol.is_some() && !summary.full_coverage() {
+            return Some(self.t_fmt(
+                "Ratio covers {rated} of {runs} runs; the totals cover all of them.",
+                &[
+                    ("rated", summary.rated_runs.to_string()),
+                    ("runs", summary.runs.to_string()),
+                ],
+            ));
+        }
+        None
     }
 
     /// One block per operation: its convention category and totals, a row
@@ -491,7 +629,7 @@ impl Foxy {
             });
             ui.label(
                 RichText::new(self.t(
-                    "How close each operation ran to the fastest time physics allows for its work; 100% is the speed of light.",
+                    "How close each operation ran to its named reference. The kind says what the percentage compares against: a bound, the run's own peak, or a nominal device rate.",
                 ))
                 .size(scale.small)
                 .color(dim),
@@ -512,9 +650,22 @@ impl Foxy {
                     if summary.work_bytes > 0 {
                         totals.push(fmt_bytes(summary.work_bytes));
                     }
-                    totals.push(fmt_duration(summary.actual_s));
+                    totals.push(format!(
+                        "{} {}",
+                        fmt_duration(summary.actual_s),
+                        self.t(if summary.runs == 1 {
+                            "elapsed"
+                        } else {
+                            "summed"
+                        })
+                    ));
                     if let Some(bps) = summary.actual_bps {
                         totals.push(format!("{}/s", fmt_bytes(bps as u64)));
+                    }
+                    if let Some(gap) = summary.gap_to_reference_s() {
+                        totals.push(
+                            self.t_fmt("{gap} vs reference", &[("gap", format!("{gap:+.2} s"))]),
+                        );
                     }
                     ui.label(
                         RichText::new(totals.join("  \u{00B7}  "))
@@ -524,7 +675,7 @@ impl Foxy {
                 });
                 ui.add_space(2.0);
                 egui::Grid::new(("benchmark_sol_grid", id, summary.op.as_str()))
-                    .num_columns(5)
+                    .num_columns(6)
                     .spacing([14.0, 4.0])
                     .min_col_width(70.0)
                     .show(ui, |ui| {
@@ -533,6 +684,7 @@ impl Foxy {
                             "Work",
                             "Light rate",
                             "Speed of light",
+                            "Kind",
                             "Light source",
                         ] {
                             ui.label(
@@ -549,6 +701,8 @@ impl Foxy {
                             summary.work_bytes,
                             summary.light_bps,
                             summary.sol,
+                            summary.sol_raw,
+                            summary.metric_kind(),
                             summary.light_src.label(),
                             summary.headroom(),
                         );
@@ -559,11 +713,16 @@ impl Foxy {
                                 part.work_bytes,
                                 part.light_bps,
                                 part.sol,
+                                part.sol_raw,
+                                part.metric_kind(),
                                 part.light_src.label(),
                                 part.headroom(),
                             );
                         }
                     });
+                if let Some(caveat) = self.sol_caveat(summary) {
+                    ui.label(RichText::new(caveat).size(scale.small).color(dim));
+                }
                 if !summary.details.is_empty() {
                     ui.add_space(4.0);
                     ui.horizontal_wrapped(|ui| {
@@ -602,10 +761,12 @@ impl Foxy {
         let dim = self.color_text_dim();
         let scale = text_scale(ui);
         let panel_bg = self.color_card_bg();
+        let best = best_comparable(&record, &self.benchmarks_view.records);
+        let translate = |key: &str, replacements: &[(&str, String)]| self.t_fmt(key, replacements);
         ui.add_space(8.0);
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = egui::Vec2::new(8.0, 8.0);
-            for (label, value, is_rate) in headline_stats(&record) {
+            for (label, value, is_rate) in headline_stats(&record, best.as_ref(), &translate) {
                 let accent = is_rate.then(|| self.color_primary_accent());
                 self.benchmark_stat_tile(ui, self.t(label), value, accent);
             }
@@ -795,28 +956,79 @@ mod tests {
             log_line_count: 0,
         };
         record.metrics.hash_files_total = 40;
-        let labels: Vec<&str> = headline_stats(&record)
-            .iter()
-            .map(|(label, _, _)| *label)
-            .collect();
-        assert_eq!(labels, vec!["Elapsed", "Files checked", "Files per second"]);
-        assert_eq!(headline_stats(&record)[2].1, "20");
+        let t = |key: &str, replacements: &[(&str, String)]| {
+            let mut text = key.to_owned();
+            for (name, value) in replacements {
+                text = text.replace(&format!("{{{name}}}"), value);
+            }
+            text
+        };
+        let stats = headline_stats(&record, None, &t);
+        let labels: Vec<&str> = stats.iter().map(|(label, _, _)| *label).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "Operation",
+                "Speed of light",
+                "Versus best measured",
+                "Elapsed",
+                "Files checked",
+                "Files per second"
+            ]
+        );
+        assert_eq!(stats[0].1, "hash");
+        assert_eq!(stats[1].1, "n/a \u{00B7} reference missing");
+        assert_eq!(stats[2].1, "not comparable");
+        assert_eq!(stats[5].1, "20");
 
         record.kind = crate::core::benchmarks::BenchmarkKind::Update;
         record.metrics.avg_download_bps = 1024.0;
         record.metrics.downloaded_bytes = 2048;
-        let labels: Vec<&str> = headline_stats(&record)
-            .iter()
-            .map(|(label, _, _)| *label)
-            .collect();
+        record.sol = vec![
+            [
+                ("op", "download"),
+                ("actual_s", "2.0"),
+                ("work_bytes", "2048"),
+                ("ideal_s", "1.0"),
+                ("sol", "0.5"),
+                ("light_src", "peak_1s"),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect(),
+        ];
+        let best = BestComparison {
+            best_id: "other".into(),
+            best_elapsed_s: 1.6,
+            candidate_elapsed_s: 2.0,
+            samples: 3,
+        };
+        let stats = headline_stats(&record, Some(&best), &t);
+        let labels: Vec<&str> = stats.iter().map(|(label, _, _)| *label).collect();
         assert_eq!(
             labels,
             vec![
+                "Operation",
+                "Speed of light",
+                "Versus best measured",
                 "Elapsed",
                 "Average download speed",
                 "Downloaded",
                 "Files checked"
             ]
         );
+        assert_eq!(stats[0].1, "download (O1)");
+        assert_eq!(stats[1].1, "50% \u{00B7} peak consistency");
+        assert_eq!(stats[2].1, "+0.40 s (25.0% slower than best of 3)");
+        let alone = BestComparison {
+            samples: 1,
+            ..best.clone()
+        };
+        assert_eq!(versus_best_text(Some(&alone), &t), "no comparable run");
+        let winner = BestComparison {
+            best_elapsed_s: 2.0,
+            ..best
+        };
+        assert_eq!(versus_best_text(Some(&winner), &t), "best of 3");
     }
 }

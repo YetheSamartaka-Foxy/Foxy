@@ -685,7 +685,16 @@ Failure exits:
 - Pending updates but empty download queue: fail.
 - Backup failure: fail before modifying files.
 - Download failure: rollback touched files.
-- Cancellation: rollback touched files and preserve enough state for retry.
+- Cancellation: join the incremental hash worker first (it skips its final
+  flush once a cancel is pending), rollback touched files, then clear the
+  local hash baseline of every reverted file, so no checksum outlives the
+  bytes it described. A cancelled delta patch attempt keeps its plan
+  (`planned`, not `fallback_full`) so the retry patches again. The rollback
+  session records its state as a header manifest plus an append-only
+  `journal.jsonl` (one line per registered, promoted, restored or committed
+  entry); crash recovery replays the journal and ignores a torn last line.
+- Integrity recheck: the hash pass takes the cancel receiver and exits with
+  `outcome=cancelled` between batches.
 
 ## Remote Metadata Refresh Algorithm
 

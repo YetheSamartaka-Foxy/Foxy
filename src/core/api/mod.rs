@@ -53,7 +53,7 @@ pub use fs_watcher::spawn_repo_fs_watcher;
 pub(crate) use logging::send_progress_event;
 pub use logging::{
     activity_log_generation, activity_log_snapshot, logger_health, next_operation_id,
-    process_start_elapsed, set_extended_diagnostics,
+    process_start_elapsed, set_extended_diagnostics, startup_operation_id,
 };
 pub(crate) use logging::{ensure_logger, ensure_logger_with_terminal};
 pub use quick_scan::{

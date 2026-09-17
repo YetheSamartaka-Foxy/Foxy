@@ -4,7 +4,7 @@ use crate::core::utils::content_hash::{
     Blake3ReadStrategy, blake3_mmap_file_hash_full, is_blake3_checksum, select_blake3_read_strategy,
 };
 use crate::core::utils::resource_profile::{ResourcePressure, ResourceProfile};
-use crate::core::utils::speed_of_light::{SolLight, sol_line};
+use crate::core::utils::speed_of_light::{SolLight, op_id_extra, sol_line};
 use crate::ui::types::HashIoProfilePreference;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -120,6 +120,9 @@ impl HashProfileDecision {
 
 const MIN_AUTO_BENCHMARK_FILES: usize = 3;
 const MIN_AUTO_BENCHMARK_BYTES: u64 = 256 * 1024 * 1024;
+/// Most profiles the auto benchmark can try; the sample is sized for one
+/// disjoint group per profile.
+const MAX_BENCHMARK_GROUPS: usize = 3;
 const LOW_WAIT_AGGRESSIVE_THRESHOLD: f64 = 0.01;
 
 fn cap_auto_hash_profile(
@@ -914,10 +917,14 @@ pub(super) fn missing_local_hash_pass_is_noop(data_tree: &Tree, file_indices: &[
     })
 }
 
-fn split_benchmark_jobs(jobs: &mut Vec<FileHashJob>) -> Vec<FileHashJob> {
-    const MAX_BENCHMARK_FILES: usize = 12;
-    const MAX_BENCHMARK_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_BENCHMARK_FILES_PER_GROUP: usize = 12;
+const MAX_BENCHMARK_BYTES_PER_GROUP: u64 = 512 * 1024 * 1024;
 
+/// Take the calibration sample out of `jobs`: enough files and bytes for
+/// `groups` disjoint trial groups, so every trial hashes its own data and no
+/// byte is hashed twice or read warm from a previous trial.
+fn split_benchmark_jobs(jobs: &mut Vec<FileHashJob>, groups: usize) -> Vec<FileHashJob> {
+    let groups = groups.max(1);
     if jobs.len() < MIN_AUTO_BENCHMARK_FILES {
         return Vec::new();
     }
@@ -925,7 +932,10 @@ fn split_benchmark_jobs(jobs: &mut Vec<FileHashJob>) -> Vec<FileHashJob> {
     // Layout-heavy PBOs can dominate real hashing time even when they are not
     // the largest files. Prefer those first, then fill the byte budget.
     jobs.sort_by_key(|job| Reverse((job.indexed_parts.len(), job_estimated_bytes(job))));
-    let take_count = jobs.len().min(MAX_BENCHMARK_FILES);
+    let min_files = MIN_AUTO_BENCHMARK_FILES.saturating_mul(groups);
+    let max_files = MAX_BENCHMARK_FILES_PER_GROUP.saturating_mul(groups);
+    let max_bytes = MAX_BENCHMARK_BYTES_PER_GROUP.saturating_mul(groups as u64);
+    let take_count = jobs.len().min(max_files);
     let mut selected = Vec::new();
     let mut selected_bytes = 0u64;
     for _ in 0..take_count {
@@ -935,7 +945,7 @@ fn split_benchmark_jobs(jobs: &mut Vec<FileHashJob>) -> Vec<FileHashJob> {
         let job = jobs.remove(0);
         selected_bytes = selected_bytes.saturating_add(job_estimated_bytes(&job));
         selected.push(job);
-        if selected.len() >= MIN_AUTO_BENCHMARK_FILES && selected_bytes >= MAX_BENCHMARK_BYTES {
+        if selected.len() >= min_files && selected_bytes >= max_bytes {
             break;
         }
     }
@@ -945,6 +955,29 @@ fn split_benchmark_jobs(jobs: &mut Vec<FileHashJob>) -> Vec<FileHashJob> {
 fn benchmark_sample_is_sufficient(benchmark_jobs: &[FileHashJob]) -> bool {
     benchmark_jobs.len() >= MIN_AUTO_BENCHMARK_FILES
         && benchmark_jobs.iter().map(job_estimated_bytes).sum::<u64>() >= MIN_AUTO_BENCHMARK_BYTES
+}
+
+/// Deal the sample into `groups` disjoint trial groups of similar work: the
+/// sample arrives sorted by (parts, bytes) descending, so round-robin dealing
+/// gives every group a like share of the heavy and the light files. Groups
+/// that would be too small to judge are folded back until every remaining
+/// group is sufficient; the result has at least one group.
+fn deal_benchmark_groups(sample: Vec<FileHashJob>, groups: usize) -> Vec<Vec<FileHashJob>> {
+    let mut groups = groups.clamp(1, sample.len().max(1));
+    loop {
+        let mut dealt: Vec<Vec<FileHashJob>> = (0..groups).map(|_| Vec::new()).collect();
+        for (index, job) in sample.iter().enumerate() {
+            dealt[index % groups].push(job.clone());
+        }
+        if groups == 1
+            || dealt
+                .iter()
+                .all(|group| benchmark_sample_is_sufficient(group))
+        {
+            return dealt;
+        }
+        groups -= 1;
+    }
 }
 
 #[derive(Default)]
@@ -1078,11 +1111,46 @@ fn benchmark_metrics_are_sufficient(metrics: &HashRunMetrics) -> bool {
         && metrics.hashed_bytes >= MIN_AUTO_BENCHMARK_BYTES
 }
 
+/// The checksum algorithm the jobs verify against, for the `SOL op=hash`
+/// line: a BLAKE3 pass and an MD5 pass have different compute references.
+fn hash_algorithm_label(jobs: &[FileHashJob]) -> &'static str {
+    let mut blake3 = false;
+    let mut md5 = false;
+    for checksum in jobs.iter().flat_map(|job| {
+        std::iter::once(job.file_remote_checksum.as_str()).chain(
+            job.indexed_parts
+                .iter()
+                .map(|(_, part)| part.remote_checksum.as_str()),
+        )
+    }) {
+        if checksum.is_empty() {
+            continue;
+        }
+        if is_blake3_checksum(checksum) {
+            blake3 = true;
+        } else {
+            md5 = true;
+        }
+        if blake3 && md5 {
+            return "mixed";
+        }
+    }
+    match (blake3, md5) {
+        (true, false) => "blake3",
+        (false, true) => "md5",
+        (true, true) => "mixed",
+        (false, false) => "unknown",
+    }
+}
+
 fn log_hash_run_metrics(
     label: &str,
     selected_profile: HashIoProfilePreference,
     wall_elapsed: std::time::Duration,
     results: &[FileHashResult],
+    operation_id: Option<&str>,
+    algorithm: &str,
+    cancelled: bool,
 ) {
     let metrics = HashRunMetrics::from_results(results);
     info!(
@@ -1113,7 +1181,34 @@ fn log_hash_run_metrics(
     );
     // Speed-of-light accounting (see conventions/SPEED_OF_LIGHT.md, O3).
     // No absolute light is computed in-app; compare this rate to the best
-    // demonstrated hash run for the same storage path.
+    // demonstrated hash run for the same storage path. `compute_s` and
+    // `wait_s` are legacy names: they are the summed blocking-task elapsed
+    // (reads and scheduling included, not CPU service) and the summed
+    // semaphore wait, repeated under their accurate names.
+    let blocking_s = format!("{:.3}", metrics.blocking_hash_elapsed_sum.as_secs_f64());
+    let permit_wait_s = format!("{:.3}", metrics.semaphore_wait_elapsed_sum.as_secs_f64());
+    let mut extras = vec![
+        ("label", label.to_string()),
+        ("files", metrics.files.to_string()),
+        ("parts", metrics.parts.to_string()),
+        ("compute_s", blocking_s.clone()),
+        ("wait_s", permit_wait_s.clone()),
+        ("blocking_elapsed_s", blocking_s),
+        ("permit_wait_s", permit_wait_s),
+        (
+            "file_elapsed_max_s",
+            format!("{:.3}", metrics.file_elapsed_max.as_secs_f64()),
+        ),
+        ("missing_files", metrics.missing_files.to_string()),
+        ("profile", selected_profile.to_string()),
+        ("algorithm", algorithm.to_string()),
+        ("timer_scope", "batch_wall".to_string()),
+        (
+            "outcome",
+            if cancelled { "cancelled" } else { "completed" }.to_string(),
+        ),
+    ];
+    extras.extend(op_id_extra(operation_id));
     info!(
         "{}",
         sol_line(
@@ -1121,19 +1216,7 @@ fn log_hash_run_metrics(
             metrics.hashed_bytes,
             wall_elapsed,
             &SolLight::SelfBaseline,
-            &[
-                ("label", label.to_string()),
-                ("files", metrics.files.to_string()),
-                ("parts", metrics.parts.to_string()),
-                (
-                    "compute_s",
-                    format!("{:.3}", metrics.blocking_hash_elapsed_sum.as_secs_f64()),
-                ),
-                (
-                    "wait_s",
-                    format!("{:.3}", metrics.semaphore_wait_elapsed_sum.as_secs_f64()),
-                ),
-            ],
+            &extras,
         )
     );
 }
@@ -1224,8 +1307,10 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
     progress_tx: Option<&Sender<ProgressEvent>>,
     total_files: usize,
     cancel_rx: Option<&watch::Receiver<bool>>,
+    operation_id: Option<&str>,
 ) -> (Vec<FileHashResult>, HashProfileDecision, bool) {
     let total_parts: usize = jobs.iter().map(|job| job.indexed_parts.len()).sum();
+    let algorithm = hash_algorithm_label(&jobs);
     let resource_profile = ResourceProfile::sample();
     let storage_class = detect_hash_storage_class(&jobs);
     if resource_profile.pressure != ResourcePressure::Normal {
@@ -1277,7 +1362,15 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
         )
         .await;
         let (results, cancelled) = results;
-        log_hash_run_metrics("sticky_auto", profile, run_started.elapsed(), &results);
+        log_hash_run_metrics(
+            "sticky_auto",
+            profile,
+            run_started.elapsed(),
+            &results,
+            operation_id,
+            algorithm,
+            cancelled,
+        );
         let mut decision = HashProfileDecision::sticky_auto(profile);
         if let Some(reason) = cap_reason {
             decision.reason = reason;
@@ -1327,6 +1420,9 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
             effective_profile,
             run_started.elapsed(),
             &results,
+            operation_id,
+            algorithm,
+            cancelled,
         );
         let mut decision = HashProfileDecision::manual(effective_profile);
         if effective_profile != requested_profile {
@@ -1363,7 +1459,7 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
         &initial_limits,
     );
 
-    let benchmark_jobs = split_benchmark_jobs(&mut jobs);
+    let benchmark_jobs = split_benchmark_jobs(&mut jobs, MAX_BENCHMARK_GROUPS);
     let benchmark_bytes: u64 = benchmark_jobs.iter().map(job_estimated_bytes).sum();
     if !benchmark_sample_is_sufficient(&benchmark_jobs) {
         warn!(
@@ -1391,6 +1487,9 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
             initial_profile,
             run_started.elapsed(),
             &results,
+            operation_id,
+            algorithm,
+            cancelled,
         );
         return (
             results,
@@ -1420,11 +1519,16 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
     );
     let benchmark_file_count = benchmark_jobs.len();
     let benchmark_started = Instant::now();
-    let mut best_results = None;
-    let mut best_profile = initial_profile;
-    let mut best_throughput = 0.0f64;
-    let mut best_hashed_bytes = 0u64;
-    let mut boost_remaining = false;
+    // Every profile hashes its own group of the sample, so the trials neither
+    // repeat work nor read data a previous trial pulled into the page cache.
+    // A sample too small to feed every profile tries the first ones only.
+    let groups = deal_benchmark_groups(benchmark_jobs, benchmark_profiles.len());
+    let group_count = groups.len();
+    let trials: Vec<(HashIoProfilePreference, Vec<FileHashJob>)> =
+        benchmark_profiles.into_iter().zip(groups).collect();
+    let mut benchmark_results: Vec<FileHashResult> = Vec::new();
+    let mut benchmark_hashed_bytes = 0u64;
+    let mut best: Option<(HashIoProfilePreference, f64, bool)> = None;
     if let Some(tx) = progress_tx {
         let _ = tx.send(ProgressEvent::Stage {
             label: "Hashing profile".to_string(),
@@ -1432,34 +1536,37 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
         });
     }
 
-    for profile in benchmark_profiles {
+    for (group_index, (profile, group_jobs)) in trials.into_iter().enumerate() {
         if cancel_rx.as_ref().is_some_and(|rx| *rx.borrow()) {
+            let benchmarked_files = benchmark_results.len();
             return (
-                Vec::new(),
+                benchmark_results,
                 HashProfileDecision {
                     requested: HashIoProfilePreference::Auto,
                     selected: initial_profile,
                     reason: "cancelled during auto benchmark".to_string(),
-                    benchmarked_files: 0,
-                    benchmarked_bytes: 0,
+                    benchmarked_files,
+                    benchmarked_bytes: benchmark_hashed_bytes,
                     benchmark_elapsed: benchmark_started.elapsed(),
                     sticky: false,
                 },
                 true,
             );
         }
-        let sample_jobs = benchmark_jobs.clone();
+        let group_parts: usize = group_jobs.iter().map(|job| job.indexed_parts.len()).sum();
+        let group_bytes: u64 = group_jobs.iter().map(job_estimated_bytes).sum();
+        let group_files = group_jobs.len();
         let limits = hash_scheduler_limits_for_environment(
-            sample_jobs.len(),
-            benchmark_total_parts,
+            group_files,
+            group_parts,
             profile,
             resource_profile,
             storage_class,
         );
         log_hash_scheduler_selection("auto_benchmark", requested_profile, profile, &limits);
         let profile_started = Instant::now();
-        let results = recalculate_parts_for_jobs(
-            sample_jobs,
+        let (results, cancelled) = recalculate_parts_for_jobs(
+            group_jobs,
             limits.file_concurrency,
             limits.global_part_concurrency,
             None,
@@ -1468,34 +1575,28 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
             WholeFileHashIo::new(profile, storage_class),
         )
         .await;
-        let (mut results, cancelled) = results;
-        if cancelled {
-            return (
-                results,
-                HashProfileDecision {
-                    requested: HashIoProfilePreference::Auto,
-                    selected: profile,
-                    reason: "cancelled during auto benchmark".to_string(),
-                    benchmarked_files: 0,
-                    benchmarked_bytes: 0,
-                    benchmark_elapsed: benchmark_started.elapsed(),
-                    sticky: false,
-                },
-                true,
-            );
-        }
         let elapsed = profile_started.elapsed();
         let elapsed_secs = elapsed.as_secs_f64().max(0.001);
         let metrics = HashRunMetrics::from_results(&results);
         let throughput = metrics.hashed_bytes as f64 / elapsed_secs;
-        log_hash_run_metrics("auto_benchmark_sample", profile, elapsed, &results);
-        info!(
-            "Hash profile auto benchmark sample: profile={} files={} missing_files={} parts={} estimated_bytes={} hashed_bytes={} elapsed={:.2}s throughput={:.2} MB/s limits={}/{} wait_ratio={:.4}",
+        log_hash_run_metrics(
+            "auto_benchmark_sample",
             profile,
+            elapsed,
+            &results,
+            operation_id,
+            algorithm,
+            cancelled,
+        );
+        info!(
+            "Hash profile auto benchmark sample: profile={} group={}/{} files={} missing_files={} parts={} estimated_bytes={} hashed_bytes={} elapsed={:.2}s throughput={:.2} MB/s limits={}/{} wait_ratio={:.4}",
+            profile,
+            group_index + 1,
+            group_count,
             results.len(),
             metrics.missing_files,
-            benchmark_total_parts,
-            benchmark_bytes,
+            group_parts,
+            group_bytes,
             metrics.hashed_bytes,
             elapsed_secs,
             throughput / (1024.0 * 1024.0),
@@ -1503,7 +1604,28 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
             limits.global_part_concurrency,
             benchmark_wait_ratio(&metrics)
         );
-        if !benchmark_metrics_are_sufficient(&metrics) {
+        // The group's hashes are real results whatever the trial says about
+        // the profile; they are never recomputed.
+        let sufficient = benchmark_metrics_are_sufficient(&metrics);
+        benchmark_hashed_bytes = benchmark_hashed_bytes.saturating_add(metrics.hashed_bytes);
+        benchmark_results.extend(results);
+        if cancelled {
+            let benchmarked_files = benchmark_results.len();
+            return (
+                benchmark_results,
+                HashProfileDecision {
+                    requested: HashIoProfilePreference::Auto,
+                    selected: profile,
+                    reason: "cancelled during auto benchmark".to_string(),
+                    benchmarked_files,
+                    benchmarked_bytes: benchmark_hashed_bytes,
+                    benchmark_elapsed: benchmark_started.elapsed(),
+                    sticky: false,
+                },
+                true,
+            );
+        }
+        if !sufficient {
             warn!(
                 "Hash profile auto benchmark rejected: profile={} files={} missing_files={} estimated_bytes={} hashed_bytes={} minimum_files={} minimum_hashed_bytes={}; using storage heuristic",
                 profile,
@@ -1516,59 +1638,62 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
             );
             continue;
         }
-        if throughput > best_throughput {
-            boost_remaining = benchmark_supports_boosted_aggressive(
+        if best.is_none_or(|(_, best_throughput, _)| throughput > best_throughput) {
+            let boost = benchmark_supports_boosted_aggressive(
                 profile,
                 &metrics,
                 storage_class,
                 resource_profile,
             );
-            best_throughput = throughput;
-            best_profile = profile;
-            best_hashed_bytes = metrics.hashed_bytes;
-            best_results = Some(std::mem::take(&mut results));
+            best = Some((profile, throughput, boost));
         }
     }
 
-    let Some(mut benchmark_results) = best_results else {
+    let Some((best_profile, best_throughput, boost_remaining)) = best else {
         warn!(
             "Hash profile auto benchmark produced no valid sample; using storage heuristic profile={}",
             initial_profile
         );
-        jobs.extend(benchmark_jobs);
         let run_started = Instant::now();
-        let results = recalculate_parts_for_jobs(
+        let (mut results, cancelled) = recalculate_parts_for_jobs(
             jobs,
             initial_limits.file_concurrency,
             initial_limits.global_part_concurrency,
             progress_tx,
-            HashRunProgress::new(total_files, total_parts),
+            HashRunProgress {
+                total_files,
+                total_parts,
+                initial_files_done: benchmark_file_count,
+                initial_parts_done: benchmark_total_parts,
+            },
             cancel_rx,
             WholeFileHashIo::new(initial_profile, storage_class),
         )
         .await;
-        let (results, cancelled) = results;
         log_hash_run_metrics(
             "auto_heuristic",
             initial_profile,
             run_started.elapsed(),
             &results,
+            operation_id,
+            algorithm,
+            cancelled,
         );
+        benchmark_results.append(&mut results);
         return (
-            results,
+            benchmark_results,
             HashProfileDecision {
                 requested: HashIoProfilePreference::Auto,
                 selected: initial_profile,
                 reason: format!("auto benchmark invalid; {initial_reason}"),
-                benchmarked_files: 0,
-                benchmarked_bytes: 0,
-                benchmark_elapsed: std::time::Duration::ZERO,
+                benchmarked_files: benchmark_file_count,
+                benchmarked_bytes: benchmark_hashed_bytes,
+                benchmark_elapsed: benchmark_started.elapsed(),
                 sticky: false,
             },
             cancelled,
         );
     };
-
     let benchmark_elapsed = benchmark_started.elapsed();
     let remaining_parts: usize = jobs.iter().map(|job| job.indexed_parts.len()).sum();
     let remaining_limits = if boost_remaining {
@@ -1601,7 +1726,7 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
         benchmark_file_count,
         benchmark_total_parts,
         benchmark_bytes,
-        best_hashed_bytes,
+        benchmark_hashed_bytes,
         benchmark_elapsed.as_secs_f64(),
         jobs.len(),
         remaining_limits.file_concurrency,
@@ -1644,6 +1769,9 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
         best_profile,
         remaining_started.elapsed(),
         &remaining_results,
+        operation_id,
+        algorithm,
+        cancelled,
     );
     benchmark_results.append(&mut remaining_results);
     (
@@ -1663,7 +1791,7 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
                 )
             },
             benchmarked_files: benchmark_file_count,
-            benchmarked_bytes: best_hashed_bytes,
+            benchmarked_bytes: benchmark_hashed_bytes,
             benchmark_elapsed,
             sticky: true,
         },
@@ -1928,10 +2056,57 @@ mod tests {
             test_job(32, 1024),
             test_job(16, 1024),
         ];
-        let selected = split_benchmark_jobs(&mut jobs);
+        let selected = split_benchmark_jobs(&mut jobs, 1);
         assert_eq!(selected.len(), 5);
         assert!(job_estimated_bytes(&selected[0]) >= job_estimated_bytes(&selected[1]));
         assert_eq!(selected[0].indexed_parts.len(), 64);
+    }
+
+    #[test]
+    fn benchmark_sample_scales_with_the_number_of_trial_groups() {
+        // 40 files of 128 MiB: one group stops at 12 files / 512 MiB, three
+        // groups take three times as much so each trial gets its own data.
+        let mut jobs: Vec<FileHashJob> = (0..40).map(|_| test_job(1, 128 << 20)).collect();
+        let one = split_benchmark_jobs(&mut jobs.clone(), 1);
+        assert_eq!(one.len(), 4);
+        let three = split_benchmark_jobs(&mut jobs, 3);
+        assert_eq!(three.len(), 12);
+        assert_eq!(jobs.len(), 28);
+    }
+
+    #[test]
+    fn benchmark_groups_are_disjoint_balanced_and_each_sufficient() {
+        let sample: Vec<FileHashJob> = (0..12).map(|i| test_job(12 - i, 32 << 20)).collect();
+        let groups = deal_benchmark_groups(sample.clone(), 3);
+        assert_eq!(groups.len(), 3);
+        let total: usize = groups.iter().map(Vec::len).sum();
+        assert_eq!(total, sample.len());
+        // Round-robin over the descending sort: parts 12,9,6,3 / 11,8,5,2 / 10,7,4,1.
+        let parts: Vec<Vec<usize>> = groups
+            .iter()
+            .map(|group| group.iter().map(|job| job.indexed_parts.len()).collect())
+            .collect();
+        assert_eq!(parts, [[12, 9, 6, 3], [11, 8, 5, 2], [10, 7, 4, 1]]);
+        assert!(
+            groups
+                .iter()
+                .all(|group| benchmark_sample_is_sufficient(group))
+        );
+    }
+
+    #[test]
+    fn benchmark_groups_fold_back_until_every_group_can_judge() {
+        // Four 96 MiB files: three groups would be one or two files each,
+        // below the minimum, so the sample folds to one group.
+        let sample: Vec<FileHashJob> = (0..4).map(|_| test_job(1, 96 << 20)).collect();
+        let groups = deal_benchmark_groups(sample, 3);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].len(), 4);
+        // Six such files feed two groups of three, not three of two.
+        let sample: Vec<FileHashJob> = (0..6).map(|_| test_job(1, 96 << 20)).collect();
+        let groups = deal_benchmark_groups(sample, 3);
+        assert_eq!(groups.len(), 2);
+        assert!(deal_benchmark_groups(Vec::new(), 3).len() == 1);
     }
 
     #[test]

@@ -28,10 +28,9 @@ use crate::core::models::repository::load_repository_by_remote_url_and_local_pat
 use crate::core::tasks::calculate_hashes::{
     AddonHashMetrics, HashCalculationResult, HashPhaseTimings, PatchedFileSegments,
     RepositoryHashContext, calculate_hashes_for_files_in_tree_with_profile,
-    calculate_hashes_for_files_with_profile, calculate_hashes_with_profile,
-    calculate_hashes_with_tree_and_profile_cancellable, finalize_repository_hashes_from_mods,
-    finalize_repository_hashes_from_tree, pre_propagate_sibling_checksums,
-    propagate_checksums_to_siblings,
+    calculate_hashes_for_files_with_profile, calculate_hashes_with_tree_and_profile_cancellable,
+    finalize_repository_hashes_from_mods, finalize_repository_hashes_from_tree,
+    pre_propagate_sibling_checksums, propagate_checksums_to_siblings,
 };
 use crate::core::tasks::download_files::{
     DownloadRunReport, UpdateRollbackSession, apply_download_plan_bytes,
@@ -41,7 +40,9 @@ use crate::core::tasks::purge_repository::purge_repository_instance;
 use crate::core::tasks::remote_file_parts::flush_deferred_part_inserts;
 use crate::core::tasks::remote_reachability::ensure_remote_repository_reachable;
 use crate::core::tasks::remote_repository::{probe_remote_repository_checksum, remote_repository};
-use crate::core::tasks::truncate_download_targets::truncate_all_download_tables;
+use crate::core::tasks::truncate_download_targets::{
+    prune_verified_download_targets, truncate_all_download_tables,
+};
 use crate::core::utils::app_paths;
 use crate::core::utils::format::{sanitize_log_path_str, sanitize_log_url};
 use crate::ui::types::HashIoProfilePreference;
@@ -588,7 +589,44 @@ async fn existing_download_targets_are_tiny(
     checked == file_ids.len()
 }
 
-async fn invalidate_force_redownload_hash_baseline(
+/// Wait for the incremental hash worker to finish whatever batch it is in
+/// before a rollback: an abort would leave its persistence running detached.
+async fn settle_incremental_hash_worker<T>(worker: tokio::task::JoinHandle<T>, reason: &str) {
+    let started = std::time::Instant::now();
+    match worker.await {
+        Ok(_) => info!(
+            "Incremental hash worker settled after {} in {:.2?}",
+            reason,
+            started.elapsed()
+        ),
+        Err(err) => warn!(
+            "Incremental hash worker did not settle cleanly after {}: {}",
+            reason, err
+        ),
+    }
+}
+
+/// A reverted file is back in its pre-download state, but the incremental
+/// hash may already have recorded the promoted bytes; drop that baseline so
+/// nothing later trusts a checksum the disk no longer carries.
+async fn forget_reverted_hashes(context: Arc<FoxyContext>, file_ids: &HashSet<u64>, reason: &str) {
+    match invalidate_local_hash_baseline(context, file_ids).await {
+        Ok(rows) => info!(
+            "Reverted {} files after {}; local hash baseline rows cleared={}",
+            file_ids.len(),
+            reason,
+            rows
+        ),
+        Err(err) => warn!(
+            "Could not clear the local hash baseline of {} reverted files after {}: {}",
+            file_ids.len(),
+            reason,
+            err
+        ),
+    }
+}
+
+async fn invalidate_local_hash_baseline(
     context: Arc<FoxyContext>,
     file_ids: &HashSet<u64>,
 ) -> Result<u64, crate::core::db::DbErr> {
@@ -825,8 +863,12 @@ async fn run_repository_pipeline(
         &normalized_repo_url,
         overall_start,
     );
-    let mut sqlite_perf_guard =
-        SqlitePerfRunGuard::start(normalized_repo_url.clone(), mode, overall_start);
+    let mut sqlite_perf_guard = SqlitePerfRunGuard::start(
+        normalized_repo_url.clone(),
+        operation_id.clone(),
+        mode,
+        overall_start,
+    );
 
     // Surface startup DB maintenance while context creation is blocked.
     if crate::core::tasks::db_turso::db_startup_compaction_active() {
@@ -858,7 +900,8 @@ async fn run_repository_pipeline(
             .with_download_target_queueing(builds_download_plan)
             .with_force_download_targets(mode == SyncMode::Download && force_redownload)
             .with_target_local_path(local_path.clone())
-            .with_repository_space_shared_path(repository_space_shared_path.clone()),
+            .with_repository_space_shared_path(repository_space_shared_path.clone())
+            .with_operation_id(operation_id.as_str()),
     );
     summary.push(StageEntry::new("create_context", stage.elapsed()));
     stage = std::time::Instant::now();
@@ -1209,11 +1252,13 @@ async fn run_repository_pipeline(
             label: "Recalculating file hashes".into(),
             percent: 0.20,
         });
-        calculate_hashes_with_profile(
+        let hash_result = calculate_hashes_with_tree_and_profile_cancellable(
             context.clone(),
             &normalized_repo_url,
+            None,
             Some(&progress_tx),
             hash_io_profile,
+            Some(&cancel_rx),
         )
         .await;
         summary.push(StageEntry::new(
@@ -1221,6 +1266,15 @@ async fn run_repository_pipeline(
             integrity_stage.elapsed(),
         ));
         integrity_stage = std::time::Instant::now();
+        if matches!(hash_result, HashCalculationResult::Cancelled) {
+            info!(
+                "Integrity recheck cancelled during hash recalculation for repo={}",
+                normalized_repo_url
+            );
+            summary.log_table("cancelled");
+            emit_progress!(ProgressEvent::Cancelled);
+            return;
+        }
 
         emit_progress!(ProgressEvent::Stage {
             label: "Refreshing content hashes".into(),
@@ -2494,10 +2548,56 @@ async fn run_repository_pipeline(
                 .with("files", download_file_ids.len())
                 .with("mods", download_mod_ids.len()),
         );
+        stage = std::time::Instant::now();
+        // A reused queue may still list files a cancelled run already finished
+        // and hashed; the incremental hash pass left their checksums verified.
+        if reuse_prepared_queue && !download_file_ids.is_empty() {
+            match prune_verified_download_targets(context.clone(), &download_file_ids).await {
+                Ok(pruned) if !pruned.is_empty() => {
+                    for file_id in &pruned {
+                        download_file_ids.remove(file_id);
+                    }
+                    info!(
+                        "Pruned {} verified files from the reused download queue for repo={} (remaining={})",
+                        pruned.len(),
+                        normalized_repo_url,
+                        download_file_ids.len()
+                    );
+                    summary.push(
+                        StageEntry::new("prepared_queue_prune", stage.elapsed())
+                            .with("files", pruned.len())
+                            .with("remaining", download_file_ids.len()),
+                    );
+                    stage = std::time::Instant::now();
+                    if download_file_ids.is_empty() {
+                        // Everything queued was already finished: let the quick
+                        // verify settle the repository state instead of failing
+                        // on an empty queue.
+                        mods = quick_local_change_diff(
+                            context.clone(),
+                            &normalized_repo_url,
+                            Some(&pending_mod_names),
+                            Some(&mod_enabled_overrides),
+                            Some(&progress_tx),
+                            false,
+                            true,
+                            false,
+                            None,
+                        )
+                        .await;
+                        emit_progress!(ProgressEvent::Diff { mods: mods.clone() });
+                        persist_pending_updates(context.clone(), &normalized_repo_url, &mods).await;
+                    }
+                }
+                Ok(_) => {}
+                Err(err) => warn!(
+                    "Could not prune verified files from the reused download queue for repo={}: {}",
+                    normalized_repo_url, err
+                ),
+            }
+        }
         if force_redownload && !download_file_ids.is_empty() {
-            match invalidate_force_redownload_hash_baseline(context.clone(), &download_file_ids)
-                .await
-            {
+            match invalidate_local_hash_baseline(context.clone(), &download_file_ids).await {
                 Ok(rows) => {
                     info!(
                         "Force redownload hash baseline invalidated: repo={} files={} rows={}",
@@ -2769,6 +2869,7 @@ async fn run_repository_pipeline(
         Arc::new(std::sync::OnceLock::new());
     let incremental_hash_started_at = overall_start;
     let hash_telemetry_epoch = telemetry_epoch.clone();
+    let incremental_hash_cancel = cancel_rx.clone();
     let incremental_hash_worker = tokio::spawn(async move {
         // A++: ensure the deferred part insert has completed before the first tree
         // load (the only `subfiles` reader on the force path). Completions that arrive
@@ -2929,6 +3030,17 @@ async fn run_repository_pipeline(
                 );
             }
         }
+        // A cancelled run is about to roll its promoted files back; hashing
+        // them now would record checksums the disk is about to lose.
+        if *incremental_hash_cancel.borrow() && !pending_file_ids.is_empty() {
+            info!(
+                "Skipping the final incremental hash batch after cancellation: repo={} files={}",
+                incremental_hash_repo_url,
+                pending_file_ids.len()
+            );
+            pending_file_ids.clear();
+            pending_segments.clear();
+        }
         if !pending_file_ids.is_empty() {
             let file_ids = std::mem::take(&mut pending_file_ids);
             let batch_segments = std::mem::take(&mut pending_segments);
@@ -3020,7 +3132,10 @@ async fn run_repository_pipeline(
     };
 
     if cancelled_during_download || *cancel_rx.borrow() {
-        incremental_hash_worker.abort();
+        // Join rather than abort: a batch in flight persists its checksums
+        // from tasks an abort would not reach, and the rollback below must
+        // run after the last of them.
+        settle_incremental_hash_worker(incremental_hash_worker, "cancel").await;
         info!(
             "Sync cancelled after download phase for repo={}",
             normalized_repo_url
@@ -3038,6 +3153,7 @@ async fn run_repository_pipeline(
                 emit_progress!(ProgressEvent::Failed(message));
                 return;
             }
+            forget_reverted_hashes(context.clone(), &rollback.touched_file_ids(), "cancel").await;
         }
         summary.log_table("cancelled");
         emit_progress!(ProgressEvent::Cancelled);
@@ -3047,7 +3163,7 @@ async fn run_repository_pipeline(
     let download_report: DownloadRunReport = match download_result {
         Ok(report) => report,
         Err(err) => {
-            incremental_hash_worker.abort();
+            settle_incremental_hash_worker(incremental_hash_worker, "failure").await;
             let message = format!("Download failed: {}", err);
             error!("{}", message);
             if let Some(session) = rollback_session.as_ref() {
@@ -3062,6 +3178,8 @@ async fn run_repository_pipeline(
                         normalized_repo_url, rollback_err
                     );
                 }
+                forget_reverted_hashes(context.clone(), &rollback.touched_file_ids(), "failure")
+                    .await;
             }
             summary.log_table("failed-download");
             emit_progress!(ProgressEvent::Failed(message));
@@ -3128,6 +3246,7 @@ async fn run_repository_pipeline(
                 emit_progress!(ProgressEvent::Failed(message));
                 return;
             }
+            forget_reverted_hashes(context.clone(), &rollback.touched_file_ids(), "cancel").await;
         }
         summary.log_table("cancelled");
         emit_progress!(ProgressEvent::Cancelled);
@@ -3152,6 +3271,7 @@ async fn run_repository_pipeline(
                 emit_progress!(ProgressEvent::Failed(message));
                 return;
             }
+            forget_reverted_hashes(context.clone(), &rollback.touched_file_ids(), "cancel").await;
         }
         summary.log_table("cancelled");
         emit_progress!(ProgressEvent::Cancelled);

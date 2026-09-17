@@ -24,22 +24,6 @@ pub(crate) async fn calculate_hashes(
     let _ = calculate_hashes_with_tree(context, repository_url, None, progress_tx).await;
 }
 
-pub(crate) async fn calculate_hashes_with_profile(
-    context: Arc<FoxyContext>,
-    repository_url: &str,
-    progress_tx: Option<&Sender<ProgressEvent>>,
-    hash_io_profile: HashIoProfilePreference,
-) {
-    let _ = calculate_hashes_with_tree_and_profile(
-        context,
-        repository_url,
-        None,
-        progress_tx,
-        hash_io_profile,
-    )
-    .await;
-}
-
 /// Runs the full hash pipeline and returns the computed tree for reuse by callers
 /// (e.g. content-hash refresh), avoiding a redundant Tree::load.
 pub(crate) async fn calculate_hashes_with_tree(
@@ -319,6 +303,7 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
         progress_tx,
         total_files,
         cancel_rx,
+        context.operation_id(),
     )
     .await;
     if cancelled || cancel_rx.as_ref().is_some_and(|rx| *rx.borrow()) {

@@ -25,8 +25,9 @@ before changing a case or the runner. For an optimization loop, follow
 - Close any other running `Foxy`. One process owns a game space database; the
   `require_no_other_foxy` guard fails the run rather than fighting over it.
 - Build once, then pass `--no-build` so iterations do not pay for a `cargo build`
-  no-op check: `cargo build -p Foxy --bin Foxy --release` and
-  `cargo build -p foxy-testkit`.
+  no-op check: `cargo build -p Foxy --bin Foxy --release`,
+  `cargo build -p foxy-testkit`, and `cargo build -p foxy-testkit-oracle --release`.
+  Mutation operations still perform the mutator's Cargo freshness check.
 - Perf cases are `release` by default. Never compare a debug row to a release
   row, a GUI row to a CLI row, or a WAL row to an MVCC row except through
   `foxy-testkit compare`.
@@ -59,6 +60,42 @@ Artifacts land in `testkit/runs/<case-id>/<run-id>/`: `app.out`, `app.log`,
 `breakdown-*.json`, the resolved case, and the fixture actually written. Ledger
 rows append to `testkit/ledger/<case-id>.jsonl`.
 
+## Flagship lanes and the measurement table
+
+After any change that can touch download, sync or startup paths, rerun the
+flagship lanes and read the correctness counters and memory guardrails on the
+same rows (`conventions/SPEED_OF_LIGHT.md`, Maintenance):
+
+```powershell
+foxy-testkit suite --filter "perf-redownload-small-ssd,perf-startup-arma3-live" --no-build
+```
+
+`compare` retires a baseline whose run profile (including `diagnostics`),
+environment (CPU, OS, memory bucket, origin), origin checksum or cited
+calibration lanes differ from the current row (`rebaseline-required`,
+`profile-mismatch`, `origin-changed`, `reference-changed`); re-accept on a
+clean revision rather than reading across. Memory metrics are advisory: a
+`memory-advisory` flag reports a footprint move and never sets the verdict
+(Foxy trades footprint for speed on purpose). The curated table in
+`conventions/SPEED_OF_LIGHT_MEASUREMENTS.md` is rendered from the latest
+valid run per case with `foxy-testkit measurements`; paste rows, do not type
+them.
+
+Calibrated ratios need the reference lanes once per machine, origin and
+volume:
+
+```powershell
+foxy-testkit calibrate --case .\testkit\cases\perf-redownload-small-ssd.json
+foxy-testkit calibrate --case .\testkit\cases\perf-tfr-scifi-stale-check-hdd.json --lanes disk
+```
+
+Rows then carry `references` and `download.sol_calibrated`,
+`hash.sol_calibrated`, `startup_probe.sol_calibrated`, `quick_scan.sol_calibrated`
+and the no-change `sync_action.sol_calibrated`; DB references remain evidence
+only until action counters separate statement kinds. The app's own `sol` stays the peak-consistency
+figure. `--lanes hosts --hosts <url,...>` records B4 per host (HTTPS included) for a multi-host startup graph. Run the network lane with the path otherwise idle; rerun the lanes
+after a hardware, OS, network or origin change.
+
 ## Changing the kit itself
 
 Do not run a case to verify a change to a parser, a metric, a threshold, or a
@@ -82,7 +119,7 @@ response corpus in `tests/driver-corpus/`.
   own log slice that `allow_warnings` did not cover.
 - Perf case: the row's `flags` say why a run was invalidated
   (`db-wipe-detected`, `incomplete-payload`, `oracle-failed`, `runaway-bytes`,
-  `threshold-failed`, `assertion-failed`). `breakdown-*.json` localizes a
+  `threshold-failed`, `assertion-failed`, `outcome-mismatch`). `breakdown-*.json` localizes a
   regression to network, disk, database, hash, scan, or patch.
 
 ## Measuring startup
@@ -113,7 +150,7 @@ Private commit is the number, not working set: the OS trims resident pages under
 pressure. To separate Foxy's own state from the renderer floor, launch once
 against an empty `--config-dir` and subtract; that floor is eframe, wgpu and the
 graphics driver, and it moves when they do.
-`conventions/SPEED_OF_LIGHT.md` M1 carries the equation and the levers.
+`conventions/SPEED_OF_LIGHT.md` M1 carries the equation; the levers and the recorded floor are in `conventions/SPEED_OF_LIGHT_MEASUREMENTS.md`.
 
 ## The local origin
 
@@ -152,7 +189,7 @@ will look like an empty repository.
 A case with `"profile": true` sets `FOXY_PROFILE=1` and the run gains
 `profile-<iteration>-<operation>.json`: phases, every seam statement split
 read/write and attributed to a phase, instrumented filesystem calls, and the
-parsed `PIPELINE SUMMARY`. It costs 5-10% of wall clock, so a profiled case
+parsed `PIPELINE SUMMARY`. It can cost 5-10% on DB/filesystem-bound lanes, so a profiled case
 carries its own id and its own history; use it to find where time goes, and the
 unprofiled twin to prove a change moved it.
 
@@ -177,8 +214,8 @@ as a content pass.
 - One process, one case, sequentially. Two perf cases at once measure each other.
 - Never edit a case during an optimization loop. `case_hash` is recorded per row
   and a changed hash starts a new history instead of continuing an old one.
-- Iteration 0 is the cold pass and is ledgered separately from the warm median.
-  "Cold" is only the iteration number: a payload the run just downloaded or
+- Iteration 0 is the unprepared first pass and is ledgered separately from the warm median.
+  Its historical `cold` label is only the iteration number: a payload the run just downloaded or
   mutated is still in the OS page cache, so an HDD case measures memory unless
   it carries an `evict-cache` operation (a non-cached open of every payload
   file, Windows only) before the operation that should read the disk.

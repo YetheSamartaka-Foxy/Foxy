@@ -2,7 +2,7 @@ use crate::core::api::ProgressEvent;
 use crate::core::models::context::FoxyContext;
 use crate::core::models::download_target_file::DownloadTargetFile;
 use crate::core::tasks::calculate_hashes::PatchedFileSegments;
-use crate::core::tasks::delta_patch::try_patch_first;
+use crate::core::tasks::delta_patch::{PatchRequestBudget, try_patch_first};
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use log::{debug, error, info, warn};
@@ -137,6 +137,14 @@ async fn download_single_file(
                 rate_limiter.clone(),
                 metrics.clone(),
                 scheduler.patch_apply_permits.clone(),
+                // The global permits bound the total; the per-file cap is the
+                // ceiling so the last blob in flight can take the permits the
+                // finished files freed instead of the fair share at dispatch.
+                PatchRequestBudget {
+                    range_permits: scheduler.range_permits.clone(),
+                    per_file_requests: scheduler.limits.max_ranges_per_file,
+                    max_run_bytes: scheduler.limits.range_chunk_target as u64,
+                },
             )
             .await
             {

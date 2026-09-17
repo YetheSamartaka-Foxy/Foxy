@@ -56,8 +56,16 @@ fn generated(case: &Value) -> Result<Value> {
         .cloned()
         .into_iter()
         .collect();
+    let mut settings = json!({"auto_recheck_on_launch":false,"auto_quick_scan_on_launch":false,"swifty_migration_offered":true});
+    // `settings` overrides land in the generated settings file, so a case can
+    // pin a bandwidth cap or a hash profile without a hand-written fixture.
+    if let Some(overrides) = case["settings"].as_object() {
+        for (key, value) in overrides {
+            settings[key] = value.clone();
+        }
+    }
     Ok(json!({"files": {
-        "settings.json":{"auto_recheck_on_launch":false,"auto_quick_scan_on_launch":false,"swifty_migration_offered":true},
+        "settings.json":settings,
         "repositories.json":repositories, "repository_spaces.json":spaces
     }}))
 }
@@ -72,9 +80,11 @@ fn generated_repository(source: &Value) -> Result<Value> {
             .context("Missing repository address")?
             .trim_end_matches('/')
     );
+    // An origin the case declares unreachable is part of the workload (an
+    // offline host in a startup graph), so it gets an empty addon list.
     let metadata = match metadata(&address) {
         Ok(value) => value,
-        Err(_) if address.contains(".invalid/") => json!({}),
+        Err(_) if address.contains(".invalid/") || source["unreachable"] == true => json!({}),
         Err(error) => return Err(error.context("Could not fetch repository fixture metadata")),
     };
     let addons = |key: &str| -> Vec<Value> {
@@ -118,7 +128,9 @@ fn generated_repository(source: &Value) -> Result<Value> {
         "no_logs",
         "include_steam_addons",
     ] {
-        repository[field] = json!(false);
+        // A case may switch a launch behaviour on for one repository (a
+        // startup probe lane needs `auto_quick_scan_on_launch`).
+        repository[field] = json!(source[field].as_bool().unwrap_or(false));
     }
     for field in [
         "apply_repo_json_client_parameters",

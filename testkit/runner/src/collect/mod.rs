@@ -5,6 +5,20 @@ pub mod metrics;
 pub mod profile;
 pub mod sol;
 
+/// One line per app event. A GUI-harness slice appends the driver's captured
+/// messages (no timestamp) after the file delta, so every event is present
+/// twice; when timestamped lines exist, only those are canonical. A legacy
+/// slice without timestamps is taken as is.
+pub fn event_lines(text: &str) -> impl Iterator<Item = &str> {
+    let timestamped = text.lines().any(is_timestamped);
+    text.lines()
+        .filter(move |line| !timestamped || is_timestamped(line))
+}
+
+fn is_timestamped(line: &str) -> bool {
+    line.starts_with('[') && line.get(1..3) == Some("20")
+}
+
 // `Collect.ps1` had no tests, so a log format change degraded a metric to null
 // instead of failing. These snapshots pin every parser against real recorded
 // slices under tests/log-corpus/; refresh them with `cargo insta review` only

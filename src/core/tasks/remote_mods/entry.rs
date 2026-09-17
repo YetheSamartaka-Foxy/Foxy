@@ -34,13 +34,30 @@ async fn repository_subfiles_empty(db: &FoxyDb, repository_id: i64) -> bool {
     }
 }
 
+/// Work the metadata rebuild did, summed over every manifest task, for the
+/// `SOL op=remote_refresh` record (conventions/SPEED_OF_LIGHT.md, O5).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RemoteRebuildWork {
+    pub(crate) mods: usize,
+    pub(crate) files: usize,
+    pub(crate) parts: usize,
+    /// Manifest response bodies received, in bytes.
+    pub(crate) response_bytes: u64,
+    /// Summed per-mod service times; parallel tasks, so not wall time.
+    pub(crate) fetch: std::time::Duration,
+    pub(crate) parse: std::time::Duration,
+    pub(crate) persist: std::time::Duration,
+    /// Wall time of the parallel manifest fan-out.
+    pub(crate) fan_out_wall: std::time::Duration,
+}
+
 /// Process required and optional mods for given repository and pre-fetched repository json data
 pub(crate) async fn remote_mods_with_data(
     context: Arc<FoxyContext>,
     repository: Arc<FoxyRepository>,
     data: serde_json::Value,
     enabled_overrides: Option<HashMap<String, bool>>,
-) {
+) -> RemoteRebuildWork {
     let rebuild_start = std::time::Instant::now();
 
     // If this repository has no linked subfile rows yet, the per-mod metadata
@@ -152,9 +169,22 @@ pub(crate) async fn remote_mods_with_data(
     )
     .await;
 
+    let work = RemoteRebuildWork {
+        mods: all_stats.len(),
+        files: all_stats.iter().map(|s| s.files).sum(),
+        parts: all_stats.iter().map(|s| s.parts).sum(),
+        response_bytes: all_stats.iter().map(|s| s.http_response_bytes as u64).sum(),
+        fetch: all_stats.iter().map(|s| s.http_download_duration).sum(),
+        parse: all_stats.iter().map(|s| s.http_parse_duration).sum(),
+        persist: all_stats
+            .iter()
+            .map(|s| s.file_upsert_duration + s.parts_persist_duration)
+            .sum(),
+        fan_out_wall: parallel_elapsed,
+    };
     if !all_stats.is_empty() {
-        let total_files: usize = all_stats.iter().map(|s| s.files).sum();
-        let total_parts: usize = all_stats.iter().map(|s| s.parts).sum();
+        let total_files = work.files;
+        let total_parts = work.parts;
         let total_bytes: u64 = all_stats.iter().map(|s| s.bytes).sum();
         let sum_mod_durations: std::time::Duration = all_stats.iter().map(|s| s.duration).sum();
         info!(
@@ -197,6 +227,7 @@ pub(crate) async fn remote_mods_with_data(
             );
         }
     }
+    work
 }
 
 #[cfg(test)]

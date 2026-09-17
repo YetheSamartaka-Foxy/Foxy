@@ -395,6 +395,7 @@ async fn turso_execute(
     let profiled = crate::core::utils::profiling::FsTimer::start();
     let affected = conn.execute(sql, values).await.map_err(map_turso_err)?;
     profiled.stop_db("write", sql, affected);
+    crate::core::tasks::init_database::record_sqlite_rows_affected(affected);
     // Cached programs are compiled against the roots the schema had at prepare
     // time, so DDL has to retire every pooled connection's cache.
     if crate::core::tasks::db_turso::sql_is_ddl(sql) {

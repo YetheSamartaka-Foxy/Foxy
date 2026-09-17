@@ -23,7 +23,7 @@ use crate::core::tasks::calculate_hashes::{
     finalize_repository_content_hashes_from_mods, finalize_repository_hashes_from_mods,
 };
 use crate::core::utils::format::sanitize_log_path_str;
-use crate::core::utils::speed_of_light::{SolLight, sol_line};
+use crate::core::utils::speed_of_light::{SolLight, op_id_extra, sol_line};
 use std::collections::HashSet as StdHashSet;
 use std::sync::{Mutex as StdMutex, OnceLock};
 
@@ -113,6 +113,7 @@ fn tree_verify_targets(
 /// the rate is trended against the machine's own best clean-run baseline.
 #[allow(clippy::too_many_arguments)]
 fn log_quick_scan_sol(
+    operation_id: Option<&str>,
     repo_url: &str,
     elapsed: std::time::Duration,
     addons_total: usize,
@@ -120,6 +121,7 @@ fn log_quick_scan_sol(
     cache_hits_shared: usize,
     cache_hits_persistent: usize,
     deep_scan_files: usize,
+    entries_walked: u64,
     outcome: &str,
 ) {
     let addons_per_s = if elapsed.as_secs_f64() > 0.0 {
@@ -127,24 +129,21 @@ fn log_quick_scan_sol(
     } else {
         0.0
     };
+    let mut extras = vec![
+        ("repo", repo_url.to_string()),
+        ("addons_total", addons_total.to_string()),
+        ("addons_hashed", addons_hashed.to_string()),
+        ("cache_hits_shared", cache_hits_shared.to_string()),
+        ("cache_hits_persistent", cache_hits_persistent.to_string()),
+        ("deep_scan_files", deep_scan_files.to_string()),
+        ("entries", entries_walked.to_string()),
+        ("addons_per_s", format!("{:.1}", addons_per_s)),
+        ("outcome", outcome.to_string()),
+    ];
+    extras.extend(op_id_extra(operation_id));
     info!(
         "{}",
-        sol_line(
-            "quick_scan",
-            0,
-            elapsed,
-            &SolLight::SelfBaseline,
-            &[
-                ("repo", repo_url.to_string()),
-                ("addons_total", addons_total.to_string()),
-                ("addons_hashed", addons_hashed.to_string()),
-                ("cache_hits_shared", cache_hits_shared.to_string()),
-                ("cache_hits_persistent", cache_hits_persistent.to_string()),
-                ("deep_scan_files", deep_scan_files.to_string()),
-                ("addons_per_s", format!("{:.1}", addons_per_s)),
-                ("outcome", outcome.to_string()),
-            ],
-        )
+        sol_line("quick_scan", 0, elapsed, &SolLight::SelfBaseline, &extras)
     );
 }
 
@@ -707,6 +706,7 @@ async fn quick_local_change_diff_locked(
             repo_url, addon_hash.enabled_addons
         );
         log_quick_scan_sol(
+            context.operation_id(),
             repo_url,
             quick_scan_total_started.elapsed(),
             addon_hash.enabled_addons,
@@ -714,6 +714,7 @@ async fn quick_local_change_diff_locked(
             addon_hash.addon_hash_hits_shared_memory,
             addon_hash.addon_hash_hits_persistent,
             0,
+            addon_hash.entries_walked,
             "clean",
         );
         info!(
@@ -835,6 +836,7 @@ async fn quick_local_change_diff_locked(
         addons_content_mismatch.len()
     );
     log_quick_scan_sol(
+        context.operation_id(),
         repo_url,
         quick_scan_total_started.elapsed(),
         addon_hash.enabled_addons,
@@ -842,6 +844,7 @@ async fn quick_local_change_diff_locked(
         addon_hash.addon_hash_hits_shared_memory,
         addon_hash.addon_hash_hits_persistent,
         diff_result.deep_scan_files_total,
+        addon_hash.entries_walked,
         if diff_result.addons_with_updates > 0 {
             "updates"
         } else {

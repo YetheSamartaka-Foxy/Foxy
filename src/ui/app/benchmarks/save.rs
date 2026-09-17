@@ -7,7 +7,7 @@ use super::BenchmarkDraft;
 use crate::core::benchmarks::export::ExportImage;
 use crate::core::benchmarks::log_slice::{
     FRAME_SLACK_AFTER_MS, FRAME_SLACK_BEFORE_MS, STARTUP_WINDOW_MS, gather_log_lines,
-    parse_pipeline_summary, parse_sol_lines, slice_lines,
+    owned_sol_lines, parse_pipeline_summary, parse_sol_lines, slice_lines,
 };
 use crate::core::benchmarks::{BenchmarkRecord, index, store};
 use crate::core::utils::app_paths;
@@ -85,7 +85,8 @@ fn save_draft_blocking(mut draft: BenchmarkDraft) -> Result<BenchmarkRecord, Str
         draft.record.stages = summary.stages;
         draft.record.operation_id = Some(summary.operation_id);
     }
-    draft.record.sol = parse_sol_lines(frame);
+    draft.record.sol =
+        owned_sol_lines(parse_sol_lines(frame), draft.record.operation_id.as_deref());
     draft.record.log_line_count = slice.line_count();
     draft.record.log_file = (slice.line_count() > 0).then(|| store::LOG_FILE.to_owned());
     describe_machine(&mut draft.record);
@@ -214,12 +215,14 @@ impl Foxy {
             return;
         };
         let log_text = store::read_log(&record);
+        let best = crate::core::benchmarks::best_comparable(&record, &self.benchmarks_view.records);
         let tx = self.benchmark_channels.save_tx.clone();
         let repaint = self.repaint_ctx.clone();
         std::thread::spawn(move || {
             let result = match crate::core::benchmarks::export::write_zip(
                 &dest,
                 &record,
+                best.as_ref(),
                 log_text.as_deref(),
                 &images,
             ) {

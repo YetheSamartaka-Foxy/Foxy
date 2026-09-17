@@ -23,6 +23,9 @@ pub(crate) struct DownloadMetrics {
     /// One `root=.. fs=..` description per volume the run writes to, so the
     /// final report says where the bytes went.
     destinations: Mutex<Vec<String>>,
+    /// Every sampler window of the run, kept so the end-of-run line can
+    /// split the wall time into ramp, plateau and tail.
+    series: Mutex<Vec<SeriesPoint>>,
     sampler_stop: AtomicBool,
     sampler_wake: tokio::sync::Notify,
 }
@@ -63,10 +66,13 @@ pub(super) struct DownloadCounters {
     pub(super) active_files: AtomicUsize,
     pub(super) active_ranges: AtomicUsize,
     pub(super) bytes_transferred: AtomicU64,
-    /// Best network throughput observed in any single 1-second sampler window
-    /// (bytes/sec). Serves as the demonstrated link capacity ("light") for the
-    /// end-of-run SOL ratio when no bandwidth limiter is configured.
+    /// Best network throughput observed in any sampler window of at least
+    /// `PEAK_MIN_INTERVAL` (bytes/sec, byte delta over the measured interval).
+    /// Serves as the demonstrated path capacity ("light") for the end-of-run
+    /// SOL ratio when no bandwidth limiter is configured.
     pub(super) peak_network_bps: AtomicU64,
+    /// Measured width in nanoseconds of the window that set `peak_network_bps`.
+    pub(super) peak_window_ns: AtomicU64,
     pub(super) disk_bytes_written: AtomicU64,
     /// Full size of every file that was delta patched rather than downloaded;
     /// its bytes were produced by local copies and never re-read by the hash.
@@ -110,6 +116,153 @@ pub(super) struct RangeMetric {
     pub(super) bytes: u64,
 }
 
+/// One retained sampler window: when it ended (offset from the telemetry
+/// epoch), how wide it was, what it moved and how much work was in flight.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SeriesPoint {
+    pub(crate) end_offset: Duration,
+    pub(crate) elapsed: Duration,
+    pub(crate) network_delta: u64,
+    pub(crate) active_files: usize,
+    pub(crate) active_ranges: usize,
+}
+
+impl SeriesPoint {
+    fn bps(&self) -> u64 {
+        let secs = self.elapsed.as_secs_f64();
+        if secs <= 0.0 {
+            0
+        } else {
+            (self.network_delta as f64 / secs).round() as u64
+        }
+    }
+}
+
+/// Fraction of the peak rate a window must reach to count as plateau.
+const PLATEAU_FRACTION: f64 = 0.9;
+
+/// How a download's wall time splits around its plateau: the ramp before
+/// the first window at plateau rate, the tail after the last one, and the
+/// bytes each of them fell short of the peak rate. All zero when no window
+/// reached the plateau or there is no peak.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct RampTail {
+    pub(crate) ramp: Duration,
+    pub(crate) plateau: Duration,
+    pub(crate) tail: Duration,
+    pub(crate) ramp_deficit_bytes: u64,
+    pub(crate) tail_deficit_bytes: u64,
+    pub(crate) ramp_windows: usize,
+    pub(crate) reached: bool,
+}
+
+pub(crate) fn ramp_tail_profile(
+    series: &[SeriesPoint],
+    peak_bps: u64,
+    total: Duration,
+) -> RampTail {
+    if peak_bps == 0 || series.is_empty() {
+        return RampTail::default();
+    }
+    let threshold = (peak_bps as f64 * PLATEAU_FRACTION) as u64;
+    let at_plateau = |point: &SeriesPoint| point.bps() >= threshold;
+    let Some(first) = series.iter().position(at_plateau) else {
+        return RampTail::default();
+    };
+    let last = series.iter().rposition(at_plateau).unwrap_or(first);
+    let deficit = |point: &SeriesPoint| {
+        let expected = (peak_bps as f64 * point.elapsed.as_secs_f64()) as u64;
+        expected.saturating_sub(point.network_delta)
+    };
+    let ramp_end = series[first]
+        .end_offset
+        .saturating_sub(series[first].elapsed);
+    let tail_start = series[last].end_offset.min(total);
+    RampTail {
+        ramp: ramp_end,
+        plateau: tail_start.saturating_sub(ramp_end),
+        tail: total.saturating_sub(tail_start),
+        ramp_deficit_bytes: series[..first].iter().map(deficit).sum(),
+        tail_deficit_bytes: series[last + 1..].iter().map(deficit).sum(),
+        ramp_windows: first,
+        reached: true,
+    }
+}
+
+/// Shortest sampler window allowed to set the run's peak rate. A window
+/// narrower than this (an immediate wake, the final partial interval) is a
+/// valid rate for the series but too noisy to stand as the path ceiling.
+pub(super) const PEAK_MIN_INTERVAL: Duration = Duration::from_millis(500);
+
+/// One throughput sample: the byte deltas since the previous sample and the
+/// measured width of that interval, so the rate is `delta / elapsed` rather
+/// than "delta per nominal tick".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct RateSample {
+    pub(super) at: Instant,
+    pub(super) elapsed: Duration,
+    pub(super) network_delta: u64,
+    pub(super) disk_delta: u64,
+    pub(super) network_bps: u64,
+    pub(super) disk_bps: u64,
+}
+
+impl RateSample {
+    pub(super) fn peak_eligible(&self) -> bool {
+        self.elapsed >= PEAK_MIN_INTERVAL && self.network_delta > 0
+    }
+}
+
+/// Cursor over monotonically increasing byte counters. Pure so the interval
+/// arithmetic can be tested with synthetic clocks.
+pub(super) struct RateSampler {
+    last_at: Instant,
+    last_network_bytes: u64,
+    last_disk_bytes: u64,
+}
+
+impl RateSampler {
+    pub(super) fn new(epoch: Instant) -> Self {
+        Self {
+            last_at: epoch,
+            last_network_bytes: 0,
+            last_disk_bytes: 0,
+        }
+    }
+
+    pub(super) fn sample(
+        &mut self,
+        network_bytes: u64,
+        disk_bytes: u64,
+        now: Instant,
+    ) -> RateSample {
+        let elapsed = now.saturating_duration_since(self.last_at);
+        let network_delta = network_bytes.saturating_sub(self.last_network_bytes);
+        let disk_delta = disk_bytes.saturating_sub(self.last_disk_bytes);
+        self.last_at = now;
+        self.last_network_bytes = network_bytes;
+        self.last_disk_bytes = disk_bytes;
+        RateSample {
+            at: now,
+            elapsed,
+            network_delta,
+            disk_delta,
+            network_bps: interval_rate(network_delta, elapsed),
+            disk_bps: interval_rate(disk_delta, elapsed),
+        }
+    }
+}
+
+/// Bytes per second over a measured interval; zero for an empty interval so
+/// an immediate wake never divides by zero or reports an infinite rate.
+pub(super) fn interval_rate(delta_bytes: u64, elapsed: Duration) -> u64 {
+    let secs = elapsed.as_secs_f64();
+    if secs <= 0.0 || delta_bytes == 0 {
+        return 0;
+    }
+    (delta_bytes as f64 / secs).round() as u64
+}
+
 /// Phase timing for top-level orchestrator steps.
 struct PhaseMetric {
     name: &'static str,
@@ -144,6 +297,7 @@ impl DownloadMetrics {
                 active_ranges: AtomicUsize::new(0),
                 bytes_transferred: AtomicU64::new(0),
                 peak_network_bps: AtomicU64::new(0),
+                peak_window_ns: AtomicU64::new(0),
                 disk_bytes_written: AtomicU64::new(0),
                 patched_full_bytes: AtomicU64::new(0),
                 files_completed: AtomicUsize::new(0),
@@ -157,6 +311,7 @@ impl DownloadMetrics {
             range_events: Mutex::new(Vec::new()),
             phase_events: Mutex::new(Vec::new()),
             destinations: Mutex::new(Vec::new()),
+            series: Mutex::new(Vec::new()),
             sampler_stop: AtomicBool::new(false),
             sampler_wake: tokio::sync::Notify::new(),
         }
@@ -206,10 +361,41 @@ impl DownloadMetrics {
         }
     }
 
-    /// Highest one-second network throughput sampled so far in this
-    /// download, 0 until the first sample.
+    /// Highest sampler-window network throughput measured so far in this
+    /// download, 0 until the first eligible window.
     pub(crate) fn peak_network_bps(&self) -> u64 {
         self.counters.peak_network_bps.load(Ordering::Relaxed)
+    }
+
+    /// Width of the window behind `peak_network_bps`, zero until a window
+    /// qualified.
+    pub(crate) fn peak_window(&self) -> Duration {
+        Duration::from_nanos(self.counters.peak_window_ns.load(Ordering::Relaxed))
+    }
+
+    fn record_peak(&self, sample: &RateSample) {
+        if !sample.peak_eligible() {
+            return;
+        }
+        let bps = sample.network_bps;
+        if self
+            .counters
+            .peak_network_bps
+            .fetch_max(bps, Ordering::Relaxed)
+            < bps
+        {
+            self.counters
+                .peak_window_ns
+                .store(sample.elapsed.as_nanos() as u64, Ordering::Relaxed);
+        }
+    }
+
+    /// The retained sampler windows in order.
+    pub(crate) fn series(&self) -> Vec<SeriesPoint> {
+        self.series
+            .lock()
+            .map(|series| series.clone())
+            .unwrap_or_default()
     }
 
     /// Record bytes transferred (called from transfer layer per chunk).
@@ -244,27 +430,35 @@ impl DownloadMetrics {
                     ProcessRefreshKind::nothing().with_cpu().with_memory(),
                 );
             }
-            let mut last_bytes = 0_u64;
-            let mut last_disk_bytes = 0_u64;
+            let mut rates = RateSampler::new(telemetry_epoch);
             loop {
                 tokio::select! {
                     _ = interval.tick() => {}
                     _ = me.sampler_wake.notified() => {}
                 }
-                if me.sampler_stop.load(Ordering::Relaxed) {
+                // The stop signal still takes one closing sample so the bytes
+                // of the final partial window are not dropped from the series.
+                let stopping = me.sampler_stop.load(Ordering::Relaxed);
+                let sample = rates.sample(
+                    me.counters.bytes_transferred.load(Ordering::Relaxed),
+                    me.counters.disk_bytes_written.load(Ordering::Relaxed),
+                    Instant::now(),
+                );
+                if stopping && sample.network_delta == 0 && sample.disk_delta == 0 {
                     break;
                 }
-                let bytes = me.counters.bytes_transferred.load(Ordering::Relaxed);
-                let delta = bytes.saturating_sub(last_bytes);
-                last_bytes = bytes;
-                me.counters
-                    .peak_network_bps
-                    .fetch_max(delta, Ordering::Relaxed);
-                let disk_bytes = me.counters.disk_bytes_written.load(Ordering::Relaxed);
-                let disk_delta = disk_bytes.saturating_sub(last_disk_bytes);
-                last_disk_bytes = disk_bytes;
-                let speed_mbps = delta as f64 / (1024.0 * 1024.0);
-                let disk_mbps = disk_delta as f64 / (1024.0 * 1024.0);
+                me.record_peak(&sample);
+                if let Ok(mut series) = me.series.lock() {
+                    series.push(SeriesPoint {
+                        end_offset: sample.at.saturating_duration_since(telemetry_epoch),
+                        elapsed: sample.elapsed,
+                        network_delta: sample.network_delta,
+                        active_files: me.counters.active_files.load(Ordering::Relaxed),
+                        active_ranges: me.counters.active_ranges.load(Ordering::Relaxed),
+                    });
+                }
+                let speed_mbps = sample.network_bps as f64 / (1024.0 * 1024.0);
+                let disk_mbps = sample.disk_bps as f64 / (1024.0 * 1024.0);
                 let active_files = me.counters.active_files.load(Ordering::Relaxed);
                 let active_ranges = me.counters.active_ranges.load(Ordering::Relaxed);
                 let completed = me.counters.files_completed.load(Ordering::Relaxed);
@@ -281,9 +475,11 @@ impl DownloadMetrics {
                     (0.0, 0)
                 };
                 debug!(
-                    "Download sample: speed={:.2} MB/s disk={:.2} MB/s cpu={:.1}% memory={} active_files={} active_ranges={} completed_files={}",
+                    "Download sample: speed={:.2} MB/s disk={:.2} MB/s interval_ms={} bytes={} cpu={:.1}% memory={} active_files={} active_ranges={} completed_files={}",
                     speed_mbps,
                     disk_mbps,
+                    sample.elapsed.as_millis(),
+                    sample.network_delta,
                     cpu_percent,
                     format_bytes(memory_bytes),
                     active_files,
@@ -292,12 +488,18 @@ impl DownloadMetrics {
                 );
                 if let Some(tx) = progress_tx.as_ref() {
                     let _ = tx.send(ProgressEvent::DownloadTelemetry {
-                        elapsed_ms: telemetry_epoch.elapsed().as_millis() as u64,
-                        download_bps: delta as f64,
-                        disk_write_bps: disk_delta as f64,
+                        elapsed_ms: sample
+                            .at
+                            .saturating_duration_since(telemetry_epoch)
+                            .as_millis() as u64,
+                        download_bps: sample.network_bps as f64,
+                        disk_write_bps: sample.disk_bps as f64,
                         cpu_percent,
                         memory_bytes,
                     });
+                }
+                if stopping {
+                    break;
                 }
             }
         })
@@ -832,12 +1034,168 @@ mod tests {
         assert!(phases[0].elapsed >= Duration::from_millis(5));
     }
 
+    fn point(end_s: f64, elapsed_s: f64, delta: u64) -> SeriesPoint {
+        SeriesPoint {
+            end_offset: Duration::from_secs_f64(end_s),
+            elapsed: Duration::from_secs_f64(elapsed_s),
+            network_delta: delta,
+            active_files: 0,
+            active_ranges: 0,
+        }
+    }
+
+    #[test]
+    fn ramp_tail_splits_the_wall_time_around_the_plateau() {
+        // 100 B/s peak: two ramp windows, three at plateau, one tail window.
+        let series = vec![
+            point(1.0, 1.0, 10),
+            point(2.0, 1.0, 50),
+            point(3.0, 1.0, 95),
+            point(4.0, 1.0, 100),
+            point(5.0, 1.0, 92),
+            point(5.5, 0.5, 10),
+        ];
+        let shape = ramp_tail_profile(&series, 100, Duration::from_secs_f64(5.5));
+        assert!(shape.reached);
+        assert_eq!(shape.ramp, Duration::from_secs(2));
+        assert_eq!(shape.plateau, Duration::from_secs(3));
+        assert_eq!(shape.tail, Duration::from_secs_f64(0.5));
+        assert_eq!(shape.ramp_deficit_bytes, 90 + 50);
+        assert_eq!(shape.tail_deficit_bytes, 40);
+        assert_eq!(shape.ramp_windows, 2);
+    }
+
+    #[test]
+    fn ramp_tail_is_empty_without_a_plateau_or_a_peak() {
+        let series = vec![point(1.0, 1.0, 10), point(2.0, 1.0, 20)];
+        assert_eq!(
+            ramp_tail_profile(&series, 100, Duration::from_secs(2)),
+            RampTail::default()
+        );
+        assert_eq!(
+            ramp_tail_profile(&series, 0, Duration::from_secs(2)),
+            RampTail::default()
+        );
+        assert_eq!(
+            ramp_tail_profile(&[], 100, Duration::from_secs(2)),
+            RampTail::default()
+        );
+    }
+
+    #[test]
+    fn ramp_tail_with_one_plateau_window() {
+        let series = vec![point(1.0, 1.0, 100)];
+        let shape = ramp_tail_profile(&series, 100, Duration::from_secs_f64(1.4));
+        assert_eq!(shape.ramp, Duration::ZERO);
+        assert_eq!(shape.plateau, Duration::from_secs(1));
+        assert_eq!(shape.tail, Duration::from_secs_f64(0.4));
+        assert_eq!(shape.ramp_deficit_bytes + shape.tail_deficit_bytes, 0);
+    }
+
     #[test]
     fn stop_sampler_sets_flag() {
         let m = DownloadMetrics::new();
         assert!(!m.sampler_stop.load(Ordering::Relaxed));
         m.stop_sampler();
         assert!(m.sampler_stop.load(Ordering::Relaxed));
+    }
+
+    // ── interval-correct sampling ─────────────────────────────────────
+
+    fn secs(s: f64) -> Duration {
+        Duration::from_secs_f64(s)
+    }
+
+    #[test]
+    fn interval_rate_divides_by_measured_time() {
+        assert_eq!(interval_rate(1_000_000, secs(1.0)), 1_000_000);
+        assert_eq!(interval_rate(1_800_000, secs(1.8)), 1_000_000);
+        assert_eq!(interval_rate(200_000, secs(0.2)), 1_000_000);
+        assert_eq!(interval_rate(0, secs(1.0)), 0);
+        assert_eq!(interval_rate(500, Duration::ZERO), 0);
+    }
+
+    #[test]
+    fn delayed_tick_is_not_reported_as_a_faster_second() {
+        let epoch = Instant::now();
+        let mut sampler = RateSampler::new(epoch);
+        // 1.8 s late with 1.8 MB moved is 1 MB/s, not 1.8 MB/s.
+        let sample = sampler.sample(1_800_000, 0, epoch + secs(1.8));
+        assert_eq!(sample.elapsed, secs(1.8));
+        assert_eq!(sample.network_bps, 1_000_000);
+        assert!(sample.peak_eligible());
+    }
+
+    #[test]
+    fn immediate_tick_reports_zero_rate_and_no_peak() {
+        let epoch = Instant::now();
+        let mut sampler = RateSampler::new(epoch);
+        sampler.sample(1_000, 0, epoch + secs(1.0));
+        let burst = sampler.sample(2_000, 0, epoch + secs(1.0));
+        assert_eq!(burst.elapsed, Duration::ZERO);
+        assert_eq!(burst.network_delta, 1_000);
+        assert_eq!(burst.network_bps, 0);
+        assert!(!burst.peak_eligible());
+    }
+
+    #[test]
+    fn burst_catch_up_ticks_split_bytes_over_their_own_intervals() {
+        let epoch = Instant::now();
+        let mut sampler = RateSampler::new(epoch);
+        let late = sampler.sample(3_000_000, 0, epoch + secs(3.0));
+        let catch_up = sampler.sample(3_050_000, 0, epoch + secs(3.05));
+        assert_eq!(late.network_bps, 1_000_000);
+        assert_eq!(catch_up.network_delta, 50_000);
+        assert_eq!(catch_up.network_bps, 1_000_000);
+        assert!(!catch_up.peak_eligible());
+    }
+
+    #[test]
+    fn final_partial_interval_keeps_its_bytes_but_not_the_peak() {
+        let epoch = Instant::now();
+        let mut sampler = RateSampler::new(epoch);
+        sampler.sample(1_000_000, 0, epoch + secs(1.0));
+        let tail = sampler.sample(1_200_000, 0, epoch + secs(1.2));
+        assert_eq!(tail.elapsed, secs(0.2));
+        assert_eq!(tail.network_delta, 200_000);
+        assert_eq!(tail.network_bps, 1_000_000);
+        assert!(!tail.peak_eligible());
+    }
+
+    #[test]
+    fn deltas_conserve_bytes_across_arbitrary_intervals() {
+        let epoch = Instant::now();
+        let mut sampler = RateSampler::new(epoch);
+        let stream = [
+            (0.7, 100_u64),
+            (1.0, 250),
+            (1.0, 250),
+            (2.6, 900),
+            (2.6, 900),
+            (2.9, 1_000),
+        ];
+        let mut total = 0;
+        let mut disk_total = 0;
+        for (at, bytes) in stream {
+            let sample = sampler.sample(bytes, bytes / 2, epoch + secs(at));
+            total += sample.network_delta;
+            disk_total += sample.disk_delta;
+        }
+        assert_eq!(total, 1_000);
+        assert_eq!(disk_total, 500);
+    }
+
+    #[test]
+    fn peak_records_the_widest_qualifying_window_rate() {
+        let m = DownloadMetrics::new();
+        let epoch = Instant::now();
+        let mut sampler = RateSampler::new(epoch);
+        m.record_peak(&sampler.sample(1_000_000, 0, epoch + secs(1.0)));
+        // A 0.2 s window at 5 MB/s is short-window noise, not the ceiling.
+        m.record_peak(&sampler.sample(2_000_000, 0, epoch + secs(1.2)));
+        m.record_peak(&sampler.sample(4_000_000, 0, epoch + secs(2.2)));
+        assert_eq!(m.peak_network_bps(), 2_000_000);
+        assert_eq!(m.peak_window(), secs(1.0));
     }
 
     // ── current_per_file_range_cap ─────────────────────────────────────

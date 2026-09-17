@@ -15,6 +15,12 @@ Requirements:
 - A case JSON file under the ignored `testkit/cases/` directory
 - For GUI cases, an interactive desktop session
 
+Before a `--no-build` performance run, build the release app, debug runner,
+and release oracle explicitly: `cargo build -p Foxy --bin Foxy --release`,
+`cargo build -p foxy-testkit`, and
+`cargo build -p foxy-testkit-oracle --release`. Mutation operations still run
+the mutator's Cargo freshness check.
+
 Build it once, then invoke it directly:
 
 ```powershell
@@ -34,7 +40,14 @@ Run a whole suite (a failing case does not stop the rest):
 ```powershell
 foxy-testkit suite --filter "ux-*" --no-build
 foxy-testkit suite --tag database --no-build
+# the flagship lanes: O1 download and O6 clean recheck (small-ssd), O8 startup; rerun
+# them after any change that can touch download, sync or startup paths
+foxy-testkit suite --filter "perf-redownload-small-ssd,perf-startup-arma3-live" --no-build
 ```
+
+A filter is a glob, or several globs separated by commas (any may match), so
+a fixed lane list runs as one suite without tagging the case files; tags are
+part of the case hash and would start a new ledger history.
 
 Validate a case without building or touching its repository path:
 
@@ -139,7 +152,8 @@ pressure, so only commit moves when an allocation regression lands. To separate
 Foxy's own state from the renderer floor, launch once against an empty
 `--config-dir` and subtract - that floor is not Foxy code and moves with eframe,
 wgpu and the graphics driver. `conventions/SPEED_OF_LIGHT.md` M1 has the
-equation, the levers, and the recorded floor for this machine.
+equation; `conventions/SPEED_OF_LIGHT_MEASUREMENTS.md` has the levers and the
+recorded floor for this machine.
 
 ## Deep profiling
 
@@ -151,11 +165,61 @@ filesystem calls, and the app's own `PIPELINE SUMMARY` table parsed into rows.
 The same profiler is what the "Extended diagnostics logging" application setting
 turns on for users, together with debug-level records and periodic `RESOURCES`
 samples; a user log with that setting on carries the `PROFILE` lines a
-profiled case does. Per-call timing costs 5-10% of wall clock, so profiled and
-unprofiled rows are not comparable. Keep the profiled variant under its own case id
+profiled case does. Per-call timing can cost roughly 5-10% on database- and
+filesystem-bound lanes and may be inside noise on a network-bound lane. Measure
+per lane; profiled and unprofiled rows are never comparable. Keep the profiled variant under its own case id
 (`perf-db-parts-bulk-profiled` beside `perf-db-parts-bulk`) rather than toggling
 the flag inside one history. See `CASE_FORMAT.md` for the field and for what the
 filesystem instrumentation does and does not cover.
+
+## Measurement table
+
+`measurements` renders the curated table for
+`conventions/SPEED_OF_LIGHT_MEASUREMENTS.md` from structured records rather
+than hand-typed numbers: for every case ledger, the latest valid run reduced to
+one line per operation lane (label, cache lane), with the SoL and its kind,
+median elapsed, the accepted baseline it compares with (or `legacy`, `expired`,
+`no lane`), the work counters, outcome, build and run id:
+
+```powershell
+foxy-testkit measurements                       # every case, Markdown
+foxy-testkit measurements --filter tfr-scifi    # cases whose id contains the text
+foxy-testkit measurements --json
+```
+
+Paste the rows that change a decision into the measurements file; keep raw
+artifacts in `testkit/runs/`.
+
+## Calibration
+
+`calibrate` measures the independent references a row's calibrated ratios
+cite (`conventions/SPEED_OF_LIGHT.md`, Baselines B1, B2/B3, B4, B6) and keeps
+them in `testkit/ledger/calibration.json`, one entry per lane with a dated id
+and the environment fingerprint:
+
+```powershell
+foxy-testkit calibrate --case .\testkit\cases\perf-redownload-small-ssd.json
+foxy-testkit calibrate --case .\testkit\cases\perf-tfr-scifi-stale-check-hdd.json --lanes disk
+foxy-testkit calibrate --case ... --lanes network --seconds 30 --connections 96
+```
+
+`network` loads the origin with 2 MiB range requests over its largest files
+(one connection, the 8/24/48 curve, then the request budget) and records the
+sustained plateau rate; `latency` records connect, fresh and reused
+`repo.json` request times; `disk` writes, unbuffered-reads and warm-reads a
+1 GiB file beside the case's repository path, single-reader and one reader
+per core (so run it once per volume); `hash` measures compute-only BLAKE3 and
+MD5; `metadata` enumerates the repository tree twice (first pass and warm
+entries per second, per volume); `db` inserts and deletes 200k part rows in a
+throwaway Turso database on the case volume, with a keyed-update pass in
+between (insert, update and delete rows per second at gate 1, per volume);
+`hosts` records connect, fresh and reused request times for any list of URLs
+(`--hosts https://a/repo.json,http://b/repo.json`, the case address when
+omitted), HTTPS included, one entry per host under `lanes.hosts`. Run the
+network lane with nothing else on the path. Every
+later run selects the lanes that match it and derives `sol_calibrated` on
+the row (see `LEDGER_FORMAT.md`); recalibrating retires the baselines that
+cited the old lanes.
 
 ## Replay
 
@@ -203,6 +267,19 @@ That is 433 248 part rows in 42 MB, matching a real 96-mod repository row for ro
 while moving three orders of magnitude fewer bytes. It is what
 `perf-db-parts-bulk` uses to exercise the deferred bulk part insert, which is the
 largest single write Foxy performs.
+
+Large files are written in 8 MiB pieces, so `--file-bytes 2147483648` is fine,
+and `--mode swifty` makes the generator publish the legacy MD5 layout
+(`mod.srf` per mod, no `foxy_addon.json`) for a hash-algorithm lane. The
+distribution and algorithm cases document their generator lines in `notes`:
+`synthetic-tiny` (16 x 2000 x 8 KiB), `synthetic-large` (one 2 GiB file) and
+`synthetic-md5` (8 x 50 x 1 MiB, swifty mode). The oracle reads FoxyMode
+manifests only, so an MD5 case keeps the `expected_files` guard instead.
+
+An `origin` block can also carry `delay_ms`, which holds every response back
+that long: with an `extra_repositories` entry marked `"unreachable": true`
+(a closed port, no manifest probe) that is the adverse-origin startup graph
+(`perf-startup-adverse-origins`).
 
 Two repositories that publish the same addons (a repository space, or two
 standalone repositories installed into one folder) are two copies of one

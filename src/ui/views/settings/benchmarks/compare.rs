@@ -132,7 +132,7 @@ impl Foxy {
         panel(ui, self.color_main_bg(), |ui| {
             self.benchmark_section_title(ui, self.t("Speed of light"));
             egui::Grid::new("benchmark_compare_sol")
-                .num_columns(4)
+                .num_columns(5)
                 .striped(true)
                 .spacing([18.0, 5.0])
                 .min_col_width(60.0)
@@ -144,17 +144,34 @@ impl Foxy {
                     header(ui, format!("A  {}", a.build.version), colors[0]);
                     header(ui, format!("B  {}", b.build.version), colors[1]);
                     header(ui, self.t("Change"), dim);
+                    header(ui, self.t("Kind"), dim);
                     ui.end_row();
                     for (op, part) in &ops {
                         let find = |summaries: &[crate::core::benchmarks::SolOpSummary]| {
                             let summary = summaries.iter().find(|summary| summary.op == *op)?;
                             match part {
-                                None => Some((summary.sol, self.t(summary.light_src.label()))),
-                                Some(name) => summary
-                                    .sub_parts
-                                    .iter()
-                                    .find(|sub| sub.name == *name)
-                                    .map(|sub| (sub.sol, self.t(sub.light_src.label()))),
+                                None => Some((
+                                    summary.sol,
+                                    format!(
+                                        "{} \u{00B7} {}",
+                                        self.t(summary.metric_kind().label()),
+                                        self.t(summary.light_src.label())
+                                    ),
+                                )),
+                                Some(name) => {
+                                    summary.sub_parts.iter().find(|sub| sub.name == *name).map(
+                                        |sub| {
+                                            (
+                                                sub.sol,
+                                                format!(
+                                                    "{} \u{00B7} {}",
+                                                    self.t(sub.metric_kind().label()),
+                                                    self.t(sub.light_src.label())
+                                                ),
+                                            )
+                                        },
+                                    )
+                                }
                             }
                         };
                         let (ratio_a, src_a) = find(&sol_a).unwrap_or((None, String::new()));
@@ -196,6 +213,16 @@ impl Foxy {
                                 ui.label(RichText::new("n/a").color(dim));
                             }
                         }
+                        // The kind is text so a mismatch between the two
+                        // records reads without a tooltip.
+                        let kind_text = if src_a == src_b || src_b.is_empty() {
+                            src_a.clone()
+                        } else if src_a.is_empty() {
+                            src_b.clone()
+                        } else {
+                            format!("A {src_a}; B {src_b}")
+                        };
+                        ui.label(RichText::new(kind_text).size(scale.small).color(dim));
                         ui.end_row();
                     }
                 });

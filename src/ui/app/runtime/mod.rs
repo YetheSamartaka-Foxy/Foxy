@@ -3,7 +3,7 @@ mod game_space_switch;
 mod progress_events;
 mod startup_sync;
 mod storage_notice;
-mod update_loop;
+pub(crate) mod update_loop;
 
 pub(crate) use startup_sync::StartupSyncTracker;
 pub(crate) use storage_notice::{

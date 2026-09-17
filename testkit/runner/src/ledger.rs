@@ -73,6 +73,9 @@ pub fn build_row(
     for key in ["mutated_parts", "mutated_bytes"] {
         metadata[key] = fallback(&mutation[key], 0.into());
     }
+    // The per-operation field keeps the legacy last-record view so old rows
+    // replay byte-identical; `sol_aggregate` is the whole-operation total.
+    let mut aggregate = json!({});
     for (field, op) in [
         ("download", "download"),
         ("hash", "hash"),
@@ -80,9 +83,16 @@ pub fn build_row(
         ("startup", "startup"),
         ("startup_probe", "startup_probe"),
         ("app_update_check", "app_update_check"),
+        ("remote_refresh", "remote_refresh"),
+        ("sync_action", "sync_action"),
+        ("db_persist", "db_persist"),
+        ("db_purge", "db_purge"),
+        ("space_switch", "space_switch"),
     ] {
         metadata[field] = sol::operation(sol, op);
+        aggregate[field] = sol::aggregate(sol, op);
     }
+    metadata["sol_aggregate"] = aggregate;
     let mut sums = json!({"delta_savings_percent":round(delta_savings(summary),4)});
     for key in [
         "download_stage_ms",
@@ -93,6 +103,7 @@ pub fn build_row(
         "dispatch_ms",
         "eligibility_ms",
         "verdict_ms",
+        "cancel_quiescent_ms",
     ] {
         sums[key] = summary[key].clone();
     }
@@ -106,6 +117,9 @@ pub fn build_row(
         "full_download_bytes",
     ] {
         sums[key] = fallback(&summary[key], 0.into());
+    }
+    if summary["ui_probe"].is_object() {
+        sums["ui_probe"] = summary["ui_probe"].clone();
     }
     metadata["summary"] = sums;
     // Null when the artifact predates the memory lane, which keeps `replay`
@@ -167,6 +181,7 @@ pub fn build_row(
         "ok"
     }
     .into();
+    crate::references::attach(&mut metadata);
     metadata
 }
 
@@ -196,14 +211,29 @@ pub const DEFINITIONS: &[(&str, bool, f64)] = &[
     ("elapsed_s", false, 0.12),
     ("download.sol", true, 0.08),
     ("download.actual_bps", true, 0.08),
+    // Calibrated estimates against the references the row cites.
+    ("download.sol_calibrated", true, 0.08),
+    ("hash.sol_calibrated", true, 0.08),
+    ("startup_probe.sol_calibrated", true, 0.08),
+    ("quick_scan.sol_calibrated", true, 0.08),
+    ("sync_action.sol_calibrated", true, 0.08),
     ("hash.sol", true, 0.08),
     // Total over every hash run of the operation: the `hash` record itself is
     // only the last run, one arbitrary page-cache batch on a download row.
     ("breakdown.run_metrics.hash_total_s", false, 0.12),
     ("quick_scan.actual_s", false, 0.12),
+    // Complete-action records (O5, O6 and the pipeline exit itself).
+    ("remote_refresh.actual_s", false, 0.12),
+    ("sync_action.actual_s", false, 0.12),
     ("summary.total_ms", false, 0.12),
     ("summary.download_stage_ms", false, 0.12),
     ("summary.hash_stage_ms", false, 0.12),
+    ("summary.cancel_quiescent_ms", false, 0.12),
+    // Frame probe beside the operation: the worst frame interval the app saw.
+    ("summary.ui_probe.frame_ms_max", false, 0.25),
+    ("summary.ui_probe.frame_ms_p95_worst", false, 0.25),
+    ("download.ramp_s", false, 0.25),
+    ("download.tail_s", false, 0.25),
     ("summary.delta_savings_percent", true, 0.0),
     ("database.write_time_ms", false, 0.12),
     ("database.permit_wait_ms", false, 0.12),
@@ -222,16 +252,62 @@ const COUNTERS: &[&str] = &[
     "summary.parts_updated",
     "mutated_parts",
 ];
+/// The row fields that must match before two rows measure the same thing.
+/// Persisted with an accepted baseline and checked on every comparison, so a
+/// debug build, a GUI harness or another storage class cannot inherit a
+/// baseline recorded under different conditions.
+pub const PROFILE_KEYS: &[&str] = &[
+    "harness",
+    "build_kind",
+    "database_mode",
+    "db_write_gate",
+    "db_pool_idle",
+    "storage_class",
+    "diagnostics",
+];
+
+/// Environment properties (from `guards::environment_fingerprint`) whose change
+/// expires an accepted baseline: the numbers were measured on other hardware
+/// or against another origin and are not a reference for this one.
+pub const ENVIRONMENT_KEYS: &[&str] = &["cpu", "os", "memory_gb", "origin"];
+
+pub fn profile_of(row: &Value) -> Value {
+    let mut profile = json!({});
+    for key in PROFILE_KEYS {
+        profile[*key] = row[*key].clone();
+    }
+    if !row["environment"].is_null() {
+        profile["environment"] = row["environment"].clone();
+    }
+    profile
+}
+
+/// The identity a row's measurements are grouped under: the operation label
+/// when the case gave one (two `quick-check` operations with different
+/// initial states are different measurements), else the operation name, and
+/// a lane suffix for rows that ran against an evicted cache.
+pub fn op_key(row: &Value) -> String {
+    let name = row["label"]
+        .as_str()
+        .or(row["op"].as_str())
+        .unwrap_or("")
+        .to_owned();
+    if row["cache_state"] == "evicted" {
+        format!("{name}@evicted")
+    } else {
+        name
+    }
+}
+
+/// Medians per operation key over the steady-state rows: warm rows and
+/// evicted rows, each in its own lane; cold iteration-zero rows and invalid
+/// rows are left out.
 pub fn warm_medians(rows: &[Value]) -> Value {
-    let mut groups: BTreeMap<&str, Vec<&Value>> = BTreeMap::new();
-    for row in rows
-        .iter()
-        .filter(|r| r["cache_state"] == "warm" && r["verdict"] != "invalid")
-    {
-        groups
-            .entry(row["op"].as_str().unwrap_or(""))
-            .or_default()
-            .push(row);
+    let mut groups: BTreeMap<String, Vec<&Value>> = BTreeMap::new();
+    for row in rows.iter().filter(|r| {
+        (r["cache_state"] == "warm" || r["cache_state"] == "evicted") && r["verdict"] != "invalid"
+    }) {
+        groups.entry(op_key(row)).or_default().push(row);
     }
     let mut result = json!({});
     for (op, rows) in groups {
@@ -249,7 +325,7 @@ pub fn warm_medians(rows: &[Value]) -> Value {
                 metrics[path] = value.into();
             }
         }
-        result[op] = json!({"samples":rows.len(),"metrics":metrics});
+        result[op] = json!({"samples":rows.len(),"cache_state":rows[0]["cache_state"],"op":rows[0]["op"],"label":rows[0]["label"],"metrics":metrics});
     }
     result
 }
@@ -264,6 +340,11 @@ pub fn save_baseline(rows: &[Value], path: &Path, case_hash: &str, git_sha: &str
             "Existing baseline has a different case hash; a changed case starts a new history"
         );
     }
+    let profile = profile_of(rows.first().unwrap_or(&Value::Null));
+    ensure!(
+        rows.iter().all(|row| profile_of(row) == profile),
+        "Cannot accept a baseline from rows with different run profiles"
+    );
     let medians = warm_medians(rows);
     let operations = medians.as_object().unwrap();
     ensure!(
@@ -276,9 +357,10 @@ pub fn save_baseline(rows: &[Value], path: &Path, case_hash: &str, git_sha: &str
             "Baseline operation {op} needs at least two warm samples"
         );
     }
+    let first = rows.first().unwrap_or(&Value::Null);
     crate::case::write_json(
         path,
-        &json!({"accepted_utc":chrono::Utc::now().to_rfc3339(),"git_sha":git_sha,"case_hash":case_hash,"operations":medians,"tolerances":{"sol":0.08,"duration":0.12,"correctness":0.0}}),
+        &json!({"accepted_utc":chrono::Utc::now().to_rfc3339(),"git_sha":git_sha,"case_hash":case_hash,"origin_checksum":first["origin_checksum"],"references":crate::references::ids(&first["references"]),"profile":profile,"operations":medians,"tolerances":{"sol":0.08,"duration":0.12,"correctness":0.0}}),
     )
 }
 /// Absolute change below which a duration metric is noise whatever the percent
@@ -293,6 +375,13 @@ pub fn noise_floor(path: &str) -> f64 {
     } else {
         0.0
     }
+}
+
+/// Metrics that are guardrails rather than gates. Foxy deliberately spends
+/// memory and disk to be faster, so a footprint move is reported and never
+/// decides a verdict (conventions/SPEED_OF_LIGHT.md, resource trade policy).
+pub fn is_advisory(path: &str) -> bool {
+    path.starts_with("memory.")
 }
 
 /// `(regression, improvement)` for one metric against its baseline median.
@@ -316,21 +405,63 @@ pub fn compare(rows: &[Value], baseline_path: &Path, ledger_path: &Path) -> Resu
             json!({"verdict":"case-hash-changed","deltas":[],"flags":["case-hash-changed"]}),
         );
     }
+    // A baseline without its run profile predates profile validation; it
+    // cannot prove it was measured under these conditions, so it is retired
+    // explicitly rather than trusted.
+    if baseline["profile"].is_null() {
+        return Ok(
+            json!({"verdict":"rebaseline-required","deltas":[],"flags":["baseline-profile-missing"]}),
+        );
+    }
+    let mismatched: Vec<String> = PROFILE_KEYS
+        .iter()
+        .filter(|key| baseline["profile"][**key] != current[**key])
+        .map(|key| format!("profile-mismatch:{key}"))
+        .collect();
+    if !mismatched.is_empty() {
+        return Ok(json!({"verdict":"profile-mismatch","deltas":[],"flags":mismatched}));
+    }
+    // The origin's payload identity is a comparison key like the case hash:
+    // a re-mirrored origin is a different workload.
+    if !baseline["origin_checksum"].is_null()
+        && baseline["origin_checksum"] != current["origin_checksum"]
+    {
+        return Ok(json!({"verdict":"case-hash-changed","deltas":[],"flags":["origin-changed"]}));
+    }
+    // The references a baseline's calibrated ratios were taken against are an
+    // expiry rule: recalibrating retires the baseline instead of comparing
+    // ratios against two different references.
+    if let Some(cited) = baseline["references"].as_object() {
+        let current_ids = crate::references::ids(&current["references"]);
+        let recalibrated: Vec<String> = cited
+            .iter()
+            .filter(|(lane, id)| current_ids[lane.as_str()] != **id)
+            .map(|(lane, _)| format!("reference-changed:{lane}"))
+            .collect();
+        if !recalibrated.is_empty() {
+            return Ok(json!({"verdict":"rebaseline-required","deltas":[],"flags":recalibrated}));
+        }
+    }
+    // The environment is an expiry rule, not a comparison key: a baseline
+    // accepted on another CPU, OS, memory size or origin is retired.
+    if !baseline["profile"]["environment"].is_null() {
+        let expired: Vec<String> = ENVIRONMENT_KEYS
+            .iter()
+            .filter(|key| {
+                baseline["profile"]["environment"][**key] != current["environment"][**key]
+            })
+            .map(|key| format!("environment-changed:{key}"))
+            .collect();
+        if !expired.is_empty() {
+            return Ok(json!({"verdict":"rebaseline-required","deltas":[],"flags":expired}));
+        }
+    }
     let history: Vec<Value> = read(ledger_path)?
         .into_iter()
         .filter(|row| {
             row["run_id"] != current["run_id"]
-                && [
-                    "case_hash",
-                    "harness",
-                    "build_kind",
-                    "database_mode",
-                    "db_write_gate",
-                    "db_pool_idle",
-                    "storage_class",
-                ]
-                .iter()
-                .all(|key| row[key] == current[key])
+                && row["case_hash"] == current["case_hash"]
+                && PROFILE_KEYS.iter().all(|key| row[*key] == current[*key])
         })
         .collect();
     let last = history.last().map(|r| r["run_id"].clone());
@@ -345,9 +476,20 @@ pub fn compare(rows: &[Value], baseline_path: &Path, ledger_path: &Path) -> Resu
     let mut flags = Vec::new();
     let (mut regression, mut improvement, mut confirmed_bad, mut confirmed_good) =
         (false, false, false, false);
+    let mut rebaseline = false;
     for (op, entry) in medians.as_object().unwrap() {
         let base = &baseline["operations"][op];
         if base.is_null() {
+            // The baseline has no lane for this operation (an evicted lane
+            // recorded before lanes existed, a new label); say so instead of
+            // passing an unmeasured operation.
+            flags.push(format!("baseline-missing-op:{op}"));
+            rebaseline = true;
+            continue;
+        }
+        if !base["cache_state"].is_null() && base["cache_state"] != entry["cache_state"] {
+            flags.push(format!("cache-lane-mismatch:{op}"));
+            rebaseline = true;
             continue;
         }
         for &(path, higher, tolerance) in DEFINITIONS {
@@ -362,8 +504,6 @@ pub fn compare(rows: &[Value], baseline_path: &Path, ledger_path: &Path) -> Resu
             }
             let change = (now - was) / was.abs();
             let (bad, good) = classify(now, was, higher, tolerance, noise_floor(path));
-            regression |= bad;
-            improvement |= good;
             let prior = previous[op]["metrics"][path]
                 .as_f64()
                 .map(|n| (n - was) / was.abs());
@@ -372,6 +512,25 @@ pub fn compare(rows: &[Value], baseline_path: &Path, ledger_path: &Path) -> Resu
                 .map_or((false, false), |n| {
                     classify(n, was, higher, tolerance, noise_floor(path))
                 });
+            // Footprint is a guardrail, not a gate: Foxy trades memory and
+            // disk for speed on purpose, so a footprint move is reported as
+            // advisory and never flips the run's verdict.
+            if is_advisory(path) {
+                let status = if bad {
+                    "advisory-regression"
+                } else if good {
+                    "advisory-improvement"
+                } else {
+                    "within-tolerance"
+                };
+                if bad && !flags.iter().any(|flag| flag == "memory-advisory") {
+                    flags.push("memory-advisory".to_owned());
+                }
+                deltas.push(json!({"op":op,"metric":path,"baseline":was,"current":now,"change_percent":round(100.0*change,2),"previous_run_change_percent":prior.map(|p|round(100.0*p,2)),"status":status}));
+                continue;
+            }
+            regression |= bad;
+            improvement |= good;
             confirmed_bad |= bad && previous_bad;
             confirmed_good |= good && previous_good;
             let status = if bad && previous_bad {
@@ -394,8 +553,8 @@ pub fn compare(rows: &[Value], baseline_path: &Path, ledger_path: &Path) -> Resu
                     base["metrics"][counter].as_f64(),
                 ) && now < was
                 {
-                    if flags.is_empty() {
-                        flags.push("work-conservation");
+                    if !flags.iter().any(|flag| flag == "work-conservation") {
+                        flags.push("work-conservation".to_owned());
                     }
                     deltas.push(json!({"op":op,"metric":counter,"baseline":was,"current":now,"change_percent":if was==0.0{None}else{Some(round(100.0*(now-was)/was.abs(),2))},"previous_run_change_percent":null,"status":"work-conservation"}));
                 }
@@ -406,6 +565,8 @@ pub fn compare(rows: &[Value], baseline_path: &Path, ledger_path: &Path) -> Resu
         "regression"
     } else if regression {
         "candidate-regression"
+    } else if rebaseline && deltas.is_empty() {
+        "rebaseline-required"
     } else if confirmed_good {
         "improvement"
     } else if improvement {
@@ -473,5 +634,142 @@ mod tests {
             json!({"op":"download","cache_state":"cold","verdict":"ok","elapsed_s":50}),
         ];
         assert_eq!(warm_medians(&rows)["download"]["metrics"]["elapsed_s"], 2.0);
+    }
+    #[test]
+    fn labels_and_evicted_lanes_are_separate_groups() {
+        let rows = vec![
+            json!({"op":"quick-check","label":"quick-check-stale","cache_state":"warm","verdict":"ok","elapsed_s":0.4}),
+            json!({"op":"quick-check","cache_state":"warm","verdict":"ok","elapsed_s":0.1}),
+            json!({"op":"download","cache_state":"evicted","verdict":"ok","elapsed_s":58.0}),
+            json!({"op":"download","cache_state":"warm","verdict":"ok","elapsed_s":29.0}),
+        ];
+        let medians = warm_medians(&rows);
+        assert_eq!(medians["quick-check-stale"]["metrics"]["elapsed_s"], 0.4);
+        assert_eq!(medians["quick-check"]["metrics"]["elapsed_s"], 0.1);
+        assert_eq!(medians["download@evicted"]["metrics"]["elapsed_s"], 58.0);
+        assert_eq!(medians["download@evicted"]["cache_state"], "evicted");
+        assert_eq!(medians["download"]["metrics"]["elapsed_s"], 29.0);
+    }
+    fn row(elapsed: f64) -> Value {
+        json!({"run_id":"r2","op":"download","cache_state":"warm","verdict":"ok","elapsed_s":elapsed,"case_hash":"h","harness":"cli","build_kind":"release","database_mode":"wal","db_write_gate":4,"db_pool_idle":1,"storage_class":"ssd"})
+    }
+    #[test]
+    fn baselines_persist_and_validate_the_run_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let baseline = dir.path().join("baseline.json");
+        let ledger = dir.path().join("ledger.jsonl");
+        let rows = vec![row(10.0), row(10.5)];
+        save_baseline(&rows, &baseline, "h", "sha").unwrap();
+        let saved = crate::case::read_json(&baseline).unwrap();
+        assert_eq!(saved["profile"]["build_kind"], "release");
+        assert_eq!(saved["profile"]["storage_class"], "ssd");
+        assert_eq!(saved["operations"]["download"]["cache_state"], "warm");
+
+        let same = compare(&rows, &baseline, &ledger).unwrap();
+        assert_eq!(same["verdict"], "ok");
+
+        let mut debug = row(10.0);
+        debug["build_kind"] = "debug".into();
+        let mismatch = compare(&[debug], &baseline, &ledger).unwrap();
+        assert_eq!(mismatch["verdict"], "profile-mismatch");
+        assert_eq!(mismatch["flags"], json!(["profile-mismatch:build_kind"]));
+
+        let mut mixed = rows.clone();
+        mixed[1]["storage_class"] = "hdd".into();
+        assert!(save_baseline(&mixed, &dir.path().join("mixed.json"), "h", "sha").is_err());
+    }
+    #[test]
+    fn a_changed_environment_expires_the_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        let baseline = dir.path().join("baseline.json");
+        let ledger = dir.path().join("ledger.jsonl");
+        let env = json!({"cpu":"9950X3D","os":"Windows 11","memory_gb":96,"origin":"a3.example.test:8080"});
+        let with_env = |elapsed: f64| {
+            let mut row = row(elapsed);
+            row["environment"] = env.clone();
+            row
+        };
+        save_baseline(&[with_env(10.0), with_env(10.5)], &baseline, "h", "sha").unwrap();
+        let saved = crate::case::read_json(&baseline).unwrap();
+        assert_eq!(
+            saved["profile"]["environment"]["origin"],
+            "a3.example.test:8080"
+        );
+        assert_eq!(
+            compare(&[with_env(10.2)], &baseline, &ledger).unwrap()["verdict"],
+            "ok"
+        );
+        let mut moved = with_env(10.2);
+        moved["environment"]["origin"] = "loopback".into();
+        moved["environment"]["cpu"] = "other".into();
+        let expired = compare(&[moved], &baseline, &ledger).unwrap();
+        assert_eq!(expired["verdict"], "rebaseline-required");
+        assert_eq!(
+            expired["flags"],
+            json!(["environment-changed:cpu", "environment-changed:origin"])
+        );
+        // A row without an environment (older kit) against an environment-bearing
+        // baseline is also not a match.
+        let legacy = compare(&[row(10.2)], &baseline, &ledger).unwrap();
+        assert_eq!(legacy["verdict"], "rebaseline-required");
+    }
+    #[test]
+    fn a_footprint_move_is_advisory_and_never_a_verdict() {
+        let dir = tempfile::tempdir().unwrap();
+        let baseline = dir.path().join("baseline.json");
+        let ledger = dir.path().join("ledger.jsonl");
+        let with_memory = |elapsed: f64, peak: f64| {
+            let mut row = row(elapsed);
+            row["memory"] = json!({"peak_private_bytes":peak,"retained_private_bytes":peak/2.0});
+            row
+        };
+        save_baseline(
+            &[with_memory(10.0, 4.0e8), with_memory(10.5, 4.0e8)],
+            &baseline,
+            "h",
+            "sha",
+        )
+        .unwrap();
+        // Twice the memory at the same speed: reported, not a regression.
+        let heavier = compare(&[with_memory(10.2, 8.0e8)], &baseline, &ledger).unwrap();
+        assert_eq!(heavier["verdict"], "ok");
+        assert_eq!(heavier["flags"], json!(["memory-advisory"]));
+        let statuses: Vec<&str> = heavier["deltas"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|d| d["metric"].as_str().unwrap().starts_with("memory."))
+            .map(|d| d["status"].as_str().unwrap())
+            .collect();
+        assert_eq!(statuses, ["advisory-regression", "advisory-regression"]);
+        // Less memory does not make a slower run an improvement either.
+        let slower = compare(&[with_memory(12.0, 1.0e8)], &baseline, &ledger).unwrap();
+        assert_eq!(slower["verdict"], "candidate-regression");
+        assert!(is_advisory("memory.peak_private_bytes"));
+        assert!(!is_advisory("elapsed_s"));
+    }
+    #[test]
+    fn a_baseline_without_a_profile_or_lane_asks_for_rebaseline() {
+        let dir = tempfile::tempdir().unwrap();
+        let baseline = dir.path().join("baseline.json");
+        let ledger = dir.path().join("ledger.jsonl");
+        crate::case::write_json(
+            &baseline,
+            &json!({"case_hash":"h","operations":{"download":{"samples":2,"metrics":{"elapsed_s":10.0}}}}),
+        )
+        .unwrap();
+        let legacy = compare(&[row(10.0)], &baseline, &ledger).unwrap();
+        assert_eq!(legacy["verdict"], "rebaseline-required");
+        assert_eq!(legacy["flags"], json!(["baseline-profile-missing"]));
+
+        save_baseline(&[row(10.0), row(10.5)], &baseline, "h", "sha").unwrap();
+        let mut evicted = row(58.0);
+        evicted["cache_state"] = "evicted".into();
+        let lane = compare(&[evicted], &baseline, &ledger).unwrap();
+        assert_eq!(lane["verdict"], "rebaseline-required");
+        assert_eq!(
+            lane["flags"],
+            json!(["baseline-missing-op:download@evicted"])
+        );
     }
 }

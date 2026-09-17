@@ -28,6 +28,8 @@ enum Command {
         file_count: usize,
         #[arg(long, default_value_t = 1)]
         truncate_by: u64,
+        #[arg(long)]
+        preserve_mtime: bool,
         #[arg(long = "target")]
         targets: Vec<PathBuf>,
     },
@@ -49,6 +51,7 @@ fn main() -> Result<()> {
             entry_count,
             file_count,
             truncate_by,
+            preserve_mtime,
             targets,
         } => {
             let journal = mutate(
@@ -60,6 +63,7 @@ fn main() -> Result<()> {
                     entry_count,
                     file_count,
                     truncate_by,
+                    preserve_mtime,
                 },
                 &journal,
             )?;

@@ -12,7 +12,19 @@ pub struct SuiteOptions {
     pub validate_only: bool,
 }
 
+/// A filter is one or more comma-separated glob patterns; a case matches
+/// when any pattern does, so a fixed lane list such as the flagship trio
+/// (`perf-redownload-small-ssd,perf-startup-arma3-live`)
+/// runs as one suite without tagging the case files (tags are part of the
+/// case hash and would start a new history).
 fn matches(name: &str, pattern: &str) -> bool {
+    if pattern.contains(',') {
+        return pattern
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .any(|part| matches(name, part));
+    }
     let segments: Vec<&str> = pattern.split('*').collect();
     let (Some(first), Some(last)) = (segments.first(), segments.last()) else {
         return false;
@@ -203,5 +215,13 @@ mod tests {
         assert!(matches("perf-db-refresh-main", "perf-*-main"));
         assert!(matches("ux-modals", "ux-modals"));
         assert!(!matches("ux-modals", "ux-modal"));
+    }
+    #[test]
+    fn comma_separated_filters_match_any_pattern() {
+        let flagship = "perf-redownload-small-ssd, perf-tfr-scifi-recheck-hdd,perf-startup-*";
+        assert!(matches("perf-redownload-small-ssd", flagship));
+        assert!(matches("perf-startup-arma3-live", flagship));
+        assert!(!matches("perf-redownload-small-hdd", flagship));
+        assert!(!matches("anything", ","));
     }
 }

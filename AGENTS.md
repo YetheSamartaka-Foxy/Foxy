@@ -48,9 +48,9 @@ Keep this file as the compact root router. Put detailed conventions in `conventi
 - Core, the Turso data layer (the `src/core/db/` seam, `tasks/db_turso.rs`), schema, transactions, filesystem/network safety, or sync tasks: `conventions/CORE_CONVENTIONS.md` and `src/core/AGENTS.md`.
 - Game modules, game spaces, capabilities, the app/game settings split, runtime space switching, Steam Workshop, managed extra files, or `.foxypack` config packs: `conventions/GAME_SPACES_CONVENTIONS.md`.
 - Sync algorithm, quick scan, remote refresh, tree hashing, download queue, delta patch, pending updates, or sync performance: `conventions/SYNC_ALGO_CONVENTION.md`.
-- Performance budgets, speed-of-light ratios, `SOL` log lines, perf baselines, or regression analysis: `conventions/SPEED_OF_LIGHT.md`.
+- Performance budgets, speed-of-light ratios, `SOL` log lines, action records (`sync_action`, `remote_refresh`, `db_persist`), `op_id` ownership, reference kinds, the memory-for-speed resource trade policy, or the benchmark presentation contract: `conventions/SPEED_OF_LIGHT.md`; measured values, the baseline registry, dated experiments, and the archived tracking table: `conventions/SPEED_OF_LIGHT_MEASUREMENTS.md`.
 - Tests, validation commands, pure helper coverage, or regression tests: `conventions/TESTING_CONVENTIONS.md`.
-- Running the on-demand UX click-through or downloader/checker/database performance cases against a real build, the perf ledger and baselines, the local repository origin, or a WAL vs MVCC comparison: `skills/foxy-testkit/SKILL.md`, then `testkit/README.md`.
+- Running the on-demand UX click-through or downloader/checker/database performance cases against a real build, the perf ledger and baselines, the calibration lanes (`foxy-testkit calibrate`) behind calibrated ratios, the local repository origin, or a WAL vs MVCC comparison: `skills/foxy-testkit/SKILL.md`, then `testkit/README.md`.
 - Config examples, manifest examples, generated repository JSON, or sample fixtures: `conventions/EXAMPLES_CONVENTIONS.md`.
 - Changelog entries: `conventions/CHANGELOG_CONVENTIONS.md`.
 - `foxy-server-backend-cli/` changes: `foxy-server-backend-cli/AGENTS.md`.

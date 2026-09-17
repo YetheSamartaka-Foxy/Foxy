@@ -771,7 +771,7 @@ async fn blob_download_coalesces_adjacent_inserts_into_few_requests() {
         &mut ops,
         pause_rx,
         cancel_rx,
-        4,
+        super::types::PatchRequestBudget::standalone(4),
         Arc::new(crate::core::tasks::download_files::AdaptiveBandwidthLimiter::Unlimited),
         metrics,
     )
@@ -786,4 +786,148 @@ async fn blob_download_coalesces_adjacent_inserts_into_few_requests() {
     {
         assert_eq!(op.downloaded_bytes, op.length);
     }
+}
+
+fn blob_fixture(
+    remote: &Arc<Vec<u8>>,
+    layout: &[(PatchOpType, u64, u64)],
+    dir: &std::path::Path,
+) -> (Vec<DownloadPatchOp>, Vec<u8>, std::path::PathBuf) {
+    let mut ops = Vec::new();
+    let mut blob_offset = 0u64;
+    let mut expected_blob = Vec::new();
+    for (order, (op_type, dest, len)) in layout.iter().enumerate() {
+        let bytes = &remote[*dest as usize..(*dest + *len) as usize];
+        let blob_at = (*op_type == PatchOpType::InsertRemote).then_some(blob_offset);
+        ops.push(patch_op(
+            order as i64,
+            *op_type,
+            *dest,
+            *len,
+            md5_upper(bytes),
+            (*op_type == PatchOpType::CopyLocal).then_some(*dest),
+            blob_at,
+        ));
+        if blob_at.is_some() {
+            expected_blob.extend_from_slice(bytes);
+            blob_offset += *len;
+        }
+    }
+    let blob_path = dir.join("file.blob");
+    std::fs::write(&blob_path, vec![0u8; expected_blob.len()]).unwrap();
+    (ops, expected_blob, blob_path)
+}
+
+async fn download_blob_with_budget(
+    url: String,
+    blob_path: &std::path::Path,
+    ops: &mut [DownloadPatchOp],
+    budget: super::types::PatchRequestBudget,
+    expected_len: usize,
+) -> anyhow::Result<()> {
+    let artifact = PatchArtifact {
+        schema_version: super::types::PATCH_SCHEMA_VERSION,
+        repository_url: "http://127.0.0.1:1/repo/".to_string(),
+        file_id: 9,
+        local_target_path: blob_path
+            .with_extension("pbo")
+            .to_string_lossy()
+            .to_string(),
+        remote_url: url,
+        base_file_expected_size: 0,
+        new_file_expected_size: 0,
+        new_file_remote_checksum: String::new(),
+        operations: Vec::new(),
+    };
+    let patch_file = DownloadPatchFile {
+        file_id: 9,
+        patch_json_path: String::new(),
+        patch_blob_path: blob_path.to_string_lossy().to_string(),
+        planned_copy_bytes: 0,
+        planned_download_bytes: expected_len as u64,
+        status: String::new(),
+        last_error: None,
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+    let db = crate::core::tasks::db_turso::build_test_database().await;
+    let context = Arc::new(FoxyContext::new(db, reqwest::Client::new()));
+    let (_pause_tx, pause_rx) = tokio::sync::watch::channel(false);
+    let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    let metrics = Arc::new(crate::core::tasks::download_files::DownloadMetrics::new());
+    super::transfer::download_patch_blob_ranges_parallel(
+        context,
+        &artifact,
+        &patch_file,
+        ops,
+        pause_rx,
+        cancel_rx,
+        budget,
+        Arc::new(crate::core::tasks::download_files::AdaptiveBandwidthLimiter::Unlimited),
+        metrics,
+    )
+    .await
+}
+
+/// A 300 KB insert op under a 64 KB request cap travels as five chunks on
+/// their own connections, is verified from the blob afterwards, and the two
+/// small ops still coalesce into one run: seven requests, exact blob bytes.
+#[tokio::test]
+async fn blob_download_chunks_large_ops_and_verifies_them_from_the_blob() {
+    let remote: Vec<u8> = (0..400_000u32).map(|i| (i * 11 % 241) as u8).collect();
+    let remote = Arc::new(remote);
+    let (url, requests) = spawn_range_server(remote.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let layout = [
+        (PatchOpType::InsertRemote, 0, 300_000),
+        (PatchOpType::CopyLocal, 300_000, 50_000),
+        (PatchOpType::InsertRemote, 350_000, 20_000),
+        (PatchOpType::InsertRemote, 370_000, 30_000),
+    ];
+    let (mut ops, expected_blob, blob_path) = blob_fixture(&remote, &layout, dir.path());
+    let budget = super::types::PatchRequestBudget {
+        range_permits: Arc::new(tokio::sync::Semaphore::new(8)),
+        per_file_requests: 8,
+        max_run_bytes: 65_536,
+    };
+    download_blob_with_budget(url, &blob_path, &mut ops, budget, expected_blob.len())
+        .await
+        .expect("chunked blob download");
+
+    assert_eq!(std::fs::read(&blob_path).unwrap(), expected_blob);
+    // 300_000 / 65_536 -> 5 chunks, plus one coalesced run for the two tail ops.
+    assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 6);
+    for op in ops
+        .iter()
+        .filter(|op| PatchOpType::from_str(&op.op_type) == Some(PatchOpType::InsertRemote))
+    {
+        assert_eq!(op.downloaded_bytes, op.length);
+    }
+}
+
+/// A chunked op whose bytes do not hash to the plan's checksum is refused
+/// (the caller then falls back to a full download); nothing is marked
+/// downloaded.
+#[tokio::test]
+async fn blob_download_rejects_a_chunked_op_with_a_wrong_checksum() {
+    let remote: Vec<u8> = (0..200_000u32).map(|i| (i * 13 % 239) as u8).collect();
+    let remote = Arc::new(remote);
+    let (url, _requests) = spawn_range_server(remote.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let layout = [(PatchOpType::InsertRemote, 0, 200_000)];
+    let (mut ops, expected_blob, blob_path) = blob_fixture(&remote, &layout, dir.path());
+    ops[0].target_checksum = md5_upper(b"not the bytes the origin serves");
+    let budget = super::types::PatchRequestBudget {
+        range_permits: Arc::new(tokio::sync::Semaphore::new(4)),
+        per_file_requests: 4,
+        max_run_bytes: 65_536,
+    };
+    let err = download_blob_with_budget(url, &blob_path, &mut ops, budget, expected_blob.len())
+        .await
+        .expect_err("checksum mismatch must fail the blob download");
+    assert!(
+        err.to_string()
+            .contains("checksum mismatch after chunked download")
+    );
+    assert_eq!(ops[0].downloaded_bytes, 0);
 }

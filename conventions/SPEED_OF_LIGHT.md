@@ -1,108 +1,565 @@
 # Foxy Speed-of-Light Performance Convention
 
-This document applies Jensen Huang's "speed of light" (SoL) engineering method
-to Foxy: for every crucial operation, define the fastest physically possible
-execution time (the "light"), measure the actual time from app logs, and track
-the ratio between them. We do not compare against last release or against
-competitors - we compare against physics, and the ratio tells us exactly how
-much headroom remains and which resource is the bottleneck.
+For every crucial operation Foxy names the work it had to do, a reference
+time for that work, and the elapsed time it actually took, and it records
+those three things so the ratio can be recomputed from a log alone. The
+reference is the "light". The discipline is borrowed from speed-of-light
+engineering (compare against the best the hardware and the algorithm could
+do, not against last release), applied with one rule this document exists to
+enforce: **every displayed ratio says which reference it compares against**.
+A hardware bound, a measured best case, and consistency against a run's own
+peak are different questions, and one percentage cannot stand for all three.
 
-> "What's the absolute fastest this could be done if nothing stood in the way
-> but the laws of physics?" - the benchmark NVIDIA judges itself against.
+Numbers live in `conventions/SPEED_OF_LIGHT_MEASUREMENTS.md` (status table,
+baseline registry, dated experiments, archived tracking rows). This file
+owns definitions, equations, operation cards, the log grammar and the rules
+for collecting and comparing.
 
-Sources:
-- [Beyond Performance: Jensen Huang's "Speed of Light" Engineering Secret](https://www.youtube.com/shorts/XtpBPktj3uA)
-- [Achieve Light Speed Like Nvidia](https://howardyu.substack.com/p/achieve-light-speed-like-nvidia-welcome)
-- [Speed of Light Management](https://www.game-changer.net/2025/06/17/speed-of-light-management-why-most-companies-are-designed-to-fail-slowly/)
+Reading order: reference kinds -> work and time definitions -> units ->
+operation index -> equations -> operation cards -> logging contract ->
+collection and comparison rules.
 
-The method, adapted to Foxy:
+## Resource trade policy
 
-1. Decompose the app into its crucial operations (O1–O8 below).
-2. For each, write the light equation from first principles: bytes moved,
-   round trips required, stat calls required - nothing else is allowed to
-   count as "necessary work".
-3. Instrument the code so a single greppable log line per operation carries
-   the measured work and elapsed time (`SOL op=...` lines).
-4. Compute the SoL ratio, find the bottleneck, fix the largest gap, repeat.
+Foxy optimizes user-visible time: the seconds between a click and a
+trustworthy result, and the seconds an update or a check takes. Memory and
+disk footprint are the resources it deliberately spends to get there, and
+that trade is the accepted one, in both directions:
+
+- A change that makes hashing, checking, downloading, patching, refreshing
+  or startup faster is welcome even when it holds more memory (bigger
+  buffers, a warmer cache, a larger tree kept resident) or uses more disk
+  (staging blobs, a larger database, kept fingerprints). The extra footprint
+  is the price, not a regression.
+- A change that lowers memory or disk footprint is never accepted when it
+  makes any of those operations slower. Footprint is not a reason to shrink
+  a buffer, drop a cache or serialize work.
+- Footprint still has guardrails: the process must stay usable on the
+  machines Foxy targets, growth must saturate rather than continue without
+  bound (a leak is a bug, not a trade), and every time optimization records
+  its peak and retained memory so the price is known. The M1 lanes report
+  and explain; they do not gate. In the test kit a footprint move is
+  `advisory-regression` / `advisory-improvement` with a `memory-advisory`
+  flag and never decides a verdict; the time and correctness metrics do.
+
+Phase 5 candidate "memory attribution" is therefore low priority and
+pursued only for evidence of unbounded growth or a renderer or allocator
+cost that is paid without any speed in return.
 
 ---
 
-## Universal equations
+## Reference kinds
 
-These are implemented in `src/core/utils/speed_of_light.rs` (E1, E2) and
-used by the cross-check algorithms below. `W` = work, `R` = rate, `T` = time.
+| Kind | Formula | Log / UI label | What it can and cannot say |
+| --- | --- | --- | --- |
+| Modeled lower bound | `T_lb / T_actual` | `metric_kind=modeled_bound`, "vs bound" | A lower bound under stated resource, algorithm and correctness assumptions. A configured bandwidth cap is one such bound (a policy ceiling); it is not necessarily the bottleneck |
+| Calibrated estimate | `T_reference / T_actual` | test-kit `sol_calibrated` beside a `reference_id` (no in-app emitter; the app never guesses a device constant) | Measured sustainable capacity of this machine or path. Not a proof of maximum physical capacity; can be exceeded by a better implementation |
+| Best measured | `T_best / T_actual` for identical useful work | "versus best measured" (saved benchmarks, test-kit baselines) | Empirical. Can exceed one when the candidate beats the frozen best |
+| Peak consistency | `R_average / R_peak_window` of the same run | `metric_kind=peak_consistency`, "peak consistency" | Whether the run held its own peak. Can be high while the whole run is slow; a degraded peak hides a regression |
+| Nominal | ratio against an uncalibrated device constant | "vs nominal" (download `disk_*` keys) | A reading aid. May exceed one on a warm run because logical bytes are counted, not device traffic |
+| None | | `metric_kind=none`, `sol=na`, "reference missing" | Only the actual time is meaningful; compare with best measured |
 
-| # | Equation | Meaning |
-| --- | --- | --- |
-| E1 | `T_ideal = W / R_light` | Fastest possible time for work `W` at the limiting rate. |
-| E2 | `sol = T_ideal / T_actual = R_actual / R_light` | SoL ratio, clamped to `[0, 1]`. `1.0` = running at the speed of light. |
-| E3 | `H = 1 / sol` | Headroom factor: "this operation can be `H`× faster before physics objects." |
-| E4 | `T_ideal = max_r(W_r / R_r)` | Multi-resource (roofline) rule: when resources overlap (network + disk + CPU), the ideal time is set by the single slowest resource; `bottleneck = argmax_r`. |
-| E5 | `T_ideal_chain = Σ_i T_ideal(stage_i)` for serial stages; `max_i` for overlappable stages | Pipeline rule. Everything in `T_actual − T_ideal_chain` is orchestration overhead, not work. |
-| E6 | `T_ideal = D × RTT + W / R_net` | Latency-bound request chains: `D` = depth of *dependent* (sequential) round trips. Requests at the same depth are free to run in parallel. |
-| E7 | `C_min = R_target × RTT / chunk_bytes` | Concurrency needed to saturate a link (bandwidth-delay product / Little's law). Below `C_min` parallel ranges, the link physically cannot be filled. |
-| E8 | `T = N_miss × C_miss + N_hit × C_hit` | Cache law (quick scan): cost is dominated by misses; a "fast" path with a broken cache key is a slow path. |
-| E9 | `R_agg = min(R_link, C × R_conn)` | Per-connection law: when a server shapes each connection to `R_conn`, aggregate is bought with concurrency `C` and nothing else, until the path ceiling `R_link` binds. Tuning a single stream is wasted work. |
-| E10 | `T_tail ≈ chunk_bytes / R_conn` | Tail law: once the work queue is empty the link is carried by whatever chunks are still in flight, and the last one runs alone at one connection's rate. The largest chunk size, not the scheduler, bounds the tail. |
-| E11 | `M_ideal = M_renderer_floor + M_state + M_op` | Footprint law (M1): the memory an operation is entitled to is the renderer floor plus the state the app must hold plus the one operation's working set. Everything above that is reserve, duplicate representations, or caches nothing reads. |
+For a valid physical bound and the same required work,
+`T_lb <= T_optimum <= T_best_measured`. A best observed run is therefore never
+"the physical limit", and a ratio above one against a claimed bound is
+evidence about the bound (or the timer scope), not a 100% achievement. The
+line keeps it as `sol_raw` with `reference_status=above_bound`; the legacy
+`sol` field stays clamped to `[0, 1]` for old readers.
 
-### E0 - Unit rules (read first, errors here invalidate every ratio)
+## Work and time
+
+For every operation record, name these separately:
+
+- `W_useful`: the required result (unique verified output bytes, selected
+  files checked, a complete remote freshness verdict).
+- `W_actual,r`: work actually consumed on resource `r`, including repeated
+  hashes, retried downloads, patch staging and fallback attempts.
+- `W_min,r`: the minimum resource work under the chosen correctness contract
+  and algorithm family.
+- `T_action`: user action to trustworthy terminal result, preparation and
+  finalization included.
+- `T_stage`: an explicitly named stage inside the action.
+
+```text
+execution_efficiency   = lower_bound(W_actual,r) / T_actual
+useful_work_efficiency = lower_bound(W_min,r)    / T_action
+work_amplification_r   = W_actual,r / W_min,r     (only when W_min,r > 0)
+```
+
+A downloader that retries every byte can show excellent transfer throughput
+while doing twice the necessary work; a hash pass can get faster per byte by
+re-reading warm data while the user's check gets slower. Track work and time
+both. When the minimum work is zero, report absolute excess counters rather
+than a ratio.
+
+Do not demand identical physical I/O between implementations: avoiding a
+redundant read is the point. Demand identical selected scope and verified
+outcomes, then explain the reduced resource work. Distinguish unique
+completed files from per-batch processing counts.
+
+**Service time is not wall time.** Sums of parallel worker durations are
+occupancy totals; the union of their intervals is occupied wall time; action
+start to finish additionally includes gaps. A saved benchmark's folded
+`actual_s` per operation is a service sum over that operation's batches and
+can exceed the record's elapsed time; nothing may divide one by the other and
+call it a share.
+
+## Units (E0)
+
+Machine records use bytes and integer nanoseconds. Presentation formats
+`MB = 1,000,000 bytes`, `MiB = 1,048,576 bytes`, `Mbps = 1,000,000 bit/s`.
 
 | Log text | Actual unit | Conversion |
 | --- | --- | --- |
-| `... MB/s` (download report, hash metrics, samples) | MiB/s | `bytes / 1024² / s` |
-| `... Mb/s` (`Download avg speed over last 30s`) | decimal megabits/s | `bytes / 125 000 / s` |
-| Download limiter setting (`Mbps`) | decimal megabits/s | `cap_bytes_per_sec = mbps × 125 000` |
-| `SOL` lines (`work_bytes`, `*_bps`) | raw bytes, bytes/s | none - use these for math |
-| ISP plan "500 Mbit" | decimal megabits/s | `× 125 000 → bytes/s` |
+| `... MB/s` in the download report and `Download sample:` | MiB/s | `bytes / 1024^2 / s` |
+| `... Mb/s` (`Download avg speed over last 30s`) | decimal megabits/s | `bytes / 125,000 / s` |
+| Download limiter setting (`Mbps`) | decimal megabits/s | `cap_bytes_per_sec = mbps * 125,000` |
+| `SOL` lines (`work_bytes`, `*_bps`, `actual_ns`) | raw bytes, bytes/s, ns | none; use these for arithmetic |
+| ISP plan "500 Mbit" | decimal megabits/s | `* 125,000 -> bytes/s` |
+
+Never convert an ambiguous historical number silently: keep its original text
+and mark the normalized value unknown until the raw counters are recovered.
+`actual_s` carries three decimals, so sub-millisecond work rounds to zero
+there; `actual_ns` and `actual_bps` are computed from the unrounded duration.
+Record what "complete" means for a timer (buffered writes accepted, files
+promoted, durable) when it is not obvious from the operation card.
+
+## Operation index
+
+| Id | Operation | Emitter | Reference available in-app |
+| --- | --- | --- | --- |
+| O1 | Full-file download | `download_files/orchestrator.rs` | limiter cap (modeled) or same-run peak (consistency); nominal disk on rotational destinations |
+| O2 | Delta patch | folded into O1's line (`delta_savings_*`) | none; byte savings only |
+| O3 | Content hashing and ordered tree verification | `calculate_hashes/scheduling.rs` | none (self baseline); saved benchmarks derive a same-run peak across homogeneous batches |
+| O4 | Quick scan | `quick_scan/diff.rs` | none (self baseline) |
+| O5 | Remote metadata refresh | `SOL op=remote_refresh` in `tasks/remote_repository.rs` | none in-app (self baseline); the kit calibrates the no-change branch through O6 |
+| O6 | No-change sync | `SOL op=sync_action` with an `early-exit-*` outcome, `sync_pipeline/summary.rs` (every pipeline exit emits one) | none in-app; test-kit `sol_calibrated` against B4 |
+| O7 | Turso persistence | `SOL op=db_persist` in `sync_pipeline/hashing.rs` (per sync action); `db:` line of the download report, `SQLite sync metrics:` (legacy name) | none |
+| O8 | Startup to settled verdict | `ui/app/runtime/startup_sync.rs`; probe stage in `quick_scan/worker.rs`; app update check in `tasks/app_update/spawn.rs` | none (self baseline) |
+| M1 | Resident footprint | `foxy-testkit` memory lane | empty-app baseline (best measured) |
+Sub-operations without an emitter of their own (download preparation and
+finalization and patch planning/fetch/apply are readable as `sync_action`
+`stage_*_s` keys; hash profile calibration as `label=auto_benchmark_sample`
+hash batches; DB purge and
+maintenance, GUI interaction under load, cancellation and resume, space
+switch, idle app) get an id only when their contract and emitter exist.
+Keep the O1-O8/M1 anchors; never renumber historical records.
+
+---
+
+## Equations
+
+`W` = work, `R` = rate, `T` = time. E1 and E2 are implemented in
+`src/core/utils/speed_of_light.rs`; the rest are models for reading and for
+building references, each with the conditions under which it holds.
+
+| # | Equation | Holds when | Does not say |
+| --- | --- | --- | --- |
+| E1 | `T_service_lb = W_min / R_capacity` | One homogeneous resource at a sustained rate; the access pattern is part of the rate (sequential cold bytes/s cannot normalize cached reads, random part reads or row counts) | Anything about tiny requests, metadata, seeks, setup or dependency chains; add measured minimum latencies only where they are serial with the work |
+| E2 | `sol_raw = T_ideal / T_actual = R_actual / R_light`; `sol = clamp(sol_raw, 0, 1)` | Both rates use the same work and time scope; `T_actual > 0` and both times finite | A ratio above one is a mismatch (bytes, stale capacity, timer scope) or a better empirical baseline, never an achievement; zero-work operations need a latency model or `na`, not a 0% throughput score |
+| E3 | `H = 1 / sol`; `gap_s = T_actual - T_reference`; `slower_percent = 100 * (T_actual / T_best - 1)` | Read as distance to the named reference | Achievable speedup. Rank work by plausible user-visible seconds saved times frequency, evidence strength and cost, not by `1/sol`. Use Amdahl `1 / ((1 - f) + f / s)` only with `f` the affected serial critical-path fraction |
+| E4 | `T_resource_lb = max_r(service_demand_r)`; `T_dependency_lb = longest_required_path`; `T_lb = max(T_resource_lb, T_dependency_lb)` | Feasible overlap on independent resources with compatible capacities | Do not add the two bounds (they may cover the same work). One shared disk models read and write jointly (`W_read/R_read + W_write/R_write`) or with a measured mixed-I/O rate. CPU, network and disk bytes are different demands |
+| E5 | Serial stages sum; fully overlappable stages on independent resources bound by their maximum; `n` identical items through dedicated pipeline stages: `sum(s_i) + (n - 1) * max(s_i)` | Stated structure; real Foxy batches differ in size, share disks and contain barriers, so use event spans and dependencies | `T_actual - T_lb` is unexplained gap, not removable overhead: it includes protocol work the model omitted, shared resources, uncertainty and stragglers |
+| E6 | `T_ideal = D * RTT + W / R_net`; homogeneous non-pipelined requests at one level with concurrency `C` and occupancy `L`: `ceil(N / C) * L` | `D` counts dependent round trips of a stated graph (connection setup, TLS, redirects and application dependencies included or excluded explicitly); reused HTTP, fresh HTTP and HTTPS are different graphs | Parallel requests are not free: they share bandwidth, server workers, connection limits, client permits and parse CPU. A 433k-part metadata rebuild has parse and persistence work whatever its HTTP depth |
+| E7 | Per lane with chunk `B`, latency `L`, per-lane rate `r`: `request_service_s = L + B / r`; `R_aggregate <= min(R_path, C * B / request_service_s)`; `C_needed >= ceil(R_target * request_service_s / B)` | `r` calibrated at the relevant concurrency; one request in flight per lane | The older `C_min = R_target * RTT / chunk_bytes` is a latency-hiding heuristic, not a sufficient connection count. BDP describes in-flight bytes, which socket windows can supply without `C` connections |
+| E8 | `T_service = T_fixed + sum(hit_cost_i) + sum(miss_cost_j)`, mapped onto the actual schedule | Entries enumerated, metadata calls, directories traversed, suspicious files, sampled bytes and hit/miss reasons are recorded | Equal addon counts do not imply equal filesystem work; addons/s is not stat entries/s. Cache reuse must stay safe across restart, local drift, remote change, same-URL separate folders and space switching |
+| E9 | Aggregate throughput is a measured curve `R(C, B, protocol, origin, cache_state)` | Independent lanes with a stable per-lane ceiling and enough demand | `R_agg = min(R_link, C * R_conn)` with one universal `R_conn` (B7 shows 1.6 MB/s at C=1, 1.15 at 48, 0.88 at 96). Keep the 96-versus-192 no-gain finding for its origin, not as a universal rule |
+| E10 | Tail: `T_tail >= max_i(remaining_bytes_i / rate_ceiling_i)` and `T_tail >= sum_i(remaining_bytes_i) / R_link_ceiling` | Verified rate ceilings; queue-empty, last-network-byte and terminal timestamps recorded | `chunk_bytes / R_conn` bounds one residual transfer from above under fixed rates, not the minimum tail. Track tail duration separately from throughput deficit; chunk size, ordering and fair scheduling all affect it. Ramp is not categorically outside client control (reuse, dispatch delay, request preparation, concurrency); TCP congestion control (RFC 5681) sets a floor for a given path |
+| E11 | `M_process(t) = M_base(t) + M_state(t) + M_work(t) + M_unattributed(t)`; `M_peak = max_t`; `M_retained` = declared statistic over a fixed quiet window | Disjoint buckets sampled at a stated rate with sample count and gaps recorded | `M_ideal = floor + state + op` as a physical minimum: an empty process includes runtime, allocator, config and engine costs; summing separately observed peaks overstates a simultaneous peak; a renderer, allocator or state representation choice moves the baseline itself. Private commit (`PrivateUsage`) and working set are not interchangeable |
+
+Download deficit against a fixed reference:
+`deficit_s = integral(1 - R(t) / R_reference) dt = T - W / R_reference`, over
+measured interval widths. With a valid fixed ceiling and matching byte domain
+it decomposes additively into ramp, plateau and tail. Do not clip negative
+intervals silently (they expose a poor reference or a burst allowance), and
+define the phase boundaries before comparing runs. A token bucket with burst
+`B0` gives `T >= max(0, (W - B0) / R_cap)`; record burst and dynamic cap
+changes rather than treating a short transfer as steady state.
+
+---
+
+## Operation cards
+
+Each card: (1) operation and user-visible completion, (2) reference kind and
+required baseline, (3) best-case comparison and current measurements,
+(4) required work and scope, (5) dependencies and assumptions, (6) counters
+and timer boundaries with producers, (7) diagnostics, candidates and
+correctness gates.
+
+### O1 - Full-file download and the complete update action
+
+1. **Completion**: every selected file verified and promoted, database
+   finalized, completion visible. The transfer stage is a sub-span.
+2. **Reference**: with a limiter, the cap (modeled bound, policy). Without,
+   the run's own peak window (peak consistency). Independently calibrated
+   path throughput (B1) is the reference for a physical statement and is not
+   emitted in-app.
+3. **Comparisons**: saved benchmarks compare with the fastest compatible
+   record (same kind, repository instance, storage class, build kind,
+   `files_updated` and `full_download_bytes`); the test kit with the accepted
+   baseline medians. Status: measurements file section 1.
+4. **Work**: selected output bytes (`full_bytes`), successful response-body
+   bytes credited to files (`credited_bytes`), the shared transfer counter
+   (`work_bytes`, an application counter, not TCP/IP traffic with headers),
+   `expected_bytes`, `range_retries`. `work_bytes` and `credited_bytes` differ
+   under retries, resume and fallback; neither is verified output bytes. The
+   completion line's `avg_speed` uses credited bytes.
+5. **Dependencies**: queue preparation -> transfer (ranges in parallel, shared
+   permits and link) -> on-arrival hashing overlapped -> verification and
+   promotion -> database finalization. `R_allowed = min(R_cap, R_path, other
+   capacities)`: a cap above disk or server capacity does not make a low
+   cap-relative ratio wasted bandwidth. On rotational destinations the disk
+   is the likelier bound; the `disk_*` keys give a nominal reading only.
+6. **Counters and timers**: `SOL op=download` at the end of the transfer
+   stage (`actual_s` is the stage, not the action), `outcome`,
+   `mods_succeeded/failed/cancelled`, `peak_1s_bps` with `peak_window_s`,
+   `delta_savings_bytes`, `destination_storage`, `op_id`. The sampler
+   (`download_files/metrics.rs`) reports byte delta over the measured interval
+   width; a window shorter than 0.5 s (immediate wake, final partial interval)
+   contributes to the series but never to the peak. The retained series
+   splits the stage into `ramp_s` (before the first window at 90% of the
+   peak), `plateau_s` and `tail_s` (after the last such window), with
+   `ramp_deficit_bytes` and `tail_deficit_bytes` the bytes each fell short
+   of the peak rate; `Download shape:` lists the ramp windows with their
+   active files and ranges. `-- DOWNLOAD REPORT --`
+   carries per-file and per-range percentiles, permit waits and DB checkpoint
+   figures. `download_stage_ms` includes joining background tasks; new tasks
+   in the path must wait on interruptible primitives, never a bare sleep.
+7. **Diagnostics**: read `ramp_s`, `plateau_s` and `tail_s` against a fixed
+   reference before touching anything; a plateau on the path ceiling with a
+   poor ratio is a ramp or tail problem, and the deficit bytes say which. A
+   resumed run after a cancellation must not refetch a file that still exists
+   at full length and matches its persisted content fingerprint: the
+   `prepared_queue_prune` stage counts the files the reused queue dropped.
+   `permit_wait` high -> fair-share starvation; range latency percentiles high -> ranges too small for the RTT
+   (E7); disk averages near the device rate -> disk-bound (E4). Gates: same
+   verified payload (oracle), no hidden retry or memory growth, `outcome=completed`.
+
+### O2 - Delta patch
+
+1. **Completion**: each patched file equals the remote file (segment
+   verification and final payload oracle), with automatic fallback to a full
+   download when plan validation or apply fails.
+2. **Reference**: none. `max(network, disk)` across files is an optimistic
+   resource bound, not the dependency chain: the orchestrator
+   (`delta_patch/orchestrator.rs`) finishes a file's insert blob before
+   applying that file.
+3. **Comparisons**: byte savings are established; elapsed speedup needs a
+   same-initial-state full-download A/B, which the tracked cases do not yet
+   include.
+4. **Work**: `byte_savings = 1 - fetched_unique_insert_bytes / full_output_bytes`
+   (`delta_savings_bytes / full_bytes` on the download line), network
+   amplification including failed attempts, source-copy reads, insert-blob
+   writes and reads, output writes, verification reads, checksum CPU, seeks
+   and fallback work, with a note on which hit the device and which the page
+   cache.
+5. **Dependencies**: preflight -> blob fetch/staging -> apply (capped by
+   `patch_applies`) -> verification/promotion -> persistence where it gates
+   completion. `W_full / W_net` predicts speedup only when network bytes
+   dominate both complete actions. The blob fetch draws on the same global
+   range budget and chunk size as full downloads (`PatchRequestBudget`):
+   ops that fit a request coalesce into runs, ops larger than one travel as
+   parallel chunks written straight into the blob and are verified from the
+   blob afterwards, so a plan of a few huge inserts still uses the whole
+   budget. The kit sums the requests (`patch_range_requests`), the bytes
+   over-fetched to coalesce them (`patch_gap_bytes`) and the source copy
+   bytes (`patch_copy_bytes`) per operation, which is how an adjacent-run
+   mutation and a scattered one of the same size are told apart. Against an origin that caps every connection, that is the
+   difference between 4 connections per file (measured 25 MB/s, 16-17 s for
+   40 files) and the path ceiling (113 MB/s, 6.9-7.5 s, 2026-09-16).
+6. **Counters**: `Parallel delta blob download: ... requests= chunk_requests=
+   bytes= elapsed= speed= requests_cap= run_max_bytes=` for the network leg;
+   `Delta patch applied successfully: ... preflight= download= apply_wait=
+   apply= verify_promote=` per file; `patch plan`, `falling back` lines with
+   reasons; `hash_source=segments` versus `reread` in `Incremental hash
+   sources:`. An apply-time fallback (`Delta patch fallback for file_id=`,
+   counted as `patch_fallbacks`) is the path a silently changed source
+   takes: the test kit reaches it with a mutation that preserves size and
+   modification time, so no fingerprint retires the plan first. Sum the per-file `download` spans against the stage elapsed to
+   see how much of the stage the blob fetch occupies.
+7. **Candidates**: source locality and apply scheduling on evicted HDD
+   sources (the apply cap, not the fetch, bounds the rotational lane now),
+   blob-fetch latency for tiny plans. A time-based patch admission policy
+   would need an explicit policy revision, validated estimates and a
+   same-state full-download comparison; low network consistency alone is not
+   a reason. Never weaken plan validation, ordered hashes or fallback to
+   improve a ratio: a chunked op that fails its blob checksum falls back to a
+   full download like any other failed patch.
+
+### O3 - Content hashing and ordered tree verification
+
+1. **Completion**: every selected file's parts hashed with the required
+   algorithm and the ordered rollups persisted; a first check additionally
+   includes profile calibration.
+2. **Reference**: none in-app (`self_baseline`). Saved benchmarks derive a
+   same-run peak across batches only when the batches share one `label`;
+   calibration trials and the production pass are not comparable and get no
+   ratio. Cold data compares against matched disk access plus algorithm CPU;
+   warm data against memory bandwidth and CPU. B6 is the compute term and is
+   combined with matched B2 read capacity; neither alone is a complete bound.
+3. **Comparisons**: best measured by `hash_files_total` and
+   `hash_parts_total`; test-kit `breakdown.run_metrics.hash_total_s` (summed
+   over every batch) is the gated metric, never the last batch's `hash.actual_s`.
+4. **Work**: `work_bytes` = payload bytes hashed in the batch. Distinguish
+   useful payload, benchmark trial bytes (`label=auto_benchmark_sample`),
+   repeated verification, layout and sampled fingerprint bytes.
+5. **Dependencies**: file/part concurrency under `hash_scheduler_limits`;
+   the run ends when the slowest file ends (`file_elapsed_max_s`).
+6. **Counters and timers**: `SOL op=hash` per batch with
+   `timer_scope=batch_wall`; `blocking_elapsed_s` (summed blocking-task
+   elapsed, reads and scheduling included, not CPU service) and
+   `permit_wait_s` (summed semaphore wait). `compute_s` and `wait_s` are the
+   same two numbers under their legacy names; the old reading of them as CPU
+   time and I/O wait was wrong. `Hash part run metrics:` carries the metadata,
+   layout and straggler breakdown; `Hash profile auto benchmark sample:` the
+   calibration trials.
+7. **Candidates**: straggler splitting and scoped trees. Cross-run profile
+   reuse is closed unless calibration costs seconds: safe reuse needs storage,
+   workload and build invalidation and a stale choice costs more than the
+   current NVMe trial. Calibration itself hashes every sample
+   byte exactly once: each candidate profile trials its own disjoint group of
+   the sample (`Hash profile auto benchmark sample: ... group=i/n`), dealt
+   round-robin from the part-heaviest files so the groups carry like work,
+   and a sample too small to feed every profile trials the first ones only.
+   Before 2026-09-16 every profile re-hashed the same sample, so the second
+   and third trials read the first trial's page cache and the selection
+   measured cache warmth (10 GB/s on NVMe) rather than the profile. Gates:
+   ordered rollups and hashes unchanged, `missing_files=0`, same selected
+   scope, `hash_work_bytes` equal to the payload on a first check.
+
+### O4 - Quick scan
+
+1. **Completion**: a trustworthy clean/updates verdict for the selected
+   addons with pending updates preserved.
+2. **Reference**: none. The lower bound is cache lookup plus necessary
+   enumeration/stat work, required DB reads and any sampled reads (up to
+   128 KiB per suspicious file), scheduled at the actual concurrency. DB
+   validation and targeted escalation are required work, not overhead.
+3. **Comparisons**: B5's addons/s is `legacy`; re-baseline by entry count,
+   cache state and scope before quoting a percentage. Read the operation's
+   own `actual_s`, not the test-kit `elapsed_s`: the stale-check lane's
+   0.445 s runner elapsed is driver round trips around a 0.021 s scan
+   (2026-09-16), so there is no fixed overhead to remove there.
+4. **Work**: `addons_total`, `addons_hashed`, `cache_hits_shared`,
+   `cache_hits_persistent`, `deep_scan_files`; record selected addon and entry
+   counts so disabled scope, shared folders or one touched file cannot
+   masquerade as a speedup.
+5. **Assumptions**: a clean verdict with deep-scan work is not proof of false
+   suspicion (timestamps can change while content stays equal); diagnose
+   invalidations by reason and scope.
+6. **Counters**: `SOL op=quick_scan` with `outcome`; `Quick scan summary:`
+   names the check that triggered escalation; `Quick scan timings:` (debug)
+   splits `db_load`, `addon_hash`, `file_fallback`, `tree_verify`.
+7. **Gates**: no part-range reads, no file-row loads for clean addons, no
+   full-tree loads on the no-change path (sync convention); the outdated but
+   untouched path hashes zero payload on the second check.
+
+### O5 - Remote metadata refresh
+
+1. **Completion**: the repository's remote tree is current and persisted.
+2. **Reference**: none in-app (`self_baseline`). Model network dependency
+   depth and bounded fan-out, then parse and DB service on the real critical
+   path; do not score a large refresh against RTT alone. The test kit gives
+   the no-change branch a calibrated latency estimate through the action
+   record (O6); a rebuilt graph has no reference yet (parse and persist
+   dominate and B5/DB references are still open).
+3. **Comparisons**: `SOL op=remote_refresh` (`outcome`, `index_requests`,
+   `manifest_requests`, `mods`, `files`, `parts`, `response_bytes`, the
+   summed `fetch_sum_s` / `parse_sum_s` / `persist_sum_s` service times and
+   `fan_out_wall_s`) against the same case's history; the `PIPELINE SUMMARY`
+   row `remote_repository` is the same span.
+4. **Work**: remote probe, changed-manifest fetch, parse/decode, tree
+   construction, persistence; total versus changed manifest count and rows.
+   `outcome` names the branch: `skipped_clean` (checksums match, nothing
+   fetched beyond the index), `graph_unchanged` (index fetched, stored graph
+   reused), `rebuilt` (manifests fetched and persisted), `failed`.
+5. **Assumptions**: fetch count proportional to changed addons (a refresh
+   that fetches every manifest for one changed addon is a scope bug); zero,
+   one, many and all changed addons are different cases. The `*_sum_s`
+   fields are service sums over parallel tasks, never wall time.
+6. **Counters**: the `remote_refresh` line; debug `Fetched response body for
+   ...` per fetch.
+7. **Gates**: only changed scope fetched and persisted where allowed.
+
+### O6 - No-change sync
+
+1. **Completion**: current remote metadata checked, the local drift contract
+   satisfied, stored state usable, a clean verdict surfaced.
+2. **Reference**: the terminal record is `SOL op=sync_action` with an
+   `early-exit-*` outcome (`self_baseline` in-app). The test kit attaches
+   `sol_calibrated` = (one fresh B4 request plus one reused request per
+   further index request) / `actual_s`, citing the latency lane it used.
+   "One GET plus O(1) DB reads" is one fast-path condition, not every clean
+   operation; `2 * RTT + 50 ms` is a service budget, not a physical identity;
+   there is no unexplained constant term.
+3. **Comparisons**: `sync_action` (`op_id`, `mode`, `outcome`, `stages`, one
+   `stage_<name>_s` per pipeline stage) against the same case's history; the
+   `Pipeline summary: op=... outcome=... elapsed=` line is the same span.
+4. **Work**: remote requests (`remote_refresh.index_requests`), local
+   validation scope, and whether local metadata validation was required or
+   already validly completed.
+5. **Counters**: the `stage_*_s` keys name any stage that ran when the sync
+   convention says it must not (DB churn, tree loads, content refresh on the
+   clean path).
+6. **Gates**: exact clean contract; no metadata rebuild or hash merely because
+   a cache key changed.
+
+### O7 - Turso persistence
+
+1. **Completion**: rows durably written under the engine's configured
+   synchronous mode.
+2. **Reference**: none for the mixed action counters. The DB calibration lane
+   records keyed inserts, updates and deletes separately, while `db_persist`
+   and `db_purge` currently combine statement kinds; applying one lane to the
+   total would fabricate a ratio. `N_txn * t_fsync` does not describe a commit:
+   `connect_tuned` (`tasks/db_turso.rs`) sets `synchronous=NORMAL`,
+   so model actual sync events, WAL bytes, index work, checkpoint work and the
+   single serial writer against the pinned engine, not SQLite estimates.
+3. **Comparisons**: same engine version, journal mode, synchronous mode,
+   write gate, pool policy, schema version, row/index shape and initial DB
+   state; the WAL/MVCC decision and gate figures are in the measurements file
+   and `conventions/CORE_CONVENTIONS.md`.
+4. **Work**: rows and statements per batch (`db:` line), scanned versus
+   affected rows (a delete affecting zero rows can scan many), WAL bytes.
+5. **Assumptions**: `db_write_time_ms` and `txn_ms` are gated transaction
+   windows with queue time charged inside them above gate 1; never a
+   percentage of wall time, never compared across gate sizes.
+6. **Counters**: `SOL op=db_persist` once per sync action (`op_id`, `mode`,
+   `outcome`, `write_time_ms`, `rows_affected` (rows the engine changed
+   across every write statement of the action), `permit_wait_ms`,
+   `write_calls`, `write_committed`, `write_failed`, `lock_retries`,
+   `backoff_ms`, `categories`, `write_gate`, `conn_opened`, `conn_reused`;
+   `actual_s` is the action wall time the windows sit inside), `db: checkpoint_batches=
+   rows= statements= total= avg_batch=`, `SQLite sync metrics:` (legacy name;
+   the engine is Turso), `SQLite write category metrics` (`txn_ms`,
+   `write_gate=`).
+7. **Gates**: unchanged durability contract, no live-database edits, sibling
+   repository instances preserved on purge.
+
+### O8 - Startup to settled verdict
+
+1. **Completion**: a painted window, then a freshness verdict for every
+   configured repository. Distinguish first painted frame, first interaction,
+   first repository verdict and all-repository settlement; `SOL op=startup`
+   emits at settlement, which can include queued rechecks.
+2. **Reference**: none in-app (`self_baseline`); the logged timeline cannot
+   yield a physical ratio without a compatible renderer and network baseline.
+   For branches that genuinely start together,
+   `max(T_paint_branch, T_verdict_branch) + T_required_join`, with branch
+   start offsets and contention; never paint plus a probe that overlaps it.
+3. **Comparisons**: the disputed 74% and the corrected arithmetic are in the
+   measurements file.
+4. **Work**: launch/setup, renderer initialization, background eligibility and
+   probes, local validation, queued rechecks, UI presentation. An unknown or
+   timed-out repository is not a successful verdict; report answered, unknown,
+   changed and failed counts (`SOL op=startup_probe`).
+5. **Timers**: `first_frame_s` and `dispatch_s` are offsets from launch;
+   `eligibility_s` and `verdict_s` are durations from dispatch; they cannot be
+   added blindly.
+6. **Counters**: `SOL op=startup` (`repos`, `quick_scan_repos`, `eligible`,
+   `prevalidated`, `remote_changed`, `rechecks` and the four timers);
+   `Quick scan preflight timings:` per repository.
+7. **Invariant**: startup work must not block first paint; a frame stall
+   during probes is a regression regardless of ratios. One slow or offline
+   host must not hold the others: the test kit's in-process origin takes a
+   `delay_ms` impairment and an `unreachable` repository entry, so a startup
+   graph with a fast host, a 3 s host and a closed port is a case, not a
+   story (`perf-startup-adverse-origins`).
+
+### M1 - Resident footprint
+
+1. **Completion**: a fixed quiet window after the operation.
+2. **Reference**: the empty-app baseline by renderer backend and process
+   state (B8) is best measured, not a floor; loaded-state and per-operation
+   deltas are separate lanes.
+3. **Comparisons**: peak, retained, growth and long-run growth per operation;
+   pair every time optimization with peak memory and UI responsiveness.
+4. **Work**: the state the operation must hold (repository list and
+   settings, rows an in-flight read is building, the glyph atlas, device
+   objects).
+5. **Assumptions**: E11 above. The minimum-over-quiet-window retention metric
+   is a lower envelope; keep it for history and add median and end-of-window
+   values with the window length. A 100 ms sampler misses short peaks: record
+   sample count and gaps, and never subtract a lifetime high-water mark to
+   invent an operation peak.
+6. **Counters**: `memory.peak_private_bytes`, `retained_private_bytes`,
+   `growth_private_bytes`, `transient_private_bytes` from `foxy-testkit`;
+   `agent-gui memory --textures` for Foxy's own buckets and the atlas.
+7. **Gates**: same useful work (bytes, files, parts); a footprint improvement
+   that moves less required work is not an improvement. Per the resource
+   trade policy above, these lanes are advisory: a higher footprint beside a
+   faster operation is the accepted price, a lower footprint beside a slower
+   one is a regression of the operation, and only unbounded growth is a
+   defect in its own right.
 
 ---
 
 ## The SOL log line
 
 Every crucial operation emits one info-level line built by
-`utils::speed_of_light::sol_line`. Grammar (stable, append-only - never rename
-or remove keys; parsers depend on it):
+`utils::speed_of_light::sol_line`. Grammar (stable, append-only: add keys,
+never rename or remove them; test-kit regexes are position-sensitive on the
+`SOL op=<name> actual_s=` prefix and on `work_bytes=`):
 
 ```text
 SOL op=<name> actual_s=<secs> [work_bytes=<n> actual_bps=<n>]
-    [light_bps=<n> ideal_s=<secs>] sol=<0.000–1.000|na>
-    light_src=<limiter_cap|peak_1s|self_baseline> [key=value ...]
+    [light_bps=<n> ideal_s=<secs>] sol=<0.000..1.000|na>
+    light_src=<limiter_cap|peak_1s|self_baseline>
+    actual_ns=<n> sol_raw=<ratio|na>
+    metric_kind=<modeled_bound|peak_consistency|none>
+    reference_status=<ok|missing|above_bound|invalid_actual>
+    metric_version=2 [key=value ...]
 ```
 
-- `light_src=limiter_cap` - the user's bandwidth cap is the light (exact ceiling).
-- `light_src=peak_1s` - the best 1-second sample of the same run is the light
-  (demonstrated capacity of the whole path: server + network + disk).
-- `light_src=self_baseline` + `sol=na` - no absolute light is computable
-  in-app; trend the rate against the best previously recorded run (the Huang
-  fallback: best demonstrated performance is the light until physics says
-  otherwise).
+Values may be double-quoted to carry spaces; the last occurrence of a repeated
+key wins; integer counters are printed and parsed as integers. Legacy meaning
+of `sol` (clamped) is preserved; `sol_raw` keeps the unclamped ratio and
+`actual_ns` the unrounded duration. `metric_version=1` lines (before
+2026-09-16) lack the four appended keys; parsers treat them as
+`metric_kind` inferred from `light_src` and `sol_raw` recomputed from
+`ideal_s / actual_s` when both are present.
 
-Currently emitted lines:
+| Line | Extra keys |
+| --- | --- |
+| `SOL op=download` (end of the transfer stage) | `files`, `peak_1s_bps`, `delta_savings_percent`, `destination_storage`, `op_id`, `outcome` (`completed`, `failed`, `cancelled`), `mods_succeeded`, `mods_failed`, `mods_cancelled`, `full_bytes`, `delta_savings_bytes`, `expected_bytes`, `credited_bytes`, `range_retries`, `peak_window_s`, and once a plateau window exists `ramp_s`, `plateau_s`, `tail_s`, `ramp_deficit_bytes`, `tail_deficit_bytes`; on rotational destinations `disk_bytes`, `disk_light_bps`, `disk_ideal_s`, `disk_sol`, `disk_light_src=nominal_hdd_sequential`, `disk_sol_raw`, `disk_reference_status=nominal` |
+| `SOL op=hash` (every part-hash batch) | `label`, `files`, `parts`, `compute_s`, `wait_s` (legacy names), `blocking_elapsed_s`, `permit_wait_s`, `file_elapsed_max_s`, `missing_files`, `profile`, `algorithm` (`blake3`, `md5`, `mixed`, `unknown`), `timer_scope=batch_wall`, `outcome` (`completed`, `cancelled`), `op_id` (when run inside an action) |
+| `SOL op=quick_scan` | `repo`, `addons_total`, `addons_hashed`, `cache_hits_shared`, `cache_hits_persistent`, `deep_scan_files`, `entries` (directory entries the fingerprint walks enumerated), `addons_per_s`, `outcome`, `op_id` (the owning sync action or quick-scan sweep) |
+| `SOL op=remote_refresh` (every remote metadata refresh) | `outcome` (`skipped_clean`, `graph_unchanged`, `rebuilt`, `failed`), `index_requests`, `manifest_requests`, `mods`, `files`, `parts`, `response_bytes`, `fetch_sum_s`, `parse_sum_s`, `persist_sum_s`, `fan_out_wall_s`, `timer_scope=action_wall`, `op_id` |
+| `SOL op=sync_action` (every pipeline exit) | `op_id`, `mode`, `outcome` (the `PIPELINE SUMMARY` outcome: `completed`, `early-exit-clean`, `early-exit-skip`, `cancelled`, `failed-*`, ...), `stages`, `timer_scope=action_wall`, one `stage_<name>_s` per stage |
+| `SOL op=db_persist` (every sync action) | `op_id`, `mode`, `outcome` (`completed`, `early_exit`), `write_time_ms`, `rows_affected`, `permit_wait_ms`, `write_calls`, `write_committed`, `write_failed`, `lock_retries`, `backoff_ms`, `categories`, `write_gate`, `conn_opened`, `conn_reused`, `timer_scope=action_wall` |
+| `SOL op=db_purge` (every repository or addon purge) | `op_id`, `kind` (`repository`, `addon`), `outcome`, `steps` (statements), `rows_affected`, `txn_s`, `checkpoint_s`, `timer_scope=action_wall` |
+| `SOL op=space_switch` (every runtime game-space switch) | `op_id`, `outcome`, `drain_s` (queued saves landing in the old space), `reset_s`, `reload_s`, `repositories`, `timer_scope=action_wall` |
+| `SOL op=startup` | `repos`, `quick_scan_repos`, `eligible`, `prevalidated`, `remote_changed`, `rechecks`, `first_frame_s`, `dispatch_s`, `eligibility_s`, `verdict_s`, `outcome=settled`, `op_id` |
+| `SOL op=startup_probe` | `repos`, `answered`, `changed`, `unknown`, `first_answer_s`, `last_answer_s` (offsets of the first and last branch to answer, so one slow host reads as the gap between them), `outcome` (`complete`, `partial`), `op_id` (shared with `startup`) |
+| `SOL op=app_update_check` | `op_id`, `mode`, `outcome` |
 
-| Line | Where | Extra keys |
-| --- | --- | --- |
-| `SOL op=download` | end of every download run (`download_files/orchestrator.rs`) | `files`, `peak_1s_bps`, `delta_savings_percent` |
-| `SOL op=hash` | every part-hash run (`calculate_hashes/scheduling.rs`) | `label`, `files`, `parts`, `compute_s`, `wait_s` |
-| `SOL op=quick_scan` | every quick scan, clean or dirty (`quick_scan/diff.rs`) | `repo`, `addons_total`, `addons_hashed`, `cache_hits_shared`, `cache_hits_persistent`, `deep_scan_files`, `addons_per_s`, `outcome` |
-| `SOL op=startup` | once per launch, when the last repository has a sync verdict (`ui/app/runtime/startup_sync.rs`) | `repos`, `quick_scan_repos`, `eligible`, `prevalidated`, `remote_changed`, `rechecks`, `first_frame_s`, `dispatch_s`, `eligibility_s`, `verdict_s` |
-| `SOL op=startup_probe` | the startup `repo.json` probe stage (`quick_scan/worker.rs`) | `repos`, `answered`, `changed`, `unknown` |
-| `SOL op=app_update_check` | every app update check (`tasks/app_update/spawn.rs`) | `op_id`, `mode`, `outcome` |
+Ownership: every line emitted inside an action carries that action's
+`op_id` (the sync pipeline stamps its id on the `FoxyContext` it hands to
+hashing, quick scans and the remote refresh; the startup timeline and its
+probe share `startup_operation_id()`; a quick-scan sweep stamps its own).
+A saved benchmark keeps only lines whose `op_id` matches its own operation
+id, plus lines without one (a bare CLI hash run, older logs), which are
+attributed by time frame. Use opaque ids for correlation and never log
+local paths or credentials; references involving game-space state stay
+scoped to the active space (no unkeyed process-wide `OnceLock`).
 
-Logs live in `%APPDATA%\Foxy\logs\foxy_rCURRENT.log` (rotated files alongside).
-Default file level is info. Debug-only cross-check lines (1 Hz `Download
-sample:`, `Quick scan timings:`, `Fetched response body ...`) require either
-starting Foxy with `RUST_LOG="warn,Foxy=debug,foxy=debug"` or the
-"Extended diagnostics logging" checkbox in application settings
-(`extended_diagnostics_logging` in `app_settings.json`, also
-`foxy settings --extended-diagnostics-logging true`). The setting applies live
-and additionally turns on the per-operation `PROFILE` report (phases, database
-statements and filesystem calls per phase, the same output `FOXY_PROFILE=1`
-gives the test kit), `PROFILE slow db` / `PROFILE slow fs` lines for single
-calls over 100 ms / 250 ms, and a `RESOURCES` line every 10 s while Foxy is
-busy (process and system CPU, RSS, system memory, process disk read/write and
-machine network rates; idle samples thin to one per two minutes). Ask a user
-reporting a slow check or update to enable it before capturing a log bundle.
+Action records versus stage records: `sync_action`, `remote_refresh`,
+`db_persist`, `startup` and `quick_scan` have `timer_scope=action_wall` or
+are single spans; `hash` lines are per-batch service spans
+(`timer_scope=batch_wall`) whose sum can exceed the action's wall time when
+batches overlap a download, and `download` is the transfer stage. Read the
+action's makespan from `sync_action.actual_s`, never from a sum of stage
+lines.
+
+Logs live in `%APPDATA%\Foxy\logs\foxy_rCURRENT.log` (rotated files
+alongside). Debug-only cross-check lines (1 Hz `Download sample:` with
+`interval_ms` and `bytes`, `Quick scan timings:`, `Fetched response body ...`)
+need `RUST_LOG="warn,Foxy=debug,foxy=debug"` or the "Extended diagnostics
+logging" setting (`extended_diagnostics_logging` in `app_settings.json`, also
+`foxy settings --extended-diagnostics-logging true`), which also turns on the
+per-operation `PROFILE` report, `PROFILE slow db` / `PROFILE slow fs` lines and
+the `RESOURCES` line every 10 s while busy. Ask a user reporting a slow check
+or update to enable it before capturing a log bundle.
 
 Extraction one-liner (PowerShell):
 
@@ -114,539 +571,165 @@ Select-String -Path "$env:APPDATA\Foxy\logs\foxy*.log" -Pattern 'SOL op=' |
       $k, $v = $kv -split '=', 2; $row[$k] = $v
     }
     [pscustomobject]$row
-  } | Format-Table op, actual_s, work_bytes, actual_bps, sol, light_src
+  } | Format-Table op, actual_s, work_bytes, actual_bps, sol_raw, metric_kind, light_src
 ```
 
----
+## Baselines
 
-## Device baselines (the "lights")
+Definitions and how to measure; values and status are in the measurements
+file. Each accepted baseline needs an opaque id, date, machine, storage,
+origin and protocol, algorithm, access pattern, cache preparation,
+concurrency, burst policy, timer boundary, sample count and distribution,
+tool and version, and validity conditions. Re-measure on any relevant
+environment change, not only hardware or ISP.
 
-Fill this table once per machine (and re-measure after hardware/ISP changes).
-Ratios computed against someone else's baseline are meaningless.
-
-| # | Baseline | How to measure | Value (this machine) |
-| --- | --- | --- | --- |
-| B1 | Network downlink `R_net` (bytes/s) | Speedtest/iperf3, or `peak_1s_bps` from a large unthrottled download run | 118,387,677 bytes/s (112.9 MiB/s), from 2026-09-10 `peak_1s_bps` against the reference origin; six consecutive runs land inside 118.07-118.39 MB/s, so this is the path ceiling, not a lucky sample |
-| B2 | Disk sequential read `R_disk_r` | `winsat disk -seq -read -drive C`, or max `throughput` among `Hash profile auto benchmark sample:` lines | _fill in_ |
-| B3 | Disk sequential write `R_disk_w` | `winsat disk -seq -write -drive C`, or `disk: ... p95` from `-- DOWNLOAD REPORT --` | _fill in_ |
-| B4 | RTT to repo server `RTT` | `ping <repo-host>`, or debug `Fetched response body for .../repo.json (... download=...)` - for a tiny payload, download ≈ RTT | **40 ms** to the reference origin (2026-09-10, dependency-free `TcpStream` connect, median of 7: 39.2-50.0 ms). A `repo.json` GET costs 83 ms on a fresh connection (2 x RTT: handshake + request) and 42 ms on a kept-alive one (1 x RTT); the body is 1 062 bytes, so payload is not a term. ICMP to this host times out - measure with a TCP connect, not `ping` |
-| B5 | Quick-scan stat rate (entries/s) | `addons_per_s` from `SOL op=quick_scan` on a clean, warm-cache run - record best ever as the light | 2,462 addons/s, from 2026-06-13 best clean scan; re-record after persistent-cache fix |
-| B7 | Per-connection rate `R_conn` (bytes/s) | Fetch one large range over a single connection and divide; repeat at several concurrency levels to confirm it is flat. Needed for E7, E9 and E10 | ~1.6 MB/s at C=1, ~1.15 at C=48, ~0.88 at C=96 against the reference origin (2026-09-09). Server-imposed, not a client property |
-| B8 | Renderer memory floor `M_renderer_floor` | Launch against an empty `--config-dir` and read private commit once it settles; that is the whole app with none of Foxy's own state in it | 221-239 MB private / 175-216 MB working set (wgpu, Vulkan, backend pinned, `MemoryHints::MemoryUsage`); 290 MB / 237 MB before pinning; 468 MB / 237 MB before both; 133 MB / 103 MB on the glow renderer. Pinning to DX12 instead measures 210 MB / 163 MB and to GL 215 MB / 172 MB, so the floor moves with the backend as well as the machine. Re-measure after any eframe, wgpu or driver change |
-| B6 | Hash compute rate `R_hash` | `work_bytes / compute_s` from `SOL op=hash` (pure aggregated hash time, I/O excluded); BLAKE3 is multi-GB/s multicore, MD5 ≈ 0.5–0.7 GB/s per stream | ≈1,234,800,000 bytes/s (1.15 GiB/s), warm 2026-06-13 hash run; re-measure cold |
-
-Reference physics, for sanity checks: NVMe read 2–7 GB/s, SATA SSD ≈ 550 MB/s,
-HDD ≈ 80–200 MB/s; NTFS warm-cache stat ≈ 10⁴–10⁵ entries/s, cold ≈ 10³;
-1 Gbps link = 125 MB/s = 119.2 MiB/s.
-
----
-
-## Crucial operations
-
-For each operation: the work definition, the light equation, the cross-check
-algorithm (exact log lines to read), and the levers that close the gap.
-
-### O1 - Full-file download (flagship throughput path)
-
-- **Work** `W` = wire bytes actually transferred (`work_bytes` in `SOL op=download`,
-  equals `bytes_transferred` in `Download stage completed:`).
-- **Light** (E4): `R_light = min(R_net, R_server_egress, R_disk_w)`. With a
-  user limiter set, the limiter cap is the light by definition.
-- **Computed in-app**: `sol` in `SOL op=download`. With no limiter, light is
-  `peak_1s` - the ratio then measures *consistency* (did we hold our own peak
-  the whole run?), while `peak_1s_bps / B1` separately measures whether the
-  path (server included) can fill the pipe at all.
-
-**Cross-check algorithm (A1):**
-
-1. Read `SOL op=download`: `sol`, `actual_bps`, `peak_1s_bps`, `light_src`.
-2. `sol < 0.85` with `light_src=limiter_cap` → we waste a capped link; look at
-   `-- DOWNLOAD REPORT --`:
-   - `network: ... permit_wait=` high → concurrency/fair-share starvation;
-   - `ranges network: p50_latency/p95_latency` high → too-small ranges for the
-     RTT, check E7: ranges per file must satisfy `C_min = R_light × RTT / range_bytes`;
-   - `disk: ... avg` near B3 → disk-bound, not network-bound (E4 bottleneck flip);
-   - `db: checkpoint ... total=` significant vs `total: elapsed=` → persistence
-     stealing run time.
-3. `peak_1s_bps ≪ B1 × ~0.9` → bottleneck is upstream (server egress or
-   per-connection limits); more local tuning cannot help (that *is* the light).
-4. Tail behavior: `Download avg speed over last 30s` rolling samples dropping
-   at the end of a run → the run is tail-bound. Read `max_range` from
-   `-- DOWNLOAD REPORT --` and apply E10: the tail cannot be shorter than
-   `max_range / R_conn` (B7) no matter what the scheduler does.
-
-**Split the deficit before touching anything.** Integrate the per-second
-telemetry (`summary-N-<op>.json` in a test kit run, or the debug `Download
-sample:` lines) against B1 and separate it into three buckets. They have
-different owners and only one of them is ours:
-
-| bucket | signature | owner |
+| # | Baseline | How to measure |
 | --- | --- | --- |
-| ramp | first ~3 samples climbing to the ceiling | the path. Congestion control, identical with 96 or 192 pre-established connections. Not client-addressable |
-| plateau | samples between ramp and tail | ours, but it has been at the ceiling since 2026-09-10; a dip here is a real regression |
-| tail | last samples decaying to zero | ours, and bounded by E10 |
+| B1 | Network body-byte throughput against the same origin and protocol | `foxy-testkit calibrate --lanes network`: 2 MiB range requests over the origin's 16 largest files, at one connection and at Foxy's 96-request budget for `--seconds`; interval-correct 500 ms samples, `sustained_bps` is the median plateau interval (first 2 s dropped), `peak_window_bps` the best interval, `per_connection_bps` the single-connection plateau |
+| B2 / B3 | Disk read / write | `calibrate --lanes disk`: one `--disk-mib` file beside the case's repository path; `durable_write_bps` (sequential write through `sync_all`), `unbuffered_read_bps` / `unbuffered_read_parallel_bps` (sequential read with the page cache bypassed, so the device answers; one reader, then one per core over disjoint blocks), `warm_read_bps` / `warm_read_parallel_bps` (buffered re-read of the just-written pages). The faster of the two is the read bound for a hash pass: an NVMe gains from parallel readers, a rotational disk loses to the seeks. Mixed and random lanes are still open. A hash pass is not a disk baseline; the app's write p95 is not an independent ceiling |
+| B4 | Latency | `calibrate --lanes latency`: TCP `connect_s`, a `fresh_request_s` (new connection, full `repo.json` body) and a `reused_request_s` (kept-alive connection), medians of ten. One origin's RTT does not describe every repository, so `calibrate --lanes hosts --hosts <url,...>` records the same three figures per host for any URL, HTTPS included (the handshake lands in the fresh request), keyed by host under `lanes.hosts` for a multi-host startup graph |
+| B5 | Metadata | `calibrate --lanes metadata`: the repository tree enumerated the way the quick scan walks an addon (`read_dir`, file type, metadata per entry), `first_pass_entries_per_s` and `warm_entries_per_s`; the better of the two is the bound for a warm `quick_scan` row (`entries / rate` over `actual_s`), the first pass for a cold or evicted one. A separate complete clean-scan latency reference is still open |
+| B6 | Hash | `calibrate --lanes hash`: compute-only BLAKE3 and MD5 over a 256 MiB in-memory buffer, one thread and all cores. The matched read-and-hash term is the B2 read lane; the row's ratio uses the slower of the two |
+| B7 | Concurrency | The B1 lane records the aggregate curve at 1, 8, 24, 48 and `--connections` requests (`curve`), so a per-connection ceiling is read as a curve, never as one constant; `foxy-testkit origin bench` for request latency |
+| B8 | App memory and startup | Empty `--config-dir` launch by renderer backend and process state, with distribution |
+| DB | Turso workload | `calibrate --lanes db`: 200k `subfiles`-shaped rows with the unique index, 256 per transaction at `synchronous=NORMAL`, one writer, on the case volume (`insert_rows_per_s`, `update_rows_per_s`, `delete_rows_per_s`, checkpoint). Current action counters mix statement kinds, so they do not receive a calibrated ratio until per-kind work is emitted |
+| UI | Frame and input latency | No calibration lane; measured beside work instead. A case operation with `ui_probe_ms` polls the agent probe (`agent-gui fps`, which keeps the app repainting) at that cadence and records `summary.ui_probe`: the worst frame interval (`frame_ms_max`) and worst p95 the app reported from its last 240 frames, the lowest smoothed fps, and the probe's own round trip (process spawn included, an upper bound on input latency). Fixed view, window size, renderer and display per row |
 
-A run whose plateau sits on B1 has no throughput problem, whatever its `sol`
-says. Chasing `sol` without this split leads to tuning the steady state, which
-on this path is already at the speed of light.
+`foxy-testkit calibrate --case <case.json>` writes the lanes to
+`testkit/ledger/calibration.json` (git-ignored, one entry per lane with an
+opaque dated id, the environment fingerprint and the case it was measured
+against). Every later run selects the lanes that match its machine, origin,
+storage class and volume, keeps them on the row as `references`, and derives
+`sol_calibrated` for `download` (B1), `hash` (min of B2 read lane and matching
+B6 BLAKE3 or MD5, over `hash_total_s`; iteration-zero rows without explicit
+eviction remain unrated), `startup_probe` (B4 fresh request) and the
+no-change `sync_action` (B4 fresh plus reused requests), `quick_scan` (B5
+entries). DB lanes remain attached as evidence but unrated while action work
+mixes statement kinds. A baseline records
+the reference ids it was accepted under; recalibrating retires it
+(`reference-changed:<lane>`) rather than comparing ratios taken against two
+different references.
 
-**Levers**, in the order they actually pay:
+A desktop-local benchmark measures this environment. Keep the NVMe and
+rotational lanes; add remote or removable storage only with a described
+access model, and never classify every removable device as a 110 MB/s disk.
 
-1. **Chunk ceiling** (E10). The single largest lever once the plateau is at the
-   ceiling. `RANGE_CHUNK_TARGET` 8 MiB -> 2 MiB took the tail deficit from
-   1.1-2.1 s to 0.25-0.54 s.
-2. **Concurrency to the last byte** (E9). Keep the global range budget busy
-   until the run ends: a wave-aligned chunk grid, a per-file ceiling equal to
-   the global budget, largest-file-first ordering, and few enough concurrent
-   large files that the budget is not oversubscribed.
-3. **Range size vs RTT** (E7), write coalescing, TLS connection reuse, limiter
-   ramp parameters.
+## Collection and comparison rules
 
-**Not a lever**: raising `MAX_ACTIVE_RANGE_REQUESTS` past the point where
-`C × R_conn` reaches `R_link` (E9). Against this origin 96 connections already
-reach 118 MB/s and 192 plateau at the same rate.
+1. Freeze a case fingerprint: selected scope, payload and manifest hashes,
+   files/parts/bytes, mutation seed and profile, initial local state,
+   terminal correctness expectation. A case JSON hash alone cannot detect a
+   changed remote repository, so every row also records the origin's
+   published `checksum` (`origin_checksum`) and a baseline accepted under
+   another one is refused with `origin-changed`.
+2. Match machine, storage class, origin and protocol, connection state, cache
+   preparation, build profile, harness, diagnostics mode (`diagnostics` is
+   `profile` when the case ran with `FOXY_PROFILE`, else `none`), model
+   version and timer boundaries; record engine, schema, gate and pool when
+   relevant. The test kit persists this profile and the cited reference ids
+   with every accepted baseline and refuses a comparison across it.
+3. Cache state is preparation evidence, not an iteration number: an operation
+   after `evict-cache` is the `evicted` lane whatever the repetition; report
+   unknown when a cold state cannot be established.
+4. Keep unprofiled performance gates apart from diagnostic profiling (saved
+   benchmarks run with extended diagnostics on); measure instrumentation
+   overhead with paired same-build runs.
+5. At least five comparable successful repetitions per condition, more for
+   noisy HDD and network cases and small effects; alternate candidate and
+   baseline order when practical. Failures and timeouts stay in the
+   reliability result; they are never filtered into a success rate.
+6. Report sample count, median, spread and absolute difference. A fixed
+   percent tolerance is a practical gate, not statistical proof; a p95 from
+   three runs is the maximum.
+7. Freeze the best reference before comparing a candidate: keep both the
+   fastest valid run and the best reproducible run-set median, and use the
+   median for the primary best-measured comparison. Never select the
+   candidate's own fastest batch as its physical light.
+8. Store outcome and oracle result with every row. Missing counters are
+   unknown, never implicit zero; failed, partial, incompatible or unverified
+   runs cannot become accepted baselines.
 
-**Measuring the light directly.** When it matters whether the client or the
-path is at fault, measure the path with something that shares no code with
-Foxy: a dependency-free `TcpStream` range reader at several concurrency levels
-and chunk sizes. That is how B1 and B7 above were established, and how "chunk
-size is free at high concurrency" (117.5-117.6 MB/s at 1, 2 and 8 MiB chunks
-with 96 connections) was settled before the chunk ceiling was lowered. The
-build recipe is in `testkit/ledger/perf-redownload-small-ssd.notes.md`.
+Baseline acceptance keeps the clean-worktree guard. Old records remain
+readable and replayable; a parser correction that changes derived values
+(the 2026-09-16 integer counters and echo de-duplication) is reported by
+`replay` as differences, not rewritten into history.
 
-**Stage timers are not download time.** `download_stage_ms` includes joining
-the background progress-checkpoint, mod-progress and telemetry-sampler tasks.
-Any of those that sleeps on a timer and only then reads its stop flag quantizes
-the whole stage to its own period, which reads as download cost and is not.
-Before 2026-09-10 this contributed a fixed 5 s and 1 s quantum. New background
-tasks in the download path must wait on an interruptible primitive
-(`timeout(delay, notify.notified())` or a `watch` change), never a bare
-`sleep`.
+## Maintenance
 
-### O2 - Delta patch (download less than the file)
+- **Baseline expiry.** An accepted baseline carries the run profile
+  (harness, build kind, database mode, write gate, pool policy, storage
+  class, diagnostics mode), the environment fingerprint (CPU, OS family and
+  major version, memory bucket, origin host), the origin's published
+  checksum and the calibration lane ids its ratios cite. `foxy-testkit
+  compare` refuses to read a baseline across any of them
+  (`profile-mismatch`, `environment-changed`, `origin-changed`,
+  `reference-changed`, `rebaseline-required`) instead of quietly comparing
+  against other hardware, another payload or another reference. A reference
+  that does not exist for a lane is reported as `no lane`, never filled in
+  from an unrelated one.
+- **Recalibration.** Rerun `foxy-testkit calibrate --case <case>` after a
+  hardware, OS, network path or origin change, and at least when a flagship
+  lane's `sol_calibrated` drifts without a code change (the reference moved,
+  not Foxy). Recalibrating retires the baselines that cited the old lane;
+  re-accept them on a clean revision.
+- **Flagship recheck.** Any change that can touch download, sync or startup
+  paths reruns the O1 and O6 lanes (`perf-redownload-small-ssd`: the force
+  redownload and the clean recheck after it) and the O8 lane before it lands:
+  `foxy-testkit suite --filter "perf-redownload-small-ssd,perf-startup-arma3-live" --no-build`,
+  read with the correctness counters (`files_updated`, `downloaded_bytes`,
+  oracle result, `pipeline_outcome`) and the memory guardrails
+  (`memory.peak_private_bytes`, `retained_private_bytes`) on the same rows.
+- **Curated table.** The current block of the measurements file is generated
+  with `foxy-testkit measurements` from the latest valid run per case and its
+  accepted baseline; rows are pasted, not typed, and old rows move to the
+  archive below it with a status.
+- **Cards and routing.** An instrumentation or workflow change updates the
+  operation card, the log-line table above and the `AGENTS.md` routing in the
+  same change.
 
-- **Work**: `W_net` = insert bytes fetched, `W_out` = full output file written,
-  `W_copy` = bytes copied from the old local file.
-- **Light** (E4/E5): `T_ideal = max(W_net / R_net, (W_copy / R_disk_r) + (W_out / R_disk_w))`.
-- **Efficiency identity**: `savings = 1 − W_net / W_full` - reported directly as
-  `delta_savings_percent` in `Download stage completed:` and `SOL op=download`.
+## Presentation
 
-**Cross-check (A2):** `Parallel delta blob download: ... bytes= elapsed= speed=`
-gives the network leg; compare with `R_net`. The apply leg is disk-bound; if a
-patch run's `avg_speed` (in output bytes per second) exceeds the link rate,
-delta is winning - the effective speedup over full download is
-`W_full / W_net` capped by the disk term. A patch plan is only valid when
-planned bytes < full bytes (sync convention invariant 8); fallbacks are logged
-with reasons - count `fallback` occurrences per run; every fallback pays both
-the planning cost and the full download.
-
-### O3 - Tree hash verification (disk + CPU)
-
-- **Work** `W` = `hashed_bytes` (in `SOL op=hash` as `work_bytes`, and in
-  `Hash part run metrics:`).
-- **Light** (E4): `R_light = min(R_disk_r, R_hash_effective)`. BLAKE3 multicore
-  is normally faster than any disk → expect disk-bound: `sol ≈ (W/T) / B2`.
-  Legacy Swifty MD5 part checksums are sequential per stream → per-file light
-  is `min(R_disk_r, ~0.6 GB/s)`; only file-level parallelism recovers it.
-
-**Cross-check (A3):**
-
-1. `R_actual = work_bytes / actual_s` from `SOL op=hash`.
-2. Light = max `throughput` among `Hash profile auto benchmark sample:` lines
-   in the same log (in-run measured device light), else B2/B6 roofline.
-3. `sol = R_actual / light`.
-4. Decompose the gap with the same line's extras and `Hash part run metrics:`:
-   - schedule loss = `wait_s / (compute_s + wait_s)` (semaphore starvation);
-   - `metadata_sum`, `layout_sum` → non-hash overhead;
-   - `Hash timing distribution: ... >=1s= >=5s=` and `Hash slow file:` →
-     stragglers (E5: the run ends when the slowest file ends);
-   - `missing_files > 0` → the run hashed less than expected; do not compare
-     against full-repo expectations.
-
-**Levers**: file/part concurrency limits (`hash_scheduler_limits`), I/O profile
-(auto benchmark already picks one - trust it), straggler splitting, avoiding
-re-hash of clean files (scoped trees).
-
-### O4 - Quick scan (the "be fast when nothing changed" path)
-
-- **Work**: directory enumeration + one stat per entry (addon folder
-  fingerprints are metadata-only: name, size, mtime, ctime, readonly - see
-  `utils/content_hash.rs::calculate_addon_folder_content_hash`). Deep-scan
-  fallback adds ≤ 128 KiB sampled read per suspicious file (16 KiB × 8 slots,
-  `quick_scan/content_hash.rs`).
-- **Light** (E8): `T_ideal = N_entries / R_stat + Σ_suspicious min(size, 128 KiB) / R_disk_r`,
-  with `N_entries` counted only for cache-missed addons. A perfect cached clean
-  scan approaches `T_ideal ≈ N_addons × C_hit` - microseconds per addon.
-
-**Cross-check (A4):** from `SOL op=quick_scan`:
-
-1. Clean runs (`outcome=clean`): track `addons_per_s`; the best value ever
-   recorded on this machine is the light (B5). Alert when below `0.5 × B5`.
-2. Cache health: `addons_hashed / addons_total` should be ~0 on consecutive
-   clean runs. Rising `addons_hashed` with `cache_hits_persistent=0` means the
-   persistent cache key went volatile (the exact failure the existing
-   `persistent addon hash cache produced zero hits` warning flags) - E8 says
-   this silently multiplies cost by `C_miss / C_hit`.
-3. `deep_scan_files > 0` on a clean-disk run → false suspicion; find which
-   check (size/missing/content) triggered it in `Quick scan summary:`.
-4. Phase decomposition (debug): `Quick scan timings:` shows `db_load`,
-   `addon_hash`, `file_fallback`, `tree_verify` - only `addon_hash` is
-   physics; the rest is overhead to drive toward zero.
-
-**Forbidden by the sync convention** (these would change the light equation -
-treat as bugs): part-range reads in quick scan; file-row loads for clean
-addons; full-tree loads on the no-change path.
-
-### O5 - Remote metadata refresh (RTT-bound)
-
-- **Work**: the dependent fetch chain. Depth `D`: `repo.json` (1) → changed
-  addons' manifests (2, parallel within level) → part lists (3, when needed).
-- **Light** (E6): `T_ideal = D × RTT + Σ bytes / R_net`. For metadata, bytes
-  are small - RTT dominates; the light for "N changed addons" is ≈ `2–3 × RTT`,
-  *not* `N × RTT` (level-parallel fetches).
-
-**Cross-check (A5):** `PIPELINE SUMMARY` table row `remote_repository` (and
-`Recheck stats: mods=, files=, parts=, elapsed_total=`):
-`sol = (D × B4 + payload/B1) / stage_elapsed`. With debug enabled, each
-`Fetched response body for ... (N bytes ... download=...)` line gives per-fetch
-reality. The sync convention requires fetch count ∝ changed addons - a refresh
-that fetches every manifest when one addon changed is a scope bug, visible as
-fetch-line count ≫ changed-addon count.
-
-### O6 - No-change sync (flagship latency path)
-
-The most frequent user-visible operation: startup/recheck when nothing changed.
-
-- **Work**: one `repo.json` GET + one checksum compare + O(1) DB reads.
-- **Light** (E6): `T_ideal ≈ RTT + repo_json_bytes / R_net + ~1 ms`.
-
-**Cross-check (A6):** `Pipeline summary: op=... outcome=... elapsed=` for
-clean-outcome runs: `sol = (B4 + payload/B1) / elapsed`. Practical target:
-clean recheck within `2 × RTT + 50 ms`. Anything beyond that is orchestration
-(DB churn, tree loads, content-hash refresh) that the sync convention says must
-not run on this path - the `PIPELINE SUMMARY` stage rows name the offender
-directly.
-
-### O7 - SQLite persistence
-
-- **Work**: rows upserted in a run (`db:` line of `-- DOWNLOAD REPORT --`,
-  `-- DATABASE METRICS SUMMARY --`, `SQLite sync metrics:`).
-- **Light**: batched transaction rate - `T_ideal ≈ N_txn × t_fsync + rows / R_row`
-  where `t_fsync` ≈ 1–10 ms (device-dependent) and `R_row` ≈ 10⁵–10⁶ rows/s for
-  prepared batched inserts. The dominant term is transaction count, not rows.
-
-**Cross-check (A7):** `db: checkpoint_batches= rows= ... avg_batch=` →
-`rows_per_batch` low + many batches = paying `t_fsync` per few rows.
-`SQLite sync metrics: lock_retries= total_backoff_ms=` - backoff is pure
-overhead (no physics in a retry); a healthy run shows ~0. `db_write_time_ms`
-vs operation `elapsed_ms` gives the persistence share of the run.
-
-`db_write_time_ms`, and the per-category `txn_ms` it sums, are gated transaction
-windows, not row cost. Turso has one internal writer, so above a write gate of 1
-the waiters block inside `conn.execute` without surfacing `Busy` and that queue
-time is charged here rather than to `permit_wait_ms`: one frozen refresh reports
-~300 ms at gate 1 and ~2 180 ms at gate 8 for identical work. Both lines carry
-`write_gate=`; never compare either number across gate sizes, and take gate 1 as
-the uncontended reference. Before 2026-09-09 the per-category field was named
-`total_ms`; the measurement is unchanged, only the name.
-
-Never compare a WAL `db_write_time_ms` to an MVCC one except through
-`foxy-testkit compare` on the same case, gate, harness, and build. Shipping
-journal is WAL (`FOXY_DB_MVCC` unset). On Turso 0.7.2 / Foxy 1.2.0 / gate 4
-(2026-09-09, NVMe): MVCC is worse on persistence and not faster on wall clock.
-Small redownload (217 files) write time 125 ms WAL vs 210 ms MVCC, elapsed
-~51 s either way. Big redownload (3738 files, ~92 GB) write time
-11.6 s WAL vs 37.4 s MVCC (~3x), elapsed 801 s vs 805 s (network-bound; O1
-drowns O7). Recheck after that download is ~0.45 s on both. Engine benches
-where MVCC looks better (flat write-gate curve, 16 concurrent writers) do
-not show up in these sync ratios. Full matrix and how to re-run:
-`conventions/CORE_CONVENTIONS.md` (WAL vs MVCC).
-
-### O8 - Startup to first sync verdict
-
-The second flagship latency path after O6: every launch pays it, and the user is
-looking at the window while it runs.
-
-- **Work**: reach a painted window, then answer "is anything out of date?" for
-  every configured repository.
-- **Light** (E5, two serial stages that cannot overlap):
-  `T_ideal = T_paint + max_repos(2 x RTT + repo_json_bytes / R_net)`.
-  - `T_paint` is the platform's window + graphics-device creation. It is not
-    Foxy code and is measured, not assumed: 520-540 ms on this machine
-    (eframe/wgpu enumerating 8 adapters across Vulkan, DX12 and GL).
-  - The verdict term is O6's light per repository, and `max` rather than `sum`
-    because probes run at the same depth (E6). It is `2 x RTT`, not `1 x RTT`:
-    a cold repository connection pays a TCP handshake before the GET.
-- **Computed in-app**: `SOL op=startup` carries the whole timeline, so the ratio
-  is recomputable from one line.
-
-**Cross-check (A8):**
-
-1. Read `SOL op=startup`: `first_frame_s`, `dispatch_s`, `eligibility_s`,
-   `verdict_s`, `actual_s`.
-2. `first_frame_s` minus the renderer floor is Foxy's own pre-paint cost. It
-   must be near zero. Anything else there is work that does not gate the first
-   frame and belongs on a thread.
-3. `verdict_s` against `2 x RTT` (B4) is the verdict ratio.
-   `SOL op=startup_probe` isolates the network leg; `answered < repos` means the
-   probe budget elapsed and those repositories' remote freshness is unknown.
-4. `Quick scan preflight timings:` localizes a slow eligibility stage to a
-   specific repository and a specific query.
-
-**Levers**, in the order they paid on 2026-09-10:
-
-1. **Nothing blocking on the paint path.** The startup system summary
-   (sysinfo + drive + GPU + antivirus enumeration, 466 ms) and the editor
-   mission scan (267 ms, 3.7 s cold) both ran inside `Foxy::new` and the first
-   frame. Neither gates the window. Moving both to threads took first frame from
-   1 259-1 342 ms to 530-561 ms.
-2. **Start the network probe before the window exists.** The probe is two round
-   trips of pure latency and touches no UI. Running it after first paint stacks
-   it on top of renderer initialization; starting it in `Foxy::new` hides it
-   underneath, and the verdict lands almost as soon as the frame does.
-   `verdict_s` 128-142 ms -> 49-51 ms.
-3. **No aggregate where a boolean is wanted.** The preflight decided two
-   booleans with a `COUNT`/`SUM` over every part row in the repository - 1.03 s
-   on a 141k-part repository, and it gated all eleven repositories' verdicts
-   because the plan waits for the slowest. `LIMIT 1` probes, skipped entirely
-   when a higher level already decided the answer, give the same verdicts.
-4. **Bound the probe stage, not just each request.** A probe that outlives its
-   own timeout would otherwise hold every other repository indefinitely. The
-   stage budget sits above the per-request timeout, never below it: a shorter
-   stage would trade a rare hang for routinely abandoning slow-but-live
-   servers, and remote freshness lost is worse than a slow launch.
-
-**`T_paint`, revisited (2026-09-10).** This used to be listed as "not a lever"
-because restricting the graphics backend trades a startup fraction for a
-compatibility risk on other people's machines. It is a lever once the risk is
-removed rather than accepted: Foxy records the backend a launch actually reached
-a window on and asks for that one alone next time, and a launch that fails while
-narrowed drops the record and retries with the full list (`ui/launcher.rs`). The
-first launch on a machine still enumerates everything, so no backend is lost.
-Measured on this machine: first frame 561-575 ms enumerating three backends,
-393-397 ms pinned to the one that won.
-
-**Invariant**: startup work must not block first paint. A frame stall during
-probes is a regression regardless of ratios.
-
----
-
-## M1 - Resident footprint (the memory lane)
-
-Time is not the only physical budget. Foxy holds a game space open for as long
-as the user leaves the window up, so its footprint is a cost paid continuously,
-and the same speed-of-light discipline applies: name the work the memory is
-*for*, and treat everything above that as headroom.
-
-- **Work**: the state an operation genuinely has to hold - the repository list
-  and settings, the rows an in-flight read is building into structs, the glyph
-  atlas for the text on screen, and the renderer's own device objects.
-- **Light** (E11): `M_ideal = M_renderer_floor + M_state + M_working_set_of_one_operation`.
-  - `M_renderer_floor` is measured, not assumed, and it is not Foxy code: an
-    empty configuration is the whole floor with none of Foxy's own state in it.
-  - `M_state` scales with repositories and spaces, not with parts: the app's own
-    buckets total single-digit megabytes on an 11-repository profile.
-  - The operation term is the only one an optimization can move without
-    changing what Foxy can do.
-- **Measured**: `foxy-testkit` samples the process from outside every 100 ms and
-  reduces the series per operation. Private commit (`PrivateUsage`) is the
-  gated metric; working set is recorded alongside because the OS trims it and it
-  is what Task Manager shows.
-
-| Metric | Meaning |
-| --- | --- |
-| `memory.peak_private_bytes` | highest private commit during the operation |
-| `memory.retained_private_bytes` | lowest commit in the quiet window after it |
-| `memory.growth_private_bytes` | retained minus the operation's starting commit |
-| `memory.transient_private_bytes` | peak minus retained - what the operation borrowed |
-
-**Cross-check (A9):**
-
-1. Read `memory.retained_private_bytes` for `startup`. Subtract the renderer
-   floor (measure it: launch against an empty `--config-dir`). What is left is
-   Foxy's own state, and it should track repository count, not part count.
-2. `memory.growth_private_bytes` on a repeated operation is the leak test. Run
-   the same walk three times and eight times: a one-time cache fill saturates,
-   a leak scales with the repetition count.
-3. `memory.transient_private_bytes` on a database-heavy operation is the read
-   path. A read that materializes rows and then builds structs from them shows
-   up here as roughly twice the size of the result it returns.
-4. The app's own attributed buckets come from `agent-gui memory --textures`,
-   which takes a fresh sample on demand and reports the epaint font atlas
-   alongside them. Anything the buckets and the atlas do not explain is
-   renderer, allocator, or engine - and on this profile that is most of it, so
-   read those two before assuming a Foxy-side cause.
-
-**Levers**, in the order they paid on 2026-09-10 (empty configuration, so this
-is the floor rather than one profile's numbers):
-
-1. **Tell wgpu to size for footprint.** wgpu defaults to
-   `MemoryHints::Performance`, which sizes suballocation blocks for a renderer
-   streaming large resources. Foxy uploads a font atlas and a few repository
-   images. `MemoryHints::MemoryUsage` took the floor from 468 MB to 290 MB of
-   private commit with no change to working set - pure reserve that never held a
-   Foxy texture.
-2. **Do not enumerate every graphics backend on every launch.** Each backend in
-   the instance descriptor loads its own driver stack. Remembering the one that
-   worked (see `T_paint` above) took 290 MB to 221-239 MB and working set 237 MB
-   to 175-216 MB.
-3. **Stream a large read instead of collecting it.** `query_all` holds every
-   `DbRow` while the caller builds its own structs from the same data;
-   `DbTxn::query_each` hands rows over one at a time. The model tree's part rows
-   are the largest such read Foxy performs, and the pair list, id map and re-sort
-   that used to sit on top of them cost more than the rows they indexed. This one
-   is a structural saving, not a measured one: on the metadata-refresh lane the
-   run-to-run spread is wider than the difference, and elapsed moved (-15%) where
-   footprint did not.
-4. **Do not size a bucket map by the pairs going into it.** Three
-   `HashMap::with_capacity(pairs.len())` calls reserved capacity for every part
-   in the repository to hold one entry per file.
-
-**Open, not yet attributed**: the first walk through every view costs about
-+44 MB of commit that is never given back, and the same walk repeated three or
-eight times costs the same 44 MB, so it is a one-time fill rather than a leak.
-Foxy's own buckets do not explain it (2.5 MB total on this profile) and neither
-does the glyph atlas, which `agent-gui memory` reports at 8192x128 and one
-percent full after the whole walk. That leaves the renderer and the allocator.
-Do not guess at it in a changelog: measure it with the series in
-`memory-<iteration>-ui-walk.json` before claiming a cause.
-
-**Invariant**: a memory improvement that moves fewer bytes, files or parts is
-not an improvement. The ledger's counter metrics are what catch that, exactly as
-they do for wall clock.
-
----
-
-## Tracking table
-
-Append one row per measured run that matters (release validation, perf work,
-or any "this feels slow" report). Date, app version, machine label, then the
-numbers straight from the logs.
-
-| Date | Version | Machine | Op | Work | T_actual | R_actual | Light (src) | sol | Bottleneck | Action |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| _2026-06-13_ | _1.0.0_ | _example_ | download | 8.2 GiB | 612 s | 14.3 MiB/s | 15.0 MiB/s (limiter) | 0.95 | limiter | none - at light |
-| 2026-07-03 | 1.0.0 | 9950X3D desktop | quick_scan clean | 96 addons | 0.210 s | 456.1 addons/s | 2,462 addons/s (B5 self) | 0.185 | no cache hits, DB load | persistent cache empty; track cache-key fix |
-| 2026-07-03 | 1.0.0 | 9950X3D desktop | quick_scan clean | 96 addons | 0.071 s | 1,356.0 addons/s | 2,462 addons/s (B5 self) | 0.551 | addon hash + DB load | cache_hits_persistent=0 |
-| 2026-07-03 | 1.0.0 | 9950X3D desktop | quick_scan clean | 96 addons | 0.074 s | 1,305.9 addons/s | 2,462 addons/s (B5 self) | 0.530 | addon hash + DB load | cache_hits_persistent=0 |
-| 2026-07-03 | 1.0.0 | 9950X3D desktop | quick_scan clean | 96 addons | 0.069 s | 1,399.2 addons/s | 2,462 addons/s (B5 self) | 0.568 | addon hash + DB load | best in this log, still under B5 |
-| 2026-07-03 | 1.0.0 | 9950X3D desktop | quick_scan clean | 96 addons | 0.072 s | 1,324.2 addons/s | 2,462 addons/s (B5 self) | 0.538 | addon hash + DB load | cache_hits_persistent=0 |
-| 2026-07-03 | 1.0.0 | 9950X3D desktop | quick_scan clean | 96 addons | 0.071 s | 1,353.6 addons/s | 2,462 addons/s (B5 self) | 0.550 | addon hash + DB load | cache_hits_persistent=0 |
-| 2026-07-03 | 1.0.0 | 9950X3D desktop | hash benchmark Conservative | 737.6 MiB | 0.362 s | 2,037.9 MiB/s | 6,003.6 MiB/s (same-run best) | 0.339 | profile limits | Balanced wins on this run |
-| 2026-07-03 | 1.0.0 | 9950X3D desktop | hash benchmark Balanced | 737.6 MiB | 0.123 s | 6,003.6 MiB/s | 6,003.6 MiB/s (same-run best) | 1.000 | at same-run light | selected profile |
-| 2026-07-03 | 1.0.0 | 9950X3D desktop | hash benchmark Aggressive | 737.6 MiB | 0.126 s | 5,859.4 MiB/s | 6,003.6 MiB/s (same-run best) | 0.976 | near same-run light | no action |
-| 2026-07-03 | 1.0.0 | 9950X3D desktop | hash selected remaining | 20.60 GiB | 6.571 s | 3,209.5 MiB/s | 6,003.6 MiB/s (benchmark best) | 0.535 | file mix, stragglers | 1086 files, max file 2.410 s |
-| 2026-07-03 | 1.0.0 | 9950X3D desktop | repository DB purge | 440,492 rows | 144.54 s | 3,047 rows/s | self_baseline | na | SQLite delete | zero-row part delete took 78.59 s; subfile delete took 59.59 s |
-| 2026-07-03 | 1.0.0 | 9950X3D desktop | deferred part insert | 433,016 rows | 107.30 s | 4,035 rows/s | self_baseline | na | SQLite insert with live indexes | 1,692 batches of 256; biggest sync cost |
-| 2026-07-03 | 1.0.0 | 9950X3D desktop | remote refresh rebuild | 3,738 files | 125.73 s | 29.7 files/s | self_baseline | na | DB persistence | 110.84 s DB write time; tree_hash_bootstrap 118.29 s |
-| 2026-07-03 | 1.0.0 | 9950X3D desktop | no-change remote skip | repo.json + foxy_addons | 0.27 s | 1 clean verdict | self_baseline | na | RTT + quick verify | repeat clean skip after rebuild |
-| 2026-07-03 | 1.0.0 | 9950X3D desktop | quick_scan clean | 96 addons | 0.072 s | 1,324.4 addons/s | 2,462 addons/s (B5 self) | 0.538 | addon hash + DB load | large-repo startup quick scan |
-| 2026-07-03 | 1.0.0 | 9950X3D desktop | quick_scan updates | 41 addons | 0.167 s | 245.6 addons/s | self_baseline | na | missing-file diff | 41-addon repo before download: 41 addons updated, 1,515 files missing |
-| 2026-07-03 | 1.0.0 | 9950X3D desktop | quick_scan updates | 41 addons | 0.158 s | 260.2 addons/s | self_baseline | na | missing-file diff | repeated update check before download |
-| 2026-07-03 | 1.0.0 | 9950X3D desktop | quick_scan updates | 41 addons | 0.154 s | 265.5 addons/s | self_baseline | na | missing-file diff | repeated update check before download |
-| 2026-07-03 | 1.0.0 | 9950X3D desktop | quick_scan updates | 41 addons | 0.153 s | 268.8 addons/s | self_baseline | na | missing-file diff | repeated update check before download |
-| 2026-07-03 | 1.0.0 | 9950X3D desktop | download | 22.56 GiB | 222.671 s | 103.73 MiB/s | 112.92 MiB/s (peak_1s) | 0.919 | network path | 1,515 full downloads, 1,515 files, no retries |
-| 2026-07-03 | 1.0.0 | 9950X3D desktop | download pipeline | 22.56 GiB | 247.54 s | 93.31 MiB/s | self_baseline | na | post-download tail | download 240.68 s, hash_finalize 17.75 s, DB writes 14.84 s |
-| 2026-07-03 | 1.0.0 | 9950X3D desktop | hash finalize tail | 22.56 GiB | 15.15 s | 1,524.6 MiB/s | self_baseline | na | rollup or persistence tail | all 1,515 files incrementally hashed during download |
-| 2026-07-03 | 1.0.0 | 9950X3D desktop | download DB checkpoint | 3,583 rows | 1.79 s | 2,002 rows/s | self_baseline | na | SQLite progress persistence | 36 batches, avg_batch=49.6ms |
-| 2026-07-03 | 1.0.0 | 9950X3D desktop | quick_scan clean | 41 addons | 0.040 s | 1,019.4 addons/s | 2,462 addons/s (B5 self) | 0.414 | addon hash + DB load | 41-addon repo clean after download |
-| 2026-07-03 | 1.0.0 | 9950X3D desktop | quick_scan clean | 41 addons | 0.042 s | 972.4 addons/s | 2,462 addons/s (B5 self) | 0.395 | addon hash + DB load | 41-addon repo remote skip verification |
-| 2026-07-03 | 1.0.0 | 9950X3D desktop | no-change remote skip | repo.json + foxy_addons | 0.21 s | 1 clean verdict | self_baseline | na | RTT + quick verify | 41-addon repo clean skip after download |
-| 2026-09-09 | 1.2.0 Turso 0.7.2 gate 4 WAL | 9950X3D NVMe | force-redownload | 217 files | 51.17 s | 86.4 MB/s | peak_1s | 0.79 | network | perf-redownload-small-ssd warm; db_write 125 ms |
-| 2026-09-09 | 1.2.0 Turso 0.7.2 gate 4 MVCC | 9950X3D NVMe | force-redownload | 217 files | 51.35 s | 86.3 MB/s | peak_1s | 0.78 | network | same case; db_write 210 ms (+68%); elapsed no-difference |
-| 2026-09-09 | 1.2.0 Turso 0.7.2 gate 4 WAL | 9950X3D NVMe | force-redownload | 92.2 GB / 3738 files | 801 s | 116.1 MB/s | peak_1s | 0.97 | network | perf-redownload-big-ssd cold; db_write 11.6 s |
-| 2026-09-09 | 1.2.0 Turso 0.7.2 gate 4 MVCC | 9950X3D NVMe | force-redownload | 92.2 GB / 3738 files | 805 s | 115.4 MB/s | peak_1s | 0.97 | network | same case; db_write 37.4 s (~3x); elapsed no-difference |
-| 2026-09-09 | 1.2.0 Turso 0.7.2 gate 4 WAL | 9950X3D NVMe | recheck | large repo after redownload | 0.44 s | 1 clean | self_baseline | na | RTT + quick verify | big-ssd cold recheck |
-| 2026-09-09 | 1.2.0 Turso 0.7.2 gate 4 MVCC | 9950X3D NVMe | recheck | large repo after redownload | 0.45 s | 1 clean | self_baseline | na | RTT + quick verify | same; not faster than WAL |
-| 2026-09-09 | 1.2.0 pre-tail-work | 9950X3D NVMe | download | 4.33 GB / 217 files | 45.11 s | 96.0 MB/s | 117.8 MB/s (peak_1s) | 0.815 | tail | perf-redownload-small-ssd warm. Plateau already at the ceiling; 2.1 s ramp + 10-12 s tail |
-| 2026-09-10 | 1.2.0 post-tail-work | 9950X3D NVMe | download | 4.33 GB / 217 files | 39.79 s | 108.8 MB/s | 118.4 MB/s (peak_1s) | 0.922 | ramp | same case, same bytes/files. Tail deficit 0.25-0.54 s; run is now ramp-bound |
-| 2026-09-09 | 1.2.0 pre-tail-work | 9950X3D HDD | download | 4.33 GB / 217 files | 65.12 s | 66.5 MB/s | peak_1s | 0.563 | tail | perf-redownload-small-hdd warm median 67.6 s |
-| 2026-09-10 | 1.2.0 post-tail-work | 9950X3D HDD | download | 4.33 GB / 217 files | 44.45 s | 97.4 MB/s | peak_1s | 0.825 | tail + disk | same case; warm median 48.4 s. Spinning media is noisy, read medians |
-| 2026-09-10 | probe (no Foxy code) | 9950X3D NVMe | path ceiling | 96 conns, 1/2/8 MiB chunks | 20 s each | 117.5-117.6 MB/s | 118.4 MB/s | ~0.99 | path | chunk size is free at full concurrency; 192 conns plateau identically |
-| 2026-09-10 | 1.2.0 pre-startup-work | 9950X3D NVMe | startup | 11 repos, 10 probed | 1.500 s | 1 verdict | 0.62 s (paint 0.54 + 2xRTT 0.08) | 0.41 | pre-paint blocking work | perf-startup-arma3-live warm median. first_frame 1.30 s, verdict 0.135 s |
-| 2026-09-10 | 1.2.0 post-startup-work | 9950X3D NVMe | startup | 11 repos, 10 probed | 0.660 s | 1 verdict | 0.59 s (paint 0.54 + 2xRTT 0.08 overlapped) | 0.89 | renderer init | same case. first_frame 0.54 s, verdict 0.050 s; probe now overlaps paint |
-| 2026-09-10 | 1.2.0 post-startup-work | 9950X3D NVMe | startup_probe | 10 repo.json | 0.092 s | 10 probes | 0.080 s (2 x B4) | 0.87 | RTT | all probes at one depth; 12 ms client overhead |
-| 2026-09-10 | probe (no Foxy code) | 9950X3D NVMe | repo.json GET | 1 062 B | 0.083 s | fresh conn | 0.080 s (2 x B4) | 0.96 | RTT | keep-alive repeat 0.042 s = 1 x RTT; payload is not a term |
-| 2026-09-10 | 1.2.0 | 9950X3D NVMe | app_update_check | 1 manifest | 0.085 s | 1 check | 0.080 s (2 x B4) | 0.94 | RTT | `SOL op=app_update_check`, outcome=up_to_date |
-| 2026-09-10 | 1.2.0 pre-memory-work | 9950X3D NVMe | footprint empty config | launch, no repositories | n/a | 468 MB commit / 237 MB WS | 133 MB (glow floor) | na | wgpu reserve | three backends enumerated, `MemoryHints::Performance` |
-| 2026-09-10 | 1.2.0 post-memory-work | 9950X3D NVMe | footprint empty config | launch, no repositories | n/a | 221 MB commit / 175 MB WS | 133 MB (glow floor) | na | wgpu device | `MemoryHints::MemoryUsage` + pinned backend; -53% commit, -26% WS |
-| 2026-09-10 | 1.2.0 pre-memory-work | 9950X3D NVMe | footprint startup | 11 repos, live arma3 space | n/a | 680 MB peak / 581 MB retained | 468 MB (B8 then) | na | renderer floor | perf-memory-arma3-live |
-| 2026-09-10 | 1.2.0 post-memory-work | 9950X3D NVMe | footprint startup | 11 repos, live arma3 space | n/a | 438 MB peak / 343 MB retained | 221-239 MB (B8) | na | renderer floor | same case; -36% peak, -41% retained |
-| 2026-09-10 | 1.2.0 pre-memory-work | 9950X3D NVMe | footprint recheck | largest configured repository, clean | n/a | 595 MB peak / 593 MB retained | 468 MB (B8 then) | na | renderer floor | warm median of three |
-| 2026-09-10 | 1.2.0 post-memory-work | 9950X3D NVMe | footprint recheck | largest configured repository, clean | n/a | 346 MB peak / 344 MB retained | 221-239 MB (B8) | na | renderer floor | same case; -42% retained |
-| 2026-09-10 | 1.2.0 pre-memory-work | 9950X3D NVMe | footprint ui-walk | 133 view steps, 3 passes | n/a | 620 MB peak / 614 MB retained | 468 MB (B8 then) | na | unattributed | growth +21 MB |
-| 2026-09-10 | 1.2.0 post-memory-work | 9950X3D NVMe | footprint ui-walk | 134 view steps, 3 passes | n/a | 393 MB peak / 390 MB retained | 221-239 MB (B8) | na | unattributed | same case; growth +45 MB, identical at 8 passes; buckets 2.5 MB, atlas 1% full |
-| 2026-09-10 | 1.2.0 pre-memory-work | 9950X3D NVMe | footprint remote-refresh (CLI) | 96 mods, 433k parts | 1.78-1.93 s | 373 MB peak (median of 3) | no renderer in a CLI run | na | manifest parse + part upsert | perf-db-refresh-main, same binary minus the app changes |
-| 2026-09-10 | 1.2.0 post-memory-work | 9950X3D NVMe | footprint remote-refresh (CLI) | 96 mods, 433k parts | 1.50-1.53 s | 345-370 MB peak (two runs, medians of 3) | no renderer in a CLI run | na | manifest parse + part upsert | same case. Elapsed is a real -15% and reproduced twice; **memory is not** - the within-run spread is 330-425 MB either side, so the streamed read shows no measurable footprint change on this lane |
-| 2026-09-10 | 1.2.0 pre-memory-work | 9950X3D NVMe | footprint force-redownload | 4.33 GB / 217 files | 40.8-41.0 s | 727 MB peak / 521 MB retained (medians) | 468 MB (B8 then) | na | renderer floor | perf-redownload-small-ssd |
-| 2026-09-10 | 1.2.0 post-memory-work | 9950X3D NVMe | footprint force-redownload | 4.33 GB / 217 files | 40.4-40.9 s | 563 MB peak / 339 MB retained (medians) | 221-239 MB (B8) | na | download buffers | same case, same 217 files and 4 331 121 846 bytes; -23% peak, -35% retained, elapsed and working-set peak unchanged; payload content-verified by `foxy-testkit-oracle` (3 744 parts, 0 problems) |
-| 2026-09-10 | 1.2.0 post-memory-work | 9950X3D NVMe | startup | 11 repos, 10 probed | 0.523-0.533 s | 1 verdict | 0.34 s (paint 0.39 measured, 2 x RTT overlapped) | 0.74 | renderer init | same case as the O8 rows above; pinned backend cut first frame 0.56 s -> 0.39 s |
-| 2026-09-16 | 1.2.0 rotational download profile (3 large, 16 small, 32 MiB) | 9950X3D HDD | download | 4.33 GB / 217 files | 125.1-136.6 s | 32 MB/s | 108 MB/s (peak_1s) | 0.28-0.30 | connections | perf-redownload-small-hdd `20260916T051653Z`, three reps. **Regression** of the HDD profile shipped with the Sept-14 build; a 13 MB mod queued 135 s behind the small-file lane. Rejected in `testkit/HYPOTHESES.md` |
-| 2026-09-16 | 1.2.0 SSD network limits on HDD, patch_applies=2 | 9950X3D HDD | download | 4.33 GB / 217 files | 45.2-58.2 s | 74-96 MB/s | 118 MB/s (peak_1s) | 0.63-0.81 | tail + disk | same case `20260916T053420Z`; back inside the 44-58 s spread of the 2026-09-10 rows. Hashing fully overlapped: 60 incremental batches inside the stage, final flush 13 MB, `files_reused_from_hash_pass=217/217` |
-| 2026-09-16 | 1.2.0 | 9950X3D NVMe | download | 4.33 GB / 217 files | 39.4-39.7 s | 109 MB/s | 118 MB/s (peak_1s) | 0.92-0.93 | ramp | perf-redownload-small-ssd `20260916T082712Z`; unchanged against the 39.5 s baseline. The `hash.actual_s` verdict (63 -> 90 ms on the last 424 MB page-cache batch) is scheduling noise, candidate since 2026-09-10 |
-| 2026-09-16 | 1.2.0 | 9950X3D HDD | hash baseline (first check, cold) | 4.33 GB / 217 files | 35.2 s remaining after 13.8 s benchmark | 103 MB/s | ~110 MB/s (B2 HDD) | ~0.94 | disk | perf-tfr-scifi-first-check-hdd `20260916T081256Z`: `hash_work_bytes` equals the payload once, `tree_verify_runs=0`, `content_refresh_files_sampled=0` |
-| 2026-09-16 | 1.2.0 | 9950X3D NVMe | hash baseline (first check) | 4.33 GB / 217 files | 0.24 s remaining | page cache | n/a | na | benchmark | perf-tfr-scifi-first-check-ssd `20260916T083021Z`: 1.33 x payload hashed because the auto benchmark tries three profiles on its 707 MB sample; expected, case budget 5.85 GB |
-| 2026-09-16 | 1.2.0 | 9950X3D HDD | quick_scan outdated, untouched | 217 files, 40 outdated | 0.445 s | 0 bytes hashed | self_baseline | na | RTT + DB | perf-tfr-scifi-stale-check-hdd `20260916T080847Z` `quick-check-stale`; the following recheck 0.547 s, also 0 bytes. The plan's "every later check while outdated" row, 260 s -> under 1 s |
-| 2026-09-16 | 1.2.0 | 9950X3D NVMe | quick_scan outdated, untouched | 217 files, 40 outdated | 0.447 s | 0 bytes hashed | self_baseline | na | RTT + DB | perf-tfr-scifi-stale-check-ssd `20260916T082351Z`; same shape as the HDD row, the path is not disk-bound |
-| 2026-09-16 | 1.2.0 | 9950X3D HDD | delta update after a check | 40 patched / 424 MB wire | 28.7-30.0 s | 14.6 MB/s wire | peak_1s | 0.36 | patch apply cap 2 | perf-tfr-scifi-stale-check-hdd download: `prepared_queue_reuses=1`, first `Starting download for mod` 219-224 ms after the click, `hash_source=segments` 40/40, `content_refresh_files_sampled=0`, `hash_batches_after_download=0` |
-| 2026-09-16 | 1.2.0 | 9950X3D HDD | delta update, cold sources | 40 patched / 424 MB wire | 57.6-58.8 s | 7.3 MB/s wire | peak_1s | 0.31-0.35 | patch copy reads from cold disk | perf-tfr-scifi-first-check-hdd download after `evict-cache`; same counters as the row above. Twice the warm row: the copy sources are read from the platter |
-| 2026-09-16 | 1.2.0 | 9950X3D NVMe | delta update after a check | 40 patched / 424 MB wire | 16.2-17.4 s | 25 MB/s wire | peak_1s | 0.43-0.53 | insert-range requests | perf-tfr-scifi-stale-check-ssd and first-check-ssd downloads, `download_patch_applies_limit=60`, same correctness counters as HDD |
-| 2026-09-16 | 1.2.0 | 9950X3D HDD | delta patch, 4 files | 4 patched / 5.2 MB wire, 97% saved | 2.82-3.02 s | n/a | peak_1s | 0.40 | blob RTT | perf-tfr-scifi-delta-patch-hdd `20260916T082008Z`: `hash_source_reread_files=0`, promotion fingerprints reused, `content_refresh_files_sampled=0` |
-| 2026-09-16 | 1.2.0 | 9950X3D NVMe | delta patch, 4 files | 4 patched / 5.2 MB wire, 97% saved | 1.71-1.91 s | n/a | peak_1s | 0.65-0.70 | blob RTT | perf-tfr-scifi-delta-patch-ssd `20260916T082243Z`; same counters |
-| | | | | | | | | | | |
-
-Workflow rules:
-
-1. **Measure before optimizing.** A perf PR must cite log lines (or this
-   table) for before/after; "feels faster" doesn't merge.
-2. **Fix the largest `1/sol` first.** Sort by headroom × frequency of the
-   operation, not by what is fun to optimize.
-3. **Never regress the flagships silently.** O1 (download throughput), O6
-   (no-change latency) and O8 (startup) ratios may only drop with a written
-   rationale here.
-4. **Re-baseline on hardware/ISP/server changes** - old lights are lies.
-5. **Alert thresholds**: investigate `sol < 0.85` for limiter-capped downloads,
-   `< 0.6` for mixed-resource ops (hash), and any `self_baseline` rate below
-   half its recorded best.
-6. **Split before you tune (O1).** For downloads, decompose the deficit into
-   ramp, plateau and tail (A1) before proposing a change. A plateau at B1 with
-   a bad `sol` is a tail problem, and the fix is E10, not scheduler tuning.
+Operation and SoL come first in every human-facing view, then the
+best-measured comparison, then actual and reference times, then evidence
+status; date, hardware, version, ids, work counts and resource breakdown
+below. On narrow layouts stack Operation, SoL with its kind, then versus best
+as the first three lines. `n/a`, partial coverage, failed outcomes and model
+violations stay visible; the headline never selects whichever sub-operation
+happens to have a numeric ratio, and a partially rated operation declines a
+whole-action percentage. Resource rows (network, disk, CPU, metadata,
+persistence) are explanations, not percentages to sum; add a timeline when
+overlap matters. The kind is text beside the percentage, readable without
+colour or a tooltip; expanded details and comparison controls are keyboard
+reachable with visible focus.
 
 ## Saved benchmarks
 
 Enabling the "Benchmarks" application setting also switches on extended
-diagnostics logging (so the saved log slice carries the `PROFILE`,
-`RESOURCES` and debug lines) and locks it on (the checkbox is greyed out,
-the CLI and agent-gui refuse to turn it off); diagnostics the user had on
-before stay the user's own, otherwise disabling benchmarks switches them
-off again (`SettingsViewState::set_benchmarks_enabled`).
-
-With the "Benchmarks" application setting on, every recheck, quick check,
-integrity check, update, force redownload and per-addon download the user
-starts ends with a "Save benchmark" prompt. A saved benchmark is a folder
-`games/<space>/benchmarks/<id>/` holding `benchmark.json` (the
-`core::benchmarks::BenchmarkRecord`: kind, repository, outcome, build,
-machine, the metrics of the run, the `PIPELINE SUMMARY` stage rows, every
-`SOL` line of the frame, and the 1 Hz samples the UI recorded) and
-`benchmark.log` (the startup block of the process log plus the lines of the
-action's time frame). The `benchmarks` table only indexes those folders and is
-rebuilt from them on load, so a database wipe keeps benchmarks unless the
-wipe confirmation's "Also delete saved benchmarks" box is ticked. The
-Benchmarks settings tab lists, filters, compares (two-way metric and stage
-diff with overlaid charts) and exports them (ZIP with the record, a flat
-`summary.txt`, the log slice and the charts as PNG).
-
-When a benchmark is meant for the tracking table below, take its `SOL` rows
-from `benchmark.json` rather than re-reading the full log; the frame already
-excludes every other operation of the session.
+diagnostics logging and locks it on (`SettingsViewState::set_benchmarks_enabled`).
+Every recheck, quick check, integrity check, update, force redownload and
+per-addon download the user starts then ends with a "Save benchmark" prompt.
+A saved benchmark is a folder `games/<space>/benchmarks/<id>/` holding
+`benchmark.json` (the `core::benchmarks::BenchmarkRecord`: kind, repository,
+outcome, build, machine, metrics, `PIPELINE SUMMARY` stage rows, the owned
+`SOL` lines of the frame, 1 Hz samples) and `benchmark.log` (the startup block
+plus the action's time frame). The `benchmarks` table only indexes those
+folders and is rebuilt from them on load, so a database wipe keeps benchmarks
+unless "Also delete saved benchmarks" is ticked. The Benchmarks settings tab
+lists, filters, compares and exports them (ZIP with the record, `summary.txt`
+led by operation, SoL kind and best-measured comparison, the log slice and
+chart PNGs). When a benchmark feeds the measurements file, take its `SOL`
+rows from `benchmark.json`.
 
 ## Logging requirements for new code
 
-- Every new operation that moves bytes, walks directories, or fans out
-  requests must emit one `SOL op=<name>` line at info level via
-  `utils::speed_of_light::sol_line` with enough keys to recompute its ratio
-  from the log alone (work, elapsed, and the light when one is knowable).
-- SOL grammar is append-only: add keys, never rename/remove them.
-- Keep debug-level detail (per-second samples, per-request timings) debug;
-  the info-level SOL line is the contract this document depends on.
-- Sanitize URLs/paths per existing logging rules; SOL lines are not exempt.
+- Every new operation that moves bytes, walks directories or fans out
+  requests emits one `SOL op=<name>` line at info level via
+  `utils::speed_of_light::sol_line`, with enough keys to recompute its ratio
+  from the log alone (work, elapsed, the light when knowable, `outcome`, and
+  an `op_id` when the operation has one).
+- The grammar is append-only; keep per-operation counters in typed Rust data
+  before rendering text; do not build a generic tracing framework for this.
+- Keep debug-level detail debug; the info-level SOL line is the contract.
+- Sanitize URLs and paths per the logging rules; SOL lines are not exempt.
+- Update the operation card and the routing in `AGENTS.md` in the same change
+  as an instrumentation or workflow contract.

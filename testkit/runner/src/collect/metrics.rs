@@ -1,7 +1,9 @@
 use serde_json::{Value, json};
 
+use super::event_lines;
+
 pub fn run_metrics(text: &str) -> Value {
-    let mut result = json!({"files":null,"bytes":null,"db_write_time_ms":null,"lock_retries":null,"total_backoff_ms":null,"elapsed_ms":null,"permit_wait_ms_total":null,"write_calls_total":null,"write_failures_total":null,"write_retries_total":null,"checkpoint_total_s":null,"hash_work_bytes":0,"hash_total_s":0.0,"tree_verify_runs":0,"fs_watcher_starts":0,"prepared_queue_reuses":0,"pipeline_outcome":null,"failed_pipelines":0,"content_refresh_runs":0,"content_refresh_files_sampled":0,"hash_source_segments_files":0,"hash_source_reread_files":0,"hash_batches_after_download":0,"final_hash_flush_files":0,"download_large_files_limit":null,"download_small_files_limit":null,"download_patch_applies_limit":null,"first_download_start_ms":null});
+    let mut result = json!({"files":null,"bytes":null,"db_write_time_ms":null,"lock_retries":null,"total_backoff_ms":null,"elapsed_ms":null,"permit_wait_ms_total":null,"write_calls_total":null,"write_failures_total":null,"write_retries_total":null,"checkpoint_total_s":null,"hash_work_bytes":0,"hash_total_s":0.0,"tree_verify_runs":0,"fs_watcher_starts":0,"prepared_queue_reuses":0,"pipeline_outcome":null,"failed_pipelines":0,"content_refresh_runs":0,"content_refresh_files_sampled":0,"hash_source_segments_files":0,"hash_source_reread_files":0,"hash_batches_after_download":0,"final_hash_flush_files":0,"download_large_files_limit":null,"download_small_files_limit":null,"download_patch_applies_limit":null,"first_download_start_ms":null,"patch_fallbacks":0,"patch_applies":0,"patch_range_requests":0,"patch_gap_bytes":0,"patch_copy_bytes":0,"patch_cancelled":0});
     let pattern =
         regex::Regex::new(r"TOTAL DOWNLOAD total:\s*files=(\d+)\s+bytes=([\d.]+)\s*([KMGT]?i?B)")
             .unwrap();
@@ -83,6 +85,41 @@ pub fn run_metrics(text: &str) -> Value {
     result["tree_verify_runs"] =
         count_lines(text, "Quick scan triggering targeted tree-hash verify").into();
     result["fs_watcher_starts"] = count_lines(text, "Starting filesystem watcher").into();
+    result["patch_fallbacks"] = count_lines(text, "Delta patch fallback for file_id=").into();
+    result["patch_applies"] = count_lines(text, "Delta patch applied successfully:").into();
+    result["patch_cancelled"] = count_lines(text, "Delta patch cancelled for file_id=").into();
+    // Locality of the patch fetch: range requests issued and the bytes
+    // over-fetched to coalesce them, plus the bytes copied from the source.
+    for (key, pattern) in [
+        (
+            "patch_range_requests",
+            r"Parallel delta blob download: [^\n]*? requests=(\d+)[^\n]*? chunk_requests=(\d+)",
+        ),
+        (
+            "patch_gap_bytes",
+            r"Parallel delta blob download: [^\n]*? gap_bytes=(\d+)",
+        ),
+        (
+            "patch_copy_bytes",
+            r"Delta patch apply completed: [^\n]*? copy_bytes=(\d+)",
+        ),
+    ] {
+        let pattern = regex::Regex::new(pattern).unwrap();
+        let total: u64 = event_lines(text)
+            .filter_map(|line| pattern.captures(line))
+            .filter_map(|c| {
+                c.get(1)
+                    .and_then(|value| value.as_str().parse::<u64>().ok())
+                    .map(|value| {
+                        value
+                            + c.get(2)
+                                .and_then(|extra| extra.as_str().parse::<u64>().ok())
+                                .unwrap_or(0)
+                    })
+            })
+            .sum();
+        result[key] = total.into();
+    }
     result["prepared_queue_reuses"] =
         count_lines(text, "Reusing confirmation-prepared download queue").into();
     // The sync pipeline's own verdict. A check that ends in `failed-*` still
@@ -162,19 +199,6 @@ pub fn run_metrics(text: &str) -> Value {
     result["first_download_start_ms"] =
         first_download_start_ms(text).map_or(Value::Null, Value::from);
     result
-}
-
-/// One line per app event. A GUI-harness slice appends the driver's captured
-/// messages (no timestamp) after the file delta, so every event is present
-/// twice; when timestamped lines exist, only those are counted.
-fn event_lines(text: &str) -> impl Iterator<Item = &str> {
-    let timestamped = text.lines().any(is_timestamped);
-    text.lines()
-        .filter(move |line| !timestamped || is_timestamped(line))
-}
-
-fn is_timestamped(line: &str) -> bool {
-    line.starts_with('[') && line.get(1..3) == Some("20")
 }
 
 fn count_lines(text: &str, needle: &str) -> u64 {
@@ -301,6 +325,18 @@ INFO Starting filesystem watcher for 2 paths",
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn patch_locality_counters_sum_owned_events() {
+        let metrics = run_metrics(
+            "Parallel delta blob download: files=2 requests=7 chunk_requests=2 gap_bytes=11\n\
+             Delta patch apply completed: file_id=1 copy_bytes=13\n\
+             Parallel delta blob download: files=1 requests=3 chunk_requests=1 gap_bytes=5",
+        );
+        assert_eq!(metrics["patch_range_requests"], 13);
+        assert_eq!(metrics["patch_gap_bytes"], 16);
+        assert_eq!(metrics["patch_copy_bytes"], 13);
     }
 }
 
