@@ -71,7 +71,31 @@ baselines at checkout `98e45d7956326cf902cd31342b4f9b153fe3a425`.
 | 2026-09-17 | `perf-startup-arma3-live` | startup (O8 startup) | 84% (calibrated, probe B4) | ssd warm | 3.03 s | 3.03 s median of 5 [3.01-3.11] | 5 | 11 repos | ok | 98e45d7 | `20260917T115028Z-14f33d74` |
 | 2026-09-17 | `perf-tfr-scifi-delta-patch-ssd` | download (O2 delta patch) | 3% (calibrated, network B1) | ssd warm | 2.16 s | 2.16 s median of 5 [2.16-2.36] | 5 | 4 files, 0.01 GB, 0.21 GB hashed | completed,completed,completed,completed,completed | 98e45d7 | `20260917T115110Z-2a30d7a0` |
 
-## 1b. Fresh implementation verification archive
+## 1b. Shared-aggregation and patch-timeline candidate
+
+The five-case gate-4 suite at checkout `0eba95d` passed with zero failed cases.
+These candidates use the exact accepted baseline profile. The change is
+measurement infrastructure, not a performance optimization, and the results do
+not show a broad speedup. Positive deltas are slower; negative deltas are faster.
+
+| Operation | Candidate median | Accepted median | Delta | Verdict |
+| --- | --- | --- | --- | --- |
+| O1 full-file download, small NVMe | 47.61 s | 41.09 s | +15.9% | Slower in this run |
+| O6 no-change sync | 0.46 s | 0.46 s | displayed equal | Gate classified regression at full precision |
+| O8 startup | 3.05 s | 3.03 s | +0.7% | Effectively flat |
+| O2 four-file delta, NVMe | 2.17 s | 2.16 s | +0.5% | Effectively flat |
+| O3 tree hash verification, HDD | 1.21 s | 1.12 s | +8.0% | Slower in this run |
+| O2 40-file delta, HDD | 32.19 s | 31.54 s | +2.1% | Within the accepted 30.73-32.63 s spread |
+| O4 stale quick scan, HDD | 0.45 s | 0.45 s | displayed equal | Gate classified improvement at full precision |
+| O4 evicted verification, HDD | 31.92 s | 32.24 s | -1.0% | Slightly faster |
+| O5 remote refresh, HDD | 0.60 s | 0.64 s | -6.3% | Faster in this run |
+
+The O2 artifacts contain typed planning, fetch, apply, promote, verify and
+finalize spans. In the four-file NVMe sample, `5,156,491` received bytes plus
+`202,383,365` source-copy bytes equal `207,539,856` useful output bytes, and the
+action reports `byte_conservation=ok`.
+
+## 1c. Fresh implementation verification archive
 
 The sequential 2026-09-16 risk-weighted suite passed all ten selected cases:
 `perf-redownload-small-ssd`, `perf-startup-arma3-live`, both first-check
@@ -84,7 +108,7 @@ first-check cases warned that the runner did not observe the short DB-wipe busy
 marker, so their wipe timing is not used as evidence; payload/oracle gates and
 the measured hash lanes passed.
 
-## 1c. Earlier generated lanes (superseded where sections 1a or 1b name a newer run)
+## 1d. Earlier generated lanes (superseded where sections 1a through 1c name a newer run)
 
 Latest valid run per case, one line per operation lane; `@cold` is iteration
 zero without a warmup pass, `@evicted` follows an `evict-cache` step. The
