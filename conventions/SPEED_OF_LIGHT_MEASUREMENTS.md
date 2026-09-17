@@ -80,11 +80,11 @@ not show a broad speedup. Positive deltas are slower; negative deltas are faster
 
 | Operation | Candidate median | Accepted median | Delta | Verdict |
 | --- | --- | --- | --- | --- |
-| O1 full-file download, small NVMe | 47.61 s | 41.09 s | +15.9% | Slower in this run |
-| O6 no-change sync | 0.46 s | 0.46 s | displayed equal | Gate classified regression at full precision |
+| O1 full-file download, small NVMe | 47.61 s | 41.09 s | +15.9% | Remote path slower: 88.53 vs 103.38 MB/s, with higher request latency |
+| O6 no-change sync | 0.46 s | 0.46 s | -0.1% at full precision | Stable; its earlier regression label was inherited from O1 and is fixed |
 | O8 startup | 3.05 s | 3.03 s | +0.7% | Effectively flat |
 | O2 four-file delta, NVMe | 2.17 s | 2.16 s | +0.5% | Effectively flat |
-| O3 tree hash verification, HDD | 1.21 s | 1.12 s | +8.0% | Slower in this run |
+| O3 tree hash verification, HDD | 1.21 s | 1.12 s | +8.0% | Identical work/profile; raw hash batches were slower in this warm-cache run |
 | O2 40-file delta, HDD | 32.19 s | 31.54 s | +2.1% | Within the accepted 30.73-32.63 s spread |
 | O4 stale quick scan, HDD | 0.45 s | 0.45 s | displayed equal | Gate classified improvement at full precision |
 | O4 evicted verification, HDD | 31.92 s | 32.24 s | -1.0% | Slightly faster |
@@ -94,6 +94,13 @@ The O2 artifacts contain typed planning, fetch, apply, promote, verify and
 finalize spans. In the four-file NVMe sample, `5,156,491` received bytes plus
 `202,383,365` source-copy bytes equal `207,539,856` useful output bytes, and the
 action reports `byte_conservation=ok`.
+
+The O1 difference localizes to the remote path rather than database, hashing or
+disk promotion. A representative accepted iteration downloaded in 39.96 s at
+103.38 MB/s with 48.1/55.2 ms p50/p95 range latency; the candidate took 46.66 s
+at 88.53 MB/s with 57.2/69.8 ms latency. O3 used the same 4,331,121,846 bytes,
+Conservative profile and BLAKE3 algorithm; its raw batch wall times increased
+from 0.242+0.491 s to 0.260+0.556 s in the representative median iteration.
 
 ## 1c. Fresh implementation verification archive
 

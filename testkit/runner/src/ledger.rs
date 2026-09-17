@@ -590,6 +590,7 @@ pub fn compare(rows: &[Value], baseline_path: &Path, ledger_path: &Path) -> Resu
     let medians = warm_medians(rows);
     let mut deltas = Vec::new();
     let mut flags = Vec::new();
+    let mut operation_verdicts = serde_json::Map::new();
     let (mut regression, mut improvement, mut confirmed_bad, mut confirmed_good) =
         (false, false, false, false);
     let mut rebaseline = false;
@@ -601,6 +602,7 @@ pub fn compare(rows: &[Value], baseline_path: &Path, ledger_path: &Path) -> Resu
             // passing an unmeasured operation.
             flags.push(format!("baseline-missing-op:{op}"));
             rebaseline = true;
+            operation_verdicts.insert(op.clone(), "rebaseline-required".into());
             continue;
         }
         let operation_row = rows
@@ -618,13 +620,17 @@ pub fn compare(rows: &[Value], baseline_path: &Path, ledger_path: &Path) -> Resu
                     .map(str::to_owned),
             );
             rebaseline = true;
+            operation_verdicts.insert(op.clone(), "rebaseline-required".into());
             continue;
         }
         if !base["cache_state"].is_null() && base["cache_state"] != entry["cache_state"] {
             flags.push(format!("cache-lane-mismatch:{op}"));
             rebaseline = true;
+            operation_verdicts.insert(op.clone(), "rebaseline-required".into());
             continue;
         }
+        let (mut op_regression, mut op_improvement, mut op_confirmed_bad, mut op_confirmed_good) =
+            (false, false, false, false);
         for &(path, higher, tolerance) in DEFINITIONS {
             let (Some(now), Some(was)) = (
                 entry["metrics"][path].as_f64(),
@@ -662,10 +668,10 @@ pub fn compare(rows: &[Value], baseline_path: &Path, ledger_path: &Path) -> Resu
                 deltas.push(json!({"op":op,"metric":path,"baseline":was,"current":now,"absolute_difference":round(now-was,6),"change_percent":round(100.0*change,2),"previous_run_change_percent":prior.map(|p|round(100.0*p,2)),"status":status}));
                 continue;
             }
-            regression |= bad;
-            improvement |= good;
-            confirmed_bad |= bad && previous_bad;
-            confirmed_good |= good && previous_good;
+            op_regression |= bad;
+            op_improvement |= good;
+            op_confirmed_bad |= bad && previous_bad;
+            op_confirmed_good |= good && previous_good;
             let status = if bad && previous_bad {
                 "regression"
             } else if bad {
@@ -679,7 +685,7 @@ pub fn compare(rows: &[Value], baseline_path: &Path, ledger_path: &Path) -> Resu
             };
             deltas.push(json!({"op":op,"metric":path,"baseline":was,"current":now,"absolute_difference":round(now-was,6),"change_percent":round(100.0*change,2),"previous_run_change_percent":prior.map(|p|round(100.0*p,2)),"status":status}));
         }
-        if improvement {
+        if op_improvement {
             for &counter in COUNTERS {
                 if let (Some(now), Some(was)) = (
                     entry["metrics"][counter].as_f64(),
@@ -693,6 +699,22 @@ pub fn compare(rows: &[Value], baseline_path: &Path, ledger_path: &Path) -> Resu
                 }
             }
         }
+        regression |= op_regression;
+        improvement |= op_improvement;
+        confirmed_bad |= op_confirmed_bad;
+        confirmed_good |= op_confirmed_good;
+        let operation_verdict = if op_confirmed_bad {
+            "regression"
+        } else if op_regression {
+            "candidate-regression"
+        } else if op_confirmed_good {
+            "improvement"
+        } else if op_improvement {
+            "candidate-improvement"
+        } else {
+            "ok"
+        };
+        operation_verdicts.insert(op.clone(), operation_verdict.into());
     }
     let verdict = if confirmed_bad {
         "regression"
@@ -707,7 +729,9 @@ pub fn compare(rows: &[Value], baseline_path: &Path, ledger_path: &Path) -> Resu
     } else {
         "ok"
     };
-    Ok(json!({"verdict":verdict,"deltas":deltas,"flags":flags}))
+    Ok(
+        json!({"verdict":verdict,"operation_verdicts":operation_verdicts,"deltas":deltas,"flags":flags}),
+    )
 }
 #[cfg(test)]
 mod tests {
@@ -843,6 +867,27 @@ mod tests {
         let mut mixed = rows.clone();
         mixed[1]["storage_class"] = "hdd".into();
         assert!(save_baseline(&mixed, &dir.path().join("mixed.json"), "h", "sha").is_err());
+    }
+    #[test]
+    fn comparison_verdicts_are_scoped_to_their_operation() {
+        let dir = tempfile::tempdir().unwrap();
+        let baseline = dir.path().join("baseline.json");
+        let ledger = dir.path().join("ledger.jsonl");
+        let mut baseline_rows = five(10.0);
+        baseline_rows.extend(five(1.0).into_iter().map(|mut row| {
+            row["op"] = "recheck".into();
+            row
+        }));
+        save_baseline(&baseline_rows, &baseline, "h", "sha").unwrap();
+        let mut recheck = row(1.2);
+        recheck["op"] = "recheck".into();
+        let comparison = compare(&[row(12.0), recheck], &baseline, &ledger).unwrap();
+        assert_eq!(comparison["verdict"], "candidate-regression");
+        assert_eq!(
+            comparison["operation_verdicts"]["download"],
+            "candidate-regression"
+        );
+        assert_eq!(comparison["operation_verdicts"]["recheck"], "ok");
     }
     #[test]
     fn a_changed_environment_expires_the_baseline() {

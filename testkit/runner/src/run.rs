@@ -1164,10 +1164,11 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
         ));
         let comparison = ledger::compare(&rows, &baseline, &ledger_path)?;
         for row in &mut rows {
-            if row["verdict"] == "ok"
-                && !matches!(comparison["verdict"].as_str(), Some("ok" | "no-baseline"))
-            {
-                row["verdict"] = comparison["verdict"].clone();
+            let operation_verdict = comparison["operation_verdicts"][ledger::op_key(row)]
+                .as_str()
+                .or_else(|| comparison["verdict"].as_str());
+            if row["verdict"] == "ok" && !matches!(operation_verdict, Some("ok" | "no-baseline")) {
+                row["verdict"] = operation_verdict.into();
             }
             for flag in comparison["flags"].as_array().into_iter().flatten() {
                 let flags = row["flags"]
