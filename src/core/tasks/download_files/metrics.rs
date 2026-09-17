@@ -26,6 +26,7 @@ pub(crate) struct DownloadMetrics {
     /// Every sampler window of the run, kept so the end-of-run line can
     /// split the wall time into ramp, plateau and tail.
     series: Mutex<Vec<SeriesPoint>>,
+    patch_stages: Mutex<Vec<PatchStageMetric>>,
     sampler_stop: AtomicBool,
     sampler_wake: tokio::sync::Notify,
     patch: PatchCounters,
@@ -48,7 +49,9 @@ struct PatchCounters {
     planning_ns: AtomicU64,
     fetch_ns: AtomicU64,
     apply_ns: AtomicU64,
-    verify_promote_ns: AtomicU64,
+    promote_ns: AtomicU64,
+    verify_ns: AtomicU64,
+    finalize_ns: AtomicU64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -69,6 +72,9 @@ pub(crate) struct PatchSummary {
     pub(crate) planning_ns: u64,
     pub(crate) fetch_ns: u64,
     pub(crate) apply_ns: u64,
+    pub(crate) promote_ns: u64,
+    pub(crate) verify_ns: u64,
+    pub(crate) finalize_ns: u64,
     pub(crate) verify_promote_ns: u64,
 }
 
@@ -92,11 +98,19 @@ impl PatchSummary {
 
 pub(crate) struct PatchAttemptTelemetry {
     metrics: Arc<DownloadMetrics>,
-    started: Instant,
-    planning_done: Option<Instant>,
-    fetch_done: Option<Instant>,
-    apply_done: Option<Instant>,
+    file_id: u64,
+    stage: &'static str,
+    stage_started: Instant,
     outcome: PatchAttemptOutcome,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PatchStageMetric {
+    pub(crate) file_id: u64,
+    pub(crate) stage: &'static str,
+    pub(crate) start_offset_ns: u64,
+    pub(crate) end_offset_ns: u64,
+    pub(crate) outcome: &'static str,
 }
 
 #[derive(Clone, Copy)]
@@ -132,15 +146,23 @@ impl PatchAttemptTelemetry {
     }
 
     pub(crate) fn planning_finished(&mut self) {
-        self.planning_done = Some(Instant::now());
+        self.transition_to("fetch");
     }
 
     pub(crate) fn fetch_finished(&mut self) {
-        self.fetch_done = Some(Instant::now());
+        self.transition_to("apply");
     }
 
     pub(crate) fn apply_finished(&mut self) {
-        self.apply_done = Some(Instant::now());
+        self.transition_to("promote");
+    }
+
+    pub(crate) fn promote_finished(&mut self) {
+        self.transition_to("verify");
+    }
+
+    pub(crate) fn verify_finished(&mut self) {
+        self.transition_to("finalize");
     }
 
     pub(crate) fn success(&mut self) {
@@ -150,30 +172,50 @@ impl PatchAttemptTelemetry {
     pub(crate) fn cancelled(&mut self) {
         self.outcome = PatchAttemptOutcome::Cancelled;
     }
+
+    fn transition_to(&mut self, next: &'static str) {
+        let ended = self.record_stage("completed");
+        self.stage = next;
+        self.stage_started = ended;
+    }
+
+    fn record_stage(&self, outcome: &'static str) -> Instant {
+        let ended = Instant::now();
+        let elapsed_ns = ended.duration_since(self.stage_started).as_nanos() as u64;
+        match self.stage {
+            "planning" => &self.metrics.patch.planning_ns,
+            "fetch" => &self.metrics.patch.fetch_ns,
+            "apply" => &self.metrics.patch.apply_ns,
+            "promote" => &self.metrics.patch.promote_ns,
+            "verify" => &self.metrics.patch.verify_ns,
+            "finalize" => &self.metrics.patch.finalize_ns,
+            _ => unreachable!("unknown patch stage"),
+        }
+        .fetch_add(elapsed_ns, Ordering::Relaxed);
+        if let Ok(mut stages) = self.metrics.patch_stages.lock() {
+            stages.push(PatchStageMetric {
+                file_id: self.file_id,
+                stage: self.stage,
+                start_offset_ns: self
+                    .stage_started
+                    .duration_since(self.metrics.started_at)
+                    .as_nanos() as u64,
+                end_offset_ns: ended.duration_since(self.metrics.started_at).as_nanos() as u64,
+                outcome,
+            });
+        }
+        ended
+    }
 }
 
 impl Drop for PatchAttemptTelemetry {
     fn drop(&mut self) {
-        let ended = Instant::now();
-        let planning_done = self.planning_done.unwrap_or(ended);
-        let fetch_done = self.fetch_done.unwrap_or(planning_done);
-        let apply_done = self.apply_done.unwrap_or(fetch_done);
-        self.metrics.patch.planning_ns.fetch_add(
-            planning_done.duration_since(self.started).as_nanos() as u64,
-            Ordering::Relaxed,
-        );
-        self.metrics.patch.fetch_ns.fetch_add(
-            fetch_done.duration_since(planning_done).as_nanos() as u64,
-            Ordering::Relaxed,
-        );
-        self.metrics.patch.apply_ns.fetch_add(
-            apply_done.duration_since(fetch_done).as_nanos() as u64,
-            Ordering::Relaxed,
-        );
-        self.metrics.patch.verify_promote_ns.fetch_add(
-            ended.duration_since(apply_done).as_nanos() as u64,
-            Ordering::Relaxed,
-        );
+        let outcome = match self.outcome {
+            PatchAttemptOutcome::Fallback => "fallback",
+            PatchAttemptOutcome::Success => "completed",
+            PatchAttemptOutcome::Cancelled => "cancelled",
+        };
+        let ended = self.record_stage(outcome);
         self.metrics.patch.last_end_ns.fetch_max(
             ended.duration_since(self.metrics.started_at).as_nanos() as u64,
             Ordering::Relaxed,
@@ -469,6 +511,7 @@ impl DownloadMetrics {
             phase_events: Mutex::new(Vec::new()),
             destinations: Mutex::new(Vec::new()),
             series: Mutex::new(Vec::new()),
+            patch_stages: Mutex::new(Vec::new()),
             sampler_stop: AtomicBool::new(false),
             sampler_wake: tokio::sync::Notify::new(),
             patch: PatchCounters {
@@ -488,12 +531,14 @@ impl DownloadMetrics {
                 planning_ns: AtomicU64::new(0),
                 fetch_ns: AtomicU64::new(0),
                 apply_ns: AtomicU64::new(0),
-                verify_promote_ns: AtomicU64::new(0),
+                promote_ns: AtomicU64::new(0),
+                verify_ns: AtomicU64::new(0),
+                finalize_ns: AtomicU64::new(0),
             },
         }
     }
 
-    pub(crate) fn start_patch_attempt(self: &Arc<Self>) -> PatchAttemptTelemetry {
+    pub(crate) fn start_patch_attempt(self: &Arc<Self>, file_id: u64) -> PatchAttemptTelemetry {
         let started = Instant::now();
         self.patch.attempts.fetch_add(1, Ordering::Relaxed);
         self.patch.first_start_ns.fetch_min(
@@ -502,10 +547,9 @@ impl DownloadMetrics {
         );
         PatchAttemptTelemetry {
             metrics: Arc::clone(self),
-            started,
-            planning_done: None,
-            fetch_done: None,
-            apply_done: None,
+            file_id,
+            stage: "planning",
+            stage_started: started,
             outcome: PatchAttemptOutcome::Fallback,
         }
     }
@@ -526,6 +570,9 @@ impl DownloadMetrics {
 
     pub(crate) fn patch_summary(&self) -> Option<PatchSummary> {
         let attempts = self.patch.attempts.load(Ordering::Relaxed);
+        let promote_ns = self.patch.promote_ns.load(Ordering::Relaxed);
+        let verify_ns = self.patch.verify_ns.load(Ordering::Relaxed);
+        let finalize_ns = self.patch.finalize_ns.load(Ordering::Relaxed);
         (attempts > 0).then(|| PatchSummary {
             start_offset_ns: self.patch.first_start_ns.load(Ordering::Relaxed),
             end_offset_ns: self.patch.last_end_ns.load(Ordering::Relaxed),
@@ -543,8 +590,22 @@ impl DownloadMetrics {
             planning_ns: self.patch.planning_ns.load(Ordering::Relaxed),
             fetch_ns: self.patch.fetch_ns.load(Ordering::Relaxed),
             apply_ns: self.patch.apply_ns.load(Ordering::Relaxed),
-            verify_promote_ns: self.patch.verify_promote_ns.load(Ordering::Relaxed),
+            promote_ns,
+            verify_ns,
+            finalize_ns,
+            verify_promote_ns: promote_ns
+                .saturating_add(verify_ns)
+                .saturating_add(finalize_ns),
         })
+    }
+
+    pub(crate) fn patch_stages(&self) -> Vec<PatchStageMetric> {
+        let mut stages = self
+            .patch_stages
+            .lock()
+            .map_or_else(|_| Vec::new(), |stages| stages.clone());
+        stages.sort_by_key(|stage| (stage.start_offset_ns, stage.file_id, stage.stage));
+        stages
     }
 
     pub(super) fn record_destination(&self, description: String) {
@@ -1198,6 +1259,56 @@ mod tests {
         assert_eq!(m.counters.active_files.load(Ordering::Relaxed), 0);
         assert_eq!(m.counters.bytes_transferred.load(Ordering::Relaxed), 0);
         assert_eq!(m.counters.files_completed.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn patch_attempt_records_owned_monotonic_stage_spans() {
+        let metrics = Arc::new(DownloadMetrics::new());
+        {
+            let mut attempt = metrics.start_patch_attempt(42);
+            attempt.planning_finished();
+            attempt.fetch_finished();
+            attempt.apply_finished();
+            attempt.promote_finished();
+            attempt.verify_finished();
+            attempt.success();
+        }
+        let stages = metrics.patch_stages();
+        assert_eq!(
+            stages.iter().map(|stage| stage.stage).collect::<Vec<_>>(),
+            [
+                "planning", "fetch", "apply", "promote", "verify", "finalize"
+            ]
+        );
+        assert!(stages.iter().all(|stage| stage.file_id == 42));
+        assert!(
+            stages
+                .windows(2)
+                .all(|pair| pair[0].end_offset_ns <= pair[1].start_offset_ns)
+        );
+        assert!(stages.iter().all(|stage| stage.outcome == "completed"));
+        let summary = metrics.patch_summary().expect("patch summary");
+        assert_eq!(summary.attempts, 1);
+        assert_eq!(summary.successes, 1);
+        assert_eq!(summary.outcome(), "completed");
+    }
+
+    #[test]
+    fn patch_attempt_records_the_stage_where_fallback_happened() {
+        let metrics = Arc::new(DownloadMetrics::new());
+        {
+            let mut attempt = metrics.start_patch_attempt(7);
+            attempt.planning_finished();
+        }
+        let stages = metrics.patch_stages();
+        assert_eq!(stages.len(), 2);
+        assert_eq!(stages[0].outcome, "completed");
+        assert_eq!(stages[1].stage, "fetch");
+        assert_eq!(stages[1].outcome, "fallback");
+        assert_eq!(
+            metrics.patch_summary().expect("patch summary").outcome(),
+            "fallback"
+        );
     }
 
     #[test]

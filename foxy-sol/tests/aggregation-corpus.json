@@ -1,0 +1,44 @@
+{
+  "cases": [
+    {
+      "name": "serial",
+      "records": [
+        {"actual_s": 2.0, "work_bytes": 20, "rated": true, "start_offset_ns": 0, "end_offset_ns": 2000000000, "reference_id": "r1", "reference_status": "ok", "metric_version": 2, "outcome": "completed"},
+        {"actual_s": 1.0, "work_bytes": 10, "rated": true, "start_offset_ns": 2000000000, "end_offset_ns": 3000000000, "reference_id": "r1", "reference_status": "ok", "metric_version": 2, "outcome": "completed"}
+      ],
+      "expected": {"service_s": 3.0, "interval_coverage_s": 3.0, "makespan_s": 3.0, "useful_work_bytes": 30, "rated_runs": 2, "reference_ids": ["r1"], "reference_statuses": ["ok"], "metric_versions": [2], "malformed_records": 0, "outcomes": ["completed"], "completed": true}
+    },
+    {
+      "name": "overlapping",
+      "records": [
+        {"actual_s": 2.0, "work_bytes": 20, "start_offset_ns": 0, "end_offset_ns": 2000000000},
+        {"actual_s": 2.0, "work_bytes": 20, "start_offset_ns": 1000000000, "end_offset_ns": 3000000000}
+      ],
+      "expected": {"service_s": 4.0, "interval_coverage_s": 3.0, "makespan_s": 3.0, "useful_work_bytes": 40, "rated_runs": 0, "reference_ids": [], "reference_statuses": [], "metric_versions": [], "malformed_records": 0, "outcomes": [], "completed": true}
+    },
+    {
+      "name": "nested",
+      "records": [
+        {"actual_s": 4.0, "work_bytes": 40, "start_offset_ns": 0, "end_offset_ns": 4000000000},
+        {"actual_s": 1.0, "work_bytes": 10, "start_offset_ns": 1000000000, "end_offset_ns": 2000000000}
+      ],
+      "expected": {"service_s": 5.0, "interval_coverage_s": 4.0, "makespan_s": 4.0, "useful_work_bytes": 50, "rated_runs": 0, "reference_ids": [], "reference_statuses": [], "metric_versions": [], "malformed_records": 0, "outcomes": [], "completed": true}
+    },
+    {
+      "name": "partial-reference",
+      "records": [
+        {"actual_s": 1.0, "work_bytes": 10, "rated": true, "reference_id": "r1", "reference_status": "ok", "metric_version": 2, "outcome": "completed"},
+        {"actual_s": 1.0, "useful_work_bytes": 7, "work_bytes": 10, "reference_status": "missing", "metric_version": 2, "outcome": "completed"}
+      ],
+      "expected": {"service_s": 2.0, "interval_coverage_s": null, "makespan_s": null, "useful_work_bytes": 17, "rated_runs": 1, "reference_ids": ["r1"], "reference_statuses": ["ok", "missing"], "metric_versions": [2], "malformed_records": 0, "outcomes": ["completed"], "completed": true}
+    },
+    {
+      "name": "mixed-reference-and-outcome",
+      "records": [
+        {"actual_s": 1.0, "work_bytes": 10, "rated": true, "reference_id": "r1", "reference_status": "ok", "metric_version": 1, "outcome": "completed"},
+        {"actual_s": 1.0, "work_bytes": 10, "rated": true, "reference_id": "r2", "reference_status": "above_bound", "metric_version": 2, "malformed": true, "outcome": "failed_validation"}
+      ],
+      "expected": {"service_s": 2.0, "interval_coverage_s": null, "makespan_s": null, "useful_work_bytes": 20, "rated_runs": 2, "reference_ids": ["r1", "r2"], "reference_statuses": ["ok", "above_bound"], "metric_versions": [1, 2], "malformed_records": 1, "outcomes": ["completed", "failed_validation"], "completed": false}
+    }
+  ]
+}

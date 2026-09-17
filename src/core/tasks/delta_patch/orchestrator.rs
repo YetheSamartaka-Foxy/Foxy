@@ -125,6 +125,7 @@ pub(crate) async fn try_patch_first(
 ) -> anyhow::Result<Option<PatchedFileSegments>> {
     let file_id = download_target.file_id as i64;
     let patch_started = std::time::Instant::now();
+    let mut patch_telemetry = metrics.start_patch_attempt(download_target.file_id);
 
     let Some(patch_file) = load_download_patch_file(context.clone(), file_id)
         .await
@@ -136,7 +137,6 @@ pub(crate) async fn try_patch_first(
         );
         return Ok(None);
     };
-    let mut patch_telemetry = metrics.start_patch_attempt();
 
     let artifact = match load_patch_artifact(&patch_file.patch_json_path).await {
         Ok(artifact) => artifact,
@@ -448,6 +448,7 @@ pub(crate) async fn try_patch_first(
             return Ok(None);
         }
     };
+    patch_telemetry.promote_finished();
 
     let target_path = PathBuf::from(&artifact.local_target_path);
     // Compute tree checksum from segment checksums collected during apply -
@@ -508,6 +509,7 @@ pub(crate) async fn try_patch_first(
         "Delta patch final tree checksum verified for file_id={} checksum={}",
         patch_file.file_id, final_tree_checksum
     );
+    patch_telemetry.verify_finished();
 
     if let Some(backup_path) = backup_path.as_ref()
         && let Err(err) = fs::remove_file(backup_path).await

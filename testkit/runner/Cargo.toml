@@ -12,6 +12,7 @@ blake3 = "1.8"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.6", features = ["derive"] }
 hex = "0.4"
+foxy-sol = { path = "../../foxy-sol" }
 http-body-util = "0.1"
 hyper = { version = "1.9", features = ["server", "http1"] }
 md-5 = "0.11"

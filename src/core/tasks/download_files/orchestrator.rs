@@ -1549,6 +1549,34 @@ pub(crate) async fn download_files(
             &sol_extras
         )
     );
+    for stage in metrics.patch_stages() {
+        let attempt_span_id = format!("{operation_id}-delta-patch-{}", stage.file_id);
+        let stage_extras = vec![
+            ("record_kind", "stage".to_owned()),
+            ("op_id", operation_id.to_string()),
+            ("parent_op_id", operation_id.to_string()),
+            ("parent_span_id", attempt_span_id.clone()),
+            ("span_id", format!("{attempt_span_id}-{}", stage.stage)),
+            ("stage_id", stage.stage.to_owned()),
+            ("file_id", stage.file_id.to_string()),
+            ("start_offset_ns", stage.start_offset_ns.to_string()),
+            ("end_offset_ns", stage.end_offset_ns.to_string()),
+            ("outcome", stage.outcome.to_owned()),
+            ("timer_scope", "stage_wall".to_owned()),
+        ];
+        info!(
+            "{}",
+            sol_line(
+                "delta_patch_stage",
+                0,
+                std::time::Duration::from_nanos(
+                    stage.end_offset_ns.saturating_sub(stage.start_offset_ns)
+                ),
+                &SolLight::SelfBaseline,
+                &stage_extras,
+            )
+        );
+    }
     if let Some(patch) = metrics.patch_summary() {
         let conservation = if patch.fallbacks == 0
             && patch.cancellations == 0
@@ -1567,7 +1595,7 @@ pub(crate) async fn download_files(
             ("span_id", format!("{operation_id}-delta-patch")),
             (
                 "stage_ids",
-                "planning,fetch,apply,verify_promote".to_owned(),
+                "planning,fetch,apply,promote,verify,finalize".to_owned(),
             ),
             ("start_offset_ns", patch.start_offset_ns.to_string()),
             ("end_offset_ns", patch.end_offset_ns.to_string()),
@@ -1594,6 +1622,15 @@ pub(crate) async fn download_files(
             ("fetch_s", format!("{:.6}", patch.fetch_ns as f64 / 1e9)),
             ("apply_ns", patch.apply_ns.to_string()),
             ("apply_s", format!("{:.6}", patch.apply_ns as f64 / 1e9)),
+            ("promote_ns", patch.promote_ns.to_string()),
+            ("promote_s", format!("{:.6}", patch.promote_ns as f64 / 1e9)),
+            ("verify_ns", patch.verify_ns.to_string()),
+            ("verify_s", format!("{:.6}", patch.verify_ns as f64 / 1e9)),
+            ("finalize_ns", patch.finalize_ns.to_string()),
+            (
+                "finalize_s",
+                format!("{:.6}", patch.finalize_ns as f64 / 1e9),
+            ),
             ("verify_promote_ns", patch.verify_promote_ns.to_string()),
             (
                 "verify_promote_s",

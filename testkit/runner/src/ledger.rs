@@ -3,6 +3,8 @@ use anyhow::{Result, ensure};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, io::Write, path::Path};
 
+pub const DERIVED_SCHEMA_VERSION: u64 = 3;
+
 fn fallback(value: &Value, default: Value) -> Value {
     if value.is_null() {
         default
@@ -94,6 +96,7 @@ pub fn build_row(
     breakdown: &Value,
     mutation: &Value,
 ) -> Value {
+    metadata["derived_schema_version"] = DERIVED_SCHEMA_VERSION.into();
     let metrics = &breakdown["run_metrics"];
     if let Some(elapsed) = metadata["elapsed_s"].as_f64() {
         metadata["elapsed_s"] = round(elapsed, 6).into();
@@ -104,8 +107,6 @@ pub fn build_row(
     for key in ["mutated_parts", "mutated_bytes"] {
         metadata[key] = fallback(&mutation[key], 0.into());
     }
-    // The per-operation field keeps the legacy last-record view so old rows
-    // replay byte-identical; `sol_aggregate` is the whole-operation total.
     let mut aggregate = json!({});
     for (field, op) in [
         ("download", "download"),
@@ -125,6 +126,7 @@ pub fn build_row(
         aggregate[field] = sol::aggregate(sol, op);
     }
     metadata["sol_aggregate"] = aggregate;
+    metadata["delta_patch_stages"] = sol::records(sol, "delta_patch_stage");
     metadata["operation_identity"] = operation_identity(&metadata).into();
     let mut sums = json!({"delta_savings_percent":round(delta_savings(summary),4)});
     for key in [

@@ -129,7 +129,7 @@ promoted, durable) when it is not obvious from the operation card.
 | Id | Operation | Emitter | Reference available in-app |
 | --- | --- | --- | --- |
 | O1 | Full-file download | `download_files/orchestrator.rs` | limiter cap (modeled) or same-run peak (consistency); nominal disk on rotational destinations |
-| O2 | Delta patch | folded into O1's line (`delta_savings_*`) | none; byte savings only |
+| O2 | Delta patch | `SOL op=delta_patch` action and `SOL op=delta_patch_stage` spans in `download_files/orchestrator.rs` | none; byte savings only |
 | O3 | Content hashing and ordered tree verification | `calculate_hashes/scheduling.rs` | none (self baseline); saved benchmarks derive a same-run peak across homogeneous batches |
 | O4 | Quick scan | `quick_scan/diff.rs` | none (self baseline) |
 | O5 | Remote metadata refresh | `SOL op=remote_refresh` in `tasks/remote_repository.rs` | none in-app (self baseline); the kit calibrates the no-change branch through O6 |
@@ -138,8 +138,8 @@ promoted, durable) when it is not obvious from the operation card.
 | O8 | Startup to settled verdict | `ui/app/runtime/startup_sync.rs`; probe stage in `quick_scan/worker.rs`; app update check in `tasks/app_update/spawn.rs` | none (self baseline) |
 | M1 | Resident footprint | `foxy-testkit` memory lane | empty-app baseline (best measured) |
 Sub-operations without an emitter of their own (download preparation and
-finalization and patch planning/fetch/apply are readable as `sync_action`
-`stage_*_s` keys; hash profile calibration as `label=auto_benchmark_sample`
+finalization are readable as `sync_action` `stage_*_s` keys; hash profile
+calibration as `label=auto_benchmark_sample`
 hash batches; DB purge and
 maintenance, GUI interaction under load, cancellation and resume, space
 switch, idle app) get an id only when their contract and emitter exist.
@@ -258,8 +258,8 @@ correctness gates.
    and fallback work, with a note on which hit the device and which the page
    cache.
 5. **Dependencies**: preflight -> blob fetch/staging -> apply (capped by
-   `patch_applies`) -> verification/promotion -> persistence where it gates
-   completion. `W_full / W_net` predicts speedup only when network bytes
+   `patch_applies`) -> promotion -> verification -> finalization/persistence
+   where it gates completion. `W_full / W_net` predicts speedup only when network bytes
    dominate both complete actions. The blob fetch draws on the same global
    range budget and chunk size as full downloads (`PatchRequestBudget`):
    ops that fit a request coalesce into runs, ops larger than one travel as
@@ -534,7 +534,8 @@ appended keys; parsers treat them as `metric_kind` inferred from `light_src` and
 | Line | Extra keys |
 | --- | --- |
 | `SOL op=download` (end of the transfer stage) | `files`, `peak_1s_bps`, `delta_savings_percent`, `destination_storage`, `op_id`, `outcome` (`completed`, `failed`, `cancelled`), `mods_succeeded`, `mods_failed`, `mods_cancelled`, `full_bytes`, `delta_savings_bytes`, `expected_bytes`, `credited_bytes`, `range_retries`, `peak_window_s`, and once a plateau window exists `ramp_s`, `plateau_s`, `tail_s`, `ramp_deficit_bytes`, `tail_deficit_bytes`; on rotational destinations `disk_bytes`, `disk_light_bps`, `disk_ideal_s`, `disk_sol`, `disk_light_src=nominal_hdd_sequential`, `disk_sol_raw`, `disk_reference_status=nominal` |
-| `SOL op=delta_patch` (one aggregate action artifact) | `op_id`, `parent_op_id`, `span_id`, monotonic `start_offset_ns`/`end_offset_ns`, attempts, successful patched files, fallbacks, cancellations, requests, retries, useful output, unique insert, actual received, source-copy and staging bytes, planning/fetch/apply/verify-promote service times, byte-conservation status, terminal outcome and `timer_scope=action_wall` |
+| `SOL op=delta_patch` (one aggregate action artifact) | `op_id`, `parent_op_id`, `span_id`, monotonic `start_offset_ns`/`end_offset_ns`, attempts, successful patched files, fallbacks, cancellations, requests, retries, useful output, unique insert, actual received, source-copy and staging bytes, planning/fetch/apply/promote/verify/finalize service times, their compatible `verify_promote` total, byte-conservation status, terminal outcome and `timer_scope=action_wall` |
+| `SOL op=delta_patch_stage` (one typed per-file stage span) | `record_kind=stage`, `op_id`, `parent_op_id`, attempt `parent_span_id`, unique `span_id`, `stage_id` (`planning`, `fetch`, `apply`, `promote`, `verify`, `finalize`), `file_id`, monotonic `start_offset_ns`/`end_offset_ns`, stage outcome and `timer_scope=stage_wall` |
 | `SOL op=hash` (every part-hash batch) | `label`, `files`, `parts`, `compute_s`, `wait_s` (legacy names), `blocking_elapsed_s`, `permit_wait_s`, `file_elapsed_max_s`, `missing_files`, `profile`, `algorithm` (`blake3`, `md5`, `mixed`, `unknown`), `timer_scope=batch_wall`, `outcome` (`completed`, `cancelled`), `op_id` (when run inside an action) |
 | `SOL op=quick_scan` | `repo`, `addons_total`, `addons_hashed`, `cache_hits_shared`, `cache_hits_persistent`, `deep_scan_files`, `entries` (directory entries the fingerprint walks enumerated), `addons_per_s`, `outcome`, `op_id` (the owning sync action or quick-scan sweep) |
 | `SOL op=remote_refresh` (every remote metadata refresh) | `outcome` (`skipped_clean`, `graph_unchanged`, `rebuilt`, `failed`), `index_requests`, `manifest_requests`, `mods`, `files`, `parts`, `response_bytes`, `fetch_sum_s`, `parse_sum_s`, `persist_sum_s`, `fan_out_wall_s`, `timer_scope=action_wall`, `op_id` |
@@ -663,9 +664,11 @@ access model, and never classify every removable device as a 110 MB/s disk.
    runs cannot become accepted baselines.
 
 Baseline acceptance keeps the clean-worktree guard. Old records remain
-readable and replayable; a parser correction that changes derived values
-(the 2026-09-16 integer counters and echo de-duplication) is reported by
-`replay` as differences, not rewritten into history.
+readable and replayable. Each ledger row carries a derived schema version.
+Replay reports changes across a schema boundary as intentional migrations and
+still treats any change within the current schema as a failing difference.
+The app and testkit derive aggregate service time, interval coverage, makespan,
+work, reference and outcome fields through the shared `foxy-sol` crate.
 
 ## Maintenance
 

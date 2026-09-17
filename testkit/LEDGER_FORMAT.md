@@ -30,6 +30,12 @@ run and operation compatibility, sample size, medians, min/max spread, terminal
 and oracle outcomes, and tolerances. Older baseline files remain readable but
 produce `rebaseline-required` instead of silently comparing.
 
+`derived_schema_version` identifies the contract used to derive a row from its
+retained artifacts. Rows without it are version 1, shared aggregation is
+version 2, and typed delta-patch stage spans are version 3. `replay` reports changes
+while rebuilding an older version as migrations; it reports any change within
+the current version as a difference and exits non-zero.
+
 `breakdown.run_metrics` grows over time (`hash_work_bytes`, `tree_verify_runs`,
 `fs_watcher_starts`, `prepared_queue_reuses` were added on 2026-09-14; the
 hash-source, refresh, overlap, limit and first-download counters listed in
@@ -40,10 +46,9 @@ download row that is one arbitrary page-cache batch of tens of milliseconds,
 and a 12 percent band over it flagged scheduler noise as a confirmed
 regression. `hash.actual_s` stays on the row; a baseline accepted before
 2026-09-16 has no `hash_total_s` median, so that metric is simply not compared
-until the baseline is re-accepted. A
-metric the recorded row never had is not a replay difference: `replay`
-re-derives the row from the retained log, so a counter added later simply
-appears on the rebuilt row, while a key the rebuilt row lost is still reported.
+until the baseline is re-accepted. A metric added by a newer derived schema is
+a replay migration. Additions, removals and changed values within the same
+schema remain replay differences.
 
 `memory` carries the process footprint the runner sampled around the operation
 (see `CASE_FORMAT.md`). It is null for rows recorded before the memory lane
@@ -147,11 +152,20 @@ startup probe. `sync_action` gains a
 `stage_prepared_queue_prune_s` stage when a reused queue dropped files a
 cancelled run had already verified.
 
+`delta_patch` is the aggregate O2 action record. `delta_patch_stages` retains
+every `SOL op=delta_patch_stage` record in log order, with the owning `op_id`,
+per-file attempt parent span, unique stage span, stage id, monotonic offsets and
+terminal stage outcome. This preserves overlap and identifies the stage where a
+fallback or cancellation occurred without mixing stage service time into the
+action aggregate.
+
 Each row also carries `sol_aggregate.<op>`: the run count, rated-run count,
 summed `actual_s` (service time over every batch, not the action makespan),
-summed `work_bytes`, the derived rate, and the set of `outcome` values with a
-`completed` flag. The per-operation field (`hash`, `download`, ...) keeps the
-legacy last-record view so recorded rows replay byte-identical. SOL records are
+interval-union coverage, makespan, summed work, the derived rate, distinct
+reference ids/statuses and metric versions, and the set of `outcome` values
+with a `completed` flag. These fields use the same `foxy-sol` implementation as
+the application benchmark viewer. The per-operation field (`hash`, `download`,
+...) keeps the legacy last-record view. SOL records are
 parsed from canonical event lines only: a GUI-harness slice echoes every event
 once without a timestamp, and those echoes no longer double the aggregate.
 Integer counters in SOL and DB key/value records are kept as exact integers

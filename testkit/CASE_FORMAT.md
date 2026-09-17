@@ -331,6 +331,12 @@ told apart by resource cost, not only elapsed. `cancel_after_s` works on every
 GUI sync operation (a `recheck-integrity` cancelled in its hash stage, a
 patching `download` cancelled while applying), not only on full downloads.
 
+The ledger row also retains `delta_patch_stages`, the typed per-file planning,
+fetch, apply, promote, verify and finalize spans emitted during the operation.
+Each span carries monotonic offsets, ownership ids and its own outcome, so a
+case can distinguish stage overlap from summed service time and locate a
+fallback or cancellation without parsing prose logs.
+
 `switch-game-space` (GUI harness, `config_seed` with several game spaces) takes
 `game_space` (the target space id from `games.json`), invokes the app's
 `switch-game-space` intent, waits for the `SOL op=space_switch` record and then

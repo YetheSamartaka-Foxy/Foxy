@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "foxy-formats", "foxy-server-backend-cli", "testkit/mutator", "testkit/runner", "testkit/oracle"]
+members = [".", "foxy-formats", "foxy-sol", "foxy-server-backend-cli", "testkit/mutator", "testkit/runner", "testkit/oracle"]
 
 [package]
 name = "Foxy"
@@ -100,6 +100,7 @@ sysinfo = "0.39.6"
 jmespath = "0.5.0"
 steamworks = "0.13.1"
 foxy-formats = { path = "foxy-formats" }
+foxy-sol = { path = "foxy-sol" }
 
 [dev-dependencies]
 tempfile = "3.27.0"

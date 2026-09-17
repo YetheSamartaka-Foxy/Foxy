@@ -237,9 +237,10 @@ foxy-testkit replay .\testkit\runs\perf-db-refresh-main\20260909T045957Z-07cbda3
 foxy-testkit replay --all
 ```
 
-`--all` exits non-zero if any run's rebuilt row differs from what was recorded,
-excluding `case_hash` and timestamps. UX runs have no rows and are reported as
-skipped.
+Each ledger row carries `derived_schema_version` (currently version 3). Replay reports a rebuilt row
+from an earlier schema as an intentional migration, while any difference within
+the current schema still makes `--all` exit non-zero. `case_hash` and timestamps
+are excluded. UX runs have no rows and are reported as skipped.
 
 ## Local origin
 

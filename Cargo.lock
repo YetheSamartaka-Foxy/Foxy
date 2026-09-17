@@ -18,6 +18,7 @@ dependencies = [
  "flate2",
  "flexi_logger",
  "foxy-formats",
+ "foxy-sol",
  "fs4",
  "futures",
  "hex",
@@ -2200,6 +2201,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "foxy-sol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "foxy-testkit"
 version = "0.1.0"
 dependencies = [
@@ -2208,6 +2217,7 @@ dependencies = [
  "blake3",
  "chrono",
  "clap",
+ "foxy-sol",
  "hex",
  "http-body-util",
  "hyper",

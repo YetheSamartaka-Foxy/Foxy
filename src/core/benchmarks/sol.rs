@@ -511,38 +511,6 @@ fn sum_of(maps: &[&BTreeMap<String, String>], key: &str) -> Option<f64> {
     (!values.is_empty()).then(|| values.iter().sum())
 }
 
-fn interval_metrics(maps: &[&BTreeMap<String, String>]) -> (Option<f64>, Option<f64>) {
-    let mut intervals: Vec<(u64, u64)> = maps
-        .iter()
-        .filter_map(|map| {
-            let start = map.get("start_offset_ns")?.parse::<u64>().ok()?;
-            let end = map.get("end_offset_ns")?.parse::<u64>().ok()?;
-            (end >= start).then_some((start, end))
-        })
-        .collect();
-    if intervals.is_empty() {
-        return (None, None);
-    }
-    intervals.sort_unstable();
-    let first = intervals[0].0;
-    let last = intervals.iter().map(|(_, end)| *end).max().unwrap_or(first);
-    let mut covered = 0_u64;
-    let (mut start, mut end) = intervals[0];
-    for (next_start, next_end) in intervals.into_iter().skip(1) {
-        if next_start <= end {
-            end = end.max(next_end);
-        } else {
-            covered = covered.saturating_add(end.saturating_sub(start));
-            (start, end) = (next_start, next_end);
-        }
-    }
-    covered = covered.saturating_add(end.saturating_sub(start));
-    (
-        Some(covered as f64 / 1e9),
-        Some(last.saturating_sub(first) as f64 / 1e9),
-    )
-}
-
 /// Work-weighted mean of a per-line ratio, for legacy lines that carry the
 /// percentage but not the counters it was derived from.
 fn weighted_mean(maps: &[&BTreeMap<String, String>], key: &str) -> Option<f64> {
@@ -730,57 +698,53 @@ fn parse_line(map: &BTreeMap<String, String>) -> SolLine {
 fn summarize(op: &str, maps: &[&BTreeMap<String, String>]) -> SolOpSummary {
     let lines: Vec<SolLine> = maps.iter().map(|map| parse_line(map)).collect();
     let lines = lines.as_slice();
-    let actual_s: f64 = lines.iter().filter_map(|line| line.actual_s).sum();
-    let work_bytes: u64 = lines.iter().filter_map(|line| line.work_bytes).sum();
-    let useful_work_bytes = maps
+    let inputs: Vec<_> = maps
         .iter()
-        .filter_map(|map| {
-            map.get("useful_output_bytes")
-                .or_else(|| map.get("work_bytes"))
-                .and_then(|value| value.parse::<u64>().ok())
+        .zip(lines)
+        .map(|(map, line)| foxy_sol::AggregationInput {
+            actual_s: line.actual_s,
+            work_bytes: line.work_bytes,
+            useful_work_bytes: map
+                .get("useful_output_bytes")
+                .and_then(|value| value.parse::<u64>().ok()),
+            rated: line.sol_raw.is_some(),
+            start_offset_ns: map
+                .get("start_offset_ns")
+                .and_then(|value| value.parse::<u64>().ok()),
+            end_offset_ns: map
+                .get("end_offset_ns")
+                .and_then(|value| value.parse::<u64>().ok()),
+            reference_id: map.get("reference_id").map(String::as_str),
+            reference_status: line.reference_status.as_deref(),
+            metric_version: line.metric_version.map(u64::from),
+            malformed: line.malformed,
+            outcome: map.get("outcome").map(String::as_str),
         })
-        .sum();
-    let (interval_coverage_s, makespan_s) = interval_metrics(maps);
-    let actual_bps = if work_bytes > 0 && actual_s > 0.0 {
-        Some(work_bytes as f64 / actual_s)
-    } else if let [single] = lines {
-        single.actual_bps
-    } else {
-        None
-    };
+        .collect();
+    let aggregate = foxy_sol::aggregate(&inputs);
+    let actual_bps = aggregate.actual_bps.or({
+        if let [single] = lines {
+            single.actual_bps
+        } else {
+            None
+        }
+    });
     let labels = distinct_values(maps, "label");
     let heterogeneous = labels.len() > 1;
-    let outcomes: Vec<String> = distinct_values(maps, "outcome")
-        .into_iter()
-        .map(str::to_owned)
-        .collect();
-    let reference_statuses: Vec<String> = lines
+    let metric_versions: Vec<u32> = aggregate
+        .metric_versions
         .iter()
-        .filter_map(|line| line.reference_status.clone())
-        .fold(Vec::new(), |mut statuses, status| {
-            if !statuses.contains(&status) {
-                statuses.push(status);
-            }
-            statuses
-        });
-    let metric_versions: Vec<u32> = lines.iter().filter_map(|line| line.metric_version).fold(
-        Vec::new(),
-        |mut versions, version| {
-            if !versions.contains(&version) {
-                versions.push(version);
-            }
-            versions
-        },
-    );
+        .filter_map(|version| u32::try_from(*version).ok())
+        .collect();
     let mut summary = SolOpSummary {
         op: op.to_owned(),
-        runs: lines.len(),
+        runs: aggregate.runs,
         rated_runs: 0,
-        actual_s,
-        interval_coverage_s,
-        makespan_s,
-        useful_work_bytes,
-        work_bytes,
+        actual_s: aggregate.service_s,
+        interval_coverage_s: aggregate.interval_coverage_s,
+        makespan_s: aggregate.makespan_s,
+        useful_work_bytes: aggregate.useful_work_bytes,
+        work_bytes: aggregate.work_bytes,
         actual_bps,
         light_bps: None,
         ideal_s: None,
@@ -792,10 +756,10 @@ fn summarize(op: &str, maps: &[&BTreeMap<String, String>]) -> SolOpSummary {
         mixed_references: false,
         heterogeneous,
         mixed_metric_versions: metric_versions.len() > 1,
-        reference_statuses,
+        reference_statuses: aggregate.reference_statuses,
         metric_versions,
-        malformed_lines: lines.iter().filter(|line| line.malformed).count(),
-        outcomes,
+        malformed_lines: aggregate.malformed_records,
+        outcomes: aggregate.outcomes,
         sub_parts: if op == "download" {
             disk_sub_part(maps).into_iter().collect()
         } else {
@@ -872,6 +836,9 @@ impl BenchmarkRecord {
     pub fn sol_summaries(&self) -> Vec<SolOpSummary> {
         let mut ops: Vec<(String, Vec<&BTreeMap<String, String>>)> = Vec::new();
         for map in &self.sol {
+            if map.get("record_kind").is_some_and(|kind| kind == "stage") {
+                continue;
+            }
             let Some(op) = map.get("op") else {
                 continue;
             };
@@ -1172,6 +1139,88 @@ mod tests {
     }
 
     #[test]
+    fn shared_aggregation_corpus_matches_benchmark_summaries() {
+        let corpus: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../foxy-sol/tests/aggregation-corpus.json"
+        ))
+        .expect("aggregation corpus");
+        for case in corpus["cases"].as_array().expect("cases") {
+            let maps: Vec<BTreeMap<String, String>> = case["records"]
+                .as_array()
+                .expect("records")
+                .iter()
+                .map(|record| {
+                    let mut map: BTreeMap<String, String> = record
+                        .as_object()
+                        .expect("record")
+                        .iter()
+                        .filter(|(key, _)| !matches!(key.as_str(), "rated" | "malformed"))
+                        .map(|(key, value)| {
+                            (
+                                if key == "useful_work_bytes" {
+                                    "useful_output_bytes".to_owned()
+                                } else {
+                                    key.clone()
+                                },
+                                value
+                                    .as_str()
+                                    .map_or_else(|| value.to_string(), str::to_owned),
+                            )
+                        })
+                        .collect();
+                    if record["rated"] == true {
+                        map.insert("sol".into(), "1".into());
+                    }
+                    if record["malformed"] == true {
+                        map.insert("parse_status".into(), "malformed".into());
+                    }
+                    map
+                })
+                .collect();
+            let refs: Vec<_> = maps.iter().collect();
+            let actual = summarize("hash", &refs);
+            let expected = &case["expected"];
+            let name = case["name"].as_str().expect("name");
+            assert_eq!(actual.actual_s, expected["service_s"], "{name}");
+            assert_eq!(
+                serde_json::to_value(actual.interval_coverage_s).expect("coverage"),
+                expected["interval_coverage_s"],
+                "{name}"
+            );
+            assert_eq!(
+                serde_json::to_value(actual.makespan_s).expect("makespan"),
+                expected["makespan_s"],
+                "{name}"
+            );
+            assert_eq!(
+                actual.useful_work_bytes, expected["useful_work_bytes"],
+                "{name}"
+            );
+            assert_eq!(actual.rated_runs, expected["rated_runs"], "{name}");
+            assert_eq!(
+                serde_json::to_value(&actual.reference_statuses).expect("reference statuses"),
+                expected["reference_statuses"],
+                "{name}"
+            );
+            assert_eq!(
+                serde_json::to_value(&actual.metric_versions).expect("metric versions"),
+                expected["metric_versions"],
+                "{name}"
+            );
+            assert_eq!(
+                actual.malformed_lines, expected["malformed_records"],
+                "{name}"
+            );
+            assert_eq!(
+                serde_json::to_value(&actual.outcomes).expect("outcomes"),
+                expected["outcomes"],
+                "{name}"
+            );
+            assert_eq!(actual.completed(), expected["completed"], "{name}");
+        }
+    }
+
+    #[test]
     fn raw_ratio_above_one_is_kept_and_flags_the_reference() {
         let record = record(
             BenchmarkKind::Update,
@@ -1310,6 +1359,29 @@ mod tests {
             "O2 delta patch + O1 full-download fallback"
         );
         assert_eq!(fallback.sol_summaries().len(), 2);
+    }
+
+    #[test]
+    fn patch_stage_records_do_not_become_ui_operations() {
+        let patch = record(
+            BenchmarkKind::Update,
+            vec![
+                line(&[
+                    ("op", "delta_patch_stage"),
+                    ("record_kind", "stage"),
+                    ("stage_id", "apply"),
+                    ("actual_ns", "12"),
+                ]),
+                line(&[
+                    ("op", "delta_patch"),
+                    ("patched_files", "1"),
+                    ("fallbacks", "0"),
+                    ("outcome", "completed"),
+                ]),
+            ],
+        );
+        assert_eq!(patch.sol_summaries().len(), 1);
+        assert_eq!(patch.sol_summaries()[0].op, "delta_patch");
     }
 
     #[test]

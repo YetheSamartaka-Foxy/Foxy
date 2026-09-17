@@ -19,7 +19,7 @@ Where a row says `MB/s` from a download report line it is MiB/s
 (`1024 * 1024`); rows typed by hand in the September tables used decimal
 MB/s. Recover exact values from `work_bytes` and `actual_s` when it matters.
 
-## 1. Status by operation (as of 2026-09-16, checkout `6cbfc25` plus the working implementation)
+## 1. Status by operation (as of 2026-09-17, checkout `98e45d7`)
 
 `n/a` means the required reference or measurement is missing, not zero
 performance. "Reported" ratios keep their original interpretation; the
@@ -54,7 +54,24 @@ comparison column says what the number actually compares.
 | M1 memory, loaded startup | n/a, advisory footprint (resource trade policy) | Empty app 221-239 MB private commit is a baseline, not a proven minimum for loaded state | 456-473 MB peak / 352-369 MB retained, Sept 16 (455-460 / 355-360 on Sept 10 with another seeded configuration) | Reported, not gated: memory is spent for speed on purpose; only unbounded growth would reopen this |
 | M1 repeated UI walk | n/a, growth/retention comparison, advisory | About +40 MB retained after the walk, the same saturation as Sept 10 | 404-417 MB peak / 400-412 MB retained, Sept 16 | Consistent with a saturating cache; not proof that longer-run leaks are absent |
 
-## 1a. Fresh implementation verification
+## 1a. Current accepted baselines
+
+Generated with `foxy-testkit measurements` from the five accepted version 2
+baselines at checkout `98e45d7956326cf902cd31342b4f9b153fe3a425`.
+
+| Date | Case | Operation | SoL (kind) | Lane | Elapsed | Baseline | Samples | Work | Outcome | Build | Run |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 2026-09-17 | `perf-redownload-small-ssd` | force-redownload (O1 full-file download) | 95% (calibrated, network B1) | ssd warm | 41.09 s | 41.09 s median of 5 [40.53-41.26] | 5 | 217 files, 4.33 GB, 4.33 GB hashed | completed,completed,completed,completed,completed | 98e45d7 | `20260917T115728Z-3a091b88` |
+| 2026-09-17 | `perf-redownload-small-ssd` | recheck (O6 no-change sync) | 89% (calibrated, no-change B4) | ssd warm | 0.46 s | 0.46 s median of 5 [0.44-0.58] | 5 | n/a | ok | 98e45d7 | `20260917T115728Z-3a091b88` |
+| 2026-09-17 | `perf-tfr-scifi-recheck-hdd` | recheck-integrity (O3 tree hash verification) | 45% (calibrated, hash B2+B6) | hdd warm | 1.12 s | 1.12 s median of 7 [1.10-1.14] | 7 | 4.33 GB hashed | ok | 98e45d7 | `20260917T114946Z-18571f30` |
+| 2026-09-17 | `perf-tfr-scifi-stale-check-hdd` | download (O2 delta patch) | 12% (calibrated, network B1) | hdd warm | 31.54 s | 31.54 s median of 7 [30.73-32.63] | 7 | 40 files, 0.42 GB | completed,completed,completed,completed,completed,completed,completed | 98e45d7 | `20260917T155052Z-18ca3678` |
+| 2026-09-17 | `perf-tfr-scifi-stale-check-hdd` | quick-check-stale (O4 quick scan) | 5% (calibrated, metadata B5) | hdd warm | 0.45 s | 0.45 s median of 7 [0.45-0.56] | 7 | n/a | ok | 98e45d7 | `20260917T155052Z-18ca3678` |
+| 2026-09-17 | `perf-tfr-scifi-stale-check-hdd` | quick-check-verify@evicted (O4 quick scan) | 68% (calibrated, hash B2+B6) | hdd evicted | 32.24 s | 32.24 s median of 7 [31.56-32.78] | 7 | 2.44 GB hashed | ok | 98e45d7 | `20260917T155052Z-18ca3678` |
+| 2026-09-17 | `perf-tfr-scifi-stale-check-hdd` | remote-refresh (O5 remote metadata refresh) | 5% (calibrated, metadata B5) | hdd warm | 0.64 s | 0.64 s median of 7 [0.60-0.69] | 7 | n/a | ok | 98e45d7 | `20260917T155052Z-18ca3678` |
+| 2026-09-17 | `perf-startup-arma3-live` | startup (O8 startup) | 84% (calibrated, probe B4) | ssd warm | 3.03 s | 3.03 s median of 5 [3.01-3.11] | 5 | 11 repos | ok | 98e45d7 | `20260917T115028Z-14f33d74` |
+| 2026-09-17 | `perf-tfr-scifi-delta-patch-ssd` | download (O2 delta patch) | 3% (calibrated, network B1) | ssd warm | 2.16 s | 2.16 s median of 5 [2.16-2.36] | 5 | 4 files, 0.01 GB, 0.21 GB hashed | completed,completed,completed,completed,completed | 98e45d7 | `20260917T115110Z-2a30d7a0` |
+
+## 1b. Fresh implementation verification archive
 
 The sequential 2026-09-16 risk-weighted suite passed all ten selected cases:
 `perf-redownload-small-ssd`, `perf-startup-arma3-live`, both first-check
@@ -67,7 +84,7 @@ first-check cases warned that the runner did not observe the short DB-wipe busy
 marker, so their wipe timing is not used as evidence; payload/oracle gates and
 the measured hash lanes passed.
 
-## 1b. Earlier generated lanes (superseded where section 1a names a newer run)
+## 1c. Earlier generated lanes (superseded where sections 1a or 1b name a newer run)
 
 Latest valid run per case, one line per operation lane; `@cold` is iteration
 zero without a warmup pass, `@evicted` follows an `evict-cache` step. The

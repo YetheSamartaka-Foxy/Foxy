@@ -1,11 +1,30 @@
 use serde_json::{Map, Value};
 
-/// `key=value` pairs of one log line. Integers stay exact (`u64`/`i64`), so a
-/// byte counter never round-trips through `f64`; decimals and unit-suffixed
-/// numbers (`0.125s`, `3x`, `97%`) become `f64`; anything else stays text.
-/// Malformed input is retained where possible and marked with parser-owned
-/// status fields.
+/// Lenient `key=value` extraction for legacy prose log lines.
 pub fn key_values(line: &str) -> Value {
+    let mut result = Map::new();
+    for token in line.split_whitespace() {
+        let Some((raw_key, raw_value)) = token.split_once('=') else {
+            continue;
+        };
+        let key = raw_key.trim_start_matches(|ch: char| !ch.is_ascii_alphabetic());
+        let valid_key = key
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_alphabetic())
+            && key
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '-'));
+        if !valid_key {
+            continue;
+        }
+        let value = raw_value.trim_end_matches([',', ')', ';']);
+        result.insert(key.to_owned(), number_or_text(value));
+    }
+    Value::Object(result)
+}
+
+fn sol_key_values(line: &str) -> Value {
     let (fields, errors) = parse_fields(line);
     let mut result = Map::new();
     for (key, raw) in fields {
@@ -151,7 +170,7 @@ pub fn parse(text: &str) -> Vec<Value> {
         .filter_map(|line| {
             line.find("SOL op=").map(|index| {
                 let raw = line[index..].trim();
-                let mut record = key_values(&raw["SOL ".len()..]);
+                let mut record = sol_key_values(&raw["SOL ".len()..]);
                 record["raw"] = raw.into();
                 record
             })
@@ -170,36 +189,13 @@ pub fn operation(records: &[Value], name: &str) -> Value {
         .unwrap_or(Value::Null)
 }
 
-fn interval_metrics(rows: &[&Value]) -> (Option<f64>, Option<f64>) {
-    let mut intervals: Vec<(u64, u64)> = rows
+pub fn records(records: &[Value], name: &str) -> Value {
+    records
         .iter()
-        .filter_map(|row| {
-            let start = row["start_offset_ns"].as_u64()?;
-            let end = row["end_offset_ns"].as_u64()?;
-            (end >= start).then_some((start, end))
-        })
-        .collect();
-    if intervals.is_empty() {
-        return (None, None);
-    }
-    intervals.sort_unstable();
-    let first = intervals[0].0;
-    let last = intervals.iter().map(|(_, end)| *end).max().unwrap_or(first);
-    let mut covered = 0_u64;
-    let (mut start, mut end) = intervals[0];
-    for (next_start, next_end) in intervals.into_iter().skip(1) {
-        if next_start <= end {
-            end = end.max(next_end);
-        } else {
-            covered = covered.saturating_add(end.saturating_sub(start));
-            (start, end) = (next_start, next_end);
-        }
-    }
-    covered = covered.saturating_add(end.saturating_sub(start));
-    (
-        Some(covered as f64 / 1e9),
-        Some(last.saturating_sub(first) as f64 / 1e9),
-    )
+        .filter(|row| row["op"] == name)
+        .cloned()
+        .collect::<Vec<_>>()
+        .into()
 }
 
 /// Totals over every record of `name`: run count, summed `actual_s` (service
@@ -210,80 +206,42 @@ pub fn aggregate(records: &[Value], name: &str) -> Value {
     if rows.is_empty() {
         return Value::Null;
     }
-    let actual_s: f64 = rows
+    let inputs: Vec<_> = rows
         .iter()
-        .map(|row| {
-            row["actual_ns"]
+        .map(|row| foxy_sol::AggregationInput {
+            actual_s: row["actual_ns"]
                 .as_f64()
                 .map(|ns| ns / 1e9)
-                .or_else(|| row["actual_s"].as_f64())
-                .unwrap_or(0.0)
+                .or_else(|| row["actual_s"].as_f64()),
+            work_bytes: row["work_bytes"].as_u64(),
+            useful_work_bytes: row["useful_output_bytes"].as_u64(),
+            rated: row["sol_raw"].is_number() || row["sol"].is_number(),
+            start_offset_ns: row["start_offset_ns"].as_u64(),
+            end_offset_ns: row["end_offset_ns"].as_u64(),
+            reference_id: row["reference_id"].as_str(),
+            reference_status: row["reference_status"].as_str(),
+            metric_version: row["metric_version"].as_u64(),
+            malformed: row["parse_status"] == "malformed",
+            outcome: row["outcome"].as_str(),
         })
-        .sum();
-    let work_bytes: u64 = rows
-        .iter()
-        .filter_map(|row| row["work_bytes"].as_u64())
-        .sum();
-    let useful_work_bytes: u64 = rows
-        .iter()
-        .filter_map(|row| {
-            row["useful_output_bytes"]
-                .as_u64()
-                .or_else(|| row["work_bytes"].as_u64())
-        })
-        .sum();
-    let (interval_coverage_s, makespan_s) = interval_metrics(&rows);
-    let rated = rows.iter().filter(|row| row["sol"].is_number()).count();
-    let mut outcomes: Vec<&str> = Vec::new();
-    for row in &rows {
-        if let Some(outcome) = row["outcome"].as_str()
-            && !outcomes.contains(&outcome)
-        {
-            outcomes.push(outcome);
-        }
-    }
-    let completed = outcomes
-        .iter()
-        .all(|outcome| !matches!(*outcome, "cancelled" | "failed"));
-    let actual_bps = (work_bytes > 0 && actual_s > 0.0).then(|| work_bytes as f64 / actual_s);
-    let reference_statuses: Vec<&str> = rows
-        .iter()
-        .filter_map(|row| row["reference_status"].as_str())
-        .fold(Vec::new(), |mut values, value| {
-            if !values.contains(&value) {
-                values.push(value);
-            }
-            values
-        });
-    let metric_versions: Vec<u64> = rows
-        .iter()
-        .filter_map(|row| row["metric_version"].as_u64())
-        .fold(Vec::new(), |mut values, value| {
-            if !values.contains(&value) {
-                values.push(value);
-            }
-            values
-        });
-    let malformed_records = rows
-        .iter()
-        .filter(|row| row["parse_status"] == "malformed")
-        .count();
-    let mixed_metric_versions = metric_versions.len() > 1;
+        .collect();
+    let aggregate = foxy_sol::aggregate(&inputs);
     serde_json::json!({
-        "runs": rows.len(),
-        "rated_runs": rated,
-        "actual_s": (actual_s * 1e6).round_ties_even() / 1e6,
-        "interval_coverage_s": interval_coverage_s,
-        "makespan_s": makespan_s,
-        "work_bytes": work_bytes,
-        "useful_work_bytes": useful_work_bytes,
-        "actual_bps": actual_bps.map(|v| v.round()),
-        "reference_statuses": reference_statuses,
-        "metric_versions": metric_versions,
-        "mixed_metric_versions": mixed_metric_versions,
-        "malformed_records": malformed_records,
-        "outcomes": outcomes,
-        "completed": completed,
+        "runs": aggregate.runs,
+        "rated_runs": aggregate.rated_runs,
+        "actual_s": (aggregate.service_s * 1e6).round_ties_even() / 1e6,
+        "interval_coverage_s": aggregate.interval_coverage_s,
+        "makespan_s": aggregate.makespan_s,
+        "work_bytes": aggregate.work_bytes,
+        "useful_work_bytes": aggregate.useful_work_bytes,
+        "actual_bps": aggregate.actual_bps.map(|v| v.round()),
+        "reference_ids": aggregate.reference_ids,
+        "reference_statuses": aggregate.reference_statuses,
+        "metric_versions": aggregate.metric_versions,
+        "mixed_metric_versions": aggregate.metric_versions.len() > 1,
+        "malformed_records": aggregate.malformed_records,
+        "outcomes": aggregate.outcomes,
+        "completed": aggregate.completed,
     })
 }
 
@@ -292,14 +250,14 @@ mod tests {
     use super::*;
     #[test]
     fn units_and_quotes() {
-        let row = key_values("op=hash actual_s=0.125s sol=3x name=\"two words\" percent=97%");
+        let row = sol_key_values("op=hash actual_s=0.125s sol=3x name=\"two words\" percent=97%");
         assert_eq!(row["actual_s"], 0.125);
         assert_eq!(row["name"], "two words");
         assert_eq!(row["percent"], 97.0);
     }
     #[test]
     fn integers_stay_exact_and_malformed_numbers_stay_text() {
-        let row = key_values("bytes=18446744073709551615 neg=-5 bad=1.2.3 na=na dup=1 dup=2");
+        let row = sol_key_values("bytes=18446744073709551615 neg=-5 bad=1.2.3 na=na dup=1 dup=2");
         assert_eq!(row["bytes"], u64::MAX);
         assert_eq!(row["bytes"].as_u64(), Some(u64::MAX));
         assert_eq!(row["neg"], -5);
@@ -338,7 +296,7 @@ mod tests {
                 serde_json::to_vec(&second).expect("serialize second parse"),
                 "{name}"
             );
-            let public = key_values(input);
+            let public = sol_key_values(input);
             if expected_status == "malformed" {
                 assert_eq!(public["parse_status"], "malformed", "{name}");
                 assert_eq!(public["parse_error"], expected_error, "{name}");
@@ -348,10 +306,32 @@ mod tests {
         }
     }
     #[test]
+    fn generic_key_values_ignore_prose_and_trim_log_punctuation() {
+        let row = key_values(
+            "Repository purge completed for repo=https://example.invalid/ (txn=0.08s, checkpoint=0.00s)",
+        );
+        assert_eq!(row["repo"], "https://example.invalid/");
+        assert_eq!(row["txn"], 0.08);
+        assert_eq!(row["checkpoint"], 0.0);
+        assert!(row.get("parse_status").is_none());
+    }
+    #[test]
     fn last_operation_wins() {
         let rows = parse("prefix SOL op=hash sol=1x\nSOL op=hash sol=2x\nother");
         assert_eq!(operation(&rows, "hash")["sol"], 2.0);
         assert!(operation(&rows, "download").is_null());
+    }
+
+    #[test]
+    fn typed_stage_records_are_retained_in_log_order() {
+        let rows = parse(
+            "SOL op=delta_patch_stage stage_id=planning file_id=7\n\
+             SOL op=delta_patch_stage stage_id=fetch file_id=7",
+        );
+        let stages = records(&rows, "delta_patch_stage");
+        assert_eq!(stages.as_array().map(Vec::len), Some(2));
+        assert_eq!(stages[0]["stage_id"], "planning");
+        assert_eq!(stages[1]["stage_id"], "fetch");
     }
     #[test]
     fn echoed_events_are_parsed_once_but_repeated_events_twice() {
@@ -403,5 +383,55 @@ mod tests {
             serde_json::json!(["ok", "missing"])
         );
         assert_eq!(total["mixed_metric_versions"], false);
+    }
+
+    #[test]
+    fn shared_aggregation_corpus_matches_ledger_aggregates() {
+        let corpus: Value = serde_json::from_str(include_str!(
+            "../../../../foxy-sol/tests/aggregation-corpus.json"
+        ))
+        .expect("aggregation corpus");
+        for case in corpus["cases"].as_array().expect("cases") {
+            let records: Vec<Value> = case["records"]
+                .as_array()
+                .expect("records")
+                .iter()
+                .map(|record| {
+                    let mut record = record.clone();
+                    record["op"] = "hash".into();
+                    if let Some(useful) = record.get("useful_work_bytes").cloned() {
+                        record["useful_output_bytes"] = useful;
+                    }
+                    if record["rated"] == true {
+                        record["sol"] = 1.into();
+                    }
+                    if record["malformed"] == true {
+                        record["parse_status"] = "malformed".into();
+                    }
+                    record
+                })
+                .collect();
+            let actual = aggregate(&records, "hash");
+            let expected = &case["expected"];
+            let name = case["name"].as_str().expect("name");
+            for (actual_key, expected_key) in [
+                ("actual_s", "service_s"),
+                ("interval_coverage_s", "interval_coverage_s"),
+                ("makespan_s", "makespan_s"),
+                ("useful_work_bytes", "useful_work_bytes"),
+                ("rated_runs", "rated_runs"),
+                ("reference_ids", "reference_ids"),
+                ("reference_statuses", "reference_statuses"),
+                ("metric_versions", "metric_versions"),
+                ("malformed_records", "malformed_records"),
+                ("outcomes", "outcomes"),
+                ("completed", "completed"),
+            ] {
+                assert_eq!(
+                    actual[actual_key], expected[expected_key],
+                    "{name}: {actual_key}"
+                );
+            }
+        }
     }
 }

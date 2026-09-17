@@ -3,39 +3,20 @@ use anyhow::{Result, ensure};
 use serde_json::{Value, json};
 use std::path::Path;
 
-/// Row fields the kit added after runs were recorded (top level, plus the
-/// calibrated ratios a later reference derives on an operation record). A rebuilt
-/// row carries them (null, or derived from retained lines); the recorded row
-/// cannot, and that is not a derivation difference.
-const ADDED_FIELDS: &[&str] = &[
-    "sol_aggregate",
-    "remote_refresh",
-    "sync_action",
-    "db_persist",
-    "db_purge",
-    "space_switch",
-    "references",
-    "diagnostics",
-    "origin_checksum",
-];
-
-fn differences(expected: &Value, actual: &Value, path: &str, out: &mut Vec<Value>) {
+fn differences(
+    expected: &Value,
+    actual: &Value,
+    path: &str,
+    schema_migration: bool,
+    diffs: &mut Vec<Value>,
+    migrations: &mut Vec<Value>,
+) {
     if matches!(path, "case_hash" | "started_utc") {
         return;
     }
     if let (Some(a), Some(b)) = (expected.as_object(), actual.as_object()) {
         let keys: std::collections::BTreeSet<_> = a.keys().chain(b.keys()).collect();
         for key in keys {
-            // A key the recorded row never had is a metric that was added to
-            // the kit after the run was recorded, not a derivation change; a
-            // key the rebuilt row lost is still a difference.
-            if !a.contains_key(key)
-                && (path.starts_with("breakdown.run_metrics")
-                    || (path.is_empty() && ADDED_FIELDS.contains(&key.as_str()))
-                    || matches!(key.as_str(), "sol_calibrated" | "reference_id"))
-            {
-                continue;
-            }
             differences(
                 a.get(key).unwrap_or(&Value::Null),
                 b.get(key).unwrap_or(&Value::Null),
@@ -44,21 +25,36 @@ fn differences(expected: &Value, actual: &Value, path: &str, out: &mut Vec<Value
                 } else {
                     format!("{path}.{key}")
                 },
-                out,
+                schema_migration,
+                diffs,
+                migrations,
             );
         }
     } else if let (Some(a), Some(b)) = (expected.as_array(), actual.as_array()) {
         if a.len() != b.len() {
-            out.push(json!({"path":path,"expected":expected,"actual":actual}));
+            let target = if schema_migration {
+                &mut *migrations
+            } else {
+                &mut *diffs
+            };
+            target.push(json!({"path":path,"expected":expected,"actual":actual}));
         } else {
             for (index, (a, b)) in a.iter().zip(b).enumerate() {
-                differences(a, b, &format!("{path}.{index}"), out);
+                differences(
+                    a,
+                    b,
+                    &format!("{path}.{index}"),
+                    schema_migration,
+                    diffs,
+                    migrations,
+                );
             }
         }
     } else if expected != actual
         && !matches!((expected.as_f64(),actual.as_f64()),(Some(a),Some(b)) if a==b)
     {
-        out.push(json!({"path":path,"expected":expected,"actual":actual}));
+        let target = if schema_migration { migrations } else { diffs };
+        target.push(json!({"path":path,"expected":expected,"actual":actual}));
     }
 }
 
@@ -73,8 +69,17 @@ pub fn run(dir: &Path) -> Result<Value> {
     let hash = case::hash(&resolved)?;
     let mut rebuilt = Vec::new();
     let mut diffs = Vec::new();
+    let mut migrations = Vec::new();
+    let mut schema_from = std::collections::BTreeSet::new();
     let mut limitations=vec!["Provenance, elapsed wall time, mutation counters, runtime guard flags and historical comparison verdicts are retained from recorded rows".to_owned()];
     for original in rows {
+        let recorded_schema = original["derived_schema_version"].as_u64().unwrap_or(1);
+        ensure!(
+            recorded_schema <= ledger::DERIVED_SCHEMA_VERSION,
+            "Run {} uses unsupported derived schema version {recorded_schema}",
+            dir.display()
+        );
+        schema_from.insert(recorded_schema);
         let stem = format!(
             "{}-{}",
             original["iteration"].as_u64().unwrap_or(0),
@@ -122,14 +127,25 @@ pub fn run(dir: &Path) -> Result<Value> {
         row["case_hash"] = hash.clone().into();
         row["verdict"] = original["verdict"].clone();
         let mut row_diffs = Vec::new();
-        differences(original, &row, "", &mut row_diffs);
+        let mut row_migrations = Vec::new();
+        differences(
+            original,
+            &row,
+            "",
+            recorded_schema < ledger::DERIVED_SCHEMA_VERSION,
+            &mut row_diffs,
+            &mut row_migrations,
+        );
         for difference in row_diffs {
             diffs.push(json!({"artifact":stem,"difference":difference}));
+        }
+        for migration in row_migrations {
+            migrations.push(json!({"artifact":stem,"change":migration}));
         }
         rebuilt.push(row);
     }
     Ok(
-        json!({"run_dir":dir,"rows":rebuilt,"differences":diffs,"equal":diffs.is_empty(),"limitations":limitations}),
+        json!({"run_dir":dir,"schema_from":schema_from,"schema_to":ledger::DERIVED_SCHEMA_VERSION,"rows":rebuilt,"migrations":migrations,"differences":diffs,"equal":diffs.is_empty(),"limitations":limitations}),
     )
 }
 
@@ -164,7 +180,7 @@ pub fn corpus(root: &Path, run_dir: Option<&Path>, all: bool) -> Result<Value> {
         "No run directories with a summary.json to replay"
     );
     let mut reports = Vec::new();
-    let (mut replayed, mut differing, mut skipped) = (0usize, 0usize, 0usize);
+    let (mut replayed, mut migrated, mut differing, mut skipped) = (0usize, 0usize, 0usize, 0usize);
     for directory in directories {
         match run(&directory) {
             Ok(report) => {
@@ -172,6 +188,12 @@ pub fn corpus(root: &Path, run_dir: Option<&Path>, all: bool) -> Result<Value> {
                     skipped += 1;
                 } else {
                     replayed += 1;
+                    if report["migrations"]
+                        .as_array()
+                        .is_some_and(|rows| !rows.is_empty())
+                    {
+                        migrated += 1;
+                    }
                     if report["equal"] != Value::Bool(true) {
                         differing += 1;
                     }
@@ -185,7 +207,7 @@ pub fn corpus(root: &Path, run_dir: Option<&Path>, all: bool) -> Result<Value> {
         }
     }
     Ok(
-        json!({"replayed":replayed,"differing":differing,"skipped":skipped,"equal":differing==0,"runs":reports}),
+        json!({"replayed":replayed,"migrated":migrated,"differing":differing,"skipped":skipped,"equal":differing==0,"runs":reports}),
     )
 }
 
@@ -220,8 +242,8 @@ pub fn table(report: &Value) -> String {
         }
     }
     text.push_str(&format!(
-        "\n{} run(s) replayed, {} differing, {} skipped\n",
-        report["replayed"], report["differing"], report["skipped"]
+        "\n{} run(s) replayed, {} migrated, {} differing, {} skipped\n",
+        report["replayed"], report["migrated"], report["differing"], report["skipped"]
     ));
     text
 }
@@ -324,35 +346,51 @@ pub fn migrate_ledger(mapping_path: &Path, ledger_dir: &Path) -> Result<Value> {
 mod tests {
     use super::*;
     #[test]
-    fn metrics_added_after_a_run_was_recorded_are_not_differences() {
+    fn earlier_schema_changes_are_reported_as_migrations() {
         let mut diff = Vec::new();
+        let mut migrations = Vec::new();
         differences(
             &json!({"breakdown":{"run_metrics":{"files":1}}}),
             &json!({"breakdown":{"run_metrics":{"files":1,"hash_work_bytes":0}}}),
             "",
+            true,
             &mut diff,
+            &mut migrations,
         );
         assert!(diff.is_empty());
+        assert_eq!(migrations.len(), 1);
+    }
+
+    #[test]
+    fn current_schema_changes_are_differences() {
+        let mut diff = Vec::new();
+        let mut migrations = Vec::new();
         differences(
             &json!({"breakdown":{"run_metrics":{"files":1,"bytes":2}}}),
             &json!({"breakdown":{"run_metrics":{"files":1}}}),
             "",
+            false,
             &mut diff,
+            &mut migrations,
         );
         assert_eq!(diff.len(), 1);
+        assert!(migrations.is_empty());
     }
 
     #[test]
     fn numeric_equality_and_real_difference() {
         let mut diff = Vec::new();
+        let mut migrations = Vec::new();
         differences(
             &json!({"n":1,"case_hash":"a"}),
             &json!({"n":1.0,"case_hash":"b"}),
             "",
+            false,
             &mut diff,
+            &mut migrations,
         );
         assert!(diff.is_empty());
-        differences(&json!(1), &json!(2), "n", &mut diff);
+        differences(&json!(1), &json!(2), "n", false, &mut diff, &mut migrations);
         assert_eq!(diff.len(), 1);
     }
 }
