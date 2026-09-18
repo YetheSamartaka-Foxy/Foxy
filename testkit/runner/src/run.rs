@@ -1129,6 +1129,7 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                     "delta_patch": sol::operation(&sol, "delta_patch"),
                     "delta_patch_stages": sol::records(&sol, "delta_patch_stage"),
                     "download": sol::operation(&sol, "download"),
+                    "quick_scan": sol::operation(&sol, "quick_scan"),
                     "elapsed_s": collected["elapsed_s"],
                 });
                 let mut flags = Vec::new();

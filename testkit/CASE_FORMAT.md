@@ -241,11 +241,12 @@ A numeric gate (`min`, `max`, `between`) fails when the value is missing or not
 a finite number; add `optional: true` when the metric may legitimately be
 absent for that operation and the gate should then be skipped.
 
-The expectation view exposes the last aggregate patch action as `delta_patch`
-and its typed per-file stage records as `delta_patch_stages`, in addition to
-`download`, `summary`, `sol`, `breakdown`, and `elapsed_s`. Patch cases should
-assert the aggregate outcome, conservation state, and fallback or cancellation
-counters. A measured operation with `inspect_cleanup: true` also exposes
+The expectation view exposes the last aggregate patch action as `delta_patch`,
+its typed per-file stage records as `delta_patch_stages`, and the last
+`download` and `quick_scan` records, in addition to `summary`, `sol`,
+`breakdown`, and `elapsed_s`. Patch cases should assert the aggregate outcome,
+conservation state, and fallback or cancellation counters. A measured operation
+with `inspect_cleanup: true` also exposes
 `summary.cleanup.residual_files` and the separate `.foxy.part`,
 `.foxy.part.meta`, and `.foxy.tmp` counts without recording local paths.
 
