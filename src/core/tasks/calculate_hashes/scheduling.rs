@@ -995,17 +995,42 @@ fn benchmark_sample_is_sufficient(benchmark_jobs: &[FileHashJob]) -> bool {
         && benchmark_jobs.iter().map(job_estimated_bytes).sum::<u64>() >= MIN_AUTO_BENCHMARK_BYTES
 }
 
-/// Deal the sample into `groups` disjoint trial groups of similar work: the
-/// sample arrives sorted by (parts, bytes) descending, so round-robin dealing
-/// gives every group a like share of the heavy and the light files. Groups
-/// that would be too small to judge are folded back until every remaining
-/// group is sufficient; the result has at least one group.
+fn benchmark_group_load_score(group: &[FileHashJob], totals: (u64, usize, usize)) -> u128 {
+    let (total_bytes, total_parts, total_files) = totals;
+    let bytes = group.iter().map(job_estimated_bytes).sum::<u64>() as u128;
+    let parts = group
+        .iter()
+        .map(|job| job.indexed_parts.len())
+        .sum::<usize>() as u128;
+    let files = group.len() as u128;
+    let total_bytes = total_bytes.max(1) as u128;
+    let total_parts = total_parts.max(1) as u128;
+    let total_files = total_files.max(1) as u128;
+    bytes * total_parts * total_files
+        + parts * total_bytes * total_files
+        + files * total_bytes * total_parts
+}
+
+/// Deal the sample into disjoint trial groups balanced by bytes, parts and
+/// file count. Groups that would be too small to judge are folded back until
+/// every remaining group is sufficient; the result has at least one group.
 fn deal_benchmark_groups(sample: Vec<FileHashJob>, groups: usize) -> Vec<Vec<FileHashJob>> {
     let mut groups = groups.clamp(1, sample.len().max(1));
+    let totals = (
+        sample.iter().map(job_estimated_bytes).sum(),
+        sample.iter().map(|job| job.indexed_parts.len()).sum(),
+        sample.len(),
+    );
     loop {
         let mut dealt: Vec<Vec<FileHashJob>> = (0..groups).map(|_| Vec::new()).collect();
-        for (index, job) in sample.iter().enumerate() {
-            dealt[index % groups].push(job.clone());
+        for job in &sample {
+            let index = dealt
+                .iter()
+                .enumerate()
+                .min_by_key(|(index, group)| (benchmark_group_load_score(group, totals), *index))
+                .map(|(index, _)| index)
+                .unwrap_or(0);
+            dealt[index].push(job.clone());
         }
         if groups == 1
             || dealt
@@ -2234,12 +2259,12 @@ mod tests {
         assert_eq!(groups.len(), 3);
         let total: usize = groups.iter().map(Vec::len).sum();
         assert_eq!(total, sample.len());
-        // Round-robin over the descending sort: parts 12,9,6,3 / 11,8,5,2 / 10,7,4,1.
         let parts: Vec<Vec<usize>> = groups
             .iter()
             .map(|group| group.iter().map(|job| job.indexed_parts.len()).collect())
             .collect();
-        assert_eq!(parts, [[12, 9, 6, 3], [11, 8, 5, 2], [10, 7, 4, 1]]);
+        assert_eq!(parts, [[12, 7, 6, 1], [11, 8, 5, 2], [10, 9, 4, 3]]);
+        assert!(parts.iter().all(|group| group.iter().sum::<usize>() == 26));
         assert!(
             groups
                 .iter()
