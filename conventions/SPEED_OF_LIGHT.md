@@ -248,9 +248,10 @@ correctness gates.
    resource bound, not the dependency chain: the orchestrator
    (`delta_patch/orchestrator.rs`) finishes a file's insert blob before
    applying that file.
-3. **Comparisons**: byte savings are established; elapsed speedup needs a
-   same-initial-state full-download A/B, which the tracked cases do not yet
-   include.
+3. **Comparisons**: byte savings are established. The tracked same-initial-state
+   force-redownload lane is an upper bound because its full arm transfers the
+   entire repository; elapsed speedup still needs an affected-files-only
+   full-download control.
 4. **Work**: `byte_savings = 1 - fetched_unique_insert_bytes / full_output_bytes`
    (`delta_savings_bytes / full_bytes` on the download line), network
    amplification including failed attempts, source-copy reads, insert-blob
