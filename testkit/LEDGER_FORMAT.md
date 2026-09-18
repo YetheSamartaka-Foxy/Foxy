@@ -131,14 +131,17 @@ per-operation fields with the same last-record shape; `remote_refresh.actual_s`
 and `sync_action.actual_s` are compared as durations. `quick_scan.sol_calibrated`
 (entries at the B5 metadata rate) joins the calibrated metrics; the DB lane
 rides on the row as a reference (`references.db`, insert, keyed-update and
-delete rows per second) but `db_purge` and `db_persist` get no ratio while
-their counters mix statement kinds; `summary.cancel_quiescent_ms`
+delete rows per second). `db_purge` and `db_persist` receive a ratio at write
+gate 1 when their insert, update and delete counters account for every affected
+row; records with other affected statement kinds stay unrated. `summary.cancel_quiescent_ms`
 is the cancel-to-quiescent latency of a `cancel_after_s` lane, and
 `breakdown.run_metrics.patch_fallbacks` / `patch_applies` count apply-time
 delta fallbacks and successful applies (2026-09-16).
 
 Added later on 2026-09-16: `db_persist.rows_affected` (rows the engine
-changed during the action, the work count a future per-kind ratio needs);
+changed during the action). Derived schema 5 adds `insert_rows_affected`,
+`update_rows_affected`, `delete_rows_affected` and `other_rows_affected` to
+the persistence and purge records and derives their gate-1 DB ratios;
 `download.ramp_s`, `plateau_s`, `tail_s`, `ramp_deficit_bytes` and
 `tail_deficit_bytes` (the transfer stage split around its plateau, present
 once a window reached 90% of the peak); `summary.ui_probe` (`samples`,

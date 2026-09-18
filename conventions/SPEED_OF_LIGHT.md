@@ -134,7 +134,7 @@ promoted, durable) when it is not obvious from the operation card.
 | O4 | Quick scan | `quick_scan/diff.rs` | self baseline in-app; accepted same-case clean-scan median in the test kit |
 | O5 | Remote metadata refresh | `SOL op=remote_refresh` in `tasks/remote_repository.rs` | none in-app (self baseline); the kit calibrates the no-change branch through O6 |
 | O6 | No-change sync | `SOL op=sync_action` with an `early-exit-*` outcome, `sync_pipeline/summary.rs` (every pipeline exit emits one) | none in-app; test-kit `sol_calibrated` against B4 |
-| O7 | Turso persistence | `SOL op=db_persist` in `sync_pipeline/hashing.rs` (per sync action); `db:` line of the download report, `SQLite sync metrics:` (legacy name) | none |
+| O7 | Turso persistence | `SOL op=db_persist` in `sync_pipeline/hashing.rs` (per sync action); `SOL op=db_purge`; `db:` line of the download report, `SQLite sync metrics:` (legacy name) | matched gate-1 DB calibration lane when every affected row has a classified statement kind |
 | O8 | Startup to settled verdict | `ui/app/runtime/startup_sync.rs`; probe stage in `quick_scan/worker.rs`; app update check in `tasks/app_update/spawn.rs` | none (self baseline) |
 | M1 | Resident footprint | `foxy-testkit` memory lane | empty-app baseline (best measured) |
 Sub-operations without an emitter of their own (download preparation and
@@ -421,10 +421,11 @@ correctness gates.
 
 1. **Completion**: rows durably written under the engine's configured
    synchronous mode.
-2. **Reference**: none for the mixed action counters. The DB calibration lane
-   records keyed inserts, updates and deletes separately, while `db_persist`
-   and `db_purge` currently combine statement kinds; applying one lane to the
-   total would fabricate a ratio. `N_txn * t_fsync` does not describe a commit:
+2. **Reference**: the DB calibration lane records inserts, keyed updates and
+   deletes separately. `db_persist` and `db_purge` emit affected rows for each
+   kind, and the testkit sums `rows_kind / rate_kind` only at write gate 1 and
+   only when every affected row is classified. Rows with other affected
+   statement kinds and gates above 1 stay unrated. `N_txn * t_fsync` does not describe a commit:
    `connect_tuned` (`tasks/db_turso.rs`) sets `synchronous=NORMAL`,
    so model actual sync events, WAL bytes, index work, checkpoint work and the
    single serial writer against the pinned engine, not SQLite estimates.
@@ -438,7 +439,8 @@ correctness gates.
    windows with queue time charged inside them above gate 1; never a
    percentage of wall time, never compared across gate sizes.
 6. **Counters**: `SOL op=db_persist` once per sync action (`op_id`, `mode`,
-   `outcome`, `write_time_ms`, `rows_affected` (rows the engine changed
+   `outcome`, `write_time_ms`, `rows_affected`, `insert_rows_affected`,
+   `update_rows_affected`, `delete_rows_affected`, `other_rows_affected` (rows the engine changed
    across every write statement of the action), `permit_wait_ms`,
    `write_calls`, `write_committed`, `write_failed`, `lock_retries`,
    `backoff_ms`, `categories`, `write_gate`, `conn_opened`, `conn_reused`;
@@ -549,8 +551,8 @@ appended keys; parsers treat them as `metric_kind` inferred from `light_src` and
 | `SOL op=quick_scan` | `repo`, `addons_total`, `addons_hashed`, `cache_hits_shared`, `cache_hits_persistent`, `deep_scan_files`, `entries` (directory entries the fingerprint walks enumerated), `addons_per_s`, `outcome`, `op_id` (the owning sync action or quick-scan sweep) |
 | `SOL op=remote_refresh` (every remote metadata refresh) | `outcome` (`skipped_clean`, `graph_unchanged`, `rebuilt`, `failed`), `index_requests`, `manifest_requests`, `mods`, `files`, `parts`, `response_bytes`, `fetch_sum_s`, `parse_sum_s`, `persist_sum_s`, `fan_out_wall_s`, `timer_scope=action_wall`, `op_id` |
 | `SOL op=sync_action` (every pipeline exit) | `op_id`, `mode`, `outcome` (the `PIPELINE SUMMARY` outcome: `completed`, `early-exit-clean`, `early-exit-skip`, `cancelled`, `failed-*`, ...), `stages`, `timer_scope=action_wall`, one `stage_<name>_s` per stage |
-| `SOL op=db_persist` (every sync action) | `op_id`, `mode`, `outcome` (`completed`, `early_exit`), `write_time_ms`, `rows_affected`, `permit_wait_ms`, `write_calls`, `write_committed`, `write_failed`, `lock_retries`, `backoff_ms`, `categories`, `write_gate`, `conn_opened`, `conn_reused`, `timer_scope=action_wall` |
-| `SOL op=db_purge` (every repository or addon purge) | `op_id`, `kind` (`repository`, `addon`), `outcome`, `steps` (statements), `rows_affected`, `txn_s`, `checkpoint_s`, `timer_scope=action_wall` |
+| `SOL op=db_persist` (every sync action) | `op_id`, `mode`, `outcome` (`completed`, `early_exit`), `write_time_ms`, `rows_affected`, per-kind `insert_rows_affected`, `update_rows_affected`, `delete_rows_affected`, `other_rows_affected`, `permit_wait_ms`, `write_calls`, `write_committed`, `write_failed`, `lock_retries`, `backoff_ms`, `categories`, `write_gate`, `conn_opened`, `conn_reused`, `timer_scope=action_wall` |
+| `SOL op=db_purge` (every repository or addon purge) | `op_id`, `kind` (`repository`, `addon`), `outcome`, `steps` (timed statements), `rows_affected`, the same four per-kind affected-row counters, `txn_s`, `checkpoint_s`, `timer_scope=action_wall` |
 | `SOL op=space_switch` (every runtime game-space switch) | `op_id`, `outcome`, `drain_s` (queued saves landing in the old space), `reset_s`, `reload_s`, `repositories`, `timer_scope=action_wall` |
 | `SOL op=startup` | `repos`, `quick_scan_repos`, `eligible`, `prevalidated`, `remote_changed`, `rechecks`, `first_frame_s`, `dispatch_s`, `eligibility_s`, `verdict_s`, `outcome=settled`, `op_id` |
 | `SOL op=startup_probe` | `repos`, `answered`, `changed`, `unknown`, `first_answer_s`, `last_answer_s` (offsets of the first and last branch to answer, so one slow host reads as the gap between them), `outcome` (`complete`, `partial`), `op_id` (shared with `startup`) |
@@ -615,7 +617,7 @@ environment change, not only hardware or ISP.
 | B6 | Hash | `calibrate --lanes hash`: compute-only BLAKE3 and MD5 over a 256 MiB in-memory buffer, one thread and all cores. The matched read-and-hash term is the B2 read lane; the row's ratio uses the slower of the two |
 | B7 | Concurrency | The B1 lane records the aggregate curve at 1, 8, 24, 48 and `--connections` requests (`curve`), so a per-connection ceiling is read as a curve, never as one constant; `foxy-testkit origin bench` for request latency |
 | B8 | App memory and startup | Empty `--config-dir` launch by renderer backend and process state, with distribution |
-| DB | Turso workload | `calibrate --lanes db`: 200k `subfiles`-shaped rows with the unique index, 256 per transaction at `synchronous=NORMAL`, one writer, on the case volume (`insert_rows_per_s`, `update_rows_per_s`, `delete_rows_per_s`, checkpoint). Current action counters mix statement kinds, so they do not receive a calibrated ratio until per-kind work is emitted |
+| DB | Turso workload | `calibrate --lanes db`: 200k `subfiles`-shaped rows with the unique index, 256 per transaction at `synchronous=NORMAL`, one writer, on the case volume (`insert_rows_per_s`, `update_rows_per_s`, `delete_rows_per_s`, checkpoint). Gate-1 action records receive a calibrated ratio only when all affected rows are insert, update or delete rows |
 | UI | Frame and input latency | No calibration lane; measured beside work instead. A case operation with `ui_probe_ms` polls the agent probe (`agent-gui fps`, which keeps the app repainting) at that cadence and records `summary.ui_probe`: the worst frame interval (`frame_ms_max`) and worst p95 the app reported from its last 240 frames, the lowest smoothed fps, and the probe's own round trip (process spawn included, an upper bound on input latency). Fixed view, window size, renderer and display per row |
 
 `foxy-testkit calibrate --case <case.json>` writes the lanes to

@@ -130,6 +130,8 @@ fn ratio(ideal_s: f64, actual_s: f64) -> Option<f64> {
 /// - `sync_action` on a no-change exit: one fresh index request plus a reused
 ///   one per further index request;
 /// - `quick_scan`: walked entries at the volume's metadata rate;
+/// - gate-1 `db_persist` and `db_purge`: the sum of each affected statement
+///   kind at its matching row rate, provided no affected rows are unclassified;
 ///
 /// Rows without a matching reference keep their records untouched.
 pub fn attach(row: &mut Value) {
@@ -214,6 +216,55 @@ pub fn attach(row: &mut Value) {
         row["quick_scan"]["sol_calibrated"] = value.into();
         row["quick_scan"]["reference_id"] = references["metadata"]["id"].clone();
     }
+    if row["db_write_gate"].as_u64() == Some(1) {
+        for (operation, actual_s) in [
+            (
+                "db_persist",
+                row["db_persist"]["write_time_ms"]
+                    .as_f64()
+                    .map(|ms| ms / 1_000.0),
+            ),
+            ("db_purge", row["db_purge"]["txn_s"].as_f64()),
+        ] {
+            let record = &row[operation];
+            let counts = [
+                (
+                    record["insert_rows_affected"].as_f64(),
+                    references["db"]["insert_rows_per_s"].as_f64(),
+                ),
+                (
+                    record["update_rows_affected"].as_f64(),
+                    references["db"]["update_rows_per_s"].as_f64(),
+                ),
+                (
+                    record["delete_rows_affected"].as_f64(),
+                    references["db"]["delete_rows_per_s"].as_f64(),
+                ),
+            ];
+            let all_rates_valid = counts
+                .iter()
+                .all(|(_, rate)| rate.is_some_and(|rate| rate > 0.0));
+            let all_counts_known = counts.iter().all(|(rows, _)| rows.is_some());
+            let classified_rows = counts.iter().filter_map(|(rows, _)| *rows).sum::<f64>();
+            if all_rates_valid
+                && all_counts_known
+                && classified_rows > 0.0
+                && record["rows_affected"].as_f64() == Some(classified_rows)
+                && record["other_rows_affected"].as_u64() == Some(0)
+                && let Some(actual) = actual_s
+            {
+                let ideal = counts
+                    .iter()
+                    .map(|(rows, rate)| rows.unwrap_or(0.0) / rate.unwrap())
+                    .sum::<f64>();
+                if let Some(value) = ratio(ideal, actual) {
+                    row[operation]["sol_calibrated"] = value.into();
+                    row[operation]["reference_id"] = references["db"]["id"].clone();
+                    row[operation]["ideal_s"] = round(ideal, 6).into();
+                }
+            }
+        }
+    }
     let fresh = references["latency"]["fresh_request_s"].as_f64();
     let reused = references["latency"]["reused_request_s"].as_f64();
     if let (Some(fresh), Some(actual)) = (fresh, row["startup_probe"]["actual_s"].as_f64())
@@ -294,7 +345,7 @@ mod tests {
     fn calibrated_ratios_name_their_reference_and_stay_unclamped() {
         let env = json!({"cpu":"9950X3D","os":"Windows 11","memory_gb":96,"origin":"a3.example.test:8080"});
         let mut row = json!({
-            "cache_state":"warm",
+            "cache_state":"warm","db_write_gate":1,
             "references": select(&calibration(), &env, "ssd", Some("S:")),
             "download":{"work_bytes":4_331_121_846u64,"actual_s":39.5},
             "hash":{"actual_s":0.05,"algorithm":"blake3"},
@@ -303,8 +354,8 @@ mod tests {
             "sync_action":{"outcome":"early-exit-skip","actual_s":0.45},
             "remote_refresh":{"index_requests":2},
             "quick_scan":{"actual_s":0.021,"entries":3000},
-            "db_purge":{"rows_affected":63000,"txn_s":1.0},
-            "db_persist":{"rows_affected":5000,"write_time_ms":200.0}
+            "db_purge":{"rows_affected":63000,"insert_rows_affected":0,"update_rows_affected":0,"delete_rows_affected":63000,"other_rows_affected":0,"txn_s":1.0},
+            "db_persist":{"rows_affected":5000,"insert_rows_affected":2000,"update_rows_affected":3000,"delete_rows_affected":0,"other_rows_affected":0,"write_time_ms":200.0}
         });
         attach(&mut row);
         assert_eq!(row["download"]["sol_calibrated"], 0.9292);
@@ -319,8 +370,37 @@ mod tests {
         assert_eq!(row["quick_scan"]["sol_calibrated"], 0.4762);
         assert_eq!(row["quick_scan"]["reference_id"], "metadata-1");
         // 63k rows at 126k rows/s over a 1 s transaction.
-        assert!(row["db_purge"]["sol_calibrated"].is_null());
-        assert!(row["db_persist"]["sol_calibrated"].is_null());
+        assert_eq!(row["db_purge"]["sol_calibrated"], 0.5);
+        // 2k inserts at 70k/s plus 3k updates at 50k/s over 200 ms.
+        assert_eq!(row["db_persist"]["sol_calibrated"], 0.4429);
+        assert_eq!(row["db_persist"]["reference_id"], "db-1");
+
+        let mut mixed = row.clone();
+        mixed["db_persist"]["other_rows_affected"] = 1.into();
+        mixed["db_persist"]
+            .as_object_mut()
+            .unwrap()
+            .remove("sol_calibrated");
+        mixed["db_persist"]
+            .as_object_mut()
+            .unwrap()
+            .remove("reference_id");
+        attach(&mut mixed);
+        assert!(mixed["db_persist"]["sol_calibrated"].is_null());
+
+        let mut concurrent = row.clone();
+        concurrent["db_write_gate"] = 4.into();
+        concurrent["db_purge"]
+            .as_object_mut()
+            .unwrap()
+            .remove("sol_calibrated");
+        concurrent["db_persist"]
+            .as_object_mut()
+            .unwrap()
+            .remove("sol_calibrated");
+        attach(&mut concurrent);
+        assert!(concurrent["db_purge"]["sol_calibrated"].is_null());
+        assert!(concurrent["db_persist"]["sol_calibrated"].is_null());
 
         let mut evicted = row.clone();
         evicted["cache_state"] = "evicted".into();

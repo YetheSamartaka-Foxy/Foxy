@@ -237,7 +237,7 @@ foxy-testkit replay .\testkit\runs\perf-db-refresh-main\20260909T045957Z-07cbda3
 foxy-testkit replay --all
 ```
 
-Each ledger row carries `derived_schema_version` (currently version 4). Replay reports a rebuilt row
+Each ledger row carries `derived_schema_version` (currently version 5). Replay reports a rebuilt row
 from an earlier schema as an intentional migration, while any difference within
 the current schema still makes `--all` exit non-zero. `case_hash` and timestamps
 are excluded. UX runs have no rows and are reported as skipped.

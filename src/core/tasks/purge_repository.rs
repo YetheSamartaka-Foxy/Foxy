@@ -165,14 +165,12 @@ async fn execute_sql(tx: &DbTxn<'_>, sql: &str, values: Vec<DbValue>) -> Result<
 #[derive(Default)]
 struct PurgeWork {
     steps: std::sync::atomic::AtomicU64,
-    rows_affected: std::sync::atomic::AtomicU64,
 }
 
 impl PurgeWork {
-    fn record(&self, affected: u64) {
+    fn record(&self) {
         use std::sync::atomic::Ordering;
         self.steps.fetch_add(1, Ordering::Relaxed);
-        self.rows_affected.fetch_add(affected, Ordering::Relaxed);
     }
 
     fn log_sol(
@@ -182,6 +180,7 @@ impl PurgeWork {
         total: std::time::Duration,
         txn: std::time::Duration,
         checkpoint: std::time::Duration,
+        db_work: crate::core::tasks::init_database::SqlitePerfSnapshot,
     ) {
         use std::sync::atomic::Ordering;
         info!(
@@ -201,9 +200,22 @@ impl PurgeWork {
                     ("kind", kind.to_string()),
                     ("outcome", "completed".to_string()),
                     ("steps", self.steps.load(Ordering::Relaxed).to_string()),
+                    ("rows_affected", db_work.rows_affected.to_string()),
                     (
-                        "rows_affected",
-                        self.rows_affected.load(Ordering::Relaxed).to_string()
+                        "insert_rows_affected",
+                        db_work.insert_rows_affected.to_string(),
+                    ),
+                    (
+                        "update_rows_affected",
+                        db_work.update_rows_affected.to_string(),
+                    ),
+                    (
+                        "delete_rows_affected",
+                        db_work.delete_rows_affected.to_string(),
+                    ),
+                    (
+                        "other_rows_affected",
+                        db_work.other_rows_affected.to_string(),
                     ),
                     ("txn_s", format!("{:.3}", txn.as_secs_f64())),
                     ("checkpoint_s", format!("{:.3}", checkpoint.as_secs_f64())),
@@ -227,7 +239,7 @@ async fn timed_step(
 ) -> Result<(), DbErr> {
     let started = Instant::now();
     let affected = tx.execute(sql, values).await?;
-    work.record(affected);
+    work.record();
     let elapsed = started.elapsed();
     if elapsed >= std::time::Duration::from_millis(50) {
         info!(
@@ -345,6 +357,7 @@ pub async fn purge_addon_by_local_path_with_context(
 
     let deleted_count = addon_ids.len();
     let db_purge_started_at = Instant::now();
+    let db_work_baseline = crate::core::tasks::init_database::sqlite_perf_snapshot();
     let work = Arc::new(PurgeWork::default());
     // Exclusive: Turso (beta) hard-wedges this bulk delete when overlapped by a
     // read/write on another connection/runtime (see DB_EXCLUSIVE).
@@ -550,6 +563,8 @@ pub async fn purge_addon_by_local_path_with_context(
     })
     .await?;
     let txn_elapsed = db_purge_started_at.elapsed();
+    let db_work =
+        crate::core::tasks::init_database::sqlite_perf_snapshot().delta_since(db_work_baseline);
 
     let checkpoint_started = Instant::now();
     let _ = context
@@ -562,6 +577,7 @@ pub async fn purge_addon_by_local_path_with_context(
         db_purge_started_at.elapsed(),
         txn_elapsed,
         checkpoint_started.elapsed(),
+        db_work,
     );
     info!(
         "Addon purge completed for {} in {:.2}s (addons={})",
@@ -716,6 +732,7 @@ async fn purge_repository_internal(
         whole_wipe
     );
     let db_purge_started_at = Instant::now();
+    let db_work_baseline = crate::core::tasks::init_database::sqlite_perf_snapshot();
     let work = Arc::new(PurgeWork::default());
     // Exclusive: a force-redownload purge holds this ~17s bulk-delete transaction
     // (66k+ subfiles) and Turso (beta) hard-wedges if any read/write on another
@@ -1003,6 +1020,8 @@ async fn purge_repository_internal(
     .await?;
 
     let txn_elapsed = db_purge_started_at.elapsed();
+    let db_work =
+        crate::core::tasks::init_database::sqlite_perf_snapshot().delta_since(db_work_baseline);
     info!(
         "Repository purge: DB transaction committed for {} in {:.2}s",
         sanitize_log_url(&normalized_url),
@@ -1039,6 +1058,7 @@ async fn purge_repository_internal(
         db_purge_started_at.elapsed(),
         txn_elapsed,
         checkpoint_elapsed,
+        db_work,
     );
 
     Ok(())

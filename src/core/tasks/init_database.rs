@@ -36,6 +36,10 @@ pub(crate) struct SqlitePerfSnapshot {
     /// Rows changed by every write statement the seam ran (the engine's own
     /// count), so a persistence record has a work model beside its windows.
     pub(crate) rows_affected: u64,
+    pub(crate) insert_rows_affected: u64,
+    pub(crate) update_rows_affected: u64,
+    pub(crate) delete_rows_affected: u64,
+    pub(crate) other_rows_affected: u64,
 }
 
 impl SqlitePerfSnapshot {
@@ -49,6 +53,18 @@ impl SqlitePerfSnapshot {
                 .db_write_time_ns_total
                 .saturating_sub(baseline.db_write_time_ns_total),
             rows_affected: self.rows_affected.saturating_sub(baseline.rows_affected),
+            insert_rows_affected: self
+                .insert_rows_affected
+                .saturating_sub(baseline.insert_rows_affected),
+            update_rows_affected: self
+                .update_rows_affected
+                .saturating_sub(baseline.update_rows_affected),
+            delete_rows_affected: self
+                .delete_rows_affected
+                .saturating_sub(baseline.delete_rows_affected),
+            other_rows_affected: self
+                .other_rows_affected
+                .saturating_sub(baseline.other_rows_affected),
         }
     }
 
@@ -75,6 +91,10 @@ struct SqlitePerfCounters {
     lock_backoff_ms_total: AtomicU64,
     db_write_time_ns_total: AtomicU64,
     rows_affected: AtomicU64,
+    insert_rows_affected: AtomicU64,
+    update_rows_affected: AtomicU64,
+    delete_rows_affected: AtomicU64,
+    other_rows_affected: AtomicU64,
 }
 
 impl SqlitePerfCounters {
@@ -84,6 +104,10 @@ impl SqlitePerfCounters {
             lock_backoff_ms_total: self.lock_backoff_ms_total.load(Ordering::Relaxed),
             db_write_time_ns_total: self.db_write_time_ns_total.load(Ordering::Relaxed),
             rows_affected: self.rows_affected.load(Ordering::Relaxed),
+            insert_rows_affected: self.insert_rows_affected.load(Ordering::Relaxed),
+            update_rows_affected: self.update_rows_affected.load(Ordering::Relaxed),
+            delete_rows_affected: self.delete_rows_affected.load(Ordering::Relaxed),
+            other_rows_affected: self.other_rows_affected.load(Ordering::Relaxed),
         }
     }
 
@@ -94,8 +118,15 @@ impl SqlitePerfCounters {
             .fetch_add(backoff_ms, Ordering::Relaxed);
     }
 
-    fn record_rows_affected(&self, rows: u64) {
+    fn record_rows_affected(&self, kind: SqliteStatementKind, rows: u64) {
         self.rows_affected.fetch_add(rows, Ordering::Relaxed);
+        let counter = match kind {
+            SqliteStatementKind::Insert => &self.insert_rows_affected,
+            SqliteStatementKind::Update => &self.update_rows_affected,
+            SqliteStatementKind::Delete => &self.delete_rows_affected,
+            SqliteStatementKind::Other => &self.other_rows_affected,
+        };
+        counter.fetch_add(rows, Ordering::Relaxed);
     }
 
     fn record_db_write_time(&self, elapsed: Duration) {
@@ -107,9 +138,59 @@ impl SqlitePerfCounters {
 
 static SQLITE_PERF_COUNTERS: Lazy<SqlitePerfCounters> = Lazy::new(SqlitePerfCounters::default);
 
-/// Credit rows a write statement changed to the process-wide counter.
-pub(crate) fn record_sqlite_rows_affected(rows: u64) {
-    SQLITE_PERF_COUNTERS.record_rows_affected(rows);
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SqliteStatementKind {
+    Insert,
+    Update,
+    Delete,
+    Other,
+}
+
+fn sqlite_statement_kind(sql: &str) -> SqliteStatementKind {
+    let head = sql.trim_start();
+    let word_len = head
+        .find(|ch: char| !ch.is_ascii_alphabetic())
+        .unwrap_or(head.len());
+    match head[..word_len].to_ascii_uppercase().as_str() {
+        "INSERT" | "REPLACE" => SqliteStatementKind::Insert,
+        "UPDATE" => SqliteStatementKind::Update,
+        "DELETE" => SqliteStatementKind::Delete,
+        _ => SqliteStatementKind::Other,
+    }
+}
+
+#[cfg(test)]
+mod statement_kind_tests {
+    use super::{SqliteStatementKind, sqlite_statement_kind};
+
+    #[test]
+    fn classifies_affected_row_statement_kinds() {
+        assert_eq!(
+            sqlite_statement_kind("  INSERT OR IGNORE INTO t VALUES (1)"),
+            SqliteStatementKind::Insert
+        );
+        assert_eq!(
+            sqlite_statement_kind("REPLACE INTO t VALUES (1)"),
+            SqliteStatementKind::Insert
+        );
+        assert_eq!(
+            sqlite_statement_kind("\nUPDATE t SET value = 1"),
+            SqliteStatementKind::Update
+        );
+        assert_eq!(
+            sqlite_statement_kind("DELETE FROM t"),
+            SqliteStatementKind::Delete
+        );
+        assert_eq!(
+            sqlite_statement_kind("CREATE TABLE t (id INTEGER)"),
+            SqliteStatementKind::Other
+        );
+    }
+}
+
+/// Credit rows a write statement changed to the process-wide counters.
+pub(crate) fn record_sqlite_rows_affected(sql: &str, rows: u64) {
+    SQLITE_PERF_COUNTERS.record_rows_affected(sqlite_statement_kind(sql), rows);
 }
 static SQLITE_WRITE_METRICS: Lazy<Mutex<HashMap<String, SqliteWriteMetricSnapshot>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));

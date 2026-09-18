@@ -499,6 +499,19 @@ impl SqlitePerfRunGuard {
                     ("write_time_ms", format!("{:.1}", delta.db_write_time_ms())),
                     ("rows_affected", delta.rows_affected.to_string()),
                     (
+                        "insert_rows_affected",
+                        delta.insert_rows_affected.to_string(),
+                    ),
+                    (
+                        "update_rows_affected",
+                        delta.update_rows_affected.to_string(),
+                    ),
+                    (
+                        "delete_rows_affected",
+                        delta.delete_rows_affected.to_string(),
+                    ),
+                    ("other_rows_affected", delta.other_rows_affected.to_string(),),
+                    (
                         "permit_wait_ms",
                         format!("{:.1}", permit_wait_ns as f64 / 1e6)
                     ),

@@ -3,7 +3,7 @@ use anyhow::{Result, ensure};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, io::Write, path::Path};
 
-pub const DERIVED_SCHEMA_VERSION: u64 = 4;
+pub const DERIVED_SCHEMA_VERSION: u64 = 5;
 
 fn fallback(value: &Value, default: Value) -> Value {
     if value.is_null() {
