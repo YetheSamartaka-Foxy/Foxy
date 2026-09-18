@@ -368,12 +368,11 @@ correctness gates.
 ### O5 - Remote metadata refresh
 
 1. **Completion**: the repository's remote tree is current and persisted.
-2. **Reference**: none in-app (`self_baseline`). Model network dependency
-   depth and bounded fan-out, then parse and DB service on the real critical
-   path; do not score a large refresh against RTT alone. The test kit gives
-   the no-change branch a calibrated latency estimate through the action
-   record (O6); a rebuilt graph has no reference yet (parse and persist
-   dominate and B5/DB references are still open).
+2. **Reference**: none in-app (`self_baseline`). The test kit freezes a
+   same-case rebuilt-graph median as the empirical action reference and keeps
+   the fetch, parse and persist service sums beside the bounded fan-out wall
+   span. Do not score a large refresh against RTT or a DB row rate alone. The
+   no-change branch instead receives the calibrated O6 latency estimate.
 3. **Comparisons**: `SOL op=remote_refresh` (`outcome`, `index_requests`,
    `manifest_requests`, `mods`, `files`, `parts`, `response_bytes`, the
    summed `fetch_sum_s` / `parse_sum_s` / `persist_sum_s` service times and
@@ -388,6 +387,9 @@ correctness gates.
    that fetches every manifest for one changed addon is a scope bug); zero,
    one, many and all changed addons are different cases. The `*_sum_s`
    fields are service sums over parallel tasks, never wall time.
+   `fan_out_wall_s / actual_s` is dependency coverage, not a physical SoL
+   ratio. The enclosing `sync_action` may include bootstrap hashing and delta
+   planning after the remote graph is current and is not the O5 span.
 6. **Counters**: the `remote_refresh` line; debug `Fetched response body for
    ...` per fetch.
 7. **Gates**: only changed scope fetched and persisted where allowed.
