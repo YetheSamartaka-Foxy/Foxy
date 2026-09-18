@@ -19,7 +19,7 @@ Where a row says `MB/s` from a download report line it is MiB/s
 (`1024 * 1024`); rows typed by hand in the September tables used decimal
 MB/s. Recover exact values from `work_bytes` and `actual_s` when it matters.
 
-## 1. Status by operation (as of 2026-09-18, checkout `178acb1`)
+## 1. Status by operation (as of 2026-09-18, checkout `956de9e`)
 
 `n/a` means the required reference or measurement is missing, not zero
 performance. "Reported" ratios keep their original interpretation; the
@@ -30,7 +30,8 @@ comparison column says what the number actually compares.
 | O1 full download, small NVMe | 95%, calibrated estimate against the evening B1 (`network-20260916-3bc06636`, 114.6 MB/s); same-run peak consistency 92% | Stage 39.5-39.8 s: ramp 3-4 s (244-252 MiB short of the plateau), plateau 34-36 s, tail 1.6-1.9 s (59-70 MiB short); the ramp is the path's (identical at 96 and 192 connections in the calibration lane) | 217 files, 4.33 GB, peak window 118.3 MB/s, oracle pass, Sept 16 `20260916T205020Z` | Steady transfer is at the path plateau; what is left is the path ramp and the last wave, neither a client lever at this origin |
 | O1 many tiny files, NVMe | n/a, loopback origin (per-file cost, not throughput) | 822 s shipped, 22.6-32.6 s after the append-only rollback journal (25-36x) | 32,016 x 8 KiB, 293-357k persisted rows in 10.9-14.1 s of write windows, Sept 16 `20260916T203538Z` | The rollback manifest rewrite was quadratic in the file count; the remaining cost is DB rows and 1,000 hash batches |
 | O1 one large file, NVMe | Reported peak consistency only (loopback) | 2 GiB in 2.06-2.12 s, 1.0 GB/s, tail 0.03-0.74 s | Sept 16 `20260916T202401Z` | The range scheduler alone reaches the NVMe durable write rate on a loopback path |
-| O1 limiter above the path | 42% against a 2000 Mbps cap (modeled bound); 90-91% against B1 | Same 40.6-40.8 s stage as the unlimited lane | Sept 16 `20260916T173645Z` | A cap above the path leaves the B1 ratio as the physical reading; the cap-relative number is policy headroom, not waste |
+| O1 limiter below the path | 96.78-96.92% against a 400 Mbps cap (modeled bound); 42.24-42.30% against B1 | 89.38-89.50 s stage with a 47.9 MiB/s peak window | Five clean, flag-free samples, Sept 18 `20260918T154512Z-383c1fd0` | The limiter is the bound and stays within 3.22% of its configured rate |
+| O1 limiter above the path | 38.36-39.76% against a 2000 Mbps cap (modeled bound); 83.71-86.77% against B1 | 43.57-45.16 s stage with 102.0-105.6 MiB/s peak windows | Five clean, flag-free samples, commit `956de9e`, Sept 18 `20260918T160309Z-054e6fc4` | A cap above the path leaves the B1 ratio as the physical reading; the cap-relative number is policy headroom, not waste |
 | O1 truncated-response recovery | n/a, deterministic correctness lane | Eight incomplete payload bodies recovered across 4,832 files | Independent oracle pass and zero residual `.foxy.part`, `.foxy.part.meta` or `.foxy.tmp` files, schema 4, Sept 18 `20260918T102801Z-305322f0` | Loopback fault injection preserves the full Content-Length, truncates only the configured payload responses, and requires explicit batch-retry evidence |
 | O1 full download, small HDD | Reported 63-81%, peak consistency | 45.2-58.2 s overlaps the Sept 10 range of 44-58 s | Sept 16, restored network limits | The 125-137 s rotational-profile regression was reversed; disk and cache effects still need isolation |
 | O1 full download, large NVMe | Reported 97%, peak consistency | No matched independent whole-action lower bound | 92.2 GB / 3,738 files in 801 s, WAL, Sept 9 | Historical; not a current-build regression gate without replay and matching metadata |
@@ -57,8 +58,9 @@ comparison column says what the number actually compares.
 
 ## 1a. Current accepted baselines
 
-Generated with `foxy-testkit measurements` from the five accepted version 2
-baselines at checkout `98e45d7956326cf902cd31342b4f9b153fe3a425`.
+Regenerated with `foxy-testkit measurements` from the current compatible
+accepted baseline set at checkout `956de9e`. Rows that name an app-owned action
+instead of the outer driver bracket cite the same accepted run artifact.
 
 | Date | Case | Operation | SoL (kind) | Lane | Elapsed | Baseline | Samples | Work | Outcome | Build | Run |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -71,8 +73,9 @@ baselines at checkout `98e45d7956326cf902cd31342b4f9b153fe3a425`.
 | 2026-09-17 | `perf-tfr-scifi-stale-check-hdd` | quick-check-verify@evicted (O4 quick scan) | 68% (calibrated, hash B2+B6) | hdd evicted | 32.24 s | 32.24 s median of 7 [31.56-32.78] | 7 | 2.44 GB hashed | ok | 98e45d7 | `20260917T155052Z-18ca3678` |
 | 2026-09-17 | `perf-tfr-scifi-stale-check-hdd` | remote-refresh (O5 remote metadata refresh) | 5% (calibrated, metadata B5) | hdd warm | 0.64 s | 0.64 s median of 7 [0.60-0.69] | 7 | n/a | ok | 98e45d7 | `20260917T155052Z-18ca3678` |
 | 2026-09-18 | `perf-db-refresh-main` | remote-refresh (O5 rebuilt graph) | n/a physical; empirical baseline | ssd warm, loopback | 0.733 s | 0.733 s median of 5 [0.706-0.779] | 5 | 96 manifests, 3,738 files, 433,063 parts | rebuilt,rebuilt,rebuilt,rebuilt,rebuilt | 9d8cfa3 | `20260918T103741Z-27e09ddc` |
-| 2026-09-17 | `perf-startup-arma3-live` | startup (O8 startup) | 84% (calibrated, probe B4) | ssd warm | 3.03 s | 3.03 s median of 5 [3.01-3.11] | 5 | 11 repos | ok | 98e45d7 | `20260917T115028Z-14f33d74` |
-| 2026-09-17 | `perf-tfr-scifi-delta-patch-ssd` | download (O2 delta patch) | 3% (calibrated, network B1) | ssd warm | 2.16 s | 2.16 s median of 5 [2.16-2.36] | 5 | 4 files, 0.01 GB, 0.21 GB hashed | completed,completed,completed,completed,completed | 98e45d7 | `20260917T115110Z-2a30d7a0` |
+| 2026-09-18 | `perf-tfr-scifi-delta-patch-ssd` | db-persist (O7 gated write windows) | 62% median (calibrated, per-kind DB) | ssd warm, gate 1 | 11.3-21.1 ms | 10.613 ms per-kind estimate | 5 | 240 inserts, 232 updates, 205 deletes | early_exit | 571efc1 | `20260918T110808Z-0934e668` |
+| 2026-09-18 | `perf-startup-arma3-live` | startup (O8 startup) | 77% (calibrated, probe B4) | ssd warm | 3.05 s | 3.05 s median of 5 [3.02-3.06] | 5 | 11 repos | ok | 02c935e | `20260918T151335Z-18cda6f0` |
+| 2026-09-18 | `perf-tfr-scifi-delta-patch-ssd` | download (O2 delta patch) | 3% (calibrated, network B1) | ssd warm | 2.13 s | 2.13 s median of 5 [2.13-2.16] | 5 | 4 files, 0.01 GB, 0.21 GB hashed | completed,completed,completed,completed,completed | 571efc1 | `20260918T110808Z-0934e668` |
 
 ## 1b. Shared-aggregation and patch-timeline candidate
 
@@ -338,10 +341,12 @@ on `startup_probe`, and `frame_ms` percentiles in the agent `fps` probe.
   the "double the budget for the first seconds" idea is rejected without a
   build. After the fixes below the stage reads 39.5-39.8 s, 0.95 against
   the evening B1, peak 118.3 MB/s.
-- Limiter above the path (`perf-redownload-small-ssd-limited-above`,
-  `20260916T173645Z`): a 2000 Mbps cap reads 0.42 against the cap and
-  0.90-0.91 against B1 at the same 40.6-40.8 s stage; the cap-relative
-  number is not a regression when the cap sits above the path.
+- Limiter controls (`perf-redownload-small-ssd-limited` and
+  `perf-redownload-small-ssd-limited-above`, `20260918T154512Z-383c1fd0` and
+  `20260918T160309Z-054e6fc4`): five clean samples at 400 Mbps read
+  0.9678-0.9692 against the cap; five clean samples at 2000 Mbps read
+  0.3836-0.3976 against the cap but 0.8371-0.8677 against B1. Case gates now
+  assert both the modeled cap and calibrated physical reference directly.
 - Responsiveness under work (`perf-redownload-small-ssd-responsive`,
   `20260916T173824Z`): worst frame 14-20 ms and p95 6.7-7.2 ms under the
   download, 13-14 ms under the integrity recheck, smoothed fps never below
@@ -416,11 +421,11 @@ records the concurrency curve. New records: `SOL op=db_purge`, `SOL
 op=space_switch`, `algorithm=` on hash lines, `entries=` on quick-scan lines.
 New cases and what they measured:
 
-- Limiter (`perf-redownload-small-ssd-limited`, `20260916T163230Z`): under a
-  400 Mbps cap the download reads 95-97% against the cap (`limiter_cap`,
-  modeled bound, peak window 50.7 MB/s) and 40-41% against B1. The two
-  numbers answer different questions and the kit shows both; a cap-bound run
-  is not a regression.
+- Limiter (`perf-redownload-small-ssd-limited`, `20260918T154512Z-383c1fd0`):
+  under a 400 Mbps cap the five clean downloads read 96.78-96.92% against the
+  cap (`limiter_cap`, modeled bound, 47.9 MiB/s peak windows) and 42.24-42.30%
+  against B1. The two numbers answer different questions and the kit gates
+  both; a cap-bound run is not a regression.
 - Instrumentation A/B (`perf-redownload-small-ssd-profiled`,
   `20260916T162528Z`): download stage 40.1-40.7 s profiled against
   40.4-41.0 s unprofiled the same hour; inside noise on a network-bound lane.

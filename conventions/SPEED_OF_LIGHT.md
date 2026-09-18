@@ -706,6 +706,23 @@ work, reference and outcome fields through the shared `foxy-sol` crate.
   lane's `sol_calibrated` drifts without a code change (the reference moved,
   not Foxy). Recalibrating retires the baselines that cited the old lane;
   re-accept them on a clean revision.
+- **Reference schedule.** A reference is remeasured before accepting a new
+  baseline when its trigger below fires. If no trigger fires, refresh B1/B4
+  every 30 days and local machine lanes every 90 days so gradual drift is not
+  mistaken for an application change.
+
+  | Reference | Immediate remeasurement triggers |
+  | --- | --- |
+  | B1 network, B4 latency and hosts | Origin host, protocol, certificate, proxy, route, NIC or connection-budget change; unexplained flagship network drift |
+  | B2/B3 disk and B5 metadata | Device, volume, filesystem, storage driver, cache preparation or OS major-version change |
+  | B6 hash | CPU, compiler target/features, hash implementation, algorithm or worker-count policy change |
+  | DB | Turso version, bootstrap schema, synchronous mode, write gate, transaction shape or database volume change |
+  | B8 memory/startup and UI | Renderer/backend, graphics driver, UI framework, startup graph, display scale or memory policy change |
+
+  The accepted operation baseline itself is rerun after code changes in its
+  owned path, a case/payload/origin checksum change, a reference-id change or
+  any automatic compatibility expiry. A scheduled reference refresh does not
+  preserve the old baseline: re-accept at least five clean compatible samples.
 - **Flagship recheck.** Any change that can touch download, sync or startup
   paths reruns the O1 and O6 lanes (`perf-redownload-small-ssd`: the force
   redownload and the clean recheck after it) and the O8 lane before it lands:
