@@ -125,6 +125,7 @@ const MIN_AUTO_BENCHMARK_BYTES: u64 = 256 * 1024 * 1024;
 /// disjoint group per profile.
 const MAX_BENCHMARK_GROUPS: usize = 3;
 const LOW_WAIT_AGGRESSIVE_THRESHOLD: f64 = 0.01;
+const PROFILE_SWITCH_MIN_IMPROVEMENT_PERCENT: f64 = 10.0;
 static AUTO_BENCHMARK_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 
 fn cap_auto_hash_profile(
@@ -534,6 +535,32 @@ fn benchmark_supports_boosted_aggressive(
         && storage_class != HashStorageClass::Hdd
         && resource_profile.pressure == ResourcePressure::Normal
         && benchmark_wait_ratio(metrics) <= LOW_WAIT_AGGRESSIVE_THRESHOLD
+}
+
+fn select_benchmark_profile(
+    initial_profile: HashIoProfilePreference,
+    trials: &[(HashIoProfilePreference, f64, bool)],
+) -> Option<(HashIoProfilePreference, f64, bool)> {
+    let fastest = trials
+        .iter()
+        .copied()
+        .max_by(|left, right| left.1.total_cmp(&right.1))?;
+    let Some(initial) = trials
+        .iter()
+        .copied()
+        .find(|(profile, _, _)| *profile == initial_profile)
+    else {
+        return Some(fastest);
+    };
+    if fastest.0 == initial_profile {
+        return Some(fastest);
+    }
+    let required = initial.1 * (1.0 + PROFILE_SWITCH_MIN_IMPROVEMENT_PERCENT / 100.0);
+    if fastest.1 >= required {
+        Some(fastest)
+    } else {
+        Some(initial)
+    }
 }
 
 fn log_hash_scheduler_selection(
@@ -1552,7 +1579,7 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
         benchmark_profiles.into_iter().zip(groups).collect();
     let mut benchmark_results: Vec<FileHashResult> = Vec::new();
     let mut benchmark_hashed_bytes = 0u64;
-    let mut best: Option<(HashIoProfilePreference, f64, bool)> = None;
+    let mut valid_trials: Vec<(HashIoProfilePreference, f64, bool)> = Vec::new();
     if let Some(tx) = progress_tx {
         let _ = tx.send(ProgressEvent::Stage {
             label: "Hashing profile".to_string(),
@@ -1662,18 +1689,18 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
             );
             continue;
         }
-        if best.is_none_or(|(_, best_throughput, _)| throughput > best_throughput) {
-            let boost = benchmark_supports_boosted_aggressive(
-                profile,
-                &metrics,
-                storage_class,
-                resource_profile,
-            );
-            best = Some((profile, throughput, boost));
-        }
+        let boost = benchmark_supports_boosted_aggressive(
+            profile,
+            &metrics,
+            storage_class,
+            resource_profile,
+        );
+        valid_trials.push((profile, throughput, boost));
     }
 
-    let Some((best_profile, best_throughput, boost_remaining)) = best else {
+    let Some((best_profile, best_throughput, boost_remaining)) =
+        select_benchmark_profile(initial_profile, &valid_trials)
+    else {
         warn!(
             "Hash profile auto benchmark produced no valid sample; using storage heuristic profile={}",
             initial_profile
@@ -1718,6 +1745,21 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
             cancelled,
         );
     };
+    if let Some((fastest_profile, fastest_throughput, _)) = valid_trials
+        .iter()
+        .copied()
+        .max_by(|left, right| left.1.total_cmp(&right.1))
+        && fastest_profile != best_profile
+    {
+        info!(
+            "Hash profile auto stability guard: selected={} sample_bps={:.0} fastest={} fastest_bps={:.0} minimum_improvement_percent={:.1}",
+            best_profile,
+            best_throughput,
+            fastest_profile,
+            fastest_throughput,
+            PROFILE_SWITCH_MIN_IMPROVEMENT_PERCENT
+        );
+    }
     let benchmark_elapsed = benchmark_started.elapsed();
     let remaining_parts: usize = jobs.iter().map(|job| job.indexed_parts.len()).sum();
     let remaining_limits = if boost_remaining {
@@ -1866,6 +1908,51 @@ mod tests {
                 HashIoProfilePreference::Aggressive,
                 HashIoProfilePreference::Conservative,
             ]
+        );
+    }
+
+    #[test]
+    fn benchmark_profile_keeps_initial_choice_for_small_sample_wins() {
+        let selected = select_benchmark_profile(
+            HashIoProfilePreference::Aggressive,
+            &[
+                (HashIoProfilePreference::Aggressive, 100.0, true),
+                (HashIoProfilePreference::Balanced, 109.9, false),
+            ],
+        );
+        assert_eq!(
+            selected,
+            Some((HashIoProfilePreference::Aggressive, 100.0, true))
+        );
+    }
+
+    #[test]
+    fn benchmark_profile_switches_for_a_material_sample_win() {
+        let selected = select_benchmark_profile(
+            HashIoProfilePreference::Aggressive,
+            &[
+                (HashIoProfilePreference::Aggressive, 100.0, true),
+                (HashIoProfilePreference::Balanced, 111.0, false),
+            ],
+        );
+        assert_eq!(
+            selected,
+            Some((HashIoProfilePreference::Balanced, 111.0, false))
+        );
+    }
+
+    #[test]
+    fn benchmark_profile_uses_fastest_valid_trial_when_initial_is_missing() {
+        let selected = select_benchmark_profile(
+            HashIoProfilePreference::Aggressive,
+            &[
+                (HashIoProfilePreference::Conservative, 90.0, false),
+                (HashIoProfilePreference::Balanced, 100.0, false),
+            ],
+        );
+        assert_eq!(
+            selected,
+            Some((HashIoProfilePreference::Balanced, 100.0, false))
         );
     }
 
