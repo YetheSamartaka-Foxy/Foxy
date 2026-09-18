@@ -436,6 +436,19 @@ fn detail_specs(op: &str) -> &'static [(&'static str, &'static str, Kind, Fold)]
             ("dispatch_s", "Dispatch", Kind::Secs, Fold::Max),
             ("eligibility_s", "Eligibility", Kind::Secs, Fold::Max),
             ("verdict_s", "Verdict", Kind::Secs, Fold::Max),
+            (
+                "dependency_bound_s",
+                "Dependency bound",
+                Kind::Secs,
+                Fold::Max,
+            ),
+            ("join_s", "Required join", Kind::Secs, Fold::Max),
+            (
+                "dependency_coverage_percent",
+                "Dependency coverage",
+                Kind::Percent,
+                Fold::Max,
+            ),
         ],
         "startup_probe" => &[
             ("repos", "Repositories", Kind::Count, Fold::Sum),

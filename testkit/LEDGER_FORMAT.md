@@ -155,6 +155,12 @@ startup probe. `sync_action` gains a
 `stage_prepared_queue_prune_s` stage when a reused queue dropped files a
 cancelled run had already verified.
 
+Derived schema 6 adds the O8 startup dependency accounting:
+`startup.dependency_bound_s` is the later of first paint and dispatch plus
+verdict duration, `startup.join_s` is the remaining action wall time, and
+`startup.dependency_coverage_percent` reports how much of the complete action
+that dependency path explains. It is not a physical SoL ratio.
+
 `delta_patch` is the aggregate O2 action record. `delta_patch_stages` retains
 every `SOL op=delta_patch_stage` record in log order, with the owning `op_id`,
 per-file attempt parent span, unique stage span, stage id, monotonic offsets and

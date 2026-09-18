@@ -47,6 +47,14 @@ fn secs(value: Duration) -> String {
     format!("{:.3}", value.as_secs_f64())
 }
 
+fn startup_dependency_bound(
+    first_frame: Duration,
+    dispatch: Duration,
+    verdict: Duration,
+) -> Duration {
+    first_frame.max(dispatch.saturating_add(verdict))
+}
+
 impl Foxy {
     /// Start the O8 timeline. Called once, on the frame that dispatches startup
     /// background work (which is the frame after first paint).
@@ -138,6 +146,14 @@ impl Foxy {
         tracker.settled = true;
         let verdict = tracker.dispatched_at.elapsed();
         let total = api::process_start_elapsed();
+        let dependency_bound =
+            startup_dependency_bound(tracker.to_first_frame, tracker.to_dispatch, verdict);
+        let join = total.saturating_sub(dependency_bound);
+        let dependency_coverage_percent = if total.is_zero() {
+            0.0
+        } else {
+            100.0 * dependency_bound.as_secs_f64() / total.as_secs_f64()
+        };
         let quick_scan_requested = self.startup_quick_scan_requested;
         let Some(tracker) = self.startup_sync.as_ref() else {
             return;
@@ -163,11 +179,43 @@ impl Foxy {
                         secs(tracker.eligibility_elapsed.unwrap_or_default()),
                     ),
                     ("verdict_s", secs(verdict)),
+                    ("dependency_bound_s", secs(dependency_bound)),
+                    ("join_s", secs(join)),
+                    (
+                        "dependency_coverage_percent",
+                        format!("{dependency_coverage_percent:.2}"),
+                    ),
                     ("outcome", "settled".to_string()),
                     ("op_id", api::startup_operation_id().to_string()),
                 ],
             )
         );
         self.needs_repaint = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::startup_dependency_bound;
+    use std::time::Duration;
+
+    #[test]
+    fn startup_dependency_bound_uses_overlapping_branch_completion() {
+        assert_eq!(
+            startup_dependency_bound(
+                Duration::from_millis(450),
+                Duration::from_millis(470),
+                Duration::from_millis(80),
+            ),
+            Duration::from_millis(550)
+        );
+        assert_eq!(
+            startup_dependency_bound(
+                Duration::from_millis(600),
+                Duration::from_millis(470),
+                Duration::from_millis(80),
+            ),
+            Duration::from_millis(600)
+        );
     }
 }

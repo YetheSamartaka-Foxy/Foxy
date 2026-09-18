@@ -3,7 +3,7 @@ use anyhow::{Result, ensure};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, io::Write, path::Path};
 
-pub const DERIVED_SCHEMA_VERSION: u64 = 5;
+pub const DERIVED_SCHEMA_VERSION: u64 = 6;
 
 fn fallback(value: &Value, default: Value) -> Value {
     if value.is_null() {
@@ -138,6 +138,9 @@ pub fn build_row(
         "dispatch_ms",
         "eligibility_ms",
         "verdict_ms",
+        "dependency_bound_ms",
+        "join_ms",
+        "dependency_coverage_percent",
         "cancel_quiescent_ms",
     ] {
         sums[key] = summary[key].clone();

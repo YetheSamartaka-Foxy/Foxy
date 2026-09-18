@@ -457,11 +457,12 @@ correctness gates.
    configured repository. Distinguish first painted frame, first interaction,
    first repository verdict and all-repository settlement; `SOL op=startup`
    emits at settlement, which can include queued rechecks.
-2. **Reference**: none in-app (`self_baseline`); the logged timeline cannot
-   yield a physical ratio without a compatible renderer and network baseline.
-   For branches that genuinely start together,
-   `max(T_paint_branch, T_verdict_branch) + T_required_join`, with branch
-   start offsets and contention; never paint plus a probe that overlaps it.
+2. **Reference**: no physical ratio in-app (`self_baseline`). The action emits
+   the observed dependency bound
+   `max(T_first_frame, T_dispatch_offset + T_verdict_from_dispatch)`, the
+   remaining required join, and their coverage of action wall time. This is a
+   timeline-accounting bound, not renderer or network capacity. Never add paint
+   to a probe that overlaps it.
 3. **Comparisons**: the disputed 74% and the corrected arithmetic are in the
    measurements file.
 4. **Work**: launch/setup, renderer initialization, background eligibility and
@@ -469,8 +470,10 @@ correctness gates.
    timed-out repository is not a successful verdict; report answered, unknown,
    changed and failed counts (`SOL op=startup_probe`).
 5. **Timers**: `first_frame_s` and `dispatch_s` are offsets from launch;
-   `eligibility_s` and `verdict_s` are durations from dispatch; they cannot be
-   added blindly.
+   `eligibility_s` and `verdict_s` are durations from dispatch.
+   `dependency_bound_s`, `join_s` and `dependency_coverage_percent` preserve
+   those origins and expose any action time not explained by the two required
+   completion branches.
 6. **Counters**: `SOL op=startup` (`repos`, `quick_scan_repos`, `eligible`,
    `prevalidated`, `remote_changed`, `rechecks` and the four timers);
    `Quick scan preflight timings:` per repository.
@@ -554,7 +557,7 @@ appended keys; parsers treat them as `metric_kind` inferred from `light_src` and
 | `SOL op=db_persist` (every sync action) | `op_id`, `mode`, `outcome` (`completed`, `early_exit`), `write_time_ms`, `rows_affected`, per-kind `insert_rows_affected`, `update_rows_affected`, `delete_rows_affected`, `other_rows_affected`, `permit_wait_ms`, `write_calls`, `write_committed`, `write_failed`, `lock_retries`, `backoff_ms`, `categories`, `write_gate`, `conn_opened`, `conn_reused`, `timer_scope=action_wall` |
 | `SOL op=db_purge` (every repository or addon purge) | `op_id`, `kind` (`repository`, `addon`), `outcome`, `steps` (timed statements), `rows_affected`, the same four per-kind affected-row counters, `txn_s`, `checkpoint_s`, `timer_scope=action_wall` |
 | `SOL op=space_switch` (every runtime game-space switch) | `op_id`, `outcome`, `drain_s` (queued saves landing in the old space), `reset_s`, `reload_s`, `repositories`, `timer_scope=action_wall` |
-| `SOL op=startup` | `repos`, `quick_scan_repos`, `eligible`, `prevalidated`, `remote_changed`, `rechecks`, `first_frame_s`, `dispatch_s`, `eligibility_s`, `verdict_s`, `outcome=settled`, `op_id` |
+| `SOL op=startup` | `repos`, `quick_scan_repos`, `eligible`, `prevalidated`, `remote_changed`, `rechecks`, `first_frame_s`, `dispatch_s`, `eligibility_s`, `verdict_s`, `dependency_bound_s`, `join_s`, `dependency_coverage_percent`, `outcome=settled`, `op_id` |
 | `SOL op=startup_probe` | `repos`, `answered`, `changed`, `unknown`, `first_answer_s`, `last_answer_s` (offsets of the first and last branch to answer, so one slow host reads as the gap between them), `outcome` (`complete`, `partial`), `op_id` (shared with `startup`) |
 | `SOL op=app_update_check` | `op_id`, `mode`, `outcome` |
 
