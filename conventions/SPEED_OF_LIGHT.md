@@ -205,9 +205,11 @@ correctness gates.
 4. **Work**: selected output bytes (`full_bytes`), successful response-body
    bytes credited to files (`credited_bytes`), the shared transfer counter
    (`work_bytes`, an application counter, not TCP/IP traffic with headers),
-   `expected_bytes`, `range_retries`. `work_bytes` and `credited_bytes` differ
-   under retries, resume and fallback; neither is verified output bytes. The
-   completion line's `avg_speed` uses credited bytes.
+   `expected_bytes`, `range_retries`. Test-kit fault lanes also retain
+   `download_retried_files` from successful batch recovery. `work_bytes` and
+   `credited_bytes` differ under retries, resume and fallback; neither is
+   verified output bytes. The completion line's `avg_speed` uses credited
+   bytes.
 5. **Dependencies**: queue preparation -> transfer (ranges in parallel, shared
    permits and link) -> on-arrival hashing overlapped -> verification and
    promotion -> database finalization. `R_allowed = min(R_cap, R_path, other
@@ -237,7 +239,9 @@ correctness gates.
    `prepared_queue_prune` stage counts the files the reused queue dropped.
    `permit_wait` high -> fair-share starvation; range latency percentiles high -> ranges too small for the RTT
    (E7); disk averages near the device rate -> disk-bound (E4). Gates: same
-   verified payload (oracle), no hidden retry or memory growth, `outcome=completed`.
+   verified payload (oracle), explicit retry accounting, no residual
+   `.foxy.part`, `.foxy.part.meta` or `.foxy.tmp` artifacts, no hidden memory
+   growth, `outcome=completed`.
 
 ### O2 - Delta patch
 

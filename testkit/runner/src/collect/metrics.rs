@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 use super::event_lines;
 
 pub fn run_metrics(text: &str) -> Value {
-    let mut result = json!({"files":null,"bytes":null,"db_write_time_ms":null,"lock_retries":null,"total_backoff_ms":null,"elapsed_ms":null,"permit_wait_ms_total":null,"write_calls_total":null,"write_failures_total":null,"write_retries_total":null,"checkpoint_total_s":null,"hash_work_bytes":0,"hash_total_s":0.0,"tree_verify_runs":0,"fs_watcher_starts":0,"prepared_queue_reuses":0,"pipeline_outcome":null,"failed_pipelines":0,"content_refresh_runs":0,"content_refresh_files_sampled":0,"hash_source_segments_files":0,"hash_source_reread_files":0,"hash_batches_after_download":0,"final_hash_flush_files":0,"download_large_files_limit":null,"download_small_files_limit":null,"download_patch_applies_limit":null,"first_download_start_ms":null,"patch_fallbacks":0,"patch_applies":0,"patch_range_requests":0,"patch_gap_bytes":0,"patch_copy_bytes":0,"patch_cancelled":0});
+    let mut result = json!({"files":null,"bytes":null,"download_retries":null,"download_retried_files":0,"db_write_time_ms":null,"lock_retries":null,"total_backoff_ms":null,"elapsed_ms":null,"permit_wait_ms_total":null,"write_calls_total":null,"write_failures_total":null,"write_retries_total":null,"checkpoint_total_s":null,"hash_work_bytes":0,"hash_total_s":0.0,"tree_verify_runs":0,"fs_watcher_starts":0,"prepared_queue_reuses":0,"pipeline_outcome":null,"failed_pipelines":0,"content_refresh_runs":0,"content_refresh_files_sampled":0,"hash_source_segments_files":0,"hash_source_reread_files":0,"hash_batches_after_download":0,"final_hash_flush_files":0,"download_large_files_limit":null,"download_small_files_limit":null,"download_patch_applies_limit":null,"first_download_start_ms":null,"patch_fallbacks":0,"patch_applies":0,"patch_range_requests":0,"patch_gap_bytes":0,"patch_copy_bytes":0,"patch_cancelled":0});
     let pattern =
         regex::Regex::new(r"TOTAL DOWNLOAD total:\s*files=(\d+)\s+bytes=([\d.]+)\s*([KMGT]?i?B)")
             .unwrap();
@@ -20,6 +20,16 @@ pub fn run_metrics(text: &str) -> Value {
             .round_ties_even()
             .into();
     }
+    let pattern = regex::Regex::new(r"TOTAL DOWNLOAD total:[^\n]* retries=(\d+)").unwrap();
+    if let Some(c) = pattern.captures(text) {
+        result["download_retries"] = c[1].parse::<u64>().unwrap().into();
+    }
+    let pattern = regex::Regex::new(r"Retry recovery:[^\n]* total_retried_files=(\d+)").unwrap();
+    result["download_retried_files"] = event_lines(text)
+        .filter_map(|line| pattern.captures(line))
+        .filter_map(|captures| captures[1].parse::<u64>().ok())
+        .sum::<u64>()
+        .into();
     let pattern=regex::Regex::new(r"sqlite: mode=\w+ lock_retries=(\d+) avg_backoff_ms=[\d.]+ total_backoff_ms=(\d+) db_write_time_ms=([\d.]+)(?: [a-z_]+=[^ ]+)* elapsed_ms=(\d+)").unwrap();
     if let Some(c) = pattern.captures(text) {
         for (key, index) in [
@@ -269,9 +279,11 @@ mod tests {
     #[test]
     fn download_and_write_totals() {
         let metrics = run_metrics(
-            "TOTAL DOWNLOAD total: files=2 bytes=1.5 MiB\nsqlite: mode=wal lock_retries=2 avg_backoff_ms=1.0 total_backoff_ms=2 db_write_time_ms=3.5 extra=1 elapsed_ms=12\ncalls=3 committed=3 failed=0 retries=2 backoff_ms=0 permit_wait_ms=1.25\ncalls=4 committed=4 failed=1 retries=0 backoff_ms=0 permit_wait_ms=2.25\ncheckpoint_batches=1 rows=2 statements=3 total=0.5s",
+            "TOTAL DOWNLOAD total: files=2 bytes=1.5 MiB elapsed=1.0s avg=1.5 MB/s retries=3\nRetry recovery: mod_id=1 all files succeeded on attempt 2 total_retried_files=4\nsqlite: mode=wal lock_retries=2 avg_backoff_ms=1.0 total_backoff_ms=2 db_write_time_ms=3.5 extra=1 elapsed_ms=12\ncalls=3 committed=3 failed=0 retries=2 backoff_ms=0 permit_wait_ms=1.25\ncalls=4 committed=4 failed=1 retries=0 backoff_ms=0 permit_wait_ms=2.25\ncheckpoint_batches=1 rows=2 statements=3 total=0.5s",
         );
         assert_eq!(metrics["bytes"], 1572864.0);
+        assert_eq!(metrics["download_retries"], 3);
+        assert_eq!(metrics["download_retried_files"], 4);
         assert_eq!(metrics["write_calls_total"], 7.0);
         assert_eq!(metrics["permit_wait_ms_total"], 3.5);
         assert_eq!(metrics["elapsed_ms"], 12.0);

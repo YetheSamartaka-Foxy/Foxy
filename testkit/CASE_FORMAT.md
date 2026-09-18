@@ -100,7 +100,7 @@ no unallowlisted WARN or ERROR entries.
 | `thresholds` | no | `{}` | Per-metric `{min,max}` hard gates |
 | `guards` | no | defaults below | Precondition object |
 | `settings` | no | none | object merged into the generated `settings.json` (a bandwidth cap, a hash profile); ignored with `fixture.files` or a `config_seed` |
-| `origin` | no | none | `{root, port}` served in-process for the run; `delay_ms` holds every response back that long (an adverse-origin lane) |
+| `origin` | no | none | `{root, port}` served in-process for the run; `delay_ms` holds every response back that long. `truncate_first_responses`, `truncate_after_bytes`, and optional `truncate_path_suffix` create deterministic incomplete-body retries. |
 
 Supported operations are `startup`, `ui-walk`, `switch-game-space`,
 `remote-refresh`, `quick-check`, `recheck`, `recheck-integrity`,
@@ -144,8 +144,10 @@ throughput by blocking the UI thread.
 `run_metrics` also carries the redundant-work counters the checker cases
 assert on: `hash_work_bytes` (bytes read by every `SOL op=hash` run in the
 operation), `tree_verify_runs` (targeted tree-hash verifies the quick scan
-triggered), `fs_watcher_starts`, and `prepared_queue_reuses`. Expectations
-reach them as `breakdown.run_metrics.<name>`.
+triggered), `fs_watcher_starts`, `prepared_queue_reuses`,
+`download_retries` from the final transfer report, and
+`download_retried_files` from successful batch recovery. Expectations reach
+them as `breakdown.run_metrics.<name>`.
 
 The hash-source counters say where an update's hash bytes came from and when
 they were paid: `content_refresh_runs` and `content_refresh_files_sampled`
@@ -241,8 +243,11 @@ absent for that operation and the gate should then be skipped.
 
 The expectation view exposes the last aggregate patch action as `delta_patch`
 and its typed per-file stage records as `delta_patch_stages`, in addition to
-`summary`, `sol`, `breakdown`, and `elapsed_s`. Patch cases should assert the
-aggregate outcome, conservation state, and fallback or cancellation counters.
+`download`, `summary`, `sol`, `breakdown`, and `elapsed_s`. Patch cases should
+assert the aggregate outcome, conservation state, and fallback or cancellation
+counters. A measured operation with `inspect_cleanup: true` also exposes
+`summary.cleanup.residual_files` and the separate `.foxy.part`,
+`.foxy.part.meta`, and `.foxy.tmp` counts without recording local paths.
 
 The `mutate` operation adds `profile`, `seed`, `files`, `entries`, `bytes`,
 optional `path` and optional `preserve_mtime`. `path` defaults to the

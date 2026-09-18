@@ -1,24 +1,80 @@
 use anyhow::{Context, Result, ensure};
-use hyper::{server::conn::http1, service::service_fn};
+use http_body_util::BodyExt;
+use hyper::{
+    body::{Body, Bytes, Frame, SizeHint},
+    server::conn::http1,
+    service::service_fn,
+};
 use hyper_util::rt::TokioIo;
 use serde_json::{Value, json};
-use std::{net::SocketAddr, path::Path, sync::mpsc, thread, time::Instant};
+use std::{
+    net::SocketAddr,
+    path::Path,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
+    task::{Context as TaskContext, Poll},
+    thread,
+    time::Instant,
+};
 use tokio::{net::TcpListener, sync::oneshot, task::JoinSet};
 use tower::ServiceExt;
 use tower_http::services::ServeDir;
 
-/// Response-shape controls for an adverse-origin lane: every response is
-/// held back by `delay_ms` before the first byte.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Response-shape controls for adverse-origin lanes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Impairment {
     pub delay_ms: u64,
+    pub truncate_first_responses: u64,
+    pub truncate_after_bytes: usize,
+    pub truncate_path_suffix: Option<String>,
 }
 
 impl Impairment {
     pub fn from_case(origin: &Value) -> Self {
         Self {
             delay_ms: origin["delay_ms"].as_u64().unwrap_or(0),
+            truncate_first_responses: origin["truncate_first_responses"].as_u64().unwrap_or(0),
+            truncate_after_bytes: origin["truncate_after_bytes"]
+                .as_u64()
+                .and_then(|value| usize::try_from(value).ok())
+                .unwrap_or(0),
+            truncate_path_suffix: origin["truncate_path_suffix"].as_str().map(str::to_owned),
         }
+    }
+
+    fn can_truncate(&self, method: &hyper::Method, path: &str) -> bool {
+        self.truncate_first_responses > 0
+            && self.truncate_after_bytes > 0
+            && method == hyper::Method::GET
+            && self
+                .truncate_path_suffix
+                .as_deref()
+                .is_none_or(|suffix| path.ends_with(suffix))
+    }
+}
+
+struct TruncatedBody {
+    bytes: Option<Bytes>,
+    claimed_len: u64,
+}
+
+impl Body for TruncatedBody {
+    type Data = Bytes;
+    type Error = std::io::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        _cx: &mut TaskContext<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        Poll::Ready(self.bytes.take().map(|bytes| Ok(Frame::data(bytes))))
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        SizeHint::with_exact(self.claimed_len)
     }
 }
 
@@ -56,6 +112,7 @@ impl Origin {
                 };
                 let _ = ready_tx.send(listener.local_addr());
                 let service = ServeDir::new(root);
+                let truncated_responses = Arc::new(AtomicU64::new(0));
                 let mut connections = JoinSet::new();
                 loop {
                     tokio::select! {
@@ -64,27 +121,64 @@ impl Origin {
                         accepted = listener.accept() => {
                             let Ok((stream, _)) = accepted else { break };
                             let service = service.clone();
+                            let impairment = impairment.clone();
+                            let truncated_responses = Arc::clone(&truncated_responses);
                             connections.spawn(async move {
                                 let service = service_fn(move |mut request: hyper::Request<hyper::body::Incoming>| {
                                     let service = service.clone();
+                                    let impairment = impairment.clone();
+                                    let truncated_responses = Arc::clone(&truncated_responses);
                                     async move {
                                         if impairment.delay_ms > 0 {
                                             tokio::time::sleep(std::time::Duration::from_millis(impairment.delay_ms)).await;
                                         }
+                                        let truncate = impairment.can_truncate(request.method(), request.uri().path());
                                         // ServeDir rejects oversized suffixes; clamp through its own safe HEAD lookup.
                                         if let Some(suffix) = request.headers().get("range").and_then(|v| v.to_str().ok())
                                             .and_then(|v| v.strip_prefix("bytes=-")).filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
                                             .and_then(|v| v.parse::<u64>().ok()) {
                                             let head = hyper::Request::builder().method("HEAD").uri(request.uri().clone())
                                                 .body(http_body_util::Empty::<hyper::body::Bytes>::new()).unwrap();
-                                            let response = service.clone().oneshot(head).await?;
+                                            let response = service
+                                                .clone()
+                                                .oneshot(head)
+                                                .await
+                                                .unwrap_or_else(|never| match never {});
                                             if response.status().is_success()
                                                 && let Some(size) = response.headers().get("content-length").and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok())
                                                 && size > 0 && suffix > size {
                                                 request.headers_mut().insert("range", "bytes=0-".parse().unwrap());
                                             }
                                         }
-                                        service.oneshot(request).await
+                                        let response = service
+                                            .oneshot(request)
+                                            .await
+                                            .unwrap_or_else(|never| match never {});
+                                        let claimed = truncate
+                                            && truncated_responses
+                                                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                                                    (count < impairment.truncate_first_responses)
+                                                        .then_some(count + 1)
+                                                })
+                                                .is_ok();
+                                        if !claimed || !response.status().is_success() {
+                                            return Ok::<_, std::io::Error>(
+                                                response.map(BodyExt::boxed_unsync),
+                                            );
+                                        }
+                                        let (parts, body) = response.into_parts();
+                                        let bytes = body.collect().await?.to_bytes();
+                                        let sent = impairment
+                                            .truncate_after_bytes
+                                            .min(bytes.len().saturating_sub(1));
+                                        let body = TruncatedBody {
+                                            bytes: Some(bytes.slice(..sent)),
+                                            claimed_len: bytes.len() as u64,
+                                        }
+                                        .boxed_unsync();
+                                        Ok::<_, std::io::Error>(hyper::Response::from_parts(
+                                            parts, body,
+                                        ))
                                     }
                                 });
                                 let _ = http1::Builder::new().serve_connection(TokioIo::new(stream), service).await;
@@ -225,7 +319,14 @@ mod tests {
     fn delay_impairment_holds_every_response() -> Result<()> {
         let directory = tempfile::tempdir()?;
         std::fs::write(directory.path().join("bytes"), b"0123456789")?;
-        let origin = Origin::start_impaired(directory.path(), 0, Impairment { delay_ms: 300 })?;
+        let origin = Origin::start_impaired(
+            directory.path(),
+            0,
+            Impairment {
+                delay_ms: 300,
+                ..Impairment::default()
+            },
+        )?;
         let client = reqwest::blocking::Client::new();
         let started = Instant::now();
         let response = client.get(format!("{}bytes", origin.url())).send()?;
@@ -233,9 +334,33 @@ mod tests {
         assert!(started.elapsed() >= std::time::Duration::from_millis(300));
         assert_eq!(
             Impairment::from_case(&json!({"delay_ms": 7})),
-            Impairment { delay_ms: 7 }
+            Impairment {
+                delay_ms: 7,
+                ..Impairment::default()
+            }
         );
         assert_eq!(Impairment::from_case(&json!({})), Impairment::default());
+        Ok(())
+    }
+
+    #[test]
+    fn truncation_impairment_only_cuts_the_configured_responses() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        std::fs::write(directory.path().join("bytes.bin"), b"0123456789")?;
+        let impairment = Impairment::from_case(&json!({
+            "truncate_first_responses": 1,
+            "truncate_after_bytes": 4,
+            "truncate_path_suffix": ".bin"
+        }));
+        let origin = Origin::start_impaired(directory.path(), 0, impairment.clone())?;
+        let client = reqwest::blocking::Client::new();
+        let url = format!("{}bytes.bin", origin.url());
+        let first = client.get(&url).send();
+        assert!(first.is_err() || first.unwrap().bytes().is_err());
+        assert_eq!(client.get(&url).send()?.bytes()?.as_ref(), b"0123456789");
+        assert_eq!(impairment.truncate_first_responses, 1);
+        assert_eq!(impairment.truncate_after_bytes, 4);
+        assert_eq!(impairment.truncate_path_suffix.as_deref(), Some(".bin"));
         Ok(())
     }
 }

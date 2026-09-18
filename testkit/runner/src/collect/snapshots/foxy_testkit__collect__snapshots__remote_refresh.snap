@@ -7,6 +7,8 @@ expression: "digest(&corpus(\"remote-refresh\"))"
   "run_metrics": {
     "files": null,
     "bytes": null,
+    "download_retries": null,
+    "download_retried_files": 0,
     "db_write_time_ms": null,
     "lock_retries": null,
     "total_backoff_ms": null,

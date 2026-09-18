@@ -7,6 +7,8 @@ expression: "digest(&corpus(\"download\"))"
   "run_metrics": {
     "files": 217,
     "bytes": 4327179551.0,
+    "download_retries": 0,
+    "download_retried_files": 0,
     "db_write_time_ms": 142.1,
     "lock_retries": 0.0,
     "total_backoff_ms": 0.0,

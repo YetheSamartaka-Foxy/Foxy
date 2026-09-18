@@ -762,6 +762,32 @@ fn oracle(case: &Value, root: &Path, run: &Path, timeout: Duration) -> Result<bo
     }
 }
 
+fn residual_download_artifacts(root: &Path) -> Result<Value> {
+    let mut part_files = 0u64;
+    let mut part_meta_files = 0u64;
+    let mut patch_temp_files = 0u64;
+    for entry in walkdir::WalkDir::new(root).follow_links(false) {
+        let entry = entry?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy();
+        if name.ends_with(".foxy.part.meta") {
+            part_meta_files += 1;
+        } else if name.ends_with(".foxy.part") {
+            part_files += 1;
+        } else if name.ends_with(".foxy.tmp") {
+            patch_temp_files += 1;
+        }
+    }
+    Ok(json!({
+        "residual_files": part_files + part_meta_files + patch_temp_files,
+        "part_files": part_files,
+        "part_meta_files": part_meta_files,
+        "patch_temp_files": patch_temp_files,
+    }))
+}
+
 pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
     ensure!(
         matches!(options.database_mode.as_str(), "wal" | "mvcc"),
@@ -1056,10 +1082,6 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                 let label = operation["label"].as_str().unwrap_or(name);
                 let stem = format!("{iteration}-{label}");
                 write_json(&run.join(format!("collected-{stem}.json")), &collected)?;
-                write_json(
-                    &run.join(format!("summary-{stem}.json")),
-                    &collected["summary"],
-                )?;
                 write_json(&run.join(format!("breakdown-{stem}.json")), &breakdown)?;
                 write_json(
                     &run.join(format!("memory-{stem}.json")),
@@ -1074,6 +1096,12 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                     ledger::append(entry, &run.join("sol.jsonl"))?;
                 }
                 let mut summary = collected["summary"].clone();
+                if operation["inspect_cleanup"].as_bool().unwrap_or(false) {
+                    let repository_path = resolved["repository"]["path"]
+                        .as_str()
+                        .context("Missing repository path")?;
+                    summary["cleanup"] = residual_download_artifacts(Path::new(repository_path))?;
+                }
                 for (destination, source) in
                     [("files_updated", "files"), ("downloaded_bytes", "bytes")]
                 {
@@ -1093,12 +1121,14 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                         0.0
                     });
                 }
+                write_json(&run.join(format!("summary-{stem}.json")), &summary)?;
                 let view = json!({
                     "summary": summary,
                     "sol": sol,
                     "breakdown": breakdown,
                     "delta_patch": sol::operation(&sol, "delta_patch"),
                     "delta_patch_stages": sol::records(&sol, "delta_patch_stage"),
+                    "download": sol::operation(&sol, "download"),
                     "elapsed_s": collected["elapsed_s"],
                 });
                 let mut flags = Vec::new();
@@ -1250,7 +1280,7 @@ fn outcome_matches(expected: Option<&str>, observed: Option<&str>) -> bool {
 
 #[cfg(test)]
 mod cache_state_tests {
-    use super::{cache_state, outcome_matches};
+    use super::{cache_state, outcome_matches, residual_download_artifacts};
 
     #[test]
     fn eviction_wins_over_the_iteration_number() {
@@ -1267,5 +1297,19 @@ mod cache_state_tests {
         assert!(outcome_matches(Some("cancelled"), Some("cancelled")));
         assert!(!outcome_matches(Some("cancelled"), Some("completed")));
         assert!(!outcome_matches(Some("cancelled"), None));
+    }
+
+    #[test]
+    fn cleanup_scan_counts_only_download_artifacts() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("a.foxy.part"), b"a").unwrap();
+        std::fs::write(directory.path().join("b.foxy.part.meta"), b"b").unwrap();
+        std::fs::write(directory.path().join("c.foxy.tmp"), b"c").unwrap();
+        std::fs::write(directory.path().join("kept.bin"), b"d").unwrap();
+        let counts = residual_download_artifacts(directory.path()).unwrap();
+        assert_eq!(counts["residual_files"], 3);
+        assert_eq!(counts["part_files"], 1);
+        assert_eq!(counts["part_meta_files"], 1);
+        assert_eq!(counts["patch_temp_files"], 1);
     }
 }
