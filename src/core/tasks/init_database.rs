@@ -149,11 +149,7 @@ enum SqliteStatementKind {
 }
 
 fn sqlite_statement_kind(sql: &str) -> SqliteStatementKind {
-    let head = sql.trim_start();
-    let word_len = head
-        .find(|ch: char| !ch.is_ascii_alphabetic())
-        .unwrap_or(head.len());
-    match head[..word_len].to_ascii_uppercase().as_str() {
+    match crate::core::utils::profiling::statement_verb(sql) {
         "INSERT" | "REPLACE" => SqliteStatementKind::Insert,
         "UPDATE" => SqliteStatementKind::Update,
         "DELETE" => SqliteStatementKind::Delete,
@@ -191,6 +187,12 @@ mod statement_kind_tests {
         assert_eq!(
             sqlite_statement_kind("COMMIT"),
             SqliteStatementKind::Ignored
+        );
+        assert_eq!(
+            sqlite_statement_kind(
+                "WITH v(id, value) AS (VALUES (1, 2)) UPDATE t SET value = v.value FROM v"
+            ),
+            SqliteStatementKind::Update
         );
     }
 }

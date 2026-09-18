@@ -198,11 +198,7 @@ impl FsTimer {
 /// A statement's aggregation key: the verb plus the first table it names, so
 /// call sites need no labels of their own and every seam statement is covered.
 fn statement_label(sql: &str) -> String {
-    const VERBS: [&str; 14] = [
-        "INSERT", "UPDATE", "DELETE", "SELECT", "REPLACE", "CREATE", "DROP", "ALTER", "REINDEX",
-        "VACUUM", "PRAGMA", "BEGIN", "COMMIT", "ROLLBACK",
-    ];
-    let verb = first_keyword(sql, &VERBS).unwrap_or("other");
+    let verb = statement_verb(sql);
     if matches!(verb, "BEGIN" | "COMMIT" | "ROLLBACK") {
         return verb.to_ascii_lowercase();
     }
@@ -210,6 +206,14 @@ fn statement_label(sql: &str) -> String {
         Some(table) => format!("{} {}", verb.to_ascii_lowercase(), table),
         None => verb.to_ascii_lowercase(),
     }
+}
+
+pub(crate) fn statement_verb(sql: &str) -> &'static str {
+    const VERBS: [&str; 14] = [
+        "INSERT", "UPDATE", "DELETE", "SELECT", "REPLACE", "CREATE", "DROP", "ALTER", "REINDEX",
+        "VACUUM", "PRAGMA", "BEGIN", "COMMIT", "ROLLBACK",
+    ];
+    first_keyword(sql, &VERBS).unwrap_or("other")
 }
 
 /// The first of `keywords` appearing as a whole word, scanning left to right.
