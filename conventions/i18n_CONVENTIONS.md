@@ -59,7 +59,7 @@ For multi-locale batches, prefer the `locale-apply` helper binary instead of han
 cargo run --manifest-path tools/i18n-checker/Cargo.toml --bin locale-apply -- --repo . --translations translations.json --keys-out changed-keys.txt
 ```
 
-The `translations.json` file must be UTF-8 and shaped as `{ "locale": { "English key from en.json": "translated value" } }`. The helper preserves existing formatting, inserts missing keys near their `en.json` order, checks placeholders, and rejects literal `?` in changed values unless `--allow-question-mark` is passed after manual review.
+The `translations.json` file must be UTF-8 and shaped as `{ "locale": { "English key from en.json": "translated value" } }`. The helper preserves existing formatting, inserts missing keys near their `en.json` order, checks placeholders, and rejects literal `?` in changed values unless `--allow-question-mark` is passed after manual review. Pass `--remove-extra` when the same batch also replaces obsolete keys; it removes only keys absent from `en.json` in the locale files named by the batch.
 
 Then run:
 

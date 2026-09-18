@@ -45,6 +45,7 @@ fn main() {
     let mut errors: Vec<String> = Vec::new();
     let mut touched_files = 0usize;
     let mut touched_values = 0usize;
+    let mut removed_values = 0usize;
     let mut changed_keys: Vec<String> = Vec::new();
 
     for (locale, translations) in &batch {
@@ -102,6 +103,7 @@ fn main() {
                 ));
                 continue;
             }
+            record_changed(&mut changed_keys, key);
 
             if let Some(index) = find_entry_line(&lines, key) {
                 let comma = lines[index].trim_end_matches(['\r', '\n']).ends_with(',');
@@ -110,7 +112,6 @@ fn main() {
                 if lines[index] != new_line {
                     lines[index] = new_line;
                     changed_here += 1;
-                    record_changed(&mut changed_keys, key);
                 }
                 continue;
             }
@@ -147,7 +148,22 @@ fn main() {
                 locale_entry_line_indented(&indent, key, translated, newline, anchor_has_comma),
             );
             changed_here += 1;
-            record_changed(&mut changed_keys, key);
+        }
+
+        if config.remove_extra {
+            let mut extra_indices = locale_map
+                .keys()
+                .filter(|key| !en_map.contains_key(*key))
+                .filter_map(|key| find_entry_line(&lines, key))
+                .collect::<Vec<_>>();
+            extra_indices.sort_unstable_by(|left, right| right.cmp(left));
+            extra_indices.dedup();
+            for index in extra_indices {
+                lines.remove(index);
+                changed_here += 1;
+                removed_values += 1;
+            }
+            repair_last_entry_comma(&mut lines);
         }
 
         if changed_here > 0 {
@@ -182,6 +198,9 @@ fn main() {
         "Updated"
     };
     println!("{action} {touched_values} value(s) across {touched_files} locale file(s).");
+    if config.remove_extra {
+        println!("Removed {removed_values} obsolete value(s).");
+    }
     if let Some(keys_out) = &config.keys_out {
         println!(
             "Changed-key file: {} ({} key(s))",
@@ -194,6 +213,21 @@ fn main() {
 fn record_changed(changed: &mut Vec<String>, key: &str) {
     if !changed.iter().any(|existing| existing == key) {
         changed.push(key.to_string());
+    }
+}
+
+fn repair_last_entry_comma(lines: &mut [String]) {
+    let Some(line) = lines
+        .iter_mut()
+        .rev()
+        .find(|line| !matches!(line.trim(), "" | "}"))
+    else {
+        return;
+    };
+    let body = line.trim_end_matches(['\r', '\n']);
+    let ending = &line[body.len()..];
+    if let Some(without_comma) = body.strip_suffix(',') {
+        *line = format!("{without_comma}{ending}");
     }
 }
 
@@ -222,6 +256,7 @@ struct Config {
     keys_out: Option<PathBuf>,
     dry_run: bool,
     allow_question_mark: bool,
+    remove_extra: bool,
 }
 
 fn parse_args() -> Config {
@@ -231,6 +266,7 @@ fn parse_args() -> Config {
     let mut keys_out = None;
     let mut dry_run = false;
     let mut allow_question_mark = false;
+    let mut remove_extra = false;
     let mut args = env::args().skip(1);
 
     while let Some(arg) = args.next() {
@@ -243,6 +279,7 @@ fn parse_args() -> Config {
             "--keys-out" => keys_out = Some(PathBuf::from(require_value(&mut args, "--keys-out"))),
             "--dry-run" => dry_run = true,
             "--allow-question-mark" => allow_question_mark = true,
+            "--remove-extra" => remove_extra = true,
             "--help" | "-h" => {
                 print_help();
                 process::exit(0);
@@ -268,6 +305,7 @@ fn parse_args() -> Config {
         keys_out,
         dry_run,
         allow_question_mark,
+        remove_extra,
     }
 }
 
@@ -291,11 +329,14 @@ fn print_help() {
     println!(
         "  --after-key <key>       Insert missing keys after this key instead of the inferred one."
     );
-    println!("  --keys-out <path>       Write the unique changed en.json keys to this UTF-8 file.");
+    println!(
+        "  --keys-out <path>       Write the unique translated en.json keys to this UTF-8 file."
+    );
     println!("  --dry-run               Validate and report without writing locale files.");
     println!(
         "  --allow-question-mark   Allow literal '?' in translated values after manual review."
     );
+    println!("  --remove-extra         Remove locale keys that are absent from en.json.");
 }
 
 fn or_die<T>(result: Result<T, String>) -> T {
@@ -303,4 +344,20 @@ fn or_die<T>(result: Result<T, String>) -> T {
         eprintln!("{error}");
         process::exit(1);
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn removing_the_last_entry_repairs_its_predecessor() {
+        let mut lines = vec![
+            "{\n".to_owned(),
+            "  \"kept\": \"value\",\n".to_owned(),
+            "}\n".to_owned(),
+        ];
+        repair_last_entry_comma(&mut lines);
+        assert_eq!(lines[1], "  \"kept\": \"value\"\n");
+    }
 }

@@ -166,7 +166,7 @@ impl Foxy {
             ui.label(RichText::new(title).size(scale.large).strong());
             if !hint.is_empty() {
                 ui.add_space(4.0);
-                ui.label(RichText::new(hint).color(self.color_text_dim()));
+                ui.add(egui::Label::new(RichText::new(hint).color(self.color_text_dim())).wrap());
             }
         });
     }
@@ -180,6 +180,7 @@ impl Foxy {
                     .desired_width(220.0),
             );
             egui::ComboBox::from_id_salt("benchmarks_sort")
+                .width(140.0)
                 .selected_text(tr(self.benchmarks_view.sort.label()))
                 .show_ui(ui, |ui| {
                     for sort in BenchmarkSort::ALL {
@@ -191,6 +192,7 @@ impl Foxy {
                 .kind_filter
                 .map_or_else(|| tr("All actions"), |kind| tr(kind.label()));
             egui::ComboBox::from_id_salt("benchmarks_kind")
+                .width(140.0)
                 .selected_text(kind_text)
                 .show_ui(ui, |ui| {
                     ui.selectable_value(
@@ -206,6 +208,8 @@ impl Foxy {
                         );
                     }
                 });
+        });
+        ui.horizontal_wrapped(|ui| {
             let repositories = self.benchmarks_view.repositories();
             let repo_text = self
                 .benchmarks_view
@@ -214,6 +218,7 @@ impl Foxy {
                 .and_then(|url| repositories.iter().find(|(known, _)| known == url))
                 .map_or_else(|| tr("All repositories"), |(_, name)| name.clone());
             egui::ComboBox::from_id_salt("benchmarks_repo")
+                .width(180.0)
                 .selected_text(repo_text)
                 .show_ui(ui, |ui| {
                     ui.selectable_value(
@@ -235,6 +240,7 @@ impl Foxy {
                 BenchmarkOutcomeFilter::Failed => tr("Failed"),
             };
             egui::ComboBox::from_id_salt("benchmarks_outcome")
+                .width(140.0)
                 .selected_text(outcome_text)
                 .show_ui(ui, |ui| {
                     ui.selectable_value(
@@ -261,7 +267,7 @@ impl Foxy {
             Self::ui_state_checkbox(ui, &mut self.benchmarks_view.show_hidden, tr("Show hidden"));
         });
         ui.add_space(2.0);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let selected: Vec<(String, String)> = self
                 .benchmarks_view
                 .selected
@@ -312,38 +318,36 @@ impl Foxy {
                     self.benchmarks_view.toggle_selected(id);
                 }
             }
-            ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button(tr("Open benchmarks folder")).clicked() {
-                    let dir = crate::core::benchmarks::store::benchmarks_dir();
-                    let _ = std::fs::create_dir_all(&dir);
-                    if let Err(err) = open_directory(&dir) {
-                        log::warn!("Failed to open benchmarks folder: {err}");
-                        self.show_error_toast(tr("Failed to open benchmarks folder."));
-                    }
+            let count = self.benchmarks_view.records.len();
+            let hidden = self
+                .benchmarks_view
+                .records
+                .iter()
+                .filter(|record| record.hidden)
+                .count();
+            let mut summary = tr_fmt("{count} saved", &[("count", count.to_string())]);
+            if hidden > 0 {
+                summary.push_str(&format!(
+                    "  \u{00B7}  {}",
+                    tr_fmt("{count} hidden", &[("count", hidden.to_string())])
+                ));
+            }
+            ui.label(
+                RichText::new(summary)
+                    .size(scale.small)
+                    .color(self.color_text_dim()),
+            );
+            if ui.button(tr("Refresh")).clicked() {
+                self.reload_benchmarks();
+            }
+            if ui.button(tr("Open benchmarks folder")).clicked() {
+                let dir = crate::core::benchmarks::store::benchmarks_dir();
+                let _ = std::fs::create_dir_all(&dir);
+                if let Err(err) = open_directory(&dir) {
+                    log::warn!("Failed to open benchmarks folder: {err}");
+                    self.show_error_toast(tr("Failed to open benchmarks folder."));
                 }
-                if ui.button(tr("Refresh")).clicked() {
-                    self.reload_benchmarks();
-                }
-                let count = self.benchmarks_view.records.len();
-                let hidden = self
-                    .benchmarks_view
-                    .records
-                    .iter()
-                    .filter(|record| record.hidden)
-                    .count();
-                let mut summary = tr_fmt("{count} saved", &[("count", count.to_string())]);
-                if hidden > 0 {
-                    summary.push_str(&format!(
-                        "  \u{00B7}  {}",
-                        tr_fmt("{count} hidden", &[("count", hidden.to_string())])
-                    ));
-                }
-                ui.label(
-                    RichText::new(summary)
-                        .size(scale.small)
-                        .color(self.color_text_dim()),
-                );
-            });
+            }
         });
     }
 
@@ -420,7 +424,7 @@ impl Foxy {
                 },
             );
             ui.add_space(2.0);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 self.benchmark_kind_badge(ui, record.kind);
                 let mut meta = vec![
                     record.repository.name.clone(),
@@ -442,16 +446,14 @@ impl Foxy {
                     .selectable(false),
                 );
                 ui.label(self.outcome_text(&record.outcome).size(scale.small));
-                ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+            });
+            if !expanded {
+                ui.add_space(2.0);
+                ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
-                    if expanded {
-                        return;
-                    }
                     if record.hidden {
                         self.benchmark_stat_chip(ui, self.t("Hidden"), "\u{1F6AB}");
                     }
-                    // Operation and ratio lead, then the best-measured
-                    // comparison, then the secondary counters.
                     if let Some(summary) = record.headline_sol() {
                         self.benchmark_stat_chip(
                             ui,
@@ -507,7 +509,7 @@ impl Foxy {
                         format!("{:.1} s", record.elapsed_secs()),
                     );
                 });
-            });
+            }
             let notes = record.notes.trim();
             if !notes.is_empty() && !expanded {
                 ui.add(
