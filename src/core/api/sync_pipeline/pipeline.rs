@@ -817,6 +817,7 @@ async fn run_repository_pipeline(
         recent_local_path_reset,
         discard_prepared_queue,
         force_redownload,
+        force_full_downloads,
         allow_suspect_full_redownload,
         mut download_pause_rx,
         mut cancel_rx,
@@ -899,6 +900,7 @@ async fn run_repository_pipeline(
             .clone()
             .with_download_target_queueing(builds_download_plan)
             .with_force_download_targets(mode == SyncMode::Download && force_redownload)
+            .with_force_full_downloads(mode == SyncMode::Download && force_full_downloads)
             .with_target_local_path(local_path.clone())
             .with_repository_space_shared_path(repository_space_shared_path.clone())
             .with_operation_id(operation_id.as_str()),

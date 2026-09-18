@@ -468,6 +468,7 @@ fn run_repository_sync(
                 .filter(|limit| *limit > 0),
             recent_local_path_reset: false,
             force_redownload,
+            force_full_downloads: false,
             allow_suspect_full_redownload: force_redownload,
             download_pause_rx: pause_rx,
             cancel_rx,

@@ -152,6 +152,9 @@ pub struct RepositorySyncOptions {
     /// of reusing it.
     pub discard_prepared_queue: bool,
     pub force_redownload: bool,
+    /// Keep the ordinary mismatch scope but download each queued file in full.
+    /// Used by the agent test harness for patch-versus-full controls.
+    pub force_full_downloads: bool,
     pub allow_suspect_full_redownload: bool,
     pub download_pause_rx: watch::Receiver<bool>,
     pub cancel_rx: watch::Receiver<bool>,

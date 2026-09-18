@@ -169,6 +169,7 @@ cargo run -- agent-gui scenario scenarios\smoke.json --json                     
 '{"command":"health"}' | cargo run -- agent-gui exec --stdin --json                 # one persistent connection, NDJSON commands from stdin
 cargo run -- agent-gui invoke list-actions --json                                   # enumerate the semantic-action registry
 cargo run -- agent-gui invoke start-sync --repo-index 0 --allow-destructive --json  # drive by intent (gated for core/disk mutations)
+cargo run -- agent-gui invoke start-sync-full-files --repo-index 0 --allow-destructive --json # mismatch-scoped full-file test control
 cargo run -- agent-gui invoke apply-profile --repo-index 0 --profile Main --json    # non-destructive intents need no flag
 echo '[{"command":"set-filter","name":"addons-filter","value":"ace"},{"command":"settle","frames":2},{"command":"addons","tab":"addons"}]' | cargo run -- agent-gui batch --stdin --json  # server-side pipeline, one round-trip
 cargo run -- agent-gui diff --baseline last --json                                  # field-level delta vs the last snapshot/diff; also --baseline frame:<n>

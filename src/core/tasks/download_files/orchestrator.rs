@@ -937,19 +937,20 @@ pub(crate) async fn download_files(
         return Err(anyhow!("download cancelled"));
     }
 
-    let (patchable_file_ids, patch_planned_bytes, full_bytes) = if context.force_download_targets {
-        let full_bytes = targets
-            .iter()
-            .map(|target| target.download.size as u64)
-            .sum();
-        for target in &mut targets {
-            target.download.expected_download_bytes = target.download.size;
-        }
-        (HashSet::new(), full_bytes, full_bytes)
-    } else {
-        let _phase = metrics.phase("load_patch_plans");
-        apply_download_plan_bytes(context.clone(), &mut targets).await
-    };
+    let (patchable_file_ids, patch_planned_bytes, full_bytes) =
+        if context.force_download_targets || context.force_full_downloads {
+            let full_bytes = targets
+                .iter()
+                .map(|target| target.download.size as u64)
+                .sum();
+            for target in &mut targets {
+                target.download.expected_download_bytes = target.download.size;
+            }
+            (HashSet::new(), full_bytes, full_bytes)
+        } else {
+            let _phase = metrics.phase("load_patch_plans");
+            apply_download_plan_bytes(context.clone(), &mut targets).await
+        };
     info!(
         "Download queue delta planning: files={} patchable_files={} planned_transfer_bytes={} full_bytes={}",
         targets.len(),

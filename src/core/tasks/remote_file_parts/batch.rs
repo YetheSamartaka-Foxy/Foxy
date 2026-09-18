@@ -17,6 +17,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+fn force_full_file_download(force_download_targets: bool, force_full_downloads: bool) -> bool {
+    force_download_targets || force_full_downloads
+}
+
 const FILE_PART_UPSERT_PARAMS_PER_ROW: usize = 6;
 const FILE_PART_INSERT_WITH_LOCAL_PARAMS_PER_ROW: usize = 9;
 const DOWNLOAD_FILE_TARGET_UPSERT_PARAMS_PER_ROW: usize = 4;
@@ -690,7 +694,10 @@ pub(crate) async fn remote_file_parts_batch(
             let local_file_present = crate::core::utils::profiling::fs::metadata(&file.local_path)
                 .map(|meta| meta.is_file())
                 .unwrap_or(false);
-            if context.force_download_targets {
+            if force_full_file_download(
+                context.force_download_targets,
+                context.force_full_downloads,
+            ) {
                 patch_clear_file_ids.push(file.id as i64);
             } else if !local_file_present {
                 debug!(
@@ -1120,6 +1127,13 @@ where
 mod tests {
     use super::*;
     use crate::core::tasks::init_database::SQLITE_MAX_VARIABLES;
+
+    #[test]
+    fn full_file_control_keeps_patch_planning_disabled_for_present_files() {
+        assert!(!force_full_file_download(false, false));
+        assert!(force_full_file_download(false, true));
+        assert!(force_full_file_download(true, false));
+    }
 
     // ── part upsert batch sizing ───────────────────────────────────────
 

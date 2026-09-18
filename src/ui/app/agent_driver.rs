@@ -5071,6 +5071,11 @@ impl Foxy {
                 self.arm_benchmark(BenchmarkKind::Update, Vec::new());
                 self.start_core_sync(index, api::SyncMode::Download);
             }
+            "start-sync-full-files" => {
+                let index = self.agent_gui_resolve_repo_index(params)?;
+                self.arm_benchmark(BenchmarkKind::Update, Vec::new());
+                self.start_core_sync_full_download_control(index);
+            }
             "recheck-repo" => {
                 let index = self.agent_gui_resolve_repo_index(params)?;
                 self.start_core_sync(index, api::SyncMode::RecheckOnly);
@@ -5383,6 +5388,12 @@ const AGENT_ACTIONS: &[AgentAction] = &[
         destructive: true,
         params: "repo-index",
         summary: "Start a download sync for a repository",
+    },
+    AgentAction {
+        name: "start-sync-full-files",
+        destructive: true,
+        params: "repo-index",
+        summary: "Download the ordinary mismatch scope without delta patches",
     },
     AgentAction {
         name: "recheck-repo",

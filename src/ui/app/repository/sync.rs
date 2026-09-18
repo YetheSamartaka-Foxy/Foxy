@@ -51,7 +51,12 @@ impl Foxy {
             selected_mod_states_override,
             force_redownload,
             false,
+            false,
         );
+    }
+
+    pub(in crate::ui::app) fn start_core_sync_full_download_control(&mut self, repo_idx: usize) {
+        self.start_core_sync_internal(repo_idx, SyncMode::Download, None, false, false, true);
     }
 
     fn start_core_sync_internal(
@@ -61,6 +66,7 @@ impl Foxy {
         selected_mod_states_override: Option<Vec<(String, bool)>>,
         force_redownload: bool,
         prepare_download_plan: bool,
+        force_full_downloads: bool,
     ) {
         let benchmark_arm = self.benchmark_armed.take();
         if self.syncing_repository.is_some() {
@@ -333,6 +339,7 @@ impl Foxy {
                     recent_local_path_reset,
                     discard_prepared_queue,
                     force_redownload,
+                    force_full_downloads,
                     allow_suspect_full_redownload: force_redownload,
                     download_pause_rx,
                     cancel_rx,
@@ -368,7 +375,7 @@ impl Foxy {
     pub(crate) fn prepare_update_confirmation(&mut self, repo_idx: usize) {
         self.update_modal_open = false;
         self.open_update_after_sync = true;
-        self.start_core_sync_internal(repo_idx, SyncMode::RecheckOnly, None, false, true);
+        self.start_core_sync_internal(repo_idx, SyncMode::RecheckOnly, None, false, true, false);
         if self.syncing_repository.is_none() {
             self.open_update_after_sync = false;
         }
@@ -382,7 +389,14 @@ impl Foxy {
     /// only refreshes status and leaves the queue ready for review.
     pub(crate) fn start_remote_recheck_with_plan(&mut self, repo_idx: usize) {
         self.open_update_after_sync = false;
-        self.start_core_sync_internal(repo_idx, SyncMode::RemoteRefreshOnly, None, false, true);
+        self.start_core_sync_internal(
+            repo_idx,
+            SyncMode::RemoteRefreshOnly,
+            None,
+            false,
+            true,
+            false,
+        );
     }
 
     pub fn standalone_download_addon(&mut self, repo_idx: usize, addon_name: &str) -> bool {

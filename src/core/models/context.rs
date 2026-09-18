@@ -27,6 +27,7 @@ pub(crate) struct FoxyContext {
     pub(crate) queue_download_targets: bool,
     pub(crate) patch_plan_metadata_refresh: bool,
     pub(crate) force_download_targets: bool,
+    pub(crate) force_full_downloads: bool,
     pub(crate) target_local_path: Option<String>,
     pub(crate) repository_space_shared_path: Option<String>,
     /// Opaque id of the user action this context serves (a sync pipeline, a
@@ -83,6 +84,7 @@ impl FoxyContext {
             queue_download_targets: true,
             patch_plan_metadata_refresh: false,
             force_download_targets: false,
+            force_full_downloads: false,
             target_local_path: None,
             repository_space_shared_path: None,
             operation_id: None,
@@ -261,6 +263,11 @@ impl FoxyContext {
 
     pub(crate) fn with_force_download_targets(mut self, enabled: bool) -> Self {
         self.force_download_targets = enabled;
+        self
+    }
+
+    pub(crate) fn with_force_full_downloads(mut self, enabled: bool) -> Self {
+        self.force_full_downloads = enabled;
         self
     }
 

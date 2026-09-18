@@ -477,6 +477,7 @@ impl ContextRun<'_> {
         let name = operation["op"].as_str().context("Missing operation name")?;
         let action = match name {
             "download" => "start-sync",
+            "download-full-files" => "start-sync-full-files",
             "force-redownload" => "force-redownload",
             "recheck" => "recheck-repo",
             "recheck-integrity" => "recheck-integrity",
@@ -565,7 +566,10 @@ impl ContextRun<'_> {
                 .as_u64()
                 .unwrap_or(self.timeout.as_secs());
             let mut args: Vec<String> = vec!["wait".into()];
-            if matches!(name, "download" | "force-redownload") {
+            if matches!(
+                name,
+                "download" | "download-full-files" | "force-redownload"
+            ) {
                 args.push("--download-complete".into());
             } else {
                 args.extend(["--busy-reason-cleared".into(), busy_reason.into()]);
@@ -1125,7 +1129,10 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                 }
                 let cancelled_on_purpose = expected_outcome == Some("cancelled");
                 if let Some(expected) = g["expected_files"].as_i64()
-                    && matches!(name, "download" | "force-redownload")
+                    && matches!(
+                        name,
+                        "download" | "download-full-files" | "force-redownload"
+                    )
                     && !cancelled_on_purpose
                     && summary["files_updated"].as_i64().unwrap_or(-1) != expected
                 {
@@ -1134,17 +1141,20 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                 // The oracle verifies a synced payload, so it runs only after
                 // the operations that produce one; a check between a
                 // mutation and its repair sees the mutated bytes on purpose.
-                let oracle_outcome =
-                    if matches!(name, "download" | "force-redownload") && !cancelled_on_purpose {
-                        if oracle(&resolved, root, &run, timeout)? {
-                            "passed"
-                        } else {
-                            flags.push("oracle-failed");
-                            "failed"
-                        }
+                let oracle_outcome = if matches!(
+                    name,
+                    "download" | "download-full-files" | "force-redownload"
+                ) && !cancelled_on_purpose
+                {
+                    if oracle(&resolved, root, &run, timeout)? {
+                        "passed"
                     } else {
-                        "not_applicable"
-                    };
+                        flags.push("oracle-failed");
+                        "failed"
+                    }
+                } else {
+                    "not_applicable"
+                };
                 let mut metadata = json!({"run_id":run_id,"iteration":iteration,"started_utc":chrono::Utc::now().to_rfc3339(),"elapsed_s":collected["elapsed_s"],"git_sha":guard["git"]["sha"],"git_dirty":guard["git"]["dirty"],"build_kind":profile,"case_id":id,"case_hash":hash,"harness":harness,"op":name,"storage_class":guard["storage_class"],"environment":guard["environment"],"cache_state":cache_state(warmup, iteration, evicted_pending),"database_mode":options.database_mode,"db_write_gate":effective_gate,"db_pool_idle":pool_idle,"diagnostics":diagnostics,"origin_checksum":origin_checksum,"references":references,"oracle_outcome":oracle_outcome,"flags":flags,"verdict":if flags.is_empty() {"ok"} else {"invalid"}});
                 if label != name {
                     metadata["label"] = label.into();

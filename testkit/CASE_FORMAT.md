@@ -104,7 +104,7 @@ no unallowlisted WARN or ERROR entries.
 
 Supported operations are `startup`, `ui-walk`, `switch-game-space`,
 `remote-refresh`, `quick-check`, `recheck`, `recheck-integrity`,
-`force-redownload`, `download`, `wipe-db`, `mutate`, `restore`, and
+`force-redownload`, `download`, `download-full-files`, `wipe-db`, `mutate`, `restore`, and
 `evict-cache`. Each operation may contain `wait_timeout_s`,
 `expect`, `label`, and `repository`. `repository` names the fixture repository
 the operation acts on (the CLI `--repo-name`, or the GUI row with that name);
@@ -124,6 +124,11 @@ toolbar recheck, which also prepares the download queue so the following
 `remote-refresh` is `repo sync --mode remote-refresh` and prepares nothing. The
 GUI `quick-check` is the toolbar quick check and `wipe-db` is the repository's
 "wipe database entries" action (busy reason `repository-db-wipe`).
+
+`download-full-files` is GUI-only and exists for the O2 control lane. It builds
+the ordinary mismatch-scoped queue but suppresses delta plans, so only the
+files a normal update would repair are downloaded in full. It does not widen
+scope like `force-redownload` and is not a shipping user preference.
 
 GUI sync operations handled by the common download/check/refresh/wipe path may
 carry `ui_probe_ms`: a frame probe then polls the
