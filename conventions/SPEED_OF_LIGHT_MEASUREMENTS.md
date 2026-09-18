@@ -19,7 +19,7 @@ Where a row says `MB/s` from a download report line it is MiB/s
 (`1024 * 1024`); rows typed by hand in the September tables used decimal
 MB/s. Recover exact values from `work_bytes` and `actual_s` when it matters.
 
-## 1. Status by operation (as of 2026-09-17, checkout `98e45d7`)
+## 1. Status by operation (as of 2026-09-18, checkout `178acb1`)
 
 `n/a` means the required reference or measurement is missing, not zero
 performance. "Reported" ratios keep their original interpretation; the
@@ -53,7 +53,7 @@ comparison column says what the number actually compares.
 | Responsiveness under work | n/a; frame probe beside the operation | Worst frame 14-20 ms and p95 6.7-7.2 ms under the 4.33 GB download, 13-14 ms under the integrity recheck | Sept 16 `20260916T173824Z` | Throughput is not bought by blocking the UI thread |
 | Startup probe / app update check | Probe 78-86% calibrated (B4 fresh request 81 ms); app update check reported 94% modeled | 81 ms reference vs 94-104 ms probe actual | Sept 16 | Plausible for that fresh HTTP path; not universal across HTTPS, reuse and hosts |
 | M1 memory, loaded startup | n/a, advisory footprint (resource trade policy) | Empty app 221-239 MB private commit is a baseline, not a proven minimum for loaded state | 456-473 MB peak / 352-369 MB retained, Sept 16 (455-460 / 355-360 on Sept 10 with another seeded configuration) | Reported, not gated: memory is spent for speed on purpose; only unbounded growth would reopen this |
-| M1 repeated UI walk | n/a, growth/retention comparison, advisory | About +40 MB retained after the walk, the same saturation as Sept 10 | 404-417 MB peak / 400-412 MB retained, Sept 16 | Consistent with a saturating cache; not proof that longer-run leaks are absent |
+| M1 repeated UI walk | n/a, growth/retention comparison, advisory | Three 31.5-31.6 s walks retained 371.9-378.5 MB, 22.3-22.5 MB above their loaded starts | 393.0-398.4 MB peak, 315-316 samples per walk, clean commit `178acb1`, Sept 18 `20260918T153928Z-0345be1c` | The quiet 30 s tail stayed bounded in all three repetitions; owner attribution remains advisory work if this plateau later grows |
 
 ## 1a. Current accepted baselines
 
@@ -391,10 +391,11 @@ on `startup_probe`, and `frame_ms` percentiles in the agent `fps` probe.
   port. First frame 378-423 ms; the fast branch answers at 86-108 ms, the
   slow one at 3.01-3.02 s, verdict settles at 2.97-2.98 s, the offline
   repository stays `unknown`, `outcome=settled` every time.
-- Game-space switch after work (`perf-space-switch-live`,
-  `20260916T204121Z`): a quick check in arma3 before the switch changes
-  nothing: 16-20 ms request-to-visible (drain 5-7, reset 0-1, reload 9-14),
-  11 repositories reloaded on the way back.
+- Repeated game-space switch after work (`perf-space-switch-live`,
+  `20260918T153814Z-368c7658`): eight request-to-visible switches across two
+  repetitions completed in 16-20 ms (drain 5-11, reset 0-1, reload 8-12).
+  Reforger exposed zero repositories and each return to arma3 exposed all 11;
+  every row was clean and flag-free.
 - Hosts lane (`hosts-20260916-8d57543a`, `hosts-20260916-e893198e`): the
   sanitized HTTP reference measured 39.6 / 80.8 / 41.8 ms (connect, fresh,
   kept-alive), and the sanitized HTTPS reference measured 25.7 / 84.2 /
@@ -492,9 +493,11 @@ request-budget change.
   test volume has been mutated and patched many times today, so the drift is not
   attributed until a fresh-payload rerun; recorded as `open` in
   `testkit/HYPOTHESES.md`.
-- Memory lane (`20260916T133825Z`): startup peak 460-473 MB, retained
-  355-369 MB, UI-walk retention +37-40 MB (saturating, as on Sept 10).
-  Advisory by the resource trade policy; no time metric moved.
+- Memory lane (`20260918T153928Z-0345be1c`): three UI walks each included a
+  30 s quiet tail and 315-316 samples over 31.5-31.6 s. Peak private memory was
+  393.0-398.4 MB and retained memory was 371.9-378.5 MB, a bounded
+  22.3-22.5 MB above the loaded start. Advisory by the resource trade policy;
+  no time metric moved.
 
 ### O1 preparation and finalization (2026-09-16, evidence only)
 
