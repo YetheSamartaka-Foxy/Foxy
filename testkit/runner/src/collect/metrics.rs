@@ -6,6 +6,7 @@ pub fn run_metrics(text: &str) -> Value {
     let mut result = json!({"files":null,"bytes":null,"download_retries":null,"download_retried_files":0,"db_write_time_ms":null,"lock_retries":null,"total_backoff_ms":null,"elapsed_ms":null,"permit_wait_ms_total":null,"write_calls_total":null,"write_failures_total":null,"write_retries_total":null,"checkpoint_total_s":null,"hash_work_bytes":0,"hash_total_s":0.0,"tree_verify_runs":0,"fs_watcher_starts":0,"prepared_queue_reuses":0,"pipeline_outcome":null,"failed_pipelines":0,"content_refresh_runs":0,"content_refresh_files_sampled":0,"hash_source_segments_files":0,"hash_source_reread_files":0,"hash_batches_after_download":0,"final_hash_flush_files":0,"download_large_files_limit":null,"download_small_files_limit":null,"download_patch_applies_limit":null,"first_download_start_ms":null,"patch_fallbacks":0,"patch_applies":0,"patch_range_requests":0,"patch_gap_bytes":0,"patch_copy_bytes":0,"patch_cancelled":0});
     for key in [
         "hash_profile_rotation",
+        "hash_profile_selected",
         "hash_profile_heldout_files",
         "hash_profile_heldout_bytes",
         "hash_profile_heldout_s",
@@ -109,22 +110,23 @@ pub fn run_metrics(text: &str) -> Value {
         result["hash_profile_rotation"] = c[1].parse::<u64>().unwrap_or(0).into();
     }
     let heldout = regex::Regex::new(
-        r"Hash profile auto heldout: .*? files=(\d+) missing_files=\d+ parts=\d+ estimated_bytes=\d+ hashed_bytes=(\d+) elapsed=([\d.]+)s sample_bps=([\d.]+) heldout_bps=([\d.]+) generalization_ratio=([\d.]+) sufficient=(true|false)",
+        r"Hash profile auto heldout: selected=(\w+) files=(\d+) missing_files=\d+ parts=\d+ estimated_bytes=\d+ hashed_bytes=(\d+) elapsed=([\d.]+)s sample_bps=([\d.]+) heldout_bps=([\d.]+) generalization_ratio=([\d.]+) sufficient=(true|false)",
     )
     .unwrap();
     if let Some(c) = event_lines(text).find_map(|line| heldout.captures(line)) {
         for (key, index) in [
-            ("hash_profile_heldout_files", 1),
-            ("hash_profile_heldout_bytes", 2),
-            ("hash_profile_heldout_s", 3),
-            ("hash_profile_sample_bps", 4),
-            ("hash_profile_heldout_bps", 5),
-            ("hash_profile_generalization_ratio", 6),
+            ("hash_profile_heldout_files", 2),
+            ("hash_profile_heldout_bytes", 3),
+            ("hash_profile_heldout_s", 4),
+            ("hash_profile_sample_bps", 5),
+            ("hash_profile_heldout_bps", 6),
+            ("hash_profile_generalization_ratio", 7),
         ] {
             result[key] = c[index].parse::<f64>().unwrap().into();
         }
+        result["hash_profile_selected"] = c[1].into();
         result["hash_profile_heldout_sufficient"] = c
-            .get(7)
+            .get(8)
             .is_some_and(|value| value.as_str() == "true")
             .into();
     }
@@ -350,6 +352,7 @@ INFO Starting filesystem watcher for 2 paths",
              Hash profile auto heldout: selected=balanced files=40 missing_files=0 parts=200 estimated_bytes=900 hashed_bytes=800 elapsed=0.500s sample_bps=1000 heldout_bps=1600 generalization_ratio=1.6000 sufficient=true",
         );
         assert_eq!(metrics["hash_profile_rotation"], 1);
+        assert_eq!(metrics["hash_profile_selected"], "balanced");
         assert_eq!(metrics["hash_profile_heldout_files"], 40.0);
         assert_eq!(metrics["hash_profile_heldout_bytes"], 800.0);
         assert_eq!(metrics["hash_profile_heldout_s"], 0.5);

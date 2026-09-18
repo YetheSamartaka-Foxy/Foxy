@@ -41,6 +41,7 @@ expression: "digest(&corpus(\"delta-patch\"))"
     "patch_copy_bytes": 23847429,
     "patch_cancelled": 0,
     "hash_profile_rotation": null,
+    "hash_profile_selected": null,
     "hash_profile_heldout_files": null,
     "hash_profile_heldout_bytes": null,
     "hash_profile_heldout_s": null,
