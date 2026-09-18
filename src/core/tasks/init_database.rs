@@ -119,13 +119,14 @@ impl SqlitePerfCounters {
     }
 
     fn record_rows_affected(&self, kind: SqliteStatementKind, rows: u64) {
-        self.rows_affected.fetch_add(rows, Ordering::Relaxed);
         let counter = match kind {
             SqliteStatementKind::Insert => &self.insert_rows_affected,
             SqliteStatementKind::Update => &self.update_rows_affected,
             SqliteStatementKind::Delete => &self.delete_rows_affected,
             SqliteStatementKind::Other => &self.other_rows_affected,
+            SqliteStatementKind::Ignored => return,
         };
+        self.rows_affected.fetch_add(rows, Ordering::Relaxed);
         counter.fetch_add(rows, Ordering::Relaxed);
     }
 
@@ -144,6 +145,7 @@ enum SqliteStatementKind {
     Update,
     Delete,
     Other,
+    Ignored,
 }
 
 fn sqlite_statement_kind(sql: &str) -> SqliteStatementKind {
@@ -155,6 +157,7 @@ fn sqlite_statement_kind(sql: &str) -> SqliteStatementKind {
         "INSERT" | "REPLACE" => SqliteStatementKind::Insert,
         "UPDATE" => SqliteStatementKind::Update,
         "DELETE" => SqliteStatementKind::Delete,
+        "BEGIN" | "COMMIT" | "ROLLBACK" | "PRAGMA" | "SELECT" => SqliteStatementKind::Ignored,
         _ => SqliteStatementKind::Other,
     }
 }
@@ -184,6 +187,10 @@ mod statement_kind_tests {
         assert_eq!(
             sqlite_statement_kind("CREATE TABLE t (id INTEGER)"),
             SqliteStatementKind::Other
+        );
+        assert_eq!(
+            sqlite_statement_kind("COMMIT"),
+            SqliteStatementKind::Ignored
         );
     }
 }
