@@ -1125,10 +1125,11 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                     });
                 }
                 write_json(&run.join(format!("summary-{stem}.json")), &summary)?;
-                let view = json!({
+                let mut view = json!({
                     "summary": summary,
                     "sol": sol,
                     "breakdown": breakdown,
+                    "references": references,
                     "delta_patch": sol::operation(&sol, "delta_patch"),
                     "delta_patch_stages": sol::records(&sol, "delta_patch_stage"),
                     "download": sol::operation(&sol, "download"),
@@ -1140,6 +1141,7 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                     "space_switch": sol::operation(&sol, "space_switch"),
                     "elapsed_s": collected["elapsed_s"],
                 });
+                crate::references::attach(&mut view);
                 let mut flags = Vec::new();
                 if !expect::expectations(&view, &operation["expect"]).is_empty() {
                     flags.push("assertion-failed");
