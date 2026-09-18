@@ -320,15 +320,19 @@ correctness gates.
    same two numbers under their legacy names; the old reading of them as CPU
    time and I/O wait was wrong. `Hash part run metrics:` carries the metadata,
    layout and straggler breakdown; `Hash profile auto benchmark sample:` the
-   calibration trials.
+   calibration trials; `Hash profile auto heldout:` the selected profile's
+   throughput on the untouched remaining workload.
 7. **Candidates**: straggler splitting and scoped trees. Cross-run profile
    reuse is closed unless calibration costs seconds: safe reuse needs storage,
    workload and build invalidation and a stale choice costs more than the
    current NVMe trial. Calibration itself hashes every sample
    byte exactly once: each candidate profile trials its own disjoint group of
    the sample (`Hash profile auto benchmark sample: ... group=i/n`), dealt
-   round-robin from the part-heaviest files so the groups carry like work,
-   and a sample too small to feed every profile trials the first ones only.
+   round-robin from the part-heaviest files so the groups carry like work.
+   Trial order rotates by operation sequence, and the selected profile's
+   sample throughput is compared with the untouched remaining files as a
+   held-out generalization check. A sample too small to feed every profile
+   trials the first ones only.
    Before 2026-09-16 every profile re-hashed the same sample, so the second
    and third trials read the first trial's page cache and the selection
    measured cache warmth (10 GB/s on NVMe) rather than the profile. Gates:

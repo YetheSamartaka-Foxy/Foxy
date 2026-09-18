@@ -161,6 +161,11 @@ verdict duration, `startup.join_s` is the remaining action wall time, and
 `startup.dependency_coverage_percent` reports how much of the complete action
 that dependency path explains. It is not a physical SoL ratio.
 
+Derived schema 7 adds hash auto-profile validation fields under
+`breakdown.run_metrics`: the rotated trial-order index, held-out files, bytes,
+time and throughput, selected-sample throughput, generalization ratio, and
+whether the remaining workload was large enough to validate independently.
+
 `delta_patch` is the aggregate O2 action record. `delta_patch_stages` retains
 every `SOL op=delta_patch_stage` record in log order, with the owning `op_id`,
 per-file attempt parent span, unique stage span, stage id, monotonic offsets and

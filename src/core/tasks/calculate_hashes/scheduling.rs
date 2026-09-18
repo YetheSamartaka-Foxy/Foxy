@@ -502,6 +502,22 @@ fn benchmark_profiles_for_environment(
     profiles
 }
 
+fn rotate_benchmark_profiles(
+    profiles: &mut [HashIoProfilePreference],
+    operation_id: Option<&str>,
+) -> usize {
+    if profiles.len() < 2 {
+        return 0;
+    }
+    let sequence = operation_id
+        .and_then(|id| id.rsplit('-').next())
+        .and_then(|suffix| suffix.parse::<usize>().ok())
+        .unwrap_or(1);
+    let rotation = sequence.saturating_sub(1) % profiles.len();
+    profiles.rotate_left(rotation);
+    rotation
+}
+
 fn benchmark_wait_ratio(metrics: &HashRunMetrics) -> f64 {
     let wait = metrics.semaphore_wait_elapsed_sum.as_secs_f64();
     let compute = metrics.blocking_hash_elapsed_sum.as_secs_f64();
@@ -1510,12 +1526,23 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
         .iter()
         .map(|job| job.indexed_parts.len())
         .sum();
-    let benchmark_profiles = benchmark_profiles_for_environment(
+    let mut benchmark_profiles = benchmark_profiles_for_environment(
         initial_profile,
         resource_profile,
         storage_class,
         benchmark_jobs.len(),
         benchmark_total_parts,
+    );
+    let profile_rotation = rotate_benchmark_profiles(&mut benchmark_profiles, operation_id);
+    info!(
+        "Hash profile auto trial order: operation_id={} rotation={} profiles={}",
+        operation_id.unwrap_or("none"),
+        profile_rotation,
+        benchmark_profiles
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
     );
     let benchmark_file_count = benchmark_jobs.len();
     let benchmark_started = Instant::now();
@@ -1764,14 +1791,33 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
     )
     .await;
     let (mut remaining_results, cancelled) = remaining_results;
+    let remaining_elapsed = remaining_started.elapsed();
     log_hash_run_metrics(
         "auto_selected_remaining",
         best_profile,
-        remaining_started.elapsed(),
+        remaining_elapsed,
         &remaining_results,
         operation_id,
         algorithm,
         cancelled,
+    );
+    let heldout = HashRunMetrics::from_results(&remaining_results);
+    let heldout_throughput =
+        heldout.hashed_bytes as f64 / remaining_elapsed.as_secs_f64().max(0.001);
+    let generalization_ratio = heldout_throughput / best_throughput.max(f64::EPSILON);
+    info!(
+        "Hash profile auto heldout: selected={} files={} missing_files={} parts={} estimated_bytes={} hashed_bytes={} elapsed={:.3}s sample_bps={:.0} heldout_bps={:.0} generalization_ratio={:.4} sufficient={}",
+        best_profile,
+        heldout.files,
+        heldout.missing_files,
+        heldout.parts,
+        heldout.estimated_bytes,
+        heldout.hashed_bytes,
+        remaining_elapsed.as_secs_f64(),
+        best_throughput,
+        heldout_throughput,
+        generalization_ratio,
+        benchmark_metrics_are_sufficient(&heldout),
     );
     benchmark_results.append(&mut remaining_results);
     (
@@ -1802,6 +1848,35 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn benchmark_profile_order_rotates_with_operation_sequence() {
+        let original = vec![
+            HashIoProfilePreference::Conservative,
+            HashIoProfilePreference::Balanced,
+            HashIoProfilePreference::Aggressive,
+        ];
+        let mut first = original.clone();
+        assert_eq!(
+            rotate_benchmark_profiles(&mut first, Some("repo-sync-0001")),
+            0
+        );
+        assert_eq!(first, original);
+
+        let mut second = original.clone();
+        assert_eq!(
+            rotate_benchmark_profiles(&mut second, Some("repo-sync-0002")),
+            1
+        );
+        assert_eq!(
+            second,
+            vec![
+                HashIoProfilePreference::Balanced,
+                HashIoProfilePreference::Aggressive,
+                HashIoProfilePreference::Conservative,
+            ]
+        );
+    }
 
     fn test_job(parts: usize, bytes_per_part: u64) -> FileHashJob {
         FileHashJob {
