@@ -243,10 +243,10 @@ absent for that operation and the gate should then be skipped.
 
 The expectation view exposes the last aggregate patch action as `delta_patch`,
 its typed per-file stage records as `delta_patch_stages`, and the last
-`download` and `quick_scan` records, in addition to `summary`, `sol`,
-`breakdown`, and `elapsed_s`. Patch cases should assert the aggregate outcome,
-conservation state, and fallback or cancellation counters. A measured operation
-with `inspect_cleanup: true` also exposes
+`download`, `quick_scan`, `remote_refresh`, `db_persist`, and `db_purge`
+records, in addition to `summary`, `sol`, `breakdown`, and `elapsed_s`. Patch
+cases should assert the aggregate outcome, conservation state, and fallback or
+cancellation counters. A measured operation with `inspect_cleanup: true` also exposes
 `summary.cleanup.residual_files` and the separate `.foxy.part`,
 `.foxy.part.meta`, and `.foxy.tmp` counts without recording local paths.
 
