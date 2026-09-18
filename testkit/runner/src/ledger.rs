@@ -289,6 +289,8 @@ const COUNTERS: &[&str] = &[
     "summary.files_updated",
     "summary.parts_updated",
     "mutated_parts",
+    "summary.join_ms",
+    "summary.dependency_coverage_percent",
 ];
 /// The row fields that must match before two rows measure the same thing.
 /// Persisted with an accepted baseline and checked on every comparison, so a

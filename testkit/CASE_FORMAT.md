@@ -243,7 +243,7 @@ absent for that operation and the gate should then be skipped.
 
 The expectation view exposes the last aggregate patch action as `delta_patch`,
 its typed per-file stage records as `delta_patch_stages`, and the last
-`download`, `quick_scan`, `remote_refresh`, `db_persist`, and `db_purge`
+`download`, `quick_scan`, `startup`, `remote_refresh`, `db_persist`, and `db_purge`
 records, in addition to `summary`, `sol`, `breakdown`, and `elapsed_s`. Patch
 cases should assert the aggregate outcome, conservation state, and fallback or
 cancellation counters. A measured operation with `inspect_cleanup: true` also exposes
