@@ -1137,6 +1137,7 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                     "remote_refresh": sol::operation(&sol, "remote_refresh"),
                     "db_persist": sol::operation(&sol, "db_persist"),
                     "db_purge": sol::operation(&sol, "db_purge"),
+                    "space_switch": sol::operation(&sol, "space_switch"),
                     "elapsed_s": collected["elapsed_s"],
                 });
                 let mut flags = Vec::new();
