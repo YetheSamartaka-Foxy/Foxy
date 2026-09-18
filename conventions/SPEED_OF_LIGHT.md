@@ -131,7 +131,7 @@ promoted, durable) when it is not obvious from the operation card.
 | O1 | Full-file download | `download_files/orchestrator.rs` | limiter cap (modeled) or same-run peak (consistency); nominal disk on rotational destinations |
 | O2 | Delta patch | `SOL op=delta_patch` action and `SOL op=delta_patch_stage` spans in `download_files/orchestrator.rs` | none; byte savings only |
 | O3 | Content hashing and ordered tree verification | `calculate_hashes/scheduling.rs` | none (self baseline); saved benchmarks derive a same-run peak across homogeneous batches |
-| O4 | Quick scan | `quick_scan/diff.rs` | none (self baseline) |
+| O4 | Quick scan | `quick_scan/diff.rs` | self baseline in-app; accepted same-case clean-scan median in the test kit |
 | O5 | Remote metadata refresh | `SOL op=remote_refresh` in `tasks/remote_repository.rs` | none in-app (self baseline); the kit calibrates the no-change branch through O6 |
 | O6 | No-change sync | `SOL op=sync_action` with an `early-exit-*` outcome, `sync_pipeline/summary.rs` (every pipeline exit emits one) | none in-app; test-kit `sol_calibrated` against B4 |
 | O7 | Turso persistence | `SOL op=db_persist` in `sync_pipeline/hashing.rs` (per sync action); `db:` line of the download report, `SQLite sync metrics:` (legacy name) | none |
@@ -339,13 +339,16 @@ correctness gates.
 
 1. **Completion**: a trustworthy clean/updates verdict for the selected
    addons with pending updates preserved.
-2. **Reference**: none. The lower bound is cache lookup plus necessary
-   enumeration/stat work, required DB reads and any sampled reads (up to
-   128 KiB per suspicious file), scheduled at the actual concurrency. DB
-   validation and targeted escalation are required work, not overhead.
-3. **Comparisons**: B5's addons/s is `legacy`; re-baseline by entry count,
-   cache state and scope before quoting a percentage. Read the operation's
-   own `actual_s`, not the test-kit `elapsed_s`: the stale-check lane's
+2. **Reference**: no in-app physical bound. The test kit freezes a complete
+   clean-scan median for the same case, cache state and scope as the empirical
+   latency reference; B5 remains the independent enumeration-only resource
+   estimate. The lower bound also includes cache lookup, required DB reads and
+   sampled reads (up to 128 KiB per suspicious file), scheduled at the actual
+   concurrency. DB validation and targeted escalation are required work, not
+   overhead.
+3. **Comparisons**: compare clean scans with the accepted same-case median;
+   use B5 by entry count only to explain the enumeration share. Read the
+   operation's own `actual_s`, not the test-kit `elapsed_s`: the stale-check lane's
    0.445 s runner elapsed is driver round trips around a 0.021 s scan
    (2026-09-16), so there is no fixed overhead to remove there.
 4. **Work**: `addons_total`, `addons_hashed`, `cache_hits_shared`,
@@ -606,7 +609,7 @@ environment change, not only hardware or ISP.
 | B1 | Network body-byte throughput against the same origin and protocol | `foxy-testkit calibrate --lanes network`: 2 MiB range requests over the origin's 16 largest files, at one connection and at Foxy's 96-request budget for `--seconds`; interval-correct 500 ms samples, `sustained_bps` is the median plateau interval (first 2 s dropped), `peak_window_bps` the best interval, `per_connection_bps` the single-connection plateau |
 | B2 / B3 | Disk read / write | `calibrate --lanes disk`: one `--disk-mib` file beside the case's repository path; `durable_write_bps` (sequential write through `sync_all`), `unbuffered_read_bps` / `unbuffered_read_parallel_bps` (sequential read with the page cache bypassed, so the device answers; one reader, then one per core over disjoint blocks), `warm_read_bps` / `warm_read_parallel_bps` (buffered re-read of the just-written pages). The faster of the two is the read bound for a hash pass: an NVMe gains from parallel readers, a rotational disk loses to the seeks. Mixed and random lanes are still open. A hash pass is not a disk baseline; the app's write p95 is not an independent ceiling |
 | B4 | Latency | `calibrate --lanes latency`: TCP `connect_s`, a `fresh_request_s` (new connection, full `repo.json` body) and a `reused_request_s` (kept-alive connection), medians of ten. One origin's RTT does not describe every repository, so `calibrate --lanes hosts --hosts <url,...>` records the same three figures per host for any URL, HTTPS included (the handshake lands in the fresh request), keyed by host under `lanes.hosts` for a multi-host startup graph |
-| B5 | Metadata | `calibrate --lanes metadata`: the repository tree enumerated the way the quick scan walks an addon (`read_dir`, file type, metadata per entry), `first_pass_entries_per_s` and `warm_entries_per_s`; the better of the two is the bound for a warm `quick_scan` row (`entries / rate` over `actual_s`), the first pass for a cold or evicted one. A separate complete clean-scan latency reference is still open |
+| B5 | Metadata | `calibrate --lanes metadata`: the repository tree enumerated the way the quick scan walks an addon (`read_dir`, file type, metadata per entry), `first_pass_entries_per_s` and `warm_entries_per_s`; the better of the two is the bound for a warm `quick_scan` row (`entries / rate` over `actual_s`), the first pass for a cold or evicted one. The accepted `perf-tfr-scifi-clean-check-ssd` baseline supplies the separate complete-action empirical latency reference |
 | B6 | Hash | `calibrate --lanes hash`: compute-only BLAKE3 and MD5 over a 256 MiB in-memory buffer, one thread and all cores. The matched read-and-hash term is the B2 read lane; the row's ratio uses the slower of the two |
 | B7 | Concurrency | The B1 lane records the aggregate curve at 1, 8, 24, 48 and `--connections` requests (`curve`), so a per-connection ceiling is read as a curve, never as one constant; `foxy-testkit origin bench` for request latency |
 | B8 | App memory and startup | Empty `--config-dir` launch by renderer backend and process state, with distribution |
