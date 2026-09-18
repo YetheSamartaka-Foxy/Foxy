@@ -29,7 +29,7 @@ claims.
 | rejected | Turso 0.7 MVCC can beat WAL for Foxy's metadata rebuild | DB write elapsed and correctness | lower, no failures | `perf-db-refresh-main` |
 | rejected | MVCC wins once the per-call `journal_mode` pragma is no longer paid (retest on the pooled build) | `summary.total_ms` | lower | `perf-db-refresh-main` |
 | accepted | `DB_WRITE_GATE` above 1 is worth ~18% on the metadata refresh | `summary.total_ms` | lower | `perf-db-refresh-main` |
-| open | Improve hash profile auto-selection by storage class | `breakdown.run_metrics.hash_total_s` | lower | SSD/HDD recheck pair |
+| testing | Improve hash profile auto-selection by storage class | `breakdown.run_metrics.hash_total_s` | lower, with stable choice across rotated balanced groups | SSD/HDD recheck pair; 10% switch guard and balanced dealing implemented, normal-pressure cold rerun pending |
 | closed | Cover the deferred 433k-row `subfiles` bulk insert with a payload-bearing origin | DB write elapsed | n/a, coverage gap | `perf-db-parts-bulk` |
 | accepted | Sorting the deferred part buffer into index key order speeds the bulk insert | deferred insert elapsed | lower | `perf-db-parts-bulk` |
 | rejected | Dropping and rebuilding the `subfiles` indexes around the download-overlapped flush pays | deferred insert elapsed | lower | `bench_subfiles_index_cost` |
@@ -492,6 +492,23 @@ is not a valid uncontended reference for a populated one.
 
 The log line now prints `txn_ms` rather than `total_ms` and carries
 `write_gate=` so the number cannot be read without its context.
+
+### testing: stabilize auto hash selection across disjoint groups (2026-09-18)
+
+The explicit cold NVMe lane `20260918T153343Z-15292830` selected Aggressive and
+then Balanced when profile order rotated. The groups differed materially in
+bytes and the apparent second-run win was only about 10%, so no profile-choice
+win was attributed. `21d9955` keeps the storage heuristic unless another valid
+profile is at least 10% faster, and `d561cf9` deals disjoint jobs using a combined
+bytes, parts and file-count load score.
+
+The first post-dealing physical attempt, `20260918T201420Z-1d105dfc`, found
+severe resource pressure because swap use exceeded 35 GiB. Foxy correctly
+reduced the candidates to Conservative and patch concurrency to 5, so that run
+cannot validate rotation stability. Repeat the two-sample evicted lane only
+under normal pressure and require the same selected profile, sufficient held-out
+work, one-pass byte accounting, no flags and an oracle pass. Do not add a
+pressure override or increase the switch threshold to manufacture agreement.
 
 ### closed: memory footprint is advisory, not a gate (2026-09-16)
 
