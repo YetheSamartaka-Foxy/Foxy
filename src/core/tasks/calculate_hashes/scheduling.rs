@@ -8,6 +8,7 @@ use crate::core::utils::speed_of_light::{SolLight, op_id_extra, sol_line};
 use crate::ui::types::HashIoProfilePreference;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use sysinfo::Disks;
 
@@ -124,6 +125,7 @@ const MIN_AUTO_BENCHMARK_BYTES: u64 = 256 * 1024 * 1024;
 /// disjoint group per profile.
 const MAX_BENCHMARK_GROUPS: usize = 3;
 const LOW_WAIT_AGGRESSIVE_THRESHOLD: f64 = 0.01;
+static AUTO_BENCHMARK_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 
 fn cap_auto_hash_profile(
     profile: HashIoProfilePreference,
@@ -502,18 +504,11 @@ fn benchmark_profiles_for_environment(
     profiles
 }
 
-fn rotate_benchmark_profiles(
-    profiles: &mut [HashIoProfilePreference],
-    operation_id: Option<&str>,
-) -> usize {
+fn rotate_benchmark_profiles(profiles: &mut [HashIoProfilePreference], sequence: usize) -> usize {
     if profiles.len() < 2 {
         return 0;
     }
-    let sequence = operation_id
-        .and_then(|id| id.rsplit('-').next())
-        .and_then(|suffix| suffix.parse::<usize>().ok())
-        .unwrap_or(1);
-    let rotation = sequence.saturating_sub(1) % profiles.len();
+    let rotation = sequence % profiles.len();
     profiles.rotate_left(rotation);
     rotation
 }
@@ -1533,10 +1528,12 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
         benchmark_jobs.len(),
         benchmark_total_parts,
     );
-    let profile_rotation = rotate_benchmark_profiles(&mut benchmark_profiles, operation_id);
+    let profile_sequence = AUTO_BENCHMARK_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let profile_rotation = rotate_benchmark_profiles(&mut benchmark_profiles, profile_sequence);
     info!(
-        "Hash profile auto trial order: operation_id={} rotation={} profiles={}",
+        "Hash profile auto trial order: operation_id={} sequence={} rotation={} profiles={}",
         operation_id.unwrap_or("none"),
+        profile_sequence,
         profile_rotation,
         benchmark_profiles
             .iter()
@@ -1857,17 +1854,11 @@ mod tests {
             HashIoProfilePreference::Aggressive,
         ];
         let mut first = original.clone();
-        assert_eq!(
-            rotate_benchmark_profiles(&mut first, Some("repo-sync-0001")),
-            0
-        );
+        assert_eq!(rotate_benchmark_profiles(&mut first, 0), 0);
         assert_eq!(first, original);
 
         let mut second = original.clone();
-        assert_eq!(
-            rotate_benchmark_profiles(&mut second, Some("repo-sync-0002")),
-            1
-        );
+        assert_eq!(rotate_benchmark_profiles(&mut second, 1), 1);
         assert_eq!(
             second,
             vec![
