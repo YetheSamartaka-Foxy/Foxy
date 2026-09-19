@@ -29,7 +29,7 @@ claims.
 | rejected | Turso 0.7 MVCC can beat WAL for Foxy's metadata rebuild | DB write elapsed and correctness | lower, no failures | `perf-db-refresh-main` |
 | rejected | MVCC wins once the per-call `journal_mode` pragma is no longer paid (retest on the pooled build) | `summary.total_ms` | lower | `perf-db-refresh-main` |
 | accepted | `DB_WRITE_GATE` above 1 is worth ~18% on the metadata refresh | `summary.total_ms` | lower | `perf-db-refresh-main` |
-| testing | Improve hash profile auto-selection by storage class | `breakdown.run_metrics.hash_total_s` | lower, with stable choice across rotated balanced groups | NVMe cold rotations now agree under normal pressure; HDD recheck pair remains |
+| closed | Improve hash profile auto-selection by storage class | `breakdown.run_metrics.hash_total_s` | n/a, SSD selection is stable and the HDD Conservative/Balanced difference is below the 10% switch guard | `perf-tfr-scifi-first-check-ssd`, `perf-tfr-scifi-hash-profile-{conservative,balanced}-hdd` |
 | closed | Cover the deferred 433k-row `subfiles` bulk insert with a payload-bearing origin | DB write elapsed | n/a, coverage gap | `perf-db-parts-bulk` |
 | accepted | Sorting the deferred part buffer into index key order speeds the bulk insert | deferred insert elapsed | lower | `perf-db-parts-bulk` |
 | rejected | Dropping and rebuilding the `subfiles` indexes around the download-overlapped flush pays | deferred insert elapsed | lower | `bench_subfiles_index_cost` |
@@ -493,7 +493,7 @@ is not a valid uncontended reference for a populated one.
 The log line now prints `txn_ms` rather than `total_ms` and carries
 `write_gate=` so the number cannot be read without its context.
 
-### testing: stabilize auto hash selection across disjoint groups (2026-09-18)
+### closed: stabilize auto hash selection across disjoint groups (2026-09-19)
 
 The explicit cold NVMe lane `20260918T153343Z-15292830` selected Aggressive and
 then Balanced when profile order rotated. The groups differed materially in
@@ -518,6 +518,18 @@ once with zero eviction failures. Hash service was 0.784 and 0.777 s; the
 of selected-sample throughput. Both repairs passed the independent oracle and
 all rows had zero flags. This closes the NVMe stability check; it does not
 establish an HDD profile choice or a five-sample performance baseline.
+
+The HDD check on clean `811447d` used `F:` with normal memory pressure,
+explicitly evicted 217 files / 4,331,121,846 bytes before each full integrity
+recheck, and compared fixed profiles on the same payload. Conservative
+(`20260919T164418Z-01e904ac`) used 31.858 and 31.502 s of hash service;
+Balanced (`20260919T164540Z-312983cc`) used 31.158 and 31.174 s. All four
+rows hashed the payload once, completed with no flags, and an independent
+oracle found zero problems across 3,744 parts. Balanced's roughly 1-2% lead
+in this two-run-per-profile probe is below the existing 10% profile switch
+guard and is too small to justify changing the HDD heuristic. Keep
+Conservative for this large-part workload; revisit only with repeated,
+same-state evidence of a larger benefit.
 
 ### closed: memory footprint is advisory, not a gate (2026-09-16)
 
