@@ -18,7 +18,7 @@ use std::{
     },
     task::{Context as TaskContext, Poll},
     thread,
-    time::Instant,
+    time::{Duration, Instant},
 };
 use tokio::{net::TcpListener, sync::oneshot, task::JoinSet};
 use tower::ServiceExt;
@@ -31,6 +31,9 @@ pub struct Impairment {
     pub truncate_first_responses: u64,
     pub truncate_after_bytes: usize,
     pub truncate_path_suffix: Option<String>,
+    pub burst_after_bytes: u64,
+    pub burst_first_bps: u64,
+    pub burst_second_bps: u64,
 }
 
 impl Impairment {
@@ -43,6 +46,9 @@ impl Impairment {
                 .and_then(|value| usize::try_from(value).ok())
                 .unwrap_or(0),
             truncate_path_suffix: origin["truncate_path_suffix"].as_str().map(str::to_owned),
+            burst_after_bytes: origin["burst_after_bytes"].as_u64().unwrap_or(0),
+            burst_first_bps: origin["burst_first_bps"].as_u64().unwrap_or(0),
+            burst_second_bps: origin["burst_second_bps"].as_u64().unwrap_or(0),
         }
     }
 
@@ -54,6 +60,109 @@ impl Impairment {
                 .truncate_path_suffix
                 .as_deref()
                 .is_none_or(|suffix| path.ends_with(suffix))
+    }
+
+    fn can_burst(&self, method: &hyper::Method, path: &str) -> bool {
+        self.burst_after_bytes > 0
+            && self.burst_first_bps > 0
+            && self.burst_second_bps > 0
+            && method == hyper::Method::GET
+            && path.ends_with(".bin")
+    }
+}
+
+#[derive(Default)]
+struct BurstStats {
+    requests: AtomicU64,
+    first_bytes: AtomicU64,
+    first_us: AtomicU64,
+    second_bytes: AtomicU64,
+    second_us: AtomicU64,
+}
+
+impl BurstStats {
+    fn snapshot(&self) -> [u64; 5] {
+        [
+            self.requests.load(Ordering::Relaxed),
+            self.first_bytes.load(Ordering::Relaxed),
+            self.first_us.load(Ordering::Relaxed),
+            self.second_bytes.load(Ordering::Relaxed),
+            self.second_us.load(Ordering::Relaxed),
+        ]
+    }
+}
+
+struct BurstBody {
+    bytes: Bytes,
+    cursor: usize,
+    split: usize,
+    first_bps: u64,
+    second_bps: u64,
+    timer: Option<Pin<Box<tokio::time::Sleep>>>,
+    started: Instant,
+    second_started: Option<Instant>,
+    stats: Arc<BurstStats>,
+}
+
+impl Body for BurstBody {
+    type Data = Bytes;
+    type Error = std::io::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        if self.cursor == self.bytes.len() {
+            return Poll::Ready(None);
+        }
+        let limit = if self.cursor < self.split {
+            self.split
+        } else {
+            self.bytes.len()
+        };
+        let end = (self.cursor + 64 * 1024).min(limit);
+        if self.timer.is_none() {
+            let rate = if self.cursor < self.split {
+                self.first_bps
+            } else {
+                self.second_bps
+            };
+            self.timer = Some(Box::pin(tokio::time::sleep(Duration::from_secs_f64(
+                (end - self.cursor) as f64 / rate as f64,
+            ))));
+        }
+        if self.timer.as_mut().unwrap().as_mut().poll(cx).is_pending() {
+            return Poll::Pending;
+        }
+        self.timer = None;
+        let frame = Frame::data(self.bytes.slice(self.cursor..end));
+        if self.cursor < self.split {
+            self.stats
+                .first_bytes
+                .fetch_add((end - self.cursor) as u64, Ordering::Relaxed);
+            if end == self.split {
+                self.stats
+                    .first_us
+                    .fetch_add(self.started.elapsed().as_micros() as u64, Ordering::Relaxed);
+                self.second_started = Some(Instant::now());
+            }
+        } else {
+            self.stats
+                .second_bytes
+                .fetch_add((end - self.cursor) as u64, Ordering::Relaxed);
+            if end == self.bytes.len() {
+                self.stats.second_us.fetch_add(
+                    self.second_started.unwrap().elapsed().as_micros() as u64,
+                    Ordering::Relaxed,
+                );
+            }
+        }
+        self.cursor = end;
+        Poll::Ready(Some(Ok(frame)))
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        SizeHint::with_exact((self.bytes.len() - self.cursor) as u64)
     }
 }
 
@@ -80,6 +189,8 @@ impl Body for TruncatedBody {
 
 pub struct Origin {
     address: SocketAddr,
+    burst: Arc<BurstStats>,
+    impairment: Impairment,
     shutdown: Option<oneshot::Sender<()>>,
     thread: Option<thread::JoinHandle<()>>,
 }
@@ -91,7 +202,31 @@ impl Origin {
 
     pub fn start_impaired(root: &Path, port: u16, impairment: Impairment) -> Result<Self> {
         ensure!(root.is_dir(), "Origin root must be an existing directory");
+        ensure!(
+            [
+                impairment.burst_after_bytes,
+                impairment.burst_first_bps,
+                impairment.burst_second_bps
+            ]
+            .iter()
+            .all(|value| *value == 0)
+                || [
+                    impairment.burst_after_bytes,
+                    impairment.burst_first_bps,
+                    impairment.burst_second_bps
+                ]
+                .iter()
+                .all(|value| *value > 0),
+            "Origin burst requires all three positive fields"
+        );
+        ensure!(
+            impairment.burst_after_bytes == 0 || impairment.truncate_first_responses == 0,
+            "Origin burst and truncation cannot share a response"
+        );
         let root = root.to_owned();
+        let burst = Arc::new(BurstStats::default());
+        let thread_burst = Arc::clone(&burst);
+        let configured_impairment = impairment.clone();
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
         let thread = thread::spawn(move || {
@@ -123,16 +258,19 @@ impl Origin {
                             let service = service.clone();
                             let impairment = impairment.clone();
                             let truncated_responses = Arc::clone(&truncated_responses);
+                            let burst_stats = Arc::clone(&thread_burst);
                             connections.spawn(async move {
                                 let service = service_fn(move |mut request: hyper::Request<hyper::body::Incoming>| {
                                     let service = service.clone();
                                     let impairment = impairment.clone();
                                     let truncated_responses = Arc::clone(&truncated_responses);
+                                    let burst_stats = Arc::clone(&burst_stats);
                                     async move {
                                         if impairment.delay_ms > 0 {
                                             tokio::time::sleep(std::time::Duration::from_millis(impairment.delay_ms)).await;
                                         }
                                         let truncate = impairment.can_truncate(request.method(), request.uri().path());
+                                        let burst = impairment.can_burst(request.method(), request.uri().path());
                                         // ServeDir rejects oversized suffixes; clamp through its own safe HEAD lookup.
                                         if let Some(suffix) = request.headers().get("range").and_then(|v| v.to_str().ok())
                                             .and_then(|v| v.strip_prefix("bytes=-")).filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
@@ -161,6 +299,24 @@ impl Origin {
                                                         .then_some(count + 1)
                                                 })
                                                 .is_ok();
+                                        if burst && response.status().is_success() {
+                                            let (parts, body) = response.into_parts();
+                                            let bytes = body.collect().await?.to_bytes();
+                                            let split = (impairment.burst_after_bytes as usize).min(bytes.len());
+                                            burst_stats.requests.fetch_add(1, Ordering::Relaxed);
+                                            let body = BurstBody {
+                                                bytes,
+                                                cursor: 0,
+                                                split,
+                                                first_bps: impairment.burst_first_bps,
+                                                second_bps: impairment.burst_second_bps,
+                                                timer: None,
+                                                started: Instant::now(),
+                                                second_started: None,
+                                                stats: burst_stats,
+                                            }.boxed_unsync();
+                                            return Ok::<_, std::io::Error>(hyper::Response::from_parts(parts, body));
+                                        }
                                         if !claimed || !response.status().is_success() {
                                             return Ok::<_, std::io::Error>(
                                                 response.map(BodyExt::boxed_unsync),
@@ -193,6 +349,8 @@ impl Origin {
         let address = ready_rx.recv().context("Origin startup thread exited")??;
         Ok(Self {
             address,
+            burst,
+            impairment: configured_impairment,
             shutdown: Some(shutdown_tx),
             thread: Some(thread),
         })
@@ -203,6 +361,37 @@ impl Origin {
     }
     pub fn bound(&self) -> Value {
         json!({"host": self.address.ip().to_string(), "port": self.address.port()})
+    }
+
+    pub fn burst_snapshot(&self) -> [u64; 5] {
+        self.burst.snapshot()
+    }
+
+    pub fn burst_delta(&self, before: [u64; 5]) -> Value {
+        if self.impairment.burst_after_bytes == 0 {
+            return Value::Null;
+        }
+        let after = self.burst.snapshot();
+        let delta =
+            std::array::from_fn::<_, 5, _>(|index| after[index].saturating_sub(before[index]));
+        let rate = |bytes: u64, micros: u64| -> Option<f64> {
+            (micros > 0).then(|| bytes as f64 * 1_000_000.0 / micros as f64)
+        };
+        let first_rate = rate(delta[1], delta[2]);
+        let second_rate = rate(delta[3], delta[4]);
+        json!({
+            "requests": delta[0],
+            "first_bytes": delta[1],
+            "first_s": delta[2] as f64 / 1_000_000.0,
+            "first_bps": self.impairment.burst_first_bps,
+            "first_observed_bps": first_rate,
+            "first_overshoot_percent": first_rate.map(|value| (100.0 * (value / self.impairment.burst_first_bps as f64 - 1.0)).max(0.0)),
+            "second_bytes": delta[3],
+            "second_s": delta[4] as f64 / 1_000_000.0,
+            "second_bps": self.impairment.burst_second_bps,
+            "second_observed_bps": second_rate,
+            "second_overshoot_percent": second_rate.map(|value| (100.0 * (value / self.impairment.burst_second_bps as f64 - 1.0)).max(0.0)),
+        })
     }
 }
 
@@ -361,6 +550,36 @@ mod tests {
         assert_eq!(impairment.truncate_first_responses, 1);
         assert_eq!(impairment.truncate_after_bytes, 4);
         assert_eq!(impairment.truncate_path_suffix.as_deref(), Some(".bin"));
+        Ok(())
+    }
+
+    #[test]
+    fn burst_changes_rate_within_one_verified_body() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let payload = vec![0x5au8; 2 * 1024 * 1024];
+        std::fs::write(directory.path().join("bytes.bin"), &payload)?;
+        let origin = Origin::start_impaired(
+            directory.path(),
+            0,
+            Impairment {
+                burst_after_bytes: 1024 * 1024,
+                burst_first_bps: 4 * 1024 * 1024,
+                burst_second_bps: 16 * 1024 * 1024,
+                ..Impairment::default()
+            },
+        )?;
+        let before = origin.burst_snapshot();
+        let received = reqwest::blocking::get(format!("{}bytes.bin", origin.url()))?
+            .error_for_status()?
+            .bytes()?;
+        assert_eq!(received.as_ref(), payload);
+        let phase = origin.burst_delta(before);
+        assert_eq!(phase["requests"], 1);
+        assert_eq!(phase["first_bytes"], 1024 * 1024);
+        assert_eq!(phase["second_bytes"], 1024 * 1024);
+        assert!(phase["first_s"].as_f64().unwrap() > phase["second_s"].as_f64().unwrap());
+        assert!(phase["first_overshoot_percent"].as_f64().unwrap() < 10.0);
+        assert!(phase["second_overshoot_percent"].as_f64().unwrap() < 10.0);
         Ok(())
     }
 }

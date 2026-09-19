@@ -693,6 +693,8 @@ Failure exits:
   session records its state as a header manifest plus an append-only
   `journal.jsonl` (one line per registered, promoted, restored or committed
   entry); crash recovery replays the journal and ignores a torn last line.
+  Completed mods are also rolled back. A force-redownload retry may refetch
+  their full payload so cancellation does not leave a partly updated repository.
 - Integrity recheck: the hash pass takes the cancel receiver and exits with
   `outcome=cancelled` between batches.
 

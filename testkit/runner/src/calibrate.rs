@@ -39,6 +39,17 @@ pub struct Options {
 }
 
 pub const LANES: &[&str] = &[
+    "network",
+    "latency",
+    "disk",
+    "hash",
+    "metadata",
+    "db",
+    "hosts",
+    "https_loopback",
+    "device_io",
+];
+pub const DEFAULT_LANES: &[&str] = &[
     "network", "latency", "disk", "hash", "metadata", "db", "hosts",
 ];
 
@@ -404,26 +415,15 @@ fn disk_lanes(file: &Path, bytes: u64) -> Result<Value> {
     let pattern: Vec<u8> = (0..block)
         .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
         .collect();
-    let started = Instant::now();
-    {
-        let mut out = fs::File::create(file)?;
-        let mut written = 0u64;
-        while written < bytes {
-            let len = ((bytes - written) as usize).min(block);
-            out.write_all(&pattern[..len])?;
-            written += len as u64;
-        }
-        out.sync_all()?;
-    }
-    let write_s = started.elapsed().as_secs_f64();
+    let write_s = write_lane(file, bytes, &pattern)?;
     let threads = thread::available_parallelism().map_or(1, |n| n.get());
     // The warm re-reads come first, while the written pages are still cached;
     // the unbuffered reads bypass the cache whatever its state. The parallel
     // lanes are the references for a hash pass, which reads with many workers.
-    let warm_s = read_lane(file, bytes, block, 1, false)?;
-    let warm_parallel_s = read_lane(file, bytes, block, threads, false)?;
-    let unbuffered_s = read_lane(file, bytes, block, 1, true)?;
-    let unbuffered_parallel_s = read_lane(file, bytes, block, threads, true)?;
+    let warm_s = read_lane(file, bytes, block, 1, false, false)?;
+    let warm_parallel_s = read_lane(file, bytes, block, threads, false, false)?;
+    let unbuffered_s = read_lane(file, bytes, block, 1, true, false)?;
+    let unbuffered_parallel_s = read_lane(file, bytes, block, threads, true, false)?;
     let rate = |secs: Option<f64>| secs.map(|s| (bytes as f64 / s).round());
     Ok(json!({
         "bytes": bytes,
@@ -437,6 +437,89 @@ fn disk_lanes(file: &Path, bytes: u64) -> Result<Value> {
     }))
 }
 
+pub fn device_io(repository_path: &Path, mib: u64) -> Result<Value> {
+    ensure!(mib >= 64, "Device I/O calibration needs at least 64 MiB");
+    let parent = repository_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(repository_path);
+    fs::create_dir_all(parent)?;
+    let file = parent.join(format!("foxy-testkit-device-{}.tmp", std::process::id()));
+    let result = device_io_lanes(&file, mib * 1024 * 1024);
+    let _ = fs::remove_file(&file);
+    let mut value = result?;
+    value["storage_class"] = guards::storage_class(parent).into();
+    value["volume"] = parent
+        .components()
+        .next()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .into();
+    Ok(value)
+}
+
+fn device_io_lanes(file: &Path, bytes: u64) -> Result<Value> {
+    let block = 1024 * 1024usize;
+    let pattern: Vec<u8> = (0..block)
+        .map(|index| (index.wrapping_mul(2_654_435_761) >> 13) as u8)
+        .collect();
+    write_lane(file, bytes, &pattern)?;
+    let random_s = read_lane(file, bytes, block, 1, true, true)?;
+    let mixed_bytes = bytes.min(256 * 1024 * 1024);
+    let mixed_file = file.with_extension("mixed.tmp");
+    let mixed = if cfg!(windows) {
+        let result = thread::scope(|scope| -> Result<(Option<f64>, f64, f64)> {
+            let writer = scope.spawn(|| write_lane(&mixed_file, mixed_bytes, &pattern));
+            let started = Instant::now();
+            let read_s = read_lane(file, mixed_bytes, block, 1, true, true)?;
+            let write_s = writer
+                .join()
+                .map_err(|_| anyhow::anyhow!("Mixed disk writer panicked"))??;
+            Ok((read_s, write_s, started.elapsed().as_secs_f64()))
+        });
+        let _ = fs::remove_file(&mixed_file);
+        Some(result?)
+    } else {
+        None
+    };
+    let rate = |work: u64, secs: Option<f64>| secs.map(|s| (work as f64 / s).round());
+    Ok(json!({
+        "bytes": bytes,
+        "random_block_bytes": block,
+        "unbuffered_random_read_bps": rate(bytes, random_s),
+        "mixed_bytes": mixed_bytes,
+        "mixed_random_read_bps": rate(mixed_bytes, mixed.as_ref().and_then(|value| value.0)),
+        "mixed_durable_write_bps": rate(mixed_bytes, mixed.as_ref().map(|value| value.1)),
+        "mixed_wall_s": mixed.as_ref().map(|value| value.2),
+    }))
+}
+
+fn write_lane(file: &Path, bytes: u64, pattern: &[u8]) -> Result<f64> {
+    let started = Instant::now();
+    let mut out = fs::File::create(file)?;
+    let mut written = 0u64;
+    while written < bytes {
+        let len = ((bytes - written) as usize).min(pattern.len());
+        out.write_all(&pattern[..len])?;
+        written += len as u64;
+    }
+    out.sync_all()?;
+    Ok(started.elapsed().as_secs_f64())
+}
+
+fn block_order(blocks: u64, random: bool) -> Vec<u64> {
+    let mut order: Vec<u64> = (0..blocks).collect();
+    if random {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        for index in (1..order.len()).rev() {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            order.swap(index, (state % (index as u64 + 1)) as usize);
+        }
+    }
+    order
+}
+
 /// Read the whole file with `threads` workers over disjoint block-aligned
 /// ranges (positioned reads, no shared cursor), buffered or bypassing the
 /// page cache; the wall time in seconds. Unbuffered reads are only available
@@ -447,15 +530,18 @@ fn read_lane(
     block: usize,
     threads: usize,
     unbuffered: bool,
+    random: bool,
 ) -> Result<Option<f64>> {
     #[cfg(not(windows))]
     if unbuffered {
-        let _ = (file, bytes, block, threads);
+        let _ = (file, bytes, block, threads, random);
         return Ok(None);
     }
     let blocks = bytes.div_ceil(block as u64);
+    let order = block_order(blocks, random);
     let started = Instant::now();
     thread::scope(|scope| -> Result<()> {
+        let order = &order;
         let workers: Vec<_> = (0..threads)
             .map(|worker| {
                 scope.spawn(move || -> Result<()> {
@@ -465,7 +551,7 @@ fn read_lane(
                     let buffer = &mut raw[offset..offset + block];
                     let mut index = worker as u64;
                     while index < blocks {
-                        let start = index * block as u64;
+                        let start = order[index as usize] * block as u64;
                         let want = ((bytes - start) as usize).min(block);
                         let mut done = 0usize;
                         while done < want {
@@ -839,14 +925,16 @@ pub fn execute(root: &Path, options: &Options) -> Result<Value> {
             )?,
             "latency" => latency(&address, 10)?,
             "disk" => disk(&repository_path, options.disk_mib)?,
+            "device_io" => device_io(&repository_path, options.disk_mib)?,
             "hash" => hash(256)?,
             "metadata" => metadata(&repository_path)?,
             "db" => db(&repository_path, 200_000)?,
+            "https_loopback" => crate::origin::tls_fixture::measure(10)?,
             _ => unreachable!(),
         };
         let measured_utc = chrono::Utc::now().to_rfc3339();
         let entry = json!({
-            "id": lane_id(lane, &measured_utc, &values),
+            "id": lane_id(if lane == "https_loopback" { "https-loopback-ipv4" } else { lane }, &measured_utc, &values),
             "measured_utc": measured_utc,
             "environment": environment,
             "case_id": header["id"],
@@ -855,7 +943,7 @@ pub fn execute(root: &Path, options: &Options) -> Result<Value> {
         results[lane] = entry.clone();
         // Volume-bound lanes are keyed by volume: an NVMe and a rotational case
         // must not overwrite each other's reference.
-        if matches!(lane.as_str(), "disk" | "db" | "metadata") {
+        if matches!(lane.as_str(), "disk" | "db" | "metadata" | "device_io") {
             let volume = entry["values"]["volume"]
                 .as_str()
                 .unwrap_or("unknown")
@@ -933,5 +1021,30 @@ mod tests {
                 .to_string_lossy()
                 .contains("calibrate")
         }));
+    }
+
+    #[test]
+    fn device_io_lane_records_random_and_mixed_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let value = device_io(&dir.path().join("payload"), 64).unwrap();
+        assert_eq!(value["random_block_bytes"], 1024 * 1024);
+        assert_eq!(value["mixed_bytes"], 64 * 1024 * 1024);
+        if cfg!(windows) {
+            assert!(value["unbuffered_random_read_bps"].as_f64().unwrap() > 0.0);
+            assert!(value["mixed_random_read_bps"].as_f64().unwrap() > 0.0);
+            assert!(value["mixed_durable_write_bps"].as_f64().unwrap() > 0.0);
+        }
+        assert!(fs::read_dir(dir.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn random_block_order_covers_each_block_once() {
+        let sequential = block_order(64, false);
+        assert_eq!(sequential, (0..64).collect::<Vec<_>>());
+        let mut random = block_order(64, true);
+        assert_ne!(random, sequential);
+        random.sort_unstable();
+        assert_eq!(random, sequential);
+        assert_eq!(block_order(0, true), Vec::<u64>::new());
     }
 }

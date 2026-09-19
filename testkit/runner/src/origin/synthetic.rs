@@ -18,6 +18,8 @@ pub struct SyntheticOptions {
     pub files_per_mod: u32,
     #[arg(long, default_value_t = 4096)]
     pub file_bytes: usize,
+    #[arg(long)]
+    pub tail_file_bytes: Option<usize>,
     /// Emit PBOs with this many entries instead of flat `.bin` files. Each entry
     /// becomes its own manifest part, so part rows scale without payload bytes.
     #[arg(long, default_value_t = 0)]
@@ -96,6 +98,11 @@ impl SyntheticOptions {
         if self.pbo_entries > 0 && self.entry_bytes == 0 {
             bail!("entry-bytes must be positive when generating PBOs");
         }
+        if self.tail_file_bytes == Some(0)
+            || (self.pbo_entries > 0 && self.tail_file_bytes.is_some())
+        {
+            bail!("tail-file-bytes requires positive flat-file size");
+        }
         let output = resolved_target(&self.output, repo_root)?;
         let mut source_name = output.as_os_str().to_owned();
         source_name.push("-src");
@@ -124,7 +131,7 @@ impl SyntheticOptions {
                     let mut output = fs::File::create(
                         directory.join("addons").join(format!("part_{file:05}.bin")),
                     )?;
-                    let mut remaining = self.file_bytes;
+                    let mut remaining = self.file_size(index, file);
                     while remaining > 0 {
                         let chunk = remaining.min(buffer.len());
                         random.fill(&mut buffer[..chunk]);
@@ -205,10 +212,18 @@ impl SyntheticOptions {
                     })
             },
         )?;
-        let summary = json!({"kind": "synthetic", "generated_utc": chrono::Utc::now().to_rfc3339(), "seed": self.seed, "mode": self.mode, "mods": names.len(), "files": files, "parts": parts, "payload_bytes": bytes});
+        let summary = json!({"kind": "synthetic", "generated_utc": chrono::Utc::now().to_rfc3339(), "seed": self.seed, "mode": self.mode, "mods": names.len(), "files": files, "parts": parts, "payload_bytes": bytes, "tail_file_bytes": self.tail_file_bytes});
         write_json(&output.join("origin.json"), &summary)?;
         fs::remove_dir_all(&source)?;
         Ok(summary)
+    }
+
+    fn file_size(&self, module: u32, file: u32) -> usize {
+        if module + 1 == self.mods && file + 1 == self.files_per_mod {
+            self.tail_file_bytes.unwrap_or(self.file_bytes)
+        } else {
+            self.file_bytes
+        }
     }
 }
 
@@ -254,6 +269,26 @@ fn synthetic_pbo(random: &mut DotNetRandom, entries: u32, entry_bytes: usize) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_last_flat_file_uses_the_tail_size() {
+        let options = SyntheticOptions {
+            output: PathBuf::new(),
+            mods: 2,
+            files_per_mod: 3,
+            file_bytes: 8,
+            tail_file_bytes: Some(64),
+            pbo_entries: 0,
+            entry_bytes: 64,
+            seed: 1,
+            repo_name: String::new(),
+            mode: "foxy".to_owned(),
+            force: false,
+        };
+        assert_eq!(options.file_size(0, 2), 8);
+        assert_eq!(options.file_size(1, 1), 8);
+        assert_eq!(options.file_size(1, 2), 64);
+    }
 
     /// Decode the generated PBO the way `foxy_formats::pbo` does, without
     /// importing it: the kit stays independent of the crates it measures.

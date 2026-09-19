@@ -29,7 +29,7 @@ claims.
 | rejected | Turso 0.7 MVCC can beat WAL for Foxy's metadata rebuild | DB write elapsed and correctness | lower, no failures | `perf-db-refresh-main` |
 | rejected | MVCC wins once the per-call `journal_mode` pragma is no longer paid (retest on the pooled build) | `summary.total_ms` | lower | `perf-db-refresh-main` |
 | accepted | `DB_WRITE_GATE` above 1 is worth ~18% on the metadata refresh | `summary.total_ms` | lower | `perf-db-refresh-main` |
-| testing | Improve hash profile auto-selection by storage class | `breakdown.run_metrics.hash_total_s` | lower, with stable choice across rotated balanced groups | SSD/HDD recheck pair; 10% switch guard and balanced dealing implemented, normal-pressure cold rerun pending |
+| testing | Improve hash profile auto-selection by storage class | `breakdown.run_metrics.hash_total_s` | lower, with stable choice across rotated balanced groups | NVMe cold rotations now agree under normal pressure; HDD recheck pair remains |
 | closed | Cover the deferred 433k-row `subfiles` bulk insert with a payload-bearing origin | DB write elapsed | n/a, coverage gap | `perf-db-parts-bulk` |
 | accepted | Sorting the deferred part buffer into index key order speeds the bulk insert | deferred insert elapsed | lower | `perf-db-parts-bulk` |
 | rejected | Dropping and rebuilding the `subfiles` indexes around the download-overlapped flush pays | deferred insert elapsed | lower | `bench_subfiles_index_cost` |
@@ -52,7 +52,7 @@ claims.
 | rejected | The HDD 40-file delta stage drifted from 28.7-30.0 s to 32.3-32.6 s across today's builds because chunked blob writes fragment the staging file on rotational media, not because of payload wear | `summary.download_stage_ms` | n/a, a fresh payload measured 28.4 s (`20260916T164216Z`), so the drift was payload wear; each mutate-and-patch cycle rewrites outputs on rotational media | `perf-tfr-scifi-stale-check-hdd` |
 | closed | Persisting the auto hash profile across restarts removes a calibration cost on the first check | `breakdown.run_metrics.hash_total_s` | n/a, evidence says the cost is 0.2-0.3 s on NVMe and nothing on HDD | `perf-tfr-scifi-first-check-ssd` |
 | closed | A download after a cancelled force redownload re-fetches every file instead of resuming the 4-5 mods the cancelled run completed and hashed | `summary.downloaded_bytes` of the resume | n/a, the cancel reverts every promoted file, finished mods included, so there is nothing on disk to resume; the reused queue now prunes verified files, but only a policy change can leave them | `perf-tfr-scifi-cancel-resume-ssd` |
-| open | Committing the rollback entries of mods that finished before a cancel (instead of reverting them with the half-done ones) lets the next download resume, at the cost of a repository that is partly new after a cancel | `summary.downloaded_bytes` of the resume | lower (only the unfinished mods) | `perf-tfr-scifi-cancel-resume-ssd`, `perf-tfr-scifi-cancel-patch-ssd`; a product decision, not taken here |
+| closed | Committing the rollback entries of mods that finished before a cancel (instead of reverting them with the half-done ones) lets the next download resume, at the cost of a repository that is partly new after a cancel | `summary.downloaded_bytes` of the resume | n/a, rollback remains the policy; revisit only if partly updated repositories become an accepted product behavior | `perf-tfr-scifi-cancel-resume-ssd`, `perf-tfr-scifi-cancel-patch-ssd` |
 | rejected | Doubling the range budget for the first seconds of a transfer shortens the 4 s ramp (250 MB of deficit against the plateau) when the ramp is per-connection growth at the origin rather than a path-level effect | `download.ramp_s`, `download.ramp_deficit_bytes` | n/a, the calibration lane ramps identically at 96 and 192 connections (3, 8, 16-19, 26-29, 43-48, 62-65, 84-86, 105-106 MB/s per 500 ms) while one connection is at full rate inside 0.5 s: the ramp is the path, not the client | `foxy-testkit calibrate --lanes network --connections 192` against 96, 2026-09-16 |
 | accepted | The rollback session rewrites its whole manifest on every promoted file, so an update of many small files pays a cost that grows with the file count | `summary.download_stage_ms` | lower, linear in files | `perf-synthetic-tiny-files-ssd` |
 | accepted | A cancelled sync leaves the incremental hash flush running detached, so reverted files keep the checksums of bytes the disk no longer has | oracle after a resume | pass | `perf-tfr-scifi-cancel-patch-ssd` |
@@ -509,6 +509,15 @@ cannot validate rotation stability. Repeat the two-sample evicted lane only
 under normal pressure and require the same selected profile, sufficient held-out
 work, one-pass byte accounting, no flags and an oracle pass. Do not add a
 pressure override or increase the switch threshold to manufacture agreement.
+
+The normal-pressure rerun `20260919T075256Z-3af24498` completed on clean
+`a0b7a2a`: 64.44 GiB available, zero pagefile use, two distinct rotations,
+Aggressive selected both times. Each evicted pass covered 217 files / 4.33 GB
+once with zero eviction failures. Hash service was 0.784 and 0.777 s; the
+208-file / 2.62 GB held-out work was sufficient and ran at 96.75% and 96.96%
+of selected-sample throughput. Both repairs passed the independent oracle and
+all rows had zero flags. This closes the NVMe stability check; it does not
+establish an HDD profile choice or a five-sample performance baseline.
 
 ### closed: memory footprint is advisory, not a gate (2026-09-16)
 

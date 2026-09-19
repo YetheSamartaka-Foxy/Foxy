@@ -9,7 +9,7 @@ use log::{debug, error, info, warn};
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::broadcast::Sender;
 use tokio::sync::{Semaphore, mpsc, watch};
 use tokio::time::sleep;
@@ -590,6 +590,17 @@ pub(super) async fn process_mod_batch(
             break;
         }
 
+        let mut final_wave =
+            if running_total == 1 && large_queue.is_empty() && small_queue.is_empty() {
+                let (_, bytes_done) = summarize_mod_progress(&progress_entries);
+                Some((
+                    Instant::now(),
+                    mod_bytes_total.saturating_sub(bytes_done as usize),
+                ))
+            } else {
+                None
+            };
+
         while let Some(res) = inflight.next().await {
             match res {
                 Ok((Ok(()), _is_large, _file)) => {
@@ -680,6 +691,33 @@ pub(super) async fn process_mod_batch(
                 }
                 break;
             }
+            if running_total == 1
+                && large_queue.is_empty()
+                && small_queue.is_empty()
+                && final_wave.is_none()
+            {
+                let (_, bytes_done) = summarize_mod_progress(&progress_entries);
+                final_wave = Some((
+                    Instant::now(),
+                    mod_bytes_total.saturating_sub(bytes_done as usize),
+                ));
+            }
+        }
+
+        if let Some((started, remaining_bytes)) = final_wave {
+            info!(
+                "Download final wave: op_id={} mod_id={} attempt={} remaining_bytes={} last_byte_tail_s={:.3} outcome={}",
+                context.operation_id().unwrap_or("none"),
+                batch.mod_id,
+                attempt,
+                remaining_bytes,
+                started.elapsed().as_secs_f64(),
+                if failed.is_empty() && !saw_cancelled_error {
+                    "completed"
+                } else {
+                    "incomplete"
+                }
+            );
         }
 
         if cancellation_requested(&cancel_rx) || saw_cancelled_error {

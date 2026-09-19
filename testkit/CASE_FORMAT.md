@@ -100,7 +100,7 @@ no unallowlisted WARN or ERROR entries.
 | `thresholds` | no | `{}` | Per-metric `{min,max}` hard gates |
 | `guards` | no | defaults below | Precondition object |
 | `settings` | no | none | object merged into the generated `settings.json` (a bandwidth cap, a hash profile); ignored with `fixture.files` or a `config_seed` |
-| `origin` | no | none | `{root, port}` served in-process for the run; `delay_ms` holds every response back that long. `truncate_first_responses`, `truncate_after_bytes`, and optional `truncate_path_suffix` create deterministic incomplete-body retries. |
+| `origin` | no | none | `{root, port}` served in-process for the run; `delay_ms` holds every response back that long. `truncate_first_responses`, `truncate_after_bytes`, and optional `truncate_path_suffix` create deterministic incomplete-body retries. `burst_after_bytes`, `burst_first_bps`, and `burst_second_bps` pace a `.bin` response across two body phases. |
 
 Supported operations are `startup`, `ui-walk`, `switch-game-space`,
 `remote-refresh`, `quick-check`, `recheck`, `recheck-integrity`,
@@ -244,7 +244,9 @@ absent for that operation and the gate should then be skipped.
 The expectation view exposes the last aggregate patch action as `delta_patch`,
 its typed per-file stage records as `delta_patch_stages`, and the last
 `download`, `quick_scan`, `startup`, `remote_refresh`, `db_persist`, `db_purge`, and `space_switch`
-records, in addition to `summary`, `sol`, `breakdown`, and `elapsed_s`. Patch
+records, in addition to `summary`, `sol`, `breakdown`, and `elapsed_s`. `origin_burst`
+records per-operation request count, phase bytes, phase seconds, observed rates,
+configured rates, and cap overshoot when the local origin enables a burst. Patch
 cases should assert the aggregate outcome, conservation state, and fallback or
 cancellation counters. A measured operation with `inspect_cleanup: true` also exposes
 `summary.cleanup.residual_files` and the separate `.foxy.part`,

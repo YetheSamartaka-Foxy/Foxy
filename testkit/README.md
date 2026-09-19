@@ -219,11 +219,20 @@ throwaway Turso database on the case volume, with a keyed-update pass in
 between (insert, update and delete rows per second at gate 1, per volume);
 `hosts` records connect, fresh and reused request times for any list of URLs
 (`--hosts https://a/repo.json,http://b/repo.json`, the case address when
-omitted), HTTPS included, one entry per host under `lanes.hosts`. Run the
+omitted), HTTPS included, one entry per host under `lanes.hosts`.
+`https_loopback` measures TLS handshake, fresh request and kept-alive reuse
+against a local fixture with a new trusted CA for each run. Its
+`https-loopback-ipv4` id is a protocol control, not a remote-host reference. Run the
 network lane with nothing else on the path. Every
 later run selects the lanes that match it and derives `sol_calibrated` on
 the row (see `LEDGER_FORMAT.md`); recalibrating retires the baselines that
 cited the old lanes.
+
+`device_io` separately measures one-megabyte random unbuffered reads and a
+mixed random-read/durable-write workload on the case volume. It records its own
+volume-keyed reference so these diagnostics do not replace the sequential
+`disk` bound used by existing ratios. On non-Windows hosts, unbuffered fields
+remain `null`.
 
 ## Replay
 
@@ -273,8 +282,10 @@ while moving three orders of magnitude fewer bytes. It is what
 `perf-db-parts-bulk` uses to exercise the deferred bulk part insert, which is the
 largest single write Foxy performs.
 
-Large files are written in 8 MiB pieces, so `--file-bytes 2147483648` is fine,
-and `--mode swifty` makes the generator publish the legacy MD5 layout
+Large files are written in 8 MiB pieces, so `--file-bytes 2147483648` is fine.
+`--tail-file-bytes` can give the final flat file a different size for an uneven
+final-wave case; it is unavailable with `--pbo-entries`. `--mode swifty` makes
+the generator publish the legacy MD5 layout
 (`mod.srf` per mod, no `foxy_addon.json`) for a hash-algorithm lane. The
 distribution and algorithm cases document their generator lines in `notes`:
 `synthetic-tiny` (16 x 2000 x 8 KiB), `synthetic-large` (one 2 GiB file) and
@@ -285,6 +296,15 @@ An `origin` block can also carry `delay_ms`, which holds every response back
 that long: with an `extra_repositories` entry marked `"unreachable": true`
 (a closed port, no manifest probe) that is the adverse-origin startup graph
 (`perf-startup-adverse-origins`).
+
+Set `burst_after_bytes`, `burst_first_bps`, and `burst_second_bps` together
+to pace each `.bin` response through two body-rate phases. The runner records
+per-operation `origin_burst` phase bytes, summed response service time, observed
+rates, and cap overshoot. Concurrent ranges make these phase times different
+from the enclosing download wall time.
+`perf-synthetic-origin-burst-ssd` uses a 64 MiB synthetic file, checks each
+phase across the app's range requests and the independent payload oracle, and
+keeps this variable-rate lane separate from a steady-rate network calibration.
 
 Two repositories that publish the same addons (a repository space, or two
 standalone repositories installed into one folder) are two copies of one

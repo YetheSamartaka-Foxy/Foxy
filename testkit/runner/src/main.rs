@@ -105,7 +105,7 @@ enum Command {
     Calibrate {
         #[arg(long)]
         case: PathBuf,
-        /// Comma-separated lanes: network, latency, disk, hash, metadata, db, hosts (default: all).
+        /// Comma-separated lanes: network, latency, disk, device_io, hash, metadata, db, hosts, https_loopback (default: core lanes).
         #[arg(long)]
         lanes: Option<String>,
         /// Seconds of sustained origin load for the network lane.
@@ -328,7 +328,12 @@ fn main() -> Result<()> {
                         .filter(|lane| !lane.is_empty())
                         .collect()
                 })
-                .unwrap_or_else(|| calibrate::LANES.iter().map(|l| (*l).to_owned()).collect());
+                .unwrap_or_else(|| {
+                    calibrate::DEFAULT_LANES
+                        .iter()
+                        .map(|l| (*l).to_owned())
+                        .collect()
+                });
             print_json(&calibrate::execute(
                 repo_root,
                 &calibrate::Options {

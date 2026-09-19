@@ -1067,6 +1067,7 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                     }
                     _ => {}
                 }
+                let burst_before = _origin.as_ref().map(|origin| origin.burst_snapshot());
                 let collected = context.operation(operation)?;
                 if let Some(gate) = collected["database_profile"]["write_gate_permits"].as_u64() {
                     effective_gate = gate as u32;
@@ -1141,6 +1142,9 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                     "space_switch": sol::operation(&sol, "space_switch"),
                     "elapsed_s": collected["elapsed_s"],
                 });
+                if let (Some(origin), Some(before)) = (_origin.as_ref(), burst_before) {
+                    view["origin_burst"] = origin.burst_delta(before);
+                }
                 crate::references::attach(&mut view);
                 let mut flags = Vec::new();
                 if !expect::expectations(&view, &operation["expect"]).is_empty() {
@@ -1199,6 +1203,9 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                 let mut metadata = json!({"run_id":run_id,"iteration":iteration,"started_utc":chrono::Utc::now().to_rfc3339(),"elapsed_s":collected["elapsed_s"],"git_sha":guard["git"]["sha"],"git_dirty":guard["git"]["dirty"],"build_kind":profile,"case_id":id,"case_hash":hash,"harness":harness,"op":name,"storage_class":guard["storage_class"],"environment":guard["environment"],"cache_state":cache_state(warmup, iteration, evicted_pending),"database_mode":options.database_mode,"db_write_gate":effective_gate,"db_pool_idle":pool_idle,"diagnostics":diagnostics,"origin_checksum":origin_checksum,"references":references,"oracle_outcome":oracle_outcome,"flags":flags,"verdict":if flags.is_empty() {"ok"} else {"invalid"}});
                 if label != name {
                     metadata["label"] = label.into();
+                }
+                if !view["origin_burst"].is_null() {
+                    metadata["origin_burst"] = view["origin_burst"].clone();
                 }
                 write_json(
                     &run.join(format!("metadata-{stem}.json")),
