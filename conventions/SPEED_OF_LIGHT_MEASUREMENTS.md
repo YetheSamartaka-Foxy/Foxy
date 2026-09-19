@@ -19,7 +19,7 @@ Where a row says `MB/s` from a download report line it is MiB/s
 (`1024 * 1024`); rows typed by hand in the September tables used decimal
 MB/s. Recover exact values from `work_bytes` and `actual_s` when it matters.
 
-## 1. Status by operation (as of 2026-09-18, checkout `d561cf9`)
+## 1. Status by operation (through 2026-09-19)
 
 `n/a` means the required reference or measurement is missing, not zero
 performance. "Reported" ratios keep their original interpretation; the
@@ -41,6 +41,7 @@ comparison column says what the number actually compares.
 | O2 delta locality, 8 files | Resource comparison, same B1 reference | Adjacent run: 48 requests, 0 gap bytes, 65 MB fetched, 216 MB copied; scattered: 74 requests, 7 KB gap, 90 MB fetched, 335 MB copied; both 3.3-4.5 s | Sept 16 `20260916T175048Z`, oracle pass | Locality changes the resource cost, not the elapsed, at this size |
 | O2 apply-time fallback | n/a, correctness lane | One of four plans fails copy verification against a silently changed source (mtime preserved) and falls back; all typed stages are present and the partial patch accounting is explicit | Sept 18 `20260918T102813Z-11a921c4`, schema 4, two repetitions, `patch_fallbacks=1`, `patch_applies=3`, `outcome=completed_with_fallback`, oracle pass and zero residual transfer artifacts | The fallback path, cleanup, aggregate outcome, stage set and conservation state are gated by the kit lane |
 | O3 evicted first-check hash, HDD | 81% calibrated against matched B2+B6 | 39.68 s median for 4.33 GB across two explicitly evicted samples | Sept 16 `20260916T184102Z` | Payload hashed once; the earlier 13.8 s benchmark figure was a transcription error |
+| O3 evicted integrity recheck, HDD | Accepted elapsed; raw calibrated B2+B6 ratio 1.0262 is above one and needs reference review | 30.70 s outer median [30.56-34.17]; 30.306 s hash service median; seven explicit evictions, 4.33 GB hashed once per sample, Auto selected Conservative 7/7 | Clean commit `11924bd`, run `20260919T165348Z-1d502298`, separate oracle pass over 217 files, Sept 19 | Current device-cold Auto baseline for this HDD payload; do not treat the above-one ratio as physical efficiency |
 | O3 first-check hash, NVMe | 94-95% calibrated against the explicit device-cold B2+B6 bound | Cache eviction covered all 217 files / 4.33 GB with zero failures; every payload byte was hashed once. Two rotated trials selected aggressive then balanced, with 2.62 GB / 208-file held-out rates at 91-96% of their selected sample rates; total hash service was 0.800 s and 0.792 s | Clean commit `cd93c11`, oracle pass, Sept 18 `20260918T153343Z-15292830` | A 10% switch guard and bytes/parts/file-count trial balancing are implemented at `d561cf9`; normal-pressure device-cold confirmation remains open because the validation machine entered severe memory pressure |
 | O3 MD5 integrity recheck, NVMe | 135-140% against the B6 MD5 all-core lane (2.3 GB/s over one buffer) | 400 x 1 MiB hashed at 4.3-4.5 GB/s with `algorithm=md5` | Sept 16 `20260916T181455Z` | The single-buffer MD5 lane is a floor for per-file parallel MD5; kept as such |
 | O4 outdated, untouched quick check | 3-6% calibrated against B5 (255 entries at the volume's metadata rate over the 21 ms scan) | The scan is not enumeration-bound: entries cost under 1 ms, the rest is cache validation and DB reads, as the model predicted | App `sync_action` 0.023 s (runner elapsed 0.45 s is driver round trips), zero hash bytes, Sept 16 | The repeated expensive recheck was removed; a B5 ratio this low says the remaining cost is the correctness work, not the walk |
@@ -58,15 +59,18 @@ comparison column says what the number actually compares.
 
 ## 1a. Current accepted baselines
 
-Regenerated with `foxy-testkit measurements` from the current compatible
-accepted baseline set at checkout `956de9e`. Rows that name an app-owned action
-instead of the outer driver bracket cite the same accepted run artifact.
+The earlier rows were regenerated with `foxy-testkit measurements` from the
+compatible accepted baseline set at checkout `956de9e`. The Sept 19 HDD row
+comes from the accepted baseline at checkout `11924bd`. Rows that name an
+app-owned action instead of the outer driver bracket cite the same accepted
+run artifact.
 
 | Date | Case | Operation | SoL (kind) | Lane | Elapsed | Baseline | Samples | Work | Outcome | Build | Run |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 2026-09-17 | `perf-redownload-small-ssd` | force-redownload (O1 full-file download) | 95% (calibrated, network B1) | ssd warm | 41.09 s | 41.09 s median of 5 [40.53-41.26] | 5 | 217 files, 4.33 GB, 4.33 GB hashed | completed,completed,completed,completed,completed | 98e45d7 | `20260917T115728Z-3a091b88` |
 | 2026-09-17 | `perf-redownload-small-ssd` | recheck (O6 no-change sync) | 89% (calibrated, no-change B4) | ssd warm | 0.46 s | 0.46 s median of 5 [0.44-0.58] | 5 | n/a | ok | 98e45d7 | `20260917T115728Z-3a091b88` |
 | 2026-09-17 | `perf-tfr-scifi-recheck-hdd` | recheck-integrity (O3 tree hash verification) | 45% (calibrated, hash B2+B6) | hdd warm | 1.12 s | 1.12 s median of 7 [1.10-1.14] | 7 | 4.33 GB hashed | ok | 98e45d7 | `20260917T114946Z-18571f30` |
+| 2026-09-19 | `perf-tfr-scifi-cold-auto-hash-hdd` | recheck-integrity@evicted (O3 tree hash verification) | 1.0262 raw calibrated ratio (above-bound reference warning) | hdd evicted | 30.70 s | 30.70 s median of 7 [30.56-34.17] | 7 | 4.33 GB hashed per sample | completed; separate oracle pass | 11924bd | `20260919T165348Z-1d502298` |
 | 2026-09-17 | `perf-tfr-scifi-stale-check-hdd` | download (O2 delta patch) | 12% (calibrated, network B1) | hdd warm | 31.54 s | 31.54 s median of 7 [30.73-32.63] | 7 | 40 files, 0.42 GB | completed,completed,completed,completed,completed,completed,completed | 98e45d7 | `20260917T155052Z-18ca3678` |
 | 2026-09-17 | `perf-tfr-scifi-stale-check-hdd` | quick-check-stale (O4 quick scan) | 5% (calibrated, metadata B5) | hdd warm | 0.45 s | 0.45 s median of 7 [0.45-0.56] | 7 | n/a | ok | 98e45d7 | `20260917T155052Z-18ca3678` |
 | 2026-09-18 | `perf-tfr-scifi-clean-check-ssd` | quick-check-clean (O4 quick scan) | 28% (calibrated, metadata B5) | ssd warm | 0.003 s app action | 0.003 s median of 5 [0.003-0.004] | 5 | 22 addons, 255 entries, zero hash/deep work | clean,clean,clean,clean,clean | bdea20b | `20260918T103351Z-02f12e74` |

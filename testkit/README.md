@@ -335,6 +335,16 @@ Real cases, ledgers, baselines, and run artifacts are ignored because they can
 contain machine paths, server credentials, and large logs. Copy an example into
 `testkit/cases/`, replace placeholders locally, then run it.
 
+The explicitly audited accepted HDD Auto hash baseline is committed at
+`testkit/ledger/perf-tfr-scifi-cold-auto-hash-hdd.gui.release.wal.gate-4.baseline.json`.
+Its reproducible case template is
+`testkit/examples/perf-tfr-scifi-cold-auto-hash-hdd.example.json`; set
+`FOXY_TESTKIT_REPO_URL` and `FOXY_TESTKIT_HDD_PAYLOAD` to the matching origin
+and HDD payload path before running it. The baseline records seven evicted
+integrity rechecks at a 30.70 s median. Its calibrated hash ratio exceeds one,
+so use the elapsed time as the accepted comparison until the B2+B6 reference
+is reviewed.
+
 The GUI driver injects discrete input events. A clean scroll case is useful
 evidence, but it cannot prove that interactive hover, momentum, and DPI paths are
 free of every egui multi-pass issue.

@@ -1,0 +1,178 @@
+{
+  "format_version": 2,
+  "accepted_utc": "2026-09-19T16:57:54.407603900+00:00",
+  "git_sha": "11924bd5393c9b9c606fed3bbad9d80245614adc",
+  "case_hash": "07b52672129352ecc39ba7f35456719ce6c1af48cc8b5969a734d52d087c59dd",
+  "origin_checksum": "EDD71A28091BA95A9A11AF5718810136BF9D91F0A884F6D1AD8718EE89090DE5",
+  "references": {
+    "network": "network-20260916-3bc06636",
+    "latency": "latency-20260916-26ed4275",
+    "disk": "disk-20260916-d8f5366c",
+    "metadata": "metadata-20260916-7ac03780",
+    "db": "db-20260916-cdb8dc4e",
+    "hash": "hash-20260916-0ba11d4e"
+  },
+  "profile": {
+    "harness": "gui",
+    "build_kind": "release",
+    "database_mode": "wal",
+    "db_write_gate": 4,
+    "db_pool_idle": null,
+    "storage_class": "hdd",
+    "diagnostics": "none",
+    "environment": {
+      "cpu": "AMD Ryzen 9 9950X3D 16-Core Processor",
+      "os": "Windows 11",
+      "memory_gb": 96,
+      "origin": "a3.tfrod.cz:8080"
+    }
+  },
+  "operations": {
+    "recheck-integrity@evicted": {
+      "samples": 7,
+      "cache_state": "evicted",
+      "op": "recheck-integrity",
+      "label": null,
+      "compatibility": {
+        "op": "recheck-integrity",
+        "label": null,
+        "cache_state": "evicted",
+        "mutation_profile": null,
+        "mutation_seed": null,
+        "origin_checksum": "EDD71A28091BA95A9A11AF5718810136BF9D91F0A884F6D1AD8718EE89090DE5",
+        "references": {
+          "network": "network-20260916-3bc06636",
+          "latency": "latency-20260916-26ed4275",
+          "disk": "disk-20260916-d8f5366c",
+          "metadata": "metadata-20260916-7ac03780",
+          "db": "db-20260916-cdb8dc4e",
+          "hash": "hash-20260916-0ba11d4e"
+        },
+        "diagnostics": "none"
+      },
+      "metrics": {
+        "elapsed_s": 30.704615,
+        "hash.sol_calibrated": 1.0262,
+        "quick_scan.sol_calibrated": 0.4713,
+        "breakdown.run_metrics.hash_total_s": 30.306,
+        "quick_scan.actual_s": 0.003,
+        "remote_refresh.actual_s": 0.147,
+        "sync_action.actual_s": 30.532,
+        "summary.delta_savings_percent": 0.0,
+        "database.write_time_ms": 28.4,
+        "database.permit_wait_ms": 0.0,
+        "database.write_retries": 0.0,
+        "memory.peak_private_bytes": 347430912.0,
+        "memory.retained_private_bytes": 332836864.0,
+        "memory.growth_private_bytes": 802816.0,
+        "summary.downloaded_bytes": 0.0,
+        "summary.files_updated": 0.0,
+        "summary.parts_updated": 0.0,
+        "mutated_parts": 0.0
+      },
+      "spread": {
+        "elapsed_s": {
+          "min": 30.558869,
+          "max": 34.169292,
+          "absolute_range": 3.6104229999999973
+        },
+        "hash.sol_calibrated": {
+          "min": 0.9204,
+          "max": 1.0306,
+          "absolute_range": 0.11019999999999996
+        },
+        "quick_scan.sol_calibrated": {
+          "min": 0.4713,
+          "max": 0.7069,
+          "absolute_range": 0.23559999999999998
+        },
+        "breakdown.run_metrics.hash_total_s": {
+          "min": 30.177,
+          "max": 33.791,
+          "absolute_range": 3.613999999999997
+        },
+        "quick_scan.actual_s": {
+          "min": 0.002,
+          "max": 0.003,
+          "absolute_range": 0.001
+        },
+        "remote_refresh.actual_s": {
+          "min": 0.144,
+          "max": 0.422,
+          "absolute_range": 0.278
+        },
+        "sync_action.actual_s": {
+          "min": 30.399,
+          "max": 34.016,
+          "absolute_range": 3.6169999999999973
+        },
+        "summary.delta_savings_percent": {
+          "min": 0.0,
+          "max": 0.0,
+          "absolute_range": 0.0
+        },
+        "database.write_time_ms": {
+          "min": 27.9,
+          "max": 36.2,
+          "absolute_range": 8.300000000000004
+        },
+        "database.permit_wait_ms": {
+          "min": 0.0,
+          "max": 0.0,
+          "absolute_range": 0.0
+        },
+        "database.write_retries": {
+          "min": 0.0,
+          "max": 0.0,
+          "absolute_range": 0.0
+        },
+        "memory.peak_private_bytes": {
+          "min": 341819392.0,
+          "max": 348741632.0,
+          "absolute_range": 6922240.0
+        },
+        "memory.retained_private_bytes": {
+          "min": 330010624.0,
+          "max": 334635008.0,
+          "absolute_range": 4624384.0
+        },
+        "memory.growth_private_bytes": {
+          "min": 0.0,
+          "max": 1531904.0,
+          "absolute_range": 1531904.0
+        },
+        "summary.downloaded_bytes": {
+          "min": 0.0,
+          "max": 0.0,
+          "absolute_range": 0.0
+        },
+        "summary.files_updated": {
+          "min": 0.0,
+          "max": 0.0,
+          "absolute_range": 0.0
+        },
+        "summary.parts_updated": {
+          "min": 0.0,
+          "max": 0.0,
+          "absolute_range": 0.0
+        },
+        "mutated_parts": {
+          "min": 0.0,
+          "max": 0.0,
+          "absolute_range": 0.0
+        }
+      },
+      "outcomes": [
+        "completed"
+      ],
+      "oracle_outcomes": {
+        "not_applicable": 7
+      }
+    }
+  },
+  "tolerances": {
+    "sol": 0.08,
+    "duration": 0.12,
+    "correctness": 0.0
+  }
+}
