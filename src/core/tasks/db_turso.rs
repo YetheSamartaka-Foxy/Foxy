@@ -1822,6 +1822,7 @@ mod tests {
         let expected = [
             "repositories",
             "pending_updates",
+            "storage_read_measurements",
             "addons",
             "files",
             "subfiles",

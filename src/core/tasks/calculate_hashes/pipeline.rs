@@ -298,12 +298,12 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
     let hash_started = Instant::now();
     let (hash_results, profile_decision, cancelled) = recalculate_parts_for_jobs_with_profile(
         hash_jobs,
+        &context,
         hash_io_profile,
         None,
         progress_tx,
         total_files,
         cancel_rx,
-        context.operation_id(),
     )
     .await;
     if cancelled || cancel_rx.as_ref().is_some_and(|rx| *rx.borrow()) {

@@ -52,6 +52,15 @@ CREATE TABLE IF NOT EXISTS pending_updates (
     PRIMARY KEY (repository_url, local_path)
 );
 
+CREATE TABLE IF NOT EXISTS storage_read_measurements (
+    volume_key      TEXT PRIMARY KEY,
+    method          TEXT NOT NULL,
+    read_bytes      INTEGER NOT NULL,
+    elapsed_ns      INTEGER NOT NULL,
+    read_bps        INTEGER NOT NULL,
+    measured_at_utc TEXT NOT NULL
+);
+
 -- Index of the benchmark folders under games/<space>/benchmarks. The folders
 -- are authoritative; rows are rebuilt from them after a wipe.
 CREATE TABLE IF NOT EXISTS benchmarks (

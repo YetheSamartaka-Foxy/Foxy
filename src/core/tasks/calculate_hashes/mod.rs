@@ -47,6 +47,7 @@ mod pipeline;
 mod propagation;
 mod scheduling;
 mod segment_verified;
+mod storage_probe;
 
 pub(crate) use context::RepositoryHashContext;
 pub(crate) use file_hashes::{
@@ -72,3 +73,4 @@ pub(crate) use scheduling::{
 pub(crate) use segment_verified::{
     PatchedFileSegments, PatchedSegment, apply_segment_verified_files,
 };
+pub(crate) use storage_probe::STORAGE_READ_MEASUREMENT_UPSERT_SQL;

@@ -52,6 +52,12 @@
 
 \- Update models and any query code that depends on the schema.
 
+`storage_read_measurements` is an additive table applied by the bootstrap to
+existing databases without a version bump. It stores a UTC-dated unbuffered
+SSD read sample per opaque volume key in the active game-space DB. The live
+wipe leaves it in place so a repository metadata rebuild can reuse a sample
+younger than 30 days; replacing the database file loses it.
+
 \### Repository instance identity is `(remote_url, local_path)`
 
 \- A repository row is identified by the composite `(remote_url, local_path)`, not by URL alone (migration 21, `upsert_repository_entry` `on_conflict`). The same URL downloaded to two folders is two independent rows. `addons`/`files` are per-instance too: conflict-keyed on `(Name, RemotePath, LocalPath)`; `remote_files.rs` separates "matching remote paths but different local paths".

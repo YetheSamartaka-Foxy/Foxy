@@ -363,12 +363,12 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
     let hash_started = Instant::now();
     let (hash_results, profile_decision, _cancelled) = recalculate_parts_for_jobs_with_profile(
         hash_jobs,
+        &context,
         hash_io_profile,
         sticky_auto_profile,
         progress_tx,
         total_files,
         None,
-        context.operation_id(),
     )
     .await;
     phase_timings.hash_wall += hash_started.elapsed();

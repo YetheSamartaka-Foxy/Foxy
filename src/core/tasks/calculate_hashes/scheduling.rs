@@ -412,7 +412,7 @@ pub(crate) fn detect_storage_class_for_path(path: &str) -> HashStorageClass {
         .unwrap_or(HashStorageClass::Unknown)
 }
 
-fn storage_path_starts_with_mount(path: &Path, mount: &Path) -> bool {
+pub(super) fn storage_path_starts_with_mount(path: &Path, mount: &Path) -> bool {
     path.starts_with(mount)
         || normalized_storage_path(path).starts_with(&normalized_storage_path(mount))
 }
@@ -1365,17 +1365,26 @@ pub(super) fn log_addon_hash_metrics(label: &str, data_tree: &Tree, results: &[F
 
 pub(super) async fn recalculate_parts_for_jobs_with_profile(
     mut jobs: Vec<FileHashJob>,
+    context: &FoxyContext,
     requested_profile: HashIoProfilePreference,
     sticky_auto_profile: Option<HashIoProfilePreference>,
     progress_tx: Option<&Sender<ProgressEvent>>,
     total_files: usize,
     cancel_rx: Option<&watch::Receiver<bool>>,
-    operation_id: Option<&str>,
 ) -> (Vec<FileHashResult>, HashProfileDecision, bool) {
+    let operation_id = context.operation_id();
     let total_parts: usize = jobs.iter().map(|job| job.indexed_parts.len()).sum();
     let algorithm = hash_algorithm_label(&jobs);
     let resource_profile = ResourceProfile::sample();
     let storage_class = detect_hash_storage_class(&jobs);
+    super::storage_probe::log_storage_read_measurement(
+        context,
+        &jobs,
+        storage_class,
+        requested_profile,
+        cancel_rx,
+    )
+    .await;
     if resource_profile.pressure != ResourcePressure::Normal {
         info!(
             "Hash scheduler resource pressure detected: {}",

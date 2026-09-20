@@ -130,7 +130,7 @@ promoted, durable) when it is not obvious from the operation card.
 | --- | --- | --- | --- |
 | O1 | Full-file download | `download_files/orchestrator.rs` | limiter cap (modeled) or same-run peak (consistency); nominal disk on rotational destinations |
 | O2 | Delta patch | `SOL op=delta_patch` action and `SOL op=delta_patch_stage` spans in `download_files/orchestrator.rs` | none; byte savings only |
-| O3 | Content hashing and ordered tree verification | `calculate_hashes/scheduling.rs` | none (self baseline); saved benchmarks derive a same-run peak across homogeneous batches |
+| O3 | Content hashing and ordered tree verification | `calculate_hashes/scheduling.rs` and `calculate_hashes/storage_probe.rs` | none (self baseline); saved benchmarks derive a same-run peak across homogeneous batches |
 | O4 | Quick scan | `quick_scan/diff.rs` | self baseline in-app; accepted same-case clean-scan median in the test kit |
 | O5 | Remote metadata refresh | `SOL op=remote_refresh` in `tasks/remote_repository.rs` | none in-app (self baseline); the kit calibrates the no-change branch through O6 |
 | O6 | No-change sync | `SOL op=sync_action` with an `early-exit-*` outcome, `sync_pipeline/summary.rs` (every pipeline exit emits one) | none in-app; test-kit `sol_calibrated` against B4 |
@@ -325,6 +325,13 @@ correctness gates.
    layout and straggler breakdown; `Hash profile auto benchmark sample:` the
    calibration trials; `Hash profile auto heldout:` the selected profile's
    throughput on the untouched remaining workload.
+   `Hash storage read measurement:` logs a separate Windows unbuffered read
+   sample from existing SSD files, or a cached sample from the active game-space
+   database. It includes `read_bps`, sampled bytes, UTC measurement time,
+   storage class, and cache status without logging the local path. The sample
+   expires after 30 days and refreshes at the next Auto hash run with at least
+   64 MiB of readable local files. It is a sampled read rate, not the hash
+   throughput or a guaranteed device maximum, and does not choose the profile.
 7. **Candidates**: straggler splitting and scoped trees. Cross-run profile
    reuse is closed unless calibration costs seconds: safe reuse needs storage,
    workload and build invalidation and a stale choice costs more than the
@@ -558,6 +565,7 @@ appended keys; parsers treat them as `metric_kind` inferred from `light_src` and
 | `SOL op=delta_patch` (one aggregate action artifact) | `op_id`, `parent_op_id`, `span_id`, monotonic `start_offset_ns`/`end_offset_ns`, attempts, successful patched files, fallbacks, cancellations, requests, retries, useful output, unique insert, actual received, source-copy and staging bytes, planning/fetch/apply/promote/verify/finalize service times, their compatible `verify_promote` total, byte-conservation status, terminal outcome and `timer_scope=action_wall` |
 | `SOL op=delta_patch_stage` (one typed per-file stage span) | `record_kind=stage`, `op_id`, `parent_op_id`, attempt `parent_span_id`, unique `span_id`, `stage_id` (`planning`, `fetch`, `apply`, `promote`, `verify`, `finalize`), `file_id`, monotonic `start_offset_ns`/`end_offset_ns`, stage outcome and `timer_scope=stage_wall` |
 | `SOL op=hash` (every part-hash batch) | `label`, `files`, `parts`, `compute_s`, `wait_s` (legacy names), `blocking_elapsed_s`, `permit_wait_s`, `file_elapsed_max_s`, `missing_files`, `profile`, `algorithm` (`blake3`, `md5`, `mixed`, `unknown`), `timer_scope=batch_wall`, `outcome` (`completed`, `cancelled`), `op_id` (when run inside an action) |
+| `SOL op=storage_read_probe` (when an SSD sample is attempted) | `storage=ssd`, opaque `volume_id`, `method`, `measured_at_utc`, `timer_scope=sample_wall`, `outcome` (`measured`, `failed`, `cancelled`), `op_id`; `work_bytes` and `actual_bps` are present for a completed sample |
 | `SOL op=quick_scan` | `repo`, `addons_total`, `addons_hashed`, `cache_hits_shared`, `cache_hits_persistent`, `deep_scan_files`, `entries` (directory entries the fingerprint walks enumerated), `addons_per_s`, `outcome`, `op_id` (the owning sync action or quick-scan sweep) |
 | `SOL op=remote_refresh` (every remote metadata refresh) | `outcome` (`skipped_clean`, `graph_unchanged`, `rebuilt`, `failed`), `index_requests`, `manifest_requests`, `mods`, `files`, `parts`, `response_bytes`, `fetch_sum_s`, `parse_sum_s`, `persist_sum_s`, `fan_out_wall_s`, `timer_scope=action_wall`, `op_id` |
 | `SOL op=sync_action` (every pipeline exit) | `op_id`, `mode`, `outcome` (the `PIPELINE SUMMARY` outcome: `completed`, `early-exit-clean`, `early-exit-skip`, `cancelled`, `failed-*`, ...), `stages`, `timer_scope=action_wall`, one `stage_<name>_s` per stage |
