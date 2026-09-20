@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Holds the checksum(s) for a hashed item, depending on generation mode.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Checksums {
     /// Placeholder before checksums are computed. Panics if accessed.
     #[default]
@@ -42,7 +42,7 @@ impl Checksums {
 }
 
 /// A single contiguous byte range within a file (PBO entry or whole file).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FilePart {
     pub path: String,
     pub checksums: Checksums,
@@ -51,7 +51,7 @@ pub struct FilePart {
 }
 
 /// A file within a mod folder, with its computed parts and checksum.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModFile {
     pub relative_path: String,
     pub checksums: Checksums,
@@ -61,7 +61,7 @@ pub struct ModFile {
 }
 
 /// A processed mod (addon folder) with its files and computed checksum.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessedMod {
     pub mod_name: String,
     pub checksums: Checksums,

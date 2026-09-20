@@ -28,8 +28,11 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
 
 use crate::cli::{GenerationMode, SpaceLayout};
+use crate::published;
 use crate::types::{Checksums, ProcessedMod, RepoConfig, ResolvedMod};
-use crate::{KeyCollectionRequest, artifacts, config, hash, keys, mod_line, srf};
+use crate::{KeyCollectionRequest, artifacts, config, hash, keys, mod_line, planner, srf};
+
+mod cleanup;
 
 pub const SPACE_MANIFEST: &str = "repository_space.json";
 const DEFAULT_POOL_DIR: &str = "pool";
@@ -520,6 +523,8 @@ struct LayoutContext<'a> {
     groups: &'a [SharedMod],
     progress: &'a ProgressBar,
     mode: GenerationMode,
+    prune_unused_optionals: bool,
+    incremental: bool,
 }
 
 impl LayoutContext<'_> {
@@ -570,7 +575,17 @@ fn build_copy(ctx: &LayoutContext<'_>) -> Result<LayoutResult> {
         );
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("Failed to create {}", dir.display()))?;
-        let processed = hash::process_mods(&repo.mods, Some(&dir), ctx.progress, ctx.mode)?;
+        if ctx.prune_unused_optionals {
+            published::remove_published_optionals(&dir, &repo.mods)?;
+        }
+        let processed = hash::process_mods(
+            &repo.mods,
+            Some(&dir),
+            ctx.progress,
+            ctx.mode,
+            ctx.prune_unused_optionals,
+            ctx.incremental,
+        )?;
         artifacts::write_mod_manifests(&processed, &dir, ctx.mode)?;
         key_sources.extend(keys::generated_key_paths(&dir, &processed));
         copied_bytes += processed.iter().map(mod_bytes).sum::<u64>();
@@ -605,7 +620,17 @@ fn build_pool(ctx: &LayoutContext<'_>, pool_dir: &Path) -> Result<LayoutResult> 
         unique.len(),
         pool_dir.display()
     );
-    let pooled = hash::process_mods(&unique, Some(pool_dir), ctx.progress, ctx.mode)?;
+    if ctx.prune_unused_optionals {
+        published::remove_published_optionals(pool_dir, &unique)?;
+    }
+    let pooled = hash::process_mods(
+        &unique,
+        Some(pool_dir),
+        ctx.progress,
+        ctx.mode,
+        ctx.prune_unused_optionals,
+        ctx.incremental,
+    )?;
     for item in &unique {
         std::fs::create_dir_all(pool_dir.join(&item.mod_name))
             .with_context(|| format!("Failed to create pool folder for {}", item.mod_name))?;
@@ -629,7 +654,14 @@ fn build_pool(ctx: &LayoutContext<'_>, pool_dir: &Path) -> Result<LayoutResult> 
             extra.len()
         );
         let candidates: Vec<ResolvedMod> = extra.iter().map(|(_, m)| m.clone()).collect();
-        let hashed = hash::process_mods(&candidates, None, ctx.progress, ctx.mode)?;
+        let hashed = hash::process_mods(
+            &candidates,
+            None,
+            ctx.progress,
+            ctx.mode,
+            ctx.prune_unused_optionals,
+            false,
+        )?;
         for ((g, candidate), processed) in extra.iter().zip(hashed) {
             if processed.checksums != pooled[*g].checksums {
                 return Err(shared_mod_mismatch(
@@ -689,7 +721,7 @@ fn build_link(ctx: &LayoutContext<'_>) -> Result<LayoutResult> {
     }
 
     println!("Hashing {} mod folders in place...", distinct.len());
-    let hashed = hash::process_mods(&distinct, None, ctx.progress, ctx.mode)?;
+    let hashed = hash::process_mods(&distinct, None, ctx.progress, ctx.mode, false, false)?;
 
     ensure_shared_mods_match(ctx.groups, |r, m| {
         let index = slot_to_distinct[&(r, m)];
@@ -736,6 +768,12 @@ pub struct CreateSpaceOptions<'a> {
     pub layout: SpaceLayout,
     pub pool_dir: Option<PathBuf>,
     pub yes: bool,
+    pub clean: bool,
+    pub dry_run: bool,
+    pub atomic: bool,
+    pub prune_unused_optionals: bool,
+    pub incremental: bool,
+    pub only: Vec<String>,
     pub app_update_url: Option<&'a str>,
     pub threads: usize,
     pub mode: GenerationMode,
@@ -755,6 +793,12 @@ pub fn cmd_create_space(
         layout,
         pool_dir,
         yes,
+        clean,
+        dry_run,
+        atomic,
+        prune_unused_optionals,
+        incremental,
+        only,
         app_update_url,
         threads,
         mode,
@@ -765,20 +809,83 @@ pub fn cmd_create_space(
     } = options;
     let started = Instant::now();
 
-    if layout == SpaceLayout::Link && !yes {
+    if layout == SpaceLayout::Link && !yes && !dry_run {
         bail!(
             "--layout link publishes the source mod folders in place: their manifests are written next to the mod files and any later edit there silently breaks the published checksums. Re-run with --yes to accept that, or use --layout pool, which copies each mod once and stays safe to edit."
         );
+    }
+    if prune_unused_optionals && layout == SpaceLayout::Link {
+        bail!("--prune-unused-optionals cannot be used with --layout link");
+    }
+    if prune_unused_optionals && !yes && !dry_run {
+        bail!("--prune-unused-optionals removes published files; re-run with --yes");
+    }
+    if clean && layout != SpaceLayout::Pool {
+        bail!("--clean requires --layout pool");
+    }
+    if clean && !dry_run && !yes {
+        bail!("--clean removes generated files; preview with --dry-run or re-run with --yes");
+    }
+    if !only.is_empty() && clean {
+        bail!(
+            "--only cannot be combined with --clean because other repositories still use the pool"
+        );
+    }
+    if !only.is_empty() && key_collection.enabled {
+        bail!("--only cannot rebuild the combined keys folder; use --per-repo-keys");
     }
 
     let mode_label = artifacts::mode_label(mode);
     println!("Mode: {}", mode_label);
     println!("Layout: {}", layout.as_str());
 
-    crate::configure_thread_pool(threads)?;
-
     println!("Loading space config from: {}", config_path.display());
-    let space = load_space_config(config_path)?;
+    let mut space = load_space_config(config_path)?;
+    let manifest_space = if only.is_empty() {
+        None
+    } else {
+        let full = load_space_config(config_path)?;
+        let wanted: BTreeSet<String> = only.iter().map(|name| name.to_lowercase()).collect();
+        for name in &wanted {
+            if !full
+                .repos
+                .iter()
+                .any(|repo| repo.folder.to_lowercase() == *name)
+            {
+                bail!("Unknown repository folder for --only: {name}");
+            }
+        }
+        for group in group_shared_mods(&full.repos) {
+            let selected = group
+                .uses
+                .iter()
+                .any(|(r, _)| wanted.contains(&full.repos[*r].folder.to_lowercase()));
+            let unselected = group
+                .uses
+                .iter()
+                .any(|(r, _)| !wanted.contains(&full.repos[*r].folder.to_lowercase()));
+            if selected && unselected {
+                bail!(
+                    "--only cannot rebuild shared mod {} without updating all repositories that use it",
+                    group.name
+                );
+            }
+        }
+        for repo in &full.repos {
+            if !wanted.contains(&repo.folder.to_lowercase())
+                && !output_dir.join(&repo.folder).join("repo.json").is_file()
+            {
+                bail!(
+                    "--only needs existing output for repository {}",
+                    repo.folder
+                );
+            }
+        }
+        space
+            .repos
+            .retain(|repo| wanted.contains(&repo.folder.to_lowercase()));
+        Some(full)
+    };
     let groups = group_shared_mods(&space.repos);
     let shared_count = groups.iter().filter(|g| g.uses.len() > 1).count();
 
@@ -804,6 +911,62 @@ pub fn cmd_create_space(
         );
     }
 
+    if dry_run {
+        let pool_dir = pool_dir.unwrap_or_else(|| output_dir.join(DEFAULT_POOL_DIR));
+        let mut plan = planner::create_space(
+            &space,
+            output_dir,
+            layout,
+            &pool_dir,
+            mode,
+            prune_unused_optionals,
+            incremental,
+        )?;
+        if atomic && output_dir.exists() {
+            plan.add("replace-output", output_dir, 0);
+        }
+        if clean {
+            let cleanup = cleanup::plan_cleanup(output_dir, &pool_dir, &groups)?;
+            for link in cleanup.links() {
+                plan.add("remove-link", link, 0);
+            }
+            for dir in cleanup.mods() {
+                plan.add("remove", dir, 0);
+            }
+        }
+        if key_collection.enabled {
+            let dest = key_collection
+                .dest
+                .clone()
+                .unwrap_or_else(|| output_dir.join(DEFAULT_KEYS_DIR));
+            let mods: Vec<_> = space
+                .repos
+                .iter()
+                .flat_map(|repo| repo.mods.clone())
+                .collect();
+            plan.add_keys(
+                &mods,
+                &dest,
+                &key_collection.additional_sources,
+                prune_unused_optionals,
+            )?;
+        }
+        if per_repo_keys {
+            for repo in &space.repos {
+                plan.add_keys(
+                    &repo.mods,
+                    &output_dir.join(&repo.folder).join(DEFAULT_KEYS_DIR),
+                    &key_collection.additional_sources,
+                    prune_unused_optionals,
+                )?;
+            }
+        }
+        plan.show();
+        return Ok(());
+    }
+
+    crate::configure_thread_pool(threads)?;
+
     std::fs::create_dir_all(output_dir)
         .with_context(|| format!("Failed to create output dir: {}", output_dir.display()))?;
 
@@ -828,6 +991,9 @@ pub fn cmd_create_space(
                 .map(|r| (r.folder.as_str(), r.mods.as_slice())),
         )?;
     }
+    if clean {
+        cleanup::plan_cleanup(output_dir, &pool_dir, &groups)?;
+    }
 
     let progress = crate::progress_bar(no_progress);
     println!("Processing files with {} threads...", threads);
@@ -837,6 +1003,8 @@ pub fn cmd_create_space(
         groups: &groups,
         progress: &progress,
         mode,
+        prune_unused_optionals,
+        incremental,
     };
     let built = match layout {
         SpaceLayout::Copy => build_copy(&ctx),
@@ -869,7 +1037,11 @@ pub fn cmd_create_space(
     }
 
     println!("Writing {}...", SPACE_MANIFEST);
-    let manifest_path = write_space_manifest(&space, output_dir, space_app_update_url)?;
+    let manifest_path = write_space_manifest(
+        manifest_space.as_ref().unwrap_or(&space),
+        output_dir,
+        space_app_update_url,
+    )?;
 
     let key_report = if key_collection.enabled {
         println!("Collecting keys into: {}", keys_dir.display());
@@ -917,6 +1089,38 @@ pub fn cmd_create_space(
     } else {
         Vec::new()
     };
+
+    let server_lines: Vec<String> = space
+        .repos
+        .iter()
+        .enumerate()
+        .map(|(r, repo)| {
+            mod_line::build_server_launch_line(
+                &repo.config,
+                &built.repo_mods[r],
+                &repo.mods,
+                mod_line_options,
+            )
+        })
+        .collect();
+    for (r, line) in server_lines.iter().enumerate() {
+        published::write_server_mod_line(&ctx.repo_dir(r), line)?;
+    }
+
+    if layout == SpaceLayout::Pool {
+        if clean {
+            let report = cleanup::plan_cleanup(output_dir, &pool_dir, &groups)?;
+            report.execute()?;
+            report.print(false);
+        }
+        cleanup::write_inventory(
+            output_dir,
+            &pool_dir,
+            manifest_space.as_ref().unwrap_or(&space),
+            &groups,
+            clean,
+        )?;
+    }
 
     let content_bytes: u64 = built.repo_mods.iter().flatten().map(mod_bytes).sum();
     let duplicated_bytes: u64 = groups
@@ -1000,18 +1204,36 @@ pub fn cmd_create_space(
 
     println!();
     println!("Server mod lines:");
-    for (r, repo) in space.repos.iter().enumerate() {
+    for (repo, line) in space.repos.iter().zip(&server_lines) {
         println!("{}:", repo.folder);
-        println!(
-            "{}",
-            mod_line::build_server_launch_line(
-                &repo.config,
-                &built.repo_mods[r],
-                &repo.mods,
-                mod_line_options,
-            )
-        );
+        println!("{line}");
     }
+
+    let lines: Vec<_> = space
+        .repos
+        .iter()
+        .zip(&server_lines)
+        .map(|(repo, line)| serde_json::json!({"folder": repo.folder, "line": line}))
+        .collect();
+    let warnings: Vec<_> = space
+        .repos
+        .iter()
+        .flat_map(|repo| {
+            mod_line::game_config_warnings(&repo.config, &repo.mods)
+                .into_iter()
+                .map(|warning| format!("{}: {warning}", repo.folder))
+        })
+        .collect();
+    crate::output::set_details(serde_json::json!({
+        "output": output_dir,
+        "layout": layout.as_str(),
+        "repositories": space.repos.len(),
+        "distinctMods": groups.len(),
+        "serverLines": lines,
+        "warnings": warnings,
+        "keyConflicts": key_report.as_ref().map(|report| report.conflicts.clone()).unwrap_or_default(),
+        "perRepoKeyConflicts": repo_key_reports.iter().map(|(dest, report)| serde_json::json!({"path": dest, "names": report.conflicts})).collect::<Vec<_>>(),
+    }));
 
     Ok(())
 }

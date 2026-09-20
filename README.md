@@ -213,7 +213,8 @@ foxy-server-backend-cli create config.json ./output --app-update-url https://exa
 ```
 
 `create` finishes by printing the server `-mod=` line for the generated repository,
-so a wrapper script can feed it straight into a server parameters file:
+and writes the same single line to `<output>/server_mod_line.txt`, so a wrapper
+script can read it later:
 
 ```bash
 foxy-server-backend-cli create config.json ./output --mod-line-prefix mods
@@ -224,6 +225,14 @@ foxy-server-backend-cli create config.json ./output --mod-line-prefix mods
 Creator DLC codes from `dlcContent` come first, then the enabled required mods.
 Client-side mods are always excluded; add `--mod-line-include-optional` to append
 the optional mods as well.
+
+Nested mod paths such as `@ace/optionals/@ace_noactionmenu` publish the nested
+folder as a standalone `@ace_noactionmenu` mod. Add `--prune-unused-optionals
+--yes` to omit the root `optionals` directory from the published `@ace` copy.
+The source mod is untouched; `--yes` accepts removal of optionals already in
+the output from an earlier run. Put the nested path in `requiredMods` to include
+it in the default server line; entries in `optionalMods` need
+`--mod-line-include-optional`.
 
 A config with `"game": "reforger"` (`new --game reforger` writes one) hashes the
 unpacked addon folders the same way, including the `.pak` entries inside them, and
@@ -285,6 +294,14 @@ paths resolve from the space config file; each repository's `basePath` keeps the
 | `pool` (recommended) | Each distinct mod is copied once into `<output>/pool` (`--pool-dir` to move it) and every repository holds a relative symlink to it. Mods shared between repositories take disk space once and the output tree can be moved as a whole. | Everywhere symlinks work: Linux hosts, or Windows with Developer Mode / an elevated shell. |
 | `link` | Every repository symlinks straight to the source mod folder; nothing is copied. Requires `--yes`: the per-mod manifests are written into the source folders, and any later change there silently breaks the published checksums until `create-space` runs again. | Only when the sources are already the served copy and never edited in place. |
 
+For pool output, `--clean --dry-run` lists orphaned generated pool folders and
+symlinks that would be removed. Run `--clean --yes` to remove them after a
+successful regeneration. Cleanup does not remove unrelated directories. A pool
+outside the output directory needs an inventory from a previous `create-space`
+run before cleanup is allowed. `--prune-unused-optionals --yes` also works with
+`copy` and `pool` layouts, but cannot be used with `link`, which publishes the
+source directory itself. Each repository gets its own `server_mod_line.txt`.
+
 The web server must follow symlinks for `pool` and `link` (nginx does by
 default; Apache needs `Options FollowSymLinks`). A mod name that appears in
 several repositories must hash identically in all of them, because the desktop
@@ -295,6 +312,51 @@ options and key collection work as for `create`, applied to every repository
 `--per-repo-keys` writes each repository's own keys plus `--additional-keys` into
 `<output>/<folder>/keys` so a server can symlink one repository's keys folder
 directly, and `-mod=` lines are printed per repository folder).
+
+### Server CLI checks and deployment
+
+`create` and `create-space` accept `--dry-run` to list planned copies, manifest
+writes, links, pruning, key collection, and pool cleanup without writing output.
+Add `--json` for one machine-readable result on stdout; progress and human
+messages go to stderr. Generation results include checksums or server lines,
+and error results include a message.
+
+```bash
+foxy-server-backend-cli validate config.json --output ./www/repo
+foxy-server-backend-cli validate space.json --space --output ./www
+foxy-server-backend-cli audit-keys config.json --strict
+foxy-server-backend-cli create-space space.json ./www --layout pool --dry-run --clean
+foxy-server-backend-cli create-space space.json ./www --layout pool --incremental --report
+foxy-server-backend-cli create-space space.json ./www --only modern
+foxy-server-backend-cli verify ./www
+foxy-server-backend-cli diff ./old-www ./www --json
+```
+
+`--incremental` reuses a mod's previous checksums when its source files have
+the same paths, sizes, and modification times and its published files still
+have the expected sizes and modification times. Use `verify` to rehash output
+when a full content check is needed. `--report` compares mod checksums before
+and after generation and estimates download bytes as the sizes of added and
+changed mods.
+
+`--atomic --yes` builds in a sibling directory, then replaces the entire old
+output after a successful build. If publication fails, it attempts to restore
+the old output. It cannot be combined with incremental generation or a custom pool or
+keys destination. `create-space --only <folder>` updates selected repositories
+and keeps the full space manifest; it refuses shared mods that are also used
+by unselected repositories and cannot rebuild the combined keys folder.
+
+`audit-keys` checks key-name conflicts, whether each PBO has a nearby
+`.bisign` file, and whether the named `.bikey` is available. Use repeatable
+`--additional-keys <path>` for keys stored outside the mod sources. It does
+not cryptographically validate signatures.
+For Arma Reforger, `export-reforger-config <config> <output>` writes a
+`game.mods` JSON fragment using IDs found in each mod's `.gproj` or
+`ServerData.json`:
+
+```bash
+foxy-server-backend-cli export-reforger-config reforger_config.json reforger_mods.json
+```
 
 App update manifest flow:
 ```bash

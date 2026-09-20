@@ -1,0 +1,10 @@
+{
+  "game": {
+    "mods": [
+      {
+        "modId": "ABCDEF1234567890",
+        "name": "MyReforgerMod"
+      }
+    ]
+  }
+}

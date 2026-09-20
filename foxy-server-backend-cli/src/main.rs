@@ -1,3 +1,13 @@
+macro_rules! println {
+    ($($arg:tt)*) => {
+        if crate::output::json_mode() {
+            std::eprintln!($($arg)*);
+        } else {
+            std::println!($($arg)*);
+        }
+    };
+}
+
 mod artifacts;
 mod build_info;
 mod changelog_parser;
@@ -5,12 +15,20 @@ mod cli;
 mod config;
 mod discover;
 mod hash;
+mod incremental;
 mod keys;
 mod mod_line;
+mod operations;
+mod output;
+mod planner;
+mod published;
+mod report;
 mod space;
 mod srf;
+mod staging;
 mod types;
 mod update_manifest;
+mod verify;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -23,110 +41,207 @@ fn main() -> Result<()> {
         .format_timestamp(None)
         .init();
 
-    let cli = cli::Cli::parse();
+    let cli = match cli::Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(err) => {
+            if matches!(
+                err.kind(),
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+            ) || !std::env::args_os().any(|arg| arg == std::ffi::OsStr::new("--json"))
+            {
+                err.exit();
+            }
+            output::print_parse_error(&err.to_string());
+            std::process::exit(err.exit_code());
+        }
+    };
+    output::set_json_mode(cli.json);
+    let command_name = match &cli.command {
+        cli::Command::Create { .. } => "create",
+        cli::Command::CreateSpace { .. } => "create-space",
+        cli::Command::New { .. } => "new",
+        cli::Command::NewSpace { .. } => "new-space",
+        cli::Command::Validate { .. } => "validate",
+        cli::Command::Verify { .. } => "verify",
+        cli::Command::Diff { .. } => "diff",
+        cli::Command::AuditKeys { .. } => "audit-keys",
+        cli::Command::ExportReforgerConfig { .. } => "export-reforger-config",
+        cli::Command::SetupAppUpdater { .. } => "setup-app-updater",
+        cli::Command::NewAppUpdate { .. } => "new-app-update",
+    };
 
-    match cli.command {
-        cli::Command::Create {
-            config,
-            output,
-            app_update_url,
-            threads,
-            mode,
-            mod_line_prefix,
-            mod_line_include_optional,
-            collect_keys,
-            keys_output,
-            additional_keys,
-        } => cmd_create(
-            &config,
-            &output,
-            CreateOptions {
-                app_update_url: app_update_url.as_deref(),
+    let result = (|| -> Result<()> {
+        match cli.command {
+            cli::Command::Create {
+                config,
+                output,
+                dry_run,
+                incremental,
+                atomic,
+                report,
+                app_update_url,
                 threads,
                 mode,
-                no_progress: cli.no_progress,
-                mod_line: mod_line::ModLineOptions {
-                    prefix: &mod_line_prefix,
-                    include_optional: mod_line_include_optional,
+                mod_line_prefix,
+                mod_line_include_optional,
+                prune_unused_optionals,
+                yes,
+                collect_keys,
+                keys_output,
+                additional_keys,
+            } => cmd_create(
+                &config,
+                &output,
+                CreateOptions {
+                    app_update_url: app_update_url.as_deref(),
+                    threads,
+                    mode,
+                    no_progress: cli.no_progress,
+                    mod_line: mod_line::ModLineOptions {
+                        prefix: &mod_line_prefix,
+                        include_optional: mod_line_include_optional,
+                    },
+                    prune_unused_optionals,
+                    dry_run,
+                    incremental,
+                    atomic,
+                    report,
+                    yes,
+                    keys: KeyCollectionRequest {
+                        enabled: collect_keys
+                            || keys_output.is_some()
+                            || !additional_keys.is_empty(),
+                        dest: keys_output,
+                        additional_sources: additional_keys,
+                    },
                 },
-                keys: KeyCollectionRequest {
-                    enabled: collect_keys || keys_output.is_some() || !additional_keys.is_empty(),
-                    dest: keys_output,
-                    additional_sources: additional_keys,
-                },
-            },
-        ),
-        cli::Command::CreateSpace {
-            config,
-            output,
-            layout,
-            pool_dir,
-            yes,
-            app_update_url,
-            threads,
-            mode,
-            mod_line_prefix,
-            mod_line_include_optional,
-            collect_keys,
-            keys_output,
-            additional_keys,
-            per_repo_keys,
-        } => space::cmd_create_space(
-            &config,
-            &output,
-            space::CreateSpaceOptions {
+            ),
+            cli::Command::CreateSpace {
+                config,
+                output,
                 layout,
                 pool_dir,
                 yes,
-                app_update_url: app_update_url.as_deref(),
+                clean,
+                dry_run,
+                incremental,
+                atomic,
+                report,
+                only,
+                prune_unused_optionals,
+                app_update_url,
                 threads,
                 mode,
-                no_progress: cli.no_progress,
-                mod_line: mod_line::ModLineOptions {
-                    prefix: &mod_line_prefix,
-                    include_optional: mod_line_include_optional,
-                },
-                keys: KeyCollectionRequest {
-                    enabled: collect_keys || keys_output.is_some() || !additional_keys.is_empty(),
-                    dest: keys_output,
-                    additional_sources: additional_keys,
-                },
+                mod_line_prefix,
+                mod_line_include_optional,
+                collect_keys,
+                keys_output,
+                additional_keys,
                 per_repo_keys,
-            },
-        ),
-        cli::Command::New { output, game } => cmd_new(&output, game),
-        cli::Command::NewSpace { output } => space::cmd_new_space(&output),
-        cli::Command::SetupAppUpdater {
-            version,
-            windows_installer,
-            linux_installer,
-            linux_aarch64_installer,
-            changelog,
-            output,
-        } => cmd_setup_app_updater(
-            &version,
-            windows_installer.as_deref(),
-            linux_installer.as_deref(),
-            linux_aarch64_installer.as_deref(),
-            &changelog,
-            &output,
-        ),
-        cli::Command::NewAppUpdate {
-            version,
-            windows_installer,
-            linux_installer,
-            linux_aarch64_installer,
-            changelog,
-            output,
-        } => cmd_new_app_update(
-            &version,
-            windows_installer.as_deref(),
-            linux_installer.as_deref(),
-            linux_aarch64_installer.as_deref(),
-            &changelog,
-            &output,
-        ),
+            } => {
+                let options = space::CreateSpaceOptions {
+                    layout,
+                    pool_dir,
+                    yes,
+                    clean,
+                    dry_run,
+                    atomic,
+                    prune_unused_optionals,
+                    incremental,
+                    only,
+                    app_update_url: app_update_url.as_deref(),
+                    threads,
+                    mode,
+                    no_progress: cli.no_progress,
+                    mod_line: mod_line::ModLineOptions {
+                        prefix: &mod_line_prefix,
+                        include_optional: mod_line_include_optional,
+                    },
+                    keys: KeyCollectionRequest {
+                        enabled: collect_keys
+                            || keys_output.is_some()
+                            || !additional_keys.is_empty(),
+                        dest: keys_output,
+                        additional_sources: additional_keys,
+                    },
+                    per_repo_keys,
+                };
+                if atomic && (layout == cli::SpaceLayout::Link || options.keys.dest.is_some()) {
+                    anyhow::bail!(
+                        "--atomic requires copy or pool layout and an output-local keys folder"
+                    );
+                }
+                let before = (report && !dry_run)
+                    .then(|| report::snapshot(&output))
+                    .transpose()?;
+                if atomic && !dry_run {
+                    staging::publish(&output, |stage| {
+                        space::cmd_create_space(&config, stage, options)
+                    })?;
+                } else {
+                    space::cmd_create_space(&config, &output, options)?;
+                }
+                if let Some(before) = before {
+                    report::print(&report::compare(&before, &report::snapshot(&output)?));
+                }
+                Ok(())
+            }
+            cli::Command::New { output, game } => cmd_new(&output, game),
+            cli::Command::NewSpace { output } => space::cmd_new_space(&output),
+            cli::Command::Validate {
+                config,
+                space,
+                output,
+            } => operations::validate(&config, space, output.as_deref()),
+            cli::Command::Verify { output } => verify::verify(&output),
+            cli::Command::Diff { old, new } => report::diff(&old, &new),
+            cli::Command::AuditKeys {
+                config,
+                space,
+                strict,
+                additional_keys,
+            } => operations::audit_keys(&config, space, strict, &additional_keys),
+            cli::Command::ExportReforgerConfig {
+                config,
+                output,
+                include_optional,
+            } => operations::export_reforger_config(&config, &output, include_optional),
+            cli::Command::SetupAppUpdater {
+                version,
+                windows_installer,
+                linux_installer,
+                linux_aarch64_installer,
+                changelog,
+                output,
+            } => cmd_setup_app_updater(
+                &version,
+                windows_installer.as_deref(),
+                linux_installer.as_deref(),
+                linux_aarch64_installer.as_deref(),
+                &changelog,
+                &output,
+            ),
+            cli::Command::NewAppUpdate {
+                version,
+                windows_installer,
+                linux_installer,
+                linux_aarch64_installer,
+                changelog,
+                output,
+            } => cmd_new_app_update(
+                &version,
+                windows_installer.as_deref(),
+                linux_installer.as_deref(),
+                linux_aarch64_installer.as_deref(),
+                &changelog,
+                &output,
+            ),
+        }
+    })();
+    if cli.json {
+        output::print_result(command_name, &result);
     }
+    result
 }
 
 /// Everything `create` needs beyond the config and output paths.
@@ -136,6 +251,12 @@ struct CreateOptions<'a> {
     mode: GenerationMode,
     no_progress: bool,
     mod_line: mod_line::ModLineOptions<'a>,
+    prune_unused_optionals: bool,
+    dry_run: bool,
+    incremental: bool,
+    atomic: bool,
+    report: bool,
+    yes: bool,
     keys: KeyCollectionRequest,
 }
 
@@ -151,12 +272,78 @@ fn cmd_create(
     output_dir: &std::path::Path,
     options: CreateOptions<'_>,
 ) -> Result<()> {
+    if options.dry_run {
+        let (config, mods) = config::load_config(config_path)?;
+        let mut plan = planner::create(
+            &mods,
+            output_dir,
+            options.mode,
+            options.prune_unused_optionals,
+            options.incremental,
+        )?;
+        if options.atomic && output_dir.exists() {
+            plan.add("replace-output", output_dir, 0);
+        }
+        let base = std::path::Path::new(&config.base_path);
+        plan.add_images(
+            &[
+                (&config.icon_image_path, base),
+                (&config.repo_image_path, base),
+            ],
+            output_dir,
+        )?;
+        if options.keys.enabled {
+            let dest = options
+                .keys
+                .dest
+                .clone()
+                .unwrap_or_else(|| output_dir.join("keys"));
+            plan.add_keys(
+                &mods,
+                &dest,
+                &options.keys.additional_sources,
+                options.prune_unused_optionals,
+            )?;
+        }
+        plan.show();
+        return Ok(());
+    }
+    if options.atomic && options.keys.dest.is_some() {
+        anyhow::bail!("--atomic requires an output-local keys folder");
+    }
+    let before = options
+        .report
+        .then(|| report::snapshot(output_dir))
+        .transpose()?;
+    configure_thread_pool(options.threads)?;
+    if options.atomic {
+        staging::publish(output_dir, |stage| run_create(config_path, stage, options))?;
+    } else {
+        run_create(config_path, output_dir, options)?;
+    }
+    if let Some(before) = before {
+        report::print(&report::compare(&before, &report::snapshot(output_dir)?));
+    }
+    Ok(())
+}
+
+fn run_create(
+    config_path: &std::path::Path,
+    output_dir: &std::path::Path,
+    options: CreateOptions<'_>,
+) -> Result<()> {
     let CreateOptions {
         app_update_url,
         threads,
         mode,
         no_progress,
         mod_line: mod_line_options,
+        prune_unused_optionals,
+        incremental,
+        dry_run: _,
+        atomic: _,
+        report: _,
+        yes,
         keys: key_collection,
     } = options;
     let started = Instant::now();
@@ -164,10 +351,11 @@ fn cmd_create(
     let mode_label = artifacts::mode_label(mode);
     println!("Mode: {}", mode_label);
 
-    configure_thread_pool(threads)?;
-
     println!("Loading config from: {}", config_path.display());
     let (config, resolved_mods) = config::load_config(config_path)?;
+    if prune_unused_optionals && !yes {
+        anyhow::bail!("--prune-unused-optionals removes published files; re-run with --yes");
+    }
 
     println!(
         "Repository: {} for {} ({} required, {} optional mods)",
@@ -176,7 +364,8 @@ fn cmd_create(
         resolved_mods.iter().filter(|m| m.is_required).count(),
         resolved_mods.iter().filter(|m| !m.is_required).count(),
     );
-    for warning in mod_line::game_config_warnings(&config, &resolved_mods) {
+    let warnings = mod_line::game_config_warnings(&config, &resolved_mods);
+    for warning in &warnings {
         log::warn!("{}", warning);
     }
 
@@ -195,10 +384,20 @@ fn cmd_create(
     // Create output directory
     std::fs::create_dir_all(output_dir)
         .with_context(|| format!("Failed to create output dir: {}", output_dir.display()))?;
+    if prune_unused_optionals {
+        published::remove_published_optionals(output_dir, &resolved_mods)?;
+    }
 
     let progress = progress_bar(no_progress);
     println!("Processing files with {} threads...", threads);
-    let processed_mods = hash::process_mods(&resolved_mods, Some(output_dir), &progress, mode)?;
+    let processed_mods = hash::process_mods(
+        &resolved_mods,
+        Some(output_dir),
+        &progress,
+        mode,
+        prune_unused_optionals,
+        incremental,
+    )?;
     progress.finish_and_clear();
 
     println!("Writing mod manifests...");
@@ -278,17 +477,25 @@ fn cmd_create(
         }
     }
 
+    let server_line = mod_line::build_server_launch_line(
+        &config,
+        &processed_mods,
+        &resolved_mods,
+        mod_line_options,
+    );
+    published::write_server_mod_line(output_dir, &server_line)?;
     println!();
     println!("Server mod line:");
-    println!(
-        "{}",
-        mod_line::build_server_launch_line(
-            &config,
-            &processed_mods,
-            &resolved_mods,
-            mod_line_options,
-        )
-    );
+    println!("{server_line}");
+    output::set_details(serde_json::json!({
+        "output": output_dir,
+        "mods": processed_mods.len(),
+        "files": total_files,
+        "checksum": repo_checksum,
+        "serverLine": server_line,
+        "warnings": warnings,
+        "keyConflicts": key_report.as_ref().map(|(_, report)| report.conflicts.clone()).unwrap_or_default(),
+    }));
 
     Ok(())
 }
@@ -568,5 +775,76 @@ fn linux_platform_key_for_installer(path: &std::path::Path, fallback: &str) -> &
         "linux-aarch64"
     } else {
         "linux-x86_64"
+    }
+}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::*;
+
+    #[test]
+    fn create_publishes_selected_optional_without_parent_optionals() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("mods").join("@ace");
+        let selected = source.join("optionals").join("@ace_selected");
+        let unused = source.join("optionals").join("@ace_unused");
+        std::fs::create_dir_all(&selected).unwrap();
+        std::fs::create_dir_all(&unused).unwrap();
+        std::fs::write(source.join("main.pbo"), b"main").unwrap();
+        std::fs::write(selected.join("selected.pbo"), b"selected").unwrap();
+        std::fs::write(unused.join("unused.pbo"), b"unused").unwrap();
+        let config = dir.path().join("config.json");
+        let value = serde_json::json!({
+            "repoName": "ACE test",
+            "basePath": dir.path().join("mods"),
+            "requiredMods": [
+                {"modName": "@ace"},
+                {"modName": "@ace/optionals/@ace_selected"}
+            ]
+        });
+        std::fs::write(&config, serde_json::to_vec(&value).unwrap()).unwrap();
+        let output = dir.path().join("output");
+
+        run_create(
+            &config,
+            &output,
+            CreateOptions {
+                app_update_url: None,
+                threads: 1,
+                mode: GenerationMode::Foxy,
+                no_progress: true,
+                mod_line: mod_line::ModLineOptions {
+                    prefix: "mods",
+                    include_optional: false,
+                },
+                prune_unused_optionals: true,
+                dry_run: false,
+                incremental: false,
+                atomic: false,
+                report: false,
+                yes: true,
+                keys: KeyCollectionRequest {
+                    enabled: false,
+                    dest: None,
+                    additional_sources: vec![],
+                },
+            },
+        )
+        .unwrap();
+
+        assert!(!output.join("@ace").join("optionals").exists());
+        assert!(output.join("@ace_selected").join("selected.pbo").exists());
+        assert!(unused.join("unused.pbo").exists());
+        assert_eq!(
+            std::fs::read_to_string(output.join(published::SERVER_MOD_LINE_FILE)).unwrap(),
+            "-mod=mods/@ace;mods/@ace_selected;\n"
+        );
+        verify::verify(&output).unwrap();
+        std::fs::write(
+            output.join("@ace_selected").join("selected.pbo"),
+            b"changed",
+        )
+        .unwrap();
+        assert!(verify::verify(&output).is_err());
     }
 }

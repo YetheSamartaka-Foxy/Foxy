@@ -11,12 +11,24 @@ const GENERATED_MOD_MANIFEST: &str = "foxy_addon.json";
 /// Recursively discover all files within a mod directory.
 /// Preserves traversal order so generated checksums align with legacy-style manifests.
 pub fn discover_files(mod_source: &Path) -> Result<Vec<DiscoveredFile>> {
+    discover_files_with_pruning(mod_source, false)
+}
+
+pub fn discover_files_with_pruning(
+    mod_source: &Path,
+    prune_unused_optionals: bool,
+) -> Result<Vec<DiscoveredFile>> {
     let mut files = Vec::new();
-    walk_dir(mod_source, mod_source, &mut files)?;
+    walk_dir(mod_source, mod_source, &mut files, prune_unused_optionals)?;
     Ok(files)
 }
 
-fn walk_dir(root: &Path, current: &Path, files: &mut Vec<DiscoveredFile>) -> Result<()> {
+fn walk_dir(
+    root: &Path,
+    current: &Path,
+    files: &mut Vec<DiscoveredFile>,
+    prune_unused_optionals: bool,
+) -> Result<()> {
     let entries = std::fs::read_dir(current)
         .with_context(|| format!("Failed to read directory: {}", current.display()))?;
 
@@ -27,7 +39,16 @@ fn walk_dir(root: &Path, current: &Path, files: &mut Vec<DiscoveredFile>) -> Res
             .with_context(|| format!("Failed to read metadata: {}", path.display()))?;
 
         if metadata.is_dir() {
-            walk_dir(root, &path, files)?;
+            if prune_unused_optionals
+                && current == root
+                && entry
+                    .file_name()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case("optionals")
+            {
+                continue;
+            }
+            walk_dir(root, &path, files, prune_unused_optionals)?;
         } else if metadata.is_file() {
             if path
                 .extension()
@@ -96,6 +117,29 @@ mod tests {
         // Path separators depend on OS
         assert!(paths.iter().any(|p| p.contains("main.pbo")));
         assert!(paths.iter().any(|p| p.contains("mod.bikey")));
+    }
+
+    #[test]
+    fn pruning_skips_root_optionals_and_keeps_nested_content() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("Optionals")).unwrap();
+        std::fs::create_dir_all(dir.path().join("addons").join("optionals")).unwrap();
+        std::fs::write(dir.path().join("Optionals").join("unused.pbo"), b"unused").unwrap();
+        std::fs::write(
+            dir.path()
+                .join("addons")
+                .join("optionals")
+                .join("needed.pbo"),
+            b"needed",
+        )
+        .unwrap();
+
+        let files = discover_files_with_pruning(dir.path(), true).unwrap();
+        let paths: Vec<_> = files
+            .iter()
+            .map(|file| file.relative_path.replace('\\', "/"))
+            .collect();
+        assert_eq!(paths, vec!["addons/optionals/needed.pbo"]);
     }
 
     #[test]

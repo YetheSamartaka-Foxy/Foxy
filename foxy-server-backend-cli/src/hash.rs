@@ -93,11 +93,30 @@ pub fn process_mods(
     output_dir: Option<&Path>,
     progress: &ProgressBar,
     mode: GenerationMode,
+    prune_unused_optionals: bool,
+    incremental: bool,
 ) -> Result<Vec<ProcessedMod>> {
     let mut work_items: Vec<FileWorkItem> = Vec::new();
+    let mut cache = (incremental && output_dir.is_some())
+        .then(|| crate::incremental::HashCache::load(output_dir.unwrap()));
+    let mut cached_mods = vec![None; resolved_mods.len()];
+    let mut fingerprints = vec![None; resolved_mods.len()];
 
     for (mod_index, resolved) in resolved_mods.iter().enumerate() {
-        let files = crate::discover::discover_files(&resolved.source_path)?;
+        let files = if prune_unused_optionals {
+            crate::discover::discover_files_with_pruning(&resolved.source_path, true)?
+        } else {
+            crate::discover::discover_files(&resolved.source_path)?
+        };
+        if let (Some(cache), Some(root)) = (&cache, output_dir) {
+            let fingerprint =
+                crate::incremental::fingerprint(resolved, &files, mode, prune_unused_optionals)?;
+            cached_mods[mod_index] = cache.reusable(resolved, root, &fingerprint);
+            fingerprints[mod_index] = Some(fingerprint);
+            if cached_mods[mod_index].is_some() {
+                continue;
+            }
+        }
 
         for (file_data_order, file) in files.into_iter().enumerate() {
             let output_path =
@@ -152,6 +171,10 @@ pub fn process_mods(
 
     let mut processed_mods = Vec::with_capacity(resolved_mods.len());
     for (mod_index, resolved) in resolved_mods.iter().enumerate() {
+        if let Some(processed) = cached_mods[mod_index].take() {
+            processed_mods.push(processed);
+            continue;
+        }
         let files = std::mem::take(&mut mod_files[mod_index]);
         let checksums = compute_mod_checksums(&files, mode);
         processed_mods.push(ProcessedMod {
@@ -163,11 +186,22 @@ pub fn process_mods(
             client_side: resolved.client_side,
         });
     }
+    if let (Some(cache), Some(root)) = (&mut cache, output_dir) {
+        for (index, item) in resolved_mods.iter().enumerate() {
+            cache.store(
+                &item.mod_name,
+                fingerprints[index].take().unwrap(),
+                processed_mods[index].clone(),
+                root,
+            )?;
+        }
+        cache.save(root)?;
+    }
 
     Ok(processed_mods)
 }
 
-fn compute_mod_checksums(files: &[ModFile], mode: GenerationMode) -> Checksums {
+pub(crate) fn compute_mod_checksums(files: &[ModFile], mode: GenerationMode) -> Checksums {
     let md5 = if matches!(mode, GenerationMode::Swifty | GenerationMode::Hybrid) {
         Some(compute_addon_checksum(FlexHasher::new_md5(), files, |f| {
             f.checksums.unwrap_md5()
@@ -1073,6 +1107,8 @@ mod tests {
             Some(&output),
             &ProgressBar::hidden(),
             GenerationMode::Foxy,
+            false,
+            false,
         )
         .unwrap();
 

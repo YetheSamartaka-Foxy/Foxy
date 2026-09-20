@@ -40,6 +40,9 @@ impl SpaceLayout {
 )]
 #[command(version = crate::build_info::clap_version())]
 pub struct Cli {
+    /// Print one machine-readable JSON result on stdout
+    #[arg(long, global = true)]
+    pub json: bool,
     #[arg(
         long,
         global = true,
@@ -58,6 +61,18 @@ pub enum Command {
         config: PathBuf,
         /// Output directory for the generated repository
         output: PathBuf,
+        /// Preview all generated file operations without writing output
+        #[arg(long)]
+        dry_run: bool,
+        /// Reuse previously generated unchanged mods based on file size and modification time
+        #[arg(long)]
+        incremental: bool,
+        /// Build beside the output and replace it after success; requires --yes
+        #[arg(long, requires = "yes", conflicts_with = "incremental")]
+        atomic: bool,
+        /// Print additions, changes, removals, and estimated download bytes
+        #[arg(long)]
+        report: bool,
         /// Optional Foxy app update source URL to write as repo.json appUpdateUrl
         #[arg(long)]
         app_update_url: Option<String>,
@@ -73,6 +88,12 @@ pub enum Command {
         /// Include optional mods in the printed server launch line
         #[arg(long)]
         mod_line_include_optional: bool,
+        /// Omit root-level optionals folders from published mods; requires --yes
+        #[arg(long)]
+        prune_unused_optionals: bool,
+        /// Accept removal of previously published optional files
+        #[arg(long)]
+        yes: bool,
         /// Copy every .bikey from the generated mods into a combined keys folder
         #[arg(long)]
         collect_keys: bool,
@@ -104,9 +125,30 @@ pub enum Command {
         /// Shared mod folder for --layout pool (default: <output>/pool)
         #[arg(long, value_name = "DIR")]
         pool_dir: Option<PathBuf>,
-        /// Accept that --layout link writes manifests into the source mod folders
+        /// Accept source manifest writes with link, output pruning, or pool cleanup
         #[arg(long)]
         yes: bool,
+        /// Remove orphaned generated pool mods and their repository symlinks
+        #[arg(long)]
+        clean: bool,
+        /// Preview generation, overwrites, pruning, and optional cleanup without writing
+        #[arg(long)]
+        dry_run: bool,
+        /// Reuse previously generated unchanged mods based on file size and modification time
+        #[arg(long)]
+        incremental: bool,
+        /// Build beside the output and replace it after success; requires --yes
+        #[arg(long, requires = "yes", conflicts_with_all = ["incremental", "only", "pool_dir", "clean"])]
+        atomic: bool,
+        /// Print additions, changes, removals, and estimated download bytes
+        #[arg(long)]
+        report: bool,
+        /// Regenerate only this repository folder (repeatable)
+        #[arg(long, value_name = "FOLDER")]
+        only: Vec<String>,
+        /// Omit root-level optionals folders from published mods; requires --yes
+        #[arg(long)]
+        prune_unused_optionals: bool,
         /// Optional Foxy app update source URL for every generated repo.json (wins over config values)
         #[arg(long)]
         app_update_url: Option<String>,
@@ -140,6 +182,41 @@ pub enum Command {
         /// Output path for the space config file
         #[arg(default_value = "space.json")]
         output: PathBuf,
+    },
+    /// Check source config and published names without hashing or writing files
+    Validate {
+        config: PathBuf,
+        /// Interpret the input as a repository space config
+        #[arg(long)]
+        space: bool,
+        /// Also check output path overlap and layout collisions
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    /// Verify generated repository or space content against its manifests
+    Verify { output: PathBuf },
+    /// Compare generated repository or space outputs
+    Diff { old: PathBuf, new: PathBuf },
+    /// Audit Arma 3 source keys and PBO signatures
+    AuditKeys {
+        config: PathBuf,
+        /// Interpret the input as a repository space config
+        #[arg(long)]
+        space: bool,
+        /// Fail if unsigned PBOs or duplicate key names are found
+        #[arg(long)]
+        strict: bool,
+        /// Extra server key file or directory to include in the audit (repeatable)
+        #[arg(long, value_name = "PATH")]
+        additional_keys: Vec<PathBuf>,
+    },
+    /// Write a Reforger game.mods JSON fragment from a repository config
+    ExportReforgerConfig {
+        config: PathBuf,
+        output: PathBuf,
+        /// Include enabled optional mods
+        #[arg(long)]
+        include_optional: bool,
     },
     /// Create a fresh update manifest with changelog JSONs from a CHANGELOG.md
     SetupAppUpdater {
