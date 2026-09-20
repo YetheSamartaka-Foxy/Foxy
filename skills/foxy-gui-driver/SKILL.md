@@ -32,7 +32,7 @@ The driver runs the **real app**. Two things to get right: isolate data, and don
 ```powershell
 $dir = "$PWD\temporary_files\agent-gui-run"
 New-Item -ItemType Directory -Force $dir | Out-Null
-foreach ($f in 'settings.json','repositories.json','repository_spaces.json') {
+foreach ($f in 'settings.json','repositories.json','repository_spaces.json','window_state.json') {
   Copy-Item "$env:APPDATA\Foxy\$f" "$dir\$f" -Force   # real repos, NOT the 1.3 GB database.db
 }
 $env:FOXY_CONFIG_DIR = $dir

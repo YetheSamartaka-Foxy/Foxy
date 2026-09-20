@@ -939,6 +939,15 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
         )?;
     }
     fixture::install(&resolved, &config, &run)?;
+    if harness == "gui"
+        && !config.join("window_state.json").exists()
+        && let Some(appdata) = std::env::var_os("APPDATA")
+    {
+        let saved = PathBuf::from(appdata).join("Foxy/window_state.json");
+        if saved.is_file() {
+            fs::copy(saved, config.join("window_state.json"))?;
+        }
+    }
     let operations = resolved["operations"]
         .as_array()
         .cloned()
