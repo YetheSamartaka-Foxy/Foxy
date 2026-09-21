@@ -2,8 +2,9 @@ use super::app::Foxy;
 use super::app::agent_driver::AgentGuiLaunchConfig;
 use super::app::debug_modals::DebugModal;
 use crate::core::utils::renderer_fallback::{
-    forget_graphics_backend, remembered_graphics_backend, renderer_fallback_notice_path,
-    wgpu_crash_marker_path,
+    GraphicsLaunchStage, clear_launch_attempt, forget_graphics_backend, next_launch_stage,
+    previous_launch_attempt, record_launch_attempt, remembered_graphics_backend,
+    renderer_fallback_notice_path, wgpu_crash_marker_path,
 };
 use crate::ui::types::{SettingsViewState, UiRendererPreference};
 use eframe::NativeOptions;
@@ -44,16 +45,19 @@ pub(crate) fn main(
     // returned an error", and it is why a retry can never open a second window
     // over a session the user already used.
     let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stage = launch_stage_after_previous_attempt();
     let run = |viewport: ViewportBuilder, pin_backend: bool| {
-        let (options, pinned) = build_native_options(viewport, pin_backend);
+        let (options, pinned) = build_native_options(viewport, pin_backend, stage);
         let debug_modals = debug_modals.clone();
         let agent_gui = agent_gui.clone();
         let started = started.clone();
+        record_launch_attempt(stage);
         let result = eframe::run_native(
             "Foxy",
             options,
             Box::new(move |cc| {
                 started.store(true, std::sync::atomic::Ordering::SeqCst);
+                clear_launch_attempt();
                 Ok(Box::new(Foxy::new(
                     cc,
                     debug_mode,
@@ -164,16 +168,39 @@ fn build_root_viewport(icon_rgba: Vec<u8>, icon_width: u32, icon_height: u32) ->
     viewport
 }
 
+/// Pick the fallback rung for this launch from the marker a previous launch
+/// left behind when it died before constructing the app.
+///
+/// A returned error is logged and exits normally, so the marker mostly records
+/// native crashes in the graphics stack that no panic hook ever sees. Reaching
+/// the app clears it, so a working machine never pays for this.
+fn launch_stage_after_previous_attempt() -> GraphicsLaunchStage {
+    let previous = previous_launch_attempt();
+    let stage = next_launch_stage(previous);
+    if let Some(previous) = previous {
+        log::warn!(
+            "The previous UI launch (graphics stage {:?}) ended before the app window was constructed; starting this launch at graphics stage {:?}",
+            previous,
+            stage
+        );
+    }
+    stage
+}
+
 /// Build the eframe options, optionally narrowing wgpu to the backend a previous
 /// launch proved. Returns whether the narrowing was actually applied, which is
 /// what makes a failed launch retryable rather than fatal.
-fn build_native_options(viewport: ViewportBuilder, pin_backend: bool) -> (NativeOptions, bool) {
+fn build_native_options(
+    viewport: ViewportBuilder,
+    pin_backend: bool,
+    stage: GraphicsLaunchStage,
+) -> (NativeOptions, bool) {
     let mut options = NativeOptions {
         viewport,
         ..Default::default()
     };
-    configure_renderer_fallback(&mut options);
-    let pinned = configure_native_graphics(&mut options, pin_backend);
+    configure_renderer_fallback(&mut options, stage);
+    let pinned = configure_native_graphics(&mut options, pin_backend, stage);
     configure_graphics_memory_hints(&mut options);
     (options, pinned)
 }
@@ -198,8 +225,8 @@ fn configure_graphics_memory_hints(options: &mut NativeOptions) {
     });
 }
 
-fn configure_renderer_fallback(options: &mut NativeOptions) {
-    match preferred_renderer() {
+fn configure_renderer_fallback(options: &mut NativeOptions, stage: GraphicsLaunchStage) {
+    match preferred_renderer(stage) {
         PreferredRenderer::Wgpu => {
             options.renderer = eframe::Renderer::Wgpu;
             log::info!("Configured UI renderer: wgpu");
@@ -218,8 +245,12 @@ enum PreferredRenderer {
     Glow { reason: String },
 }
 
-fn preferred_renderer() -> PreferredRenderer {
+fn preferred_renderer(stage: GraphicsLaunchStage) -> PreferredRenderer {
     let had_wgpu_crash_marker = consume_wgpu_crash_marker();
+    let died_in_wgpu_startup = stage == GraphicsLaunchStage::Glow;
+    if died_in_wgpu_startup {
+        persist_glow_fallback();
+    }
 
     if let Ok(renderer) = std::env::var("FOXY_RENDERER") {
         let renderer = renderer.trim().to_ascii_lowercase();
@@ -240,6 +271,13 @@ fn preferred_renderer() -> PreferredRenderer {
     if had_wgpu_crash_marker {
         return PreferredRenderer::Glow {
             reason: "previous egui-wgpu panic; setting switched to Glow".to_string(),
+        };
+    }
+
+    if died_in_wgpu_startup {
+        return PreferredRenderer::Glow {
+            reason: "previous launches died while starting wgpu; setting switched to Glow"
+                .to_string(),
         };
     }
 
@@ -284,6 +322,21 @@ fn consume_wgpu_crash_marker() -> bool {
         return false;
     }
 
+    persist_glow_fallback();
+
+    if let Err(err) = std::fs::remove_file(&marker_path) {
+        log::warn!(
+            "Failed to remove consumed WGPU crash marker {}: {}",
+            marker_path.display(),
+            err
+        );
+    }
+
+    true
+}
+
+/// Switch the renderer setting to Glow and leave the notice the UI shows once.
+fn persist_glow_fallback() {
     switch_renderer_setting_to_glow();
     // The remembered backend is the one that just crashed. Clear it so a later
     // return to wgpu re-enumerates instead of pinning the failure.
@@ -307,16 +360,6 @@ fn consume_wgpu_crash_marker() -> bool {
             err
         );
     }
-
-    if let Err(err) = std::fs::remove_file(&marker_path) {
-        log::warn!(
-            "Failed to remove consumed WGPU crash marker {}: {}",
-            marker_path.display(),
-            err
-        );
-    }
-
-    true
 }
 
 fn switch_renderer_setting_to_glow() {
@@ -380,6 +423,21 @@ fn platform_backends() -> eframe::wgpu::Backends {
     Backends::VULKAN | Backends::GL
 }
 
+/// The single backend to try after a full enumeration killed the process.
+///
+/// Vulkan instance creation loads every installed ICD and implicit layer
+/// (overlays, capture tools, stale drivers), which is where such crashes
+/// almost always live. DX12 on Windows and GL on Linux touch none of that.
+#[cfg(target_os = "windows")]
+fn safe_backend() -> eframe::wgpu::Backends {
+    eframe::wgpu::Backends::DX12
+}
+
+#[cfg(target_os = "linux")]
+fn safe_backend() -> eframe::wgpu::Backends {
+    eframe::wgpu::Backends::GL
+}
+
 /// Map a recorded backend name onto its single-backend bit.
 ///
 /// The names are wgpu's own (`Backend::to_str`), which is also what
@@ -395,7 +453,11 @@ fn named_backend(name: &str) -> Option<eframe::wgpu::Backends> {
 }
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
-fn configure_native_graphics(options: &mut NativeOptions, pin_backend: bool) -> bool {
+fn configure_native_graphics(
+    options: &mut NativeOptions,
+    pin_backend: bool,
+    stage: GraphicsLaunchStage,
+) -> bool {
     use eframe::egui_wgpu::WgpuSetup;
     use eframe::wgpu;
 
@@ -403,6 +465,19 @@ fn configure_native_graphics(options: &mut NativeOptions, pin_backend: bool) -> 
         return false;
     };
     if wgpu::Backends::from_env().is_some() {
+        return false;
+    }
+
+    if stage == GraphicsLaunchStage::SafeBackend {
+        // The record names a backend that once worked, but the enumeration it
+        // shortcuts just killed the process; the safe backend is chosen
+        // outright and gets re-recorded if it reaches a window.
+        forget_graphics_backend();
+        create_new.instance_descriptor.backends = safe_backend();
+        log::warn!(
+            "Configured graphics backend {:?} only, because the previous launch died while enumerating every backend. Set WGPU_BACKEND to override.",
+            safe_backend()
+        );
         return false;
     }
 
@@ -427,6 +502,10 @@ fn configure_native_graphics(options: &mut NativeOptions, pin_backend: bool) -> 
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-fn configure_native_graphics(_options: &mut NativeOptions, _pin_backend: bool) -> bool {
+fn configure_native_graphics(
+    _options: &mut NativeOptions,
+    _pin_backend: bool,
+    _stage: GraphicsLaunchStage,
+) -> bool {
     false
 }

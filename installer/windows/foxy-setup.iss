@@ -75,9 +75,13 @@ Root: HKLM; Subkey: "SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags
 Root: HKCU; Subkey: "SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers"; ValueType: none; ValueName: "{app}\Foxy.exe"; Flags: deletevalue
 
 [Run]
-Filename: "{app}\Foxy.exe"; Description: "Launch Foxy"; Flags: nowait postinstall skipifsilent
+; shellexec starts Foxy through ShellExecute, so a "Run as administrator"
+; compatibility flag the user set on Foxy.exe produces a UAC prompt instead of
+; CreateProcess failing with error 740 (ERROR_ELEVATION_REQUIRED) from the
+; unelevated setup.
+Filename: "{app}\Foxy.exe"; Description: "Launch Foxy"; Flags: nowait postinstall skipifsilent shellexec
 ; In silent mode (auto-update), always relaunch
-Filename: "{app}\Foxy.exe"; Flags: nowait skipifnotsilent
+Filename: "{app}\Foxy.exe"; Flags: nowait skipifnotsilent shellexec
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}"
