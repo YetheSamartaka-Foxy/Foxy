@@ -22,7 +22,7 @@ claims.
 | open | Reuse TLS connections more effectively | `breakdown.network.permit_wait_s` | lower | force redownload |
 | open | Tune patch copy buffer for spinning disks | `summary.total_ms` | lower | delta single-entry HDD |
 | open | Repeated layout discovery or mapping contributes materially to the full evicted HDD recheck; reducing it lowers action time without changing part work | `layout_sum`, full recheck elapsed | lower | paired full TFR Main recheck cases |
-| open | Limit the PAC1 magic probe to .pak files so each PBO avoids an extra header open before layout parsing | `layout_sum`, full recheck elapsed | lower; one fewer open per PBO, wall effect uncertain | paired evicted Sci-Fi hash cases, then full TFR Main recheck |
+| open | Let the game module name its container format (Arma 3 PBO, Reforger PAC1) so hashing never opens an archive head to tell PBO from gapless PAC1 | `layout_sum`, full recheck elapsed | lower; one fewer open per PBO, wall effect uncertain | paired full TFR Main recheck cases on clean `38e52f6` versus clean `6ee594a` |
 | open | The two worker HDD hash schedule causes enough extra seeking that a more sequential read order reduces the full evicted recheck median | disk read rate, full recheck elapsed | higher rate, lower time | paired full TFR Main recheck cases |
 | open | Improve persistent quick-scan cache key hit rate | `quick_scan.actual_s` | lower | touch-only quick check |
 | open | Use BLAKE3 mmap rayon for large SSD files | `breakdown.run_metrics.hash_total_s` | lower | SSD recheck |
