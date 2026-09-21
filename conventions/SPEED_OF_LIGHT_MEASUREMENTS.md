@@ -120,11 +120,53 @@ raw and normalized log records; count each event once. Both cases have one
 dirty-build sample and no accepted baseline, so neither proves a change in
 performance or the notebook's 0.76% difference.
 
+### September 21 clean full recheck baselines and the container-format candidate
+
+Clean seven-sample HDD and five-sample SSD baselines for the frozen full TFR
+Main evicted recheck cases were accepted from release `38e52f6` (WAL, gate
+4, `evict-cache` before every measured refresh). HDD run
+`20260921T164741Z-0221e59c`: median 650.985 s [650.381-652.607]; an earlier
+same-revision run `20260921T130249Z-1476cb40` gave seven more samples with
+median 651.037 s [649.686-653.629], so run-to-run drift on `F:` is about
+0.6%. SSD run `20260921T181601Z-08b1ec54`: median 31.735 s
+[29.951-32.280]. Every row hashed 92,193,872,029 bytes in 3,738 files and
+433,063 parts with zero eviction failures.
+
+The candidate `6ee594a` lets the game module declare its container format
+(`GameModule::content_formats`: Arma 3 declares PBO, Arma Reforger PAC1), so
+hashing trusts a single declared format and only probes an undeclared game's
+file head. Against the accepted baselines it measured, on clean `b8acc65`
+(same Foxy sources): HDD run `20260921T182557Z-0cd5b248`, seven evicted
+rechecks, median 648.970 s [648.235-650.366], -0.31%, verdict ok within
+tolerance; SSD run `20260921T195356Z-1d8e32e0`, five evicted rechecks,
+median 31.379 s [25.598-32.293], -1.12%, verdict ok within tolerance. Both
+carried the same work counters as the baselines. All seven HDD candidate
+rows fall at or below the baseline minimum, which is consistent with one
+fewer open per archive but is inside the 12% duration tolerance and is not
+a confirmed improvement. The change is kept as a correctness-neutral cleanup
+that removes a per-archive probe the game already answers; it does not
+explain the notebook's 0.76% difference. The 92 GB HDD hash runs at 111%
+of the calibrated B2+B6 reference, so the remaining headroom on this disk
+is inside calibration error, and the 10% reduction goal stays open pending
+evidence of avoidable reads or seeks in Phase 2.
+
+The kit fixes that unblocked acceptance are `f8a58db` and `13af2a1`:
+iteration 0 of a case without warmup is the unprepared pass, so the
+incidental `wipe-db` lane had one sample fewer than the measured operation
+and a cold first row that broke both acceptance and comparison. Acceptance
+now records a lane below five samples as `unbaselined_operations`,
+comparison reads such a lane as `no-baseline`, and `foxy-testkit accept
+<run-dir>` accepts a finished clean run without repeating it. The two HDD
+candidate `wipe-db` rows were recorded with `rebaseline-required` before
+the comparison fix; the measured lane was never affected.
+
 ## 1a. Current accepted baselines
 
 The earlier rows were regenerated with `foxy-testkit measurements` from the
 compatible accepted baseline set at checkout `956de9e`. The Sept 19 HDD row
-comes from the accepted baseline at checkout `11924bd`. Rows that name an
+comes from the accepted baseline at checkout `11924bd`, and the Sept 21 full
+TFR Main rows compare clean `b8acc65` with the `38e52f6` baselines accepted
+at checkout `f8a58db`. Rows that name an
 app-owned action instead of the outer driver bracket cite the same accepted
 run artifact.
 
@@ -143,6 +185,8 @@ run artifact.
 | 2026-09-18 | `perf-tfr-scifi-delta-patch-ssd` | db-persist (O7 gated write windows) | 62% median (calibrated, per-kind DB) | ssd warm, gate 1 | 11.3-21.1 ms | 10.613 ms per-kind estimate | 5 | 240 inserts, 232 updates, 205 deletes | early_exit | 571efc1 | `20260918T110808Z-0934e668` |
 | 2026-09-18 | `perf-startup-arma3-live` | startup (O8 startup) | 77% (calibrated, probe B4) | ssd warm | 3.05 s | 3.05 s median of 5 [3.02-3.06] | 5 | 11 repos | ok | 02c935e | `20260918T151335Z-18cda6f0` |
 | 2026-09-18 | `perf-tfr-scifi-delta-patch-ssd` | download (O2 delta patch) | 3% (calibrated, network B1) | ssd warm | 2.13 s | 2.13 s median of 5 [2.13-2.16] | 5 | 4 files, 0.01 GB, 0.21 GB hashed | completed,completed,completed,completed,completed | 571efc1 | `20260918T110808Z-0934e668` |
+| 2026-09-21 | `perf-hdd-plan-main-recheck-hdd` | remote-refresh@evicted (O5 remote metadata refresh) | 111% (calibrated, hash B2+B6) | hdd evicted | 648.97 s | 650.98 s median of 7 [650.38-652.61] | 7 | 92.19 GB hashed | ok | b8acc65 | `20260921T182557Z-0cd5b248` |
+| 2026-09-21 | `perf-hdd-plan-main-recheck-ssd` | remote-refresh@evicted (O5 remote metadata refresh) | 62% (calibrated, hash B2+B6) | ssd evicted | 31.38 s | 31.74 s median of 5 [29.95-32.28] | 5 | 92.19 GB hashed | ok | b8acc65 | `20260921T195356Z-1d8e32e0` |
 
 ## 1b. Shared-aggregation and patch-timeline candidate
 

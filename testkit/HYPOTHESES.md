@@ -22,7 +22,7 @@ claims.
 | open | Reuse TLS connections more effectively | `breakdown.network.permit_wait_s` | lower | force redownload |
 | open | Tune patch copy buffer for spinning disks | `summary.total_ms` | lower | delta single-entry HDD |
 | open | Repeated layout discovery or mapping contributes materially to the full evicted HDD recheck; reducing it lowers action time without changing part work | `layout_sum`, full recheck elapsed | lower | paired full TFR Main recheck cases |
-| open | Let the game module name its container format (Arma 3 PBO, Reforger PAC1) so hashing never opens an archive head to tell PBO from gapless PAC1 | `layout_sum`, full recheck elapsed | lower; one fewer open per PBO, wall effect uncertain | paired full TFR Main recheck cases on clean `38e52f6` versus clean `6ee594a` |
+| closed | Let the game module name its container format (Arma 3 PBO, Reforger PAC1) so hashing never opens an archive head to tell PBO from gapless PAC1 | `layout_sum`, full recheck elapsed | n/a, kept as a correctness-neutral cleanup: -0.31% HDD and -1.12% SSD, both within tolerance against accepted clean baselines | `perf-hdd-plan-main-recheck-{hdd,ssd}` |
 | open | The two worker HDD hash schedule causes enough extra seeking that a more sequential read order reduces the full evicted recheck median | disk read rate, full recheck elapsed | higher rate, lower time | paired full TFR Main recheck cases |
 | open | Improve persistent quick-scan cache key hit rate | `quick_scan.actual_s` | lower | touch-only quick check |
 | open | Use BLAKE3 mmap rayon for large SSD files | `breakdown.run_metrics.hash_total_s` | lower | SSD recheck |
@@ -169,6 +169,29 @@ as results, and the selection compares cold data with cold data. Measured
 after the change on the same case (`20260916T114141Z`): `hash_work_bytes`
 equal to the payload (1.0x, was 1.33x), `hash_total_s` 0.47 s against
 0.55-0.60 s; the HDD lane was already single-trial and is unchanged.
+
+### closed: the container format comes from the game, not a file probe (2026-09-21)
+
+Clean seven-sample HDD and five-sample SSD baselines for the full evicted
+TFR Main recheck were accepted from `38e52f6` (`20260921T164741Z-0221e59c`,
+median 650.985 s [650.381-652.607]; `20260921T181601Z-08b1ec54`, median
+31.735 s [29.951-32.280]). `6ee594a` adds `GameModule::content_formats`:
+Arma 3 declares PBO, Arma Reforger declares PAC1, and `remote_parts_format_id`
+trusts a single declared format instead of opening every archive head to
+tell PBO from a gapless PAC1; only an undeclared game still probes. Measured
+on clean `b8acc65` against those baselines: HDD `20260921T182557Z-0cd5b248`
+median 648.970 s [648.235-650.366] (-0.31%), SSD `20260921T195356Z-1d8e32e0`
+median 31.379 s [25.598-32.293] (-1.12%), both `ok` within tolerance with
+the same 92,193,872,029 hashed bytes, 3,738 files and 433,063 parts. All
+seven HDD candidate rows sit at or below the baseline minimum, which is the
+direction one fewer open per archive predicts, but the effect is inside the
+12% duration tolerance and the 0.6% run-to-run drift, so it is not a
+confirmed improvement and does not explain the notebook's 0.76%. Kept
+because the game already answers the question the probe asked. The two
+remaining rows above (repeated layout work, two-worker seeking) stay open
+for Phase 2 of the local HDD plan; the 92 GB hash already runs at 111% of
+the calibrated B2+B6 reference, so either needs evidence of avoidable reads
+before a trial.
 
 ### closed: stale-check fixed overhead is a measurement artifact
 
