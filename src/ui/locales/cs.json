@@ -1024,7 +1024,7 @@
     "Checking TS3 plugins in the background...": "Kontrola pluginů TS3 na pozadí...",
     "Showing the last known state.": "Zobrazuje se poslední známý stav.",
     "Waiting for TeamSpeak to finish installing": "Čeká se na dokončení instalace TeamSpeak",
-    "TS3 Plugin": "TS3 Plugin",
+    "TS3 Plugin": "TS3 plugin",
     "TS3 plugins are TeamSpeak 3 plugin files found inside your repository addons. Installing opens the plugin with TeamSpeak, which must be closed first.": "TS3 pluginy jsou soubory pluginů TeamSpeak 3 nalezené ve vašich repozitářových addonech. Instalace otevře plugin pomocí TeamSpeaku, který musí být nejprve zavřen.",
     "TeamSpeak 3 is currently running. Please close it before installing plugins.": "TeamSpeak 3 je aktuálně spuštěn. Před instalací pluginů jej prosím zavřete.",
     "No TS3 plugins found in your repositories.": "Ve vašich repozitářích nebyly nalezeny žádné TS3 pluginy.",

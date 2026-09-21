@@ -193,7 +193,7 @@
     "Force redownload repository": "Pilitin ang muling pag-download ng repository",
     "Force redownload addon": "Pilitin ang muling pag-download ng addon",
     "Standalone download": "Standalone na download",
-    "System": "System",
+    "System": "Sistema",
     "Direct download": "Direktang download",
     "Download repositories, addons, or files directly from URL without database sync.": "I-download ang mga repository, addon, o file nang direkta mula sa URL nang walang database sync.",
     "Direct download in progress: {done}/{total} files": "Direktang download in progress: {done}/{total} na file",

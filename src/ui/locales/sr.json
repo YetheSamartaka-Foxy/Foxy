@@ -55,7 +55,7 @@
     "Auto quick scan for changes on launch": "Аутоматско брзо скенирање промена при покретању",
     "Auto backup addons before update": "Аутоматско прављење резервних копија додатака пре ажурирања",
     "Hashing profile": "Профил хеширања",
-    "Renderer": "Renderer",
+    "Renderer": "Рендерер",
     "Auto (WGPU)": "Automatski (WGPU)",
     "WGPU": "WGPU",
     "Glow": "Glow",

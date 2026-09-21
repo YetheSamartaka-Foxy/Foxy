@@ -41,6 +41,12 @@ Recommended process:
    cargo run --manifest-path tools/i18n-checker/Cargo.toml -- --audit-changed-since HEAD
    ```
 
+To list every non-English value that still equals `en.json` as a locale-apply shaped map (informational, most hits are intentional product names, theme names, units, and placeholders):
+
+   ```powershell
+   cargo run --manifest-path tools/i18n-checker/Cargo.toml -- --report-english english.json
+   ```
+
 6. Run the global checker:
 
    ```powershell

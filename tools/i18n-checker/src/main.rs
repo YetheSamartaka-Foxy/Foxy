@@ -213,6 +213,10 @@ fn main() {
         );
     }
 
+    if let Some(path) = &config.report_english {
+        or_die(report_english_values(path, &locale_files, &en_map));
+    }
+
     let mut audit_issues = 0usize;
     if let Some(baseline) = &config.audit_changed_since {
         audit_issues = audit_changed_pairs(
@@ -351,6 +355,7 @@ struct Config {
     audit_changed_since: Option<String>,
     audit_allowed_english_keys: BTreeSet<String>,
     strict_placeholders: bool,
+    report_english: Option<PathBuf>,
 }
 
 impl Config {
@@ -399,6 +404,13 @@ fn parse_args() -> Config {
                     config.audit_allowed_english_keys.insert(key);
                 }
             }
+            "--report-english" => {
+                let Some(path) = args.next() else {
+                    eprintln!("--report-english requires a path argument");
+                    process::exit(1);
+                };
+                config.report_english = Some(PathBuf::from(path));
+            }
             "--help" | "-h" => {
                 print_help();
                 process::exit(0);
@@ -432,6 +444,11 @@ fn print_help() {
     println!("      reporting placeholder mismatches and changed values that still equal en.json.");
     println!("  --audit-allow-english-key-file <path>");
     println!("      Keys allowed to stay exactly English during --audit-changed-since.");
+    println!("  --report-english <path>");
+    println!(
+        "      Write every non-English string value that still equals en.json to a UTF-8 JSON"
+    );
+    println!("      file shaped like a locale-apply translation map. Informational only.");
     println!();
     println!("Placeholder parity is scanned for every shared key. It only fails the run for keys");
     println!("named by --require-translated-key/-file, unless --strict-placeholders is passed.");
@@ -462,6 +479,45 @@ fn or_die<T>(result: Result<T, String>) -> T {
         eprintln!("{error}");
         process::exit(1);
     })
+}
+
+/// Writes `{ locale: { key: english_value } }` for every string value that is
+/// still exactly English, so the file can be filled in and fed to locale-apply.
+fn report_english_values(
+    path: &Path,
+    locale_files: &[PathBuf],
+    en_map: &serde_json::Map<String, Value>,
+) -> Result<(), String> {
+    let mut report = serde_json::Map::new();
+    let mut total = 0usize;
+    for file in locale_files {
+        let locale = file
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let locale_map = load_locale_file(file)?.map;
+        let mut same = serde_json::Map::new();
+        for (key, english) in en_map {
+            let Some(english_str) = english.as_str() else {
+                continue;
+            };
+            if locale_map.get(key).and_then(|v| v.as_str()) == Some(english_str) {
+                same.insert(key.clone(), english.clone());
+            }
+        }
+        if !same.is_empty() {
+            total += same.len();
+            report.insert(locale, Value::Object(same));
+        }
+    }
+    let text = serde_json::to_string_pretty(&Value::Object(report))
+        .map_err(|e| format!("Failed to serialize English report: {e}"))?;
+    std::fs::write(path, text).map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
+    println!(
+        "Wrote {total} exact-English value(s) to {} (informational).",
+        path.display()
+    );
+    Ok(())
 }
 
 #[cfg(test)]
