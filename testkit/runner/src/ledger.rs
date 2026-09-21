@@ -627,7 +627,8 @@ pub fn compare(rows: &[Value], baseline_path: &Path, ledger_path: &Path) -> Resu
         }
         let operation_row = rows
             .iter()
-            .find(|row| op_key(row) == *op)
+            .find(|row| op_key(row) == *op && is_baseline_sample(row))
+            .or_else(|| rows.iter().find(|row| op_key(row) == *op))
             .unwrap_or(current);
         let compatible = compatibility(&baseline, operation_row, Some(base));
         if compatible["verdict"] != "compatible" {
@@ -859,6 +860,10 @@ mod tests {
         let saved = crate::case::read_json(&baseline).unwrap();
         assert_eq!(saved["operations"]["download"]["samples"], 5);
         assert_eq!(saved["operations"]["download"]["cache_state"], "warm");
+
+        let comparison = compare(&rows, &baseline, &dir.path().join("ledger.jsonl")).unwrap();
+        assert_eq!(comparison["operation_verdicts"]["download"], "ok");
+        assert_eq!(comparison["flags"], json!([]));
     }
     #[test]
     fn an_under_sampled_incidental_stage_stays_out_of_the_baseline() {
