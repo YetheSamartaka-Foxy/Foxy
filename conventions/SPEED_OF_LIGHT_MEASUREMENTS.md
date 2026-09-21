@@ -19,7 +19,7 @@ Where a row says `MB/s` from a download report line it is MiB/s
 (`1024 * 1024`); rows typed by hand in the September tables used decimal
 MB/s. Recover exact values from `work_bytes` and `actual_s` when it matters.
 
-## 1. Status by operation (through 2026-09-19)
+## 1. Status by operation (through 2026-09-20)
 
 `n/a` means the required reference or measurement is missing, not zero
 performance. "Reported" ratios keep their original interpretation; the
@@ -56,6 +56,69 @@ comparison column says what the number actually compares.
 | Startup probe / app update check | Probe 78-86% calibrated (B4 fresh request 81 ms); app update check reported 94% modeled | 81 ms reference vs 94-104 ms probe actual | Sept 16 | Plausible for that fresh HTTP path; not universal across HTTPS, reuse and hosts |
 | M1 memory, loaded startup | n/a, advisory footprint (resource trade policy) | Empty app 221-239 MB private commit is a baseline, not a proven minimum for loaded state | 456-473 MB peak / 352-369 MB retained, Sept 16 (455-460 / 355-360 on Sept 10 with another seeded configuration) | Reported, not gated: memory is spent for speed on purpose; only unbounded growth would reopen this |
 | M1 repeated UI walk | n/a, growth/retention comparison, advisory | Three 31.5-31.6 s walks retained 371.9-378.5 MB, 22.3-22.5 MB above their loaded starts | 393.0-398.4 MB peak, 315-316 samples per walk, clean commit `178acb1`, Sept 18 `20260918T153928Z-0345be1c` | The quiet 30 s tail stayed bounded in all three repetitions; owner attribution remains advisory work if this plateau later grows |
+
+### September 20 notebook HDD recheck signal
+
+The supplied saved benchmarks `bm-20260915-204332-recheck.zip` and
+`bm-20260920-152104-recheck.zip` report 827.588 and 833.897 s respectively
+for a full TFR Main recheck on the same notebook and HDD-class repository.
+Both succeeded with 3,738 files, 433,063 parts, 92,193,872,029 hashed
+bytes, Auto selecting Conservative, and two hash workers. Tree hash
+bootstrap rose from 820.945 to 828.220 s. The newer run is 6.309 s (+0.76%)
+slower overall. Summed per-file layout time rose from 98.747 to 116.162 s,
+while summed blocking hash time fell from 1536.011 to 1530.648 s; these
+parallel worker sums are not additive stage times. The older build was dirty,
+each export contains one run, Auto sampled different files, and cache state
+was not controlled. No comparable SoL reference is present. Treat this as an
+investigation signal, not an accepted regression or a replacement for the
+testkit baselines below.
+
+The 2026-09-20 paired Sci-Fi first-check testkit smoke passed on HDD and SSD
+with two evicted hash operations and the same 2,618,093,728 work bytes per
+device; all four repair downloads passed the independent oracle. It has no
+accepted comparison baseline and is not the 92 GB notebook workload. The HDD
+run is `20260920T133432Z-3b99286c`; the SSD run is
+`20260920T134108Z-06a6c1dc`.
+
+A later single repetition of the full TFR Main case on the desktop, with an
+extra PBO header probe removed, measured 652.424 s on HDD (`F:`) and 30.509 s
+on SSD (`H:`). Both runs processed 92,193,872,029 hash bytes, 3,738 files,
+433,063 parts and 448,402 DB inserts after an explicit zero-failure cache
+eviction. Independent content oracles found no problems. Run ids:
+`20260920T142344Z-058b39e0` and `20260920T163223Z-0467d758`.
+These are pilot observations on a different machine from the notebook and
+cannot establish a change in performance. On the smaller seven-sample HDD
+gate the pre-change run drifted from 31 to 50 s, while the candidate stayed
+near 31 s; that spread prevents attributing the difference to the probe
+change. The full HDD pilot's 141.3 MB/s effective read rate is near the
+older 139.3 MB/s B2 unbuffered calibration, whose value is not a hard bound
+for every region of the disk.
+
+Fresh 2026-09-20 disk calibrations on the exact case volumes measured F: at
+129.4 MB/s with one unbuffered sequential reader, 94.3 MB/s with 32 readers,
+and 53.4 MB/s for 1 MiB random reads (`disk-20260920-eaba5a35`,
+`device_io-20260920-270d9dd4`). H: measured 3.998 GB/s with one sequential
+reader, 6.093 GB/s with 32 readers, and 2.566 GB/s for 1 MiB random reads
+(`disk-20260920-80e0b9d9`, `device_io-20260920-608b2d83`). The full F:
+hash exceeds both the old and new 1 GiB sequential references, so neither
+reference is a hard limit for this 92 GB payload. Recalibration changes the
+reference fingerprint for later comparisons; old ratios cannot establish a
+performance verdict against new runs.
+
+Separate full profiled cases passed with the same 92,193,872,029 hashed
+bytes, 3,738 files and 433,063 parts: F: run
+`20260920T170149Z-078ec658` took 651.11 s in the testkit operation row,
+and H: run `20260920T172355Z-0af979c8` took 29.50 s. The HDD action spent
+646.323 of 650.928 s in tree hashing and 4.090 s fetching remote metadata.
+Its `hash_read` scope totaled 1203.555 worker seconds across two workers,
+while layout totaled 79.871 worker seconds and database writes 6.909 s.
+Those worker and DB spans overlap action time. The profiler combines reads
+with BLAKE3 and cannot split them; the compute-only B6 rate and live F: disk
+samples around 138-148 MB/s support a storage-bound interpretation. The SSD
+action spent 24.754 of 29.315 s in tree hashing. Profiler artifacts repeat
+raw and normalized log records; count each event once. Both cases have one
+dirty-build sample and no accepted baseline, so neither proves a change in
+performance or the notebook's 0.76% difference.
 
 ## 1a. Current accepted baselines
 

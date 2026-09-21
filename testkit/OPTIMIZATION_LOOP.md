@@ -44,6 +44,11 @@ Commands: `foxy-testkit run` for one case, `foxy-testkit suite` for several,
 write-gate size, named explicitly on both sides), `foxy-testkit sweep` plus
 `foxy-testkit report` for the whole mode/gate matrix.
 
+For a storage optimization, run the affected storage case and its
+paired HDD or SSD gate after each part. Record both run ids, work counters,
+oracle outcomes and verdicts in the local checkpoint before starting the
+next part.
+
 For a change to a parser, a metric, a threshold, or a ledger field, verify with
 `foxy-testkit replay --all` before running a case: it re-derives rows from every
 recorded run in milliseconds, so a fresh run is only needed once the derivation

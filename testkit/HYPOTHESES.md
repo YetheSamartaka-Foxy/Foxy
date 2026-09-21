@@ -21,6 +21,9 @@ claims.
 | open | Coalesce small writes without increasing retries | `download.sol` (higher), `breakdown.disk` write time | higher ratio, lower time | delta scattered |
 | open | Reuse TLS connections more effectively | `breakdown.network.permit_wait_s` | lower | force redownload |
 | open | Tune patch copy buffer for spinning disks | `summary.total_ms` | lower | delta single-entry HDD |
+| open | Repeated layout discovery or mapping contributes materially to the full evicted HDD recheck; reducing it lowers action time without changing part work | `layout_sum`, full recheck elapsed | lower | paired full TFR Main recheck cases |
+| open | Limit the PAC1 magic probe to .pak files so each PBO avoids an extra header open before layout parsing | `layout_sum`, full recheck elapsed | lower; one fewer open per PBO, wall effect uncertain | paired evicted Sci-Fi hash cases, then full TFR Main recheck |
+| open | The two worker HDD hash schedule causes enough extra seeking that a more sequential read order reduces the full evicted recheck median | disk read rate, full recheck elapsed | higher rate, lower time | paired full TFR Main recheck cases |
 | open | Improve persistent quick-scan cache key hit rate | `quick_scan.actual_s` | lower | touch-only quick check |
 | open | Use BLAKE3 mmap rayon for large SSD files | `breakdown.run_metrics.hash_total_s` | lower | SSD recheck |
 | open | Replace manual compaction with `VACUUM INTO` after the large probe | DB compaction elapsed | lower | large bloated DB probe |
@@ -61,6 +64,17 @@ claims.
 | closed | A cap above the path makes the cap-relative download ratio read as a regression | `download.sol` (cap) beside `download.sol_calibrated` (B1) | n/a, the kit shows both: 0.42 against 2000 Mbps, 0.90 against B1, same 40.6-40.8 s stage | `perf-redownload-small-ssd-limited-above` |
 | closed | The MD5 all-core calibration lane (one 256 MiB buffer) bounds an MD5 integrity recheck | `hash.sol_calibrated` | n/a, 400 x 1 MiB files hash at 4.3-4.5 GB/s against the lane's 2.3 GB/s (ratio 1.35-1.40); the single-buffer lane is a floor for per-file parallel MD5, kept as such | `perf-synthetic-md5-check-ssd` |
 | closed | Deep profiling (`FOXY_PROFILE`) costs enough on a network-bound download to need its own comparison lane | `summary.download_stage_ms` | n/a, inside noise on this lane | `perf-redownload-small-ssd-profiled` |
+
+The 2026-09-20 full profiled F: run `20260920T170149Z-078ec658` spent
+646.323 of 650.928 action seconds in tree hashing; the paired H: run
+`20260920T172355Z-0af979c8` passed the same work. F: layout totaled 79.871
+worker seconds and 1203.555 read and hash worker seconds, both overlapping
+across two workers. Database writes overlapped hashing. Fresh F: unbuffered
+sequential calibration was 129.4 MB/s, while live workload disk samples were
+about 138-148 MB/s. The PAC1 header-probe candidate still lacks a controlled
+wall-time comparison, and the repeated-layout and schedule claims remain
+unproven. Do not change parser ownership or worker limits based on the
+overlapping worker sums alone.
 
 ## Closed entries
 
