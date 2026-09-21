@@ -73,6 +73,10 @@ impl GameModule for ReforgerModule {
         }
     }
 
+    fn content_formats(&self) -> &'static [&'static str] {
+        &[foxy_formats::PAC1_FORMAT_ID]
+    }
+
     fn detect_install_dir(&self, ctx: &GameDetectCtx) -> Option<PathBuf> {
         steam::detect_steam_app_install_directory(
             ctx.steam_directory,
@@ -1441,6 +1445,19 @@ mod tests {
             crate::core::game::arma3::Arma3Module
                 .capabilities()
                 .client_side_addons
+        );
+    }
+
+    #[test]
+    fn reforger_ships_pac1_containers_only() {
+        assert_eq!(
+            ReforgerModule.content_formats(),
+            &[foxy_formats::PAC1_FORMAT_ID]
+        );
+        assert!(
+            crate::core::game::generic_game::GenericGameModule
+                .content_formats()
+                .is_empty()
         );
     }
 

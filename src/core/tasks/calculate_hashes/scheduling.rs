@@ -761,6 +761,7 @@ pub(super) async fn recalculate_parts_for_jobs(
 ) -> (Vec<FileHashResult>, bool) {
     // Shared semaphore limits the total in-flight spawn_blocking hash tasks across all files.
     let semaphore = Arc::new(Semaphore::new(global_part_concurrency));
+    let game_formats = crate::core::game::registry().active().content_formats();
 
     // Shared counter for completed files - used for progress reporting
     let files_done = Arc::new(AtomicUsize::new(
@@ -853,6 +854,7 @@ pub(super) async fn recalculate_parts_for_jobs(
                             &file_path,
                             sem,
                             span_source,
+                            game_formats,
                             part_progress,
                             cancel.clone(),
                         )

@@ -47,6 +47,10 @@ impl GameModule for Arma3Module {
         }
     }
 
+    fn content_formats(&self) -> &'static [&'static str] {
+        &[foxy_formats::PBO_FORMAT_ID]
+    }
+
     fn repository_launch_flags(&self) -> Vec<RepositoryLaunchFlag> {
         vec![
             RepositoryLaunchFlag {
@@ -795,5 +799,13 @@ mod tests {
         assert!(module.capabilities().repository_sync);
         assert!(module.capabilities().steam_workshop);
         assert_eq!(module.steam_app_id(), Some(107410));
+    }
+
+    #[test]
+    fn arma3_ships_pbo_containers_only() {
+        assert_eq!(
+            Arma3Module.content_formats(),
+            &[foxy_formats::PBO_FORMAT_ID]
+        );
     }
 }

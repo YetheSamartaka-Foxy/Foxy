@@ -103,6 +103,7 @@ pub(super) async fn calculate_part_hashes(
     file_path: &str,
     semaphore: Arc<Semaphore>,
     span_source: PartSpanSource,
+    game_formats: &[&'static str],
     progress: Option<PartHashProgress>,
     cancel: Option<watch::Receiver<bool>>,
 ) -> PartHashCalculation {
@@ -174,7 +175,7 @@ pub(super) async fn calculate_part_hashes(
 
     // Detect local archive layout for local span remapping before opening the file
     let layout_started = Instant::now();
-    let remote_format_id = remote_parts_format_id(file_path, &parts);
+    let remote_format_id = remote_parts_format_id(file_path, &parts, game_formats);
     let local_span_overrides = if let (PartSpanSource::DetectLocalLayout, Some(format_id)) =
         (span_source, remote_format_id)
     {
@@ -536,6 +537,7 @@ mod tests {
             file.path().to_str().unwrap(),
             Arc::new(Semaphore::new(1)),
             PartSpanSource::RemoteLayout,
+            &[],
             None,
             None,
         )
@@ -634,6 +636,7 @@ mod tests {
             "ignored",
             Arc::new(Semaphore::new(1)),
             PartSpanSource::RemoteLayout,
+            &[],
             None,
             None,
         )
@@ -662,6 +665,7 @@ mod tests {
             missing.to_str().unwrap(),
             Arc::new(Semaphore::new(1)),
             PartSpanSource::RemoteLayout,
+            &[],
             None,
             None,
         )
@@ -691,6 +695,7 @@ mod tests {
             file.path().to_str().unwrap(),
             Arc::new(Semaphore::new(1)),
             PartSpanSource::RemoteLayout,
+            &[],
             None,
             Some(cancel_rx),
         )
@@ -718,6 +723,7 @@ mod tests {
             file.path().to_str().unwrap(),
             Arc::new(Semaphore::new(1)),
             PartSpanSource::RemoteLayout,
+            &[],
             None,
             None,
         )

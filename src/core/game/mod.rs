@@ -157,6 +157,14 @@ pub trait GameModule: Send + Sync {
     ) -> Result<LaunchCommand, LaunchError>;
     fn settings_schema(&self) -> GameSettingsSchema;
 
+    /// Container formats this game's repositories ship, as `foxy_formats`
+    /// ids. Hashing trusts a single entry without probing the file head;
+    /// an empty list means detect the format from the manifest markers and
+    /// the local file.
+    fn content_formats(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     /// Turn a repository's enabled addon selection into a launch plan for this
     /// game. Only meaningful for a module that declares `repository_launch`;
     /// the default refuses so a module never inherits another game's plan shape.
