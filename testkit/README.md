@@ -62,8 +62,16 @@ foxy-testkit run --case .\testkit\cases\perf-repo.json --accept
 ```
 
 Acceptance also requires a release build and at least five compatible,
-successful warm or explicitly evicted samples for every recorded operation
-lane. Noisy HDD and network cases should use seven or more repetitions.
+successful warm or explicitly evicted samples for the measured operation
+lane; an incidental lane with fewer is recorded as `unbaselined_operations`
+and never compared. Noisy HDD and network cases should use seven or more
+repetitions. A finished run made without `--accept` (or whose acceptance was
+refused) can be accepted afterwards from its rows, provided it ran on a clean
+worktree:
+
+```powershell
+foxy-testkit accept .	estkitunsperf-repo<run-id>
+```
 
 Compare WAL and MVCC without changing the case workload:
 

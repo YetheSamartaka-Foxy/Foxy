@@ -23,8 +23,11 @@ ledger/<case-id>.<harness>.<build>.<database-mode>.gate-<n>.baseline.json
 ```
 
 `--accept` refuses a dirty tree, non-release builds, invalid rows, case-hash
-changes, incompatible operation profiles, and fewer than five successful warm
-or explicitly evicted samples per lane. A version 2 baseline stores the
+changes, incompatible operation profiles, and a run in which no lane reaches
+five successful warm or explicitly evicted samples. A lane with fewer than
+five (typically an incidental `wipe-db` whose iteration 0 is its unprepared
+pass) is listed under `unbaselined_operations` instead of being compared;
+`compare` reports it as `no-baseline`. A version 2 baseline stores the
 accepted Git SHA, case and origin identity, calibration references, complete
 run and operation compatibility, sample size, medians, min/max spread, terminal
 and oracle outcomes, and tolerances. Older baseline files remain readable but

@@ -311,6 +311,7 @@ pub const PROFILE_KEYS: &[&str] = &[
 /// or against another origin and are not a reference for this one.
 pub const ENVIRONMENT_KEYS: &[&str] = &["cpu", "os", "memory_gb", "origin"];
 const BASELINE_FORMAT_VERSION: u64 = 2;
+const MIN_BASELINE_SAMPLES: u64 = 5;
 const BASELINE_REQUIRED_ROW_KEYS: &[&str] = &[
     "mutation_profile",
     "mutation_seed",
@@ -386,11 +387,15 @@ fn oracle_outcome(row: &Value) -> String {
 /// Medians per operation key over the steady-state rows: warm rows and
 /// evicted rows, each in its own lane; cold iteration-zero rows and invalid
 /// rows are left out.
+/// Iteration 0 without warmup is the unprepared first pass and never a
+/// baseline sample; a warm or evicted valid row is.
+fn is_baseline_sample(row: &Value) -> bool {
+    (row["cache_state"] == "warm" || row["cache_state"] == "evicted") && row["verdict"] != "invalid"
+}
+
 pub fn warm_medians(rows: &[Value]) -> Value {
     let mut groups: BTreeMap<String, Vec<&Value>> = BTreeMap::new();
-    for row in rows.iter().filter(|r| {
-        (r["cache_state"] == "warm" || r["cache_state"] == "evicted") && r["verdict"] != "invalid"
-    }) {
+    for row in rows.iter().filter(|row| is_baseline_sample(row)) {
         groups.entry(op_key(row)).or_default().push(row);
     }
     let mut result = json!({});
@@ -462,29 +467,35 @@ pub fn save_baseline(rows: &[Value], path: &Path, case_hash: &str, git_sha: &str
         rows.iter().all(|row| profile_of(row) == profile),
         "Cannot accept a baseline from rows with different run profiles"
     );
-    let medians = warm_medians(rows);
-    let operations = medians.as_object().unwrap();
-    ensure!(
-        !operations.is_empty(),
-        "No warm samples are available for a baseline"
-    );
-    for (op, entry) in operations {
-        ensure!(
-            entry["samples"].as_u64().unwrap_or(0) >= 5,
-            "Baseline operation {op} needs at least five compatible successful samples"
-        );
+    let mut medians = warm_medians(rows);
+    // An incidental stage (a `wipe-db` before the measured refresh) collects
+    // one sample fewer than the measured operation when iteration 0 is its
+    // unprepared pass, so it stays out of the baseline rather than blocking
+    // the operation the case exists to measure.
+    let mut unbaselined = json!({});
+    for (op, entry) in medians.as_object_mut().unwrap() {
         let expected = &entry["compatibility"];
         ensure!(
             rows.iter()
-                .filter(|row| op_key(row) == *op && row["verdict"] != "invalid")
+                .filter(|row| op_key(row) == *op && is_baseline_sample(row))
                 .all(|row| operation_compatibility(row) == *expected),
             "Baseline operation {op} contains incompatible samples"
         );
+        if entry["samples"].as_u64().unwrap_or(0) < MIN_BASELINE_SAMPLES {
+            unbaselined[op] = json!({"samples": entry["samples"]});
+        }
     }
+    for op in unbaselined.as_object().unwrap().keys() {
+        medians.as_object_mut().unwrap().remove(op);
+    }
+    ensure!(
+        !medians.as_object().unwrap().is_empty(),
+        "No operation has at least {MIN_BASELINE_SAMPLES} compatible successful samples"
+    );
     let first = rows.first().unwrap_or(&Value::Null);
     crate::case::write_json(
         path,
-        &json!({"format_version":BASELINE_FORMAT_VERSION,"accepted_utc":chrono::Utc::now().to_rfc3339(),"git_sha":git_sha,"case_hash":case_hash,"origin_checksum":first["origin_checksum"],"references":crate::references::ids(&first["references"]),"profile":profile,"operations":medians,"tolerances":{"sol":0.08,"duration":0.12,"correctness":0.0}}),
+        &json!({"format_version":BASELINE_FORMAT_VERSION,"accepted_utc":chrono::Utc::now().to_rfc3339(),"git_sha":git_sha,"case_hash":case_hash,"origin_checksum":first["origin_checksum"],"references":crate::references::ids(&first["references"]),"profile":profile,"operations":medians,"unbaselined_operations":unbaselined,"tolerances":{"sol":0.08,"duration":0.12,"correctness":0.0}}),
     )
 }
 
@@ -601,6 +612,10 @@ pub fn compare(rows: &[Value], baseline_path: &Path, ledger_path: &Path) -> Resu
     let mut rebaseline = false;
     for (op, entry) in medians.as_object().unwrap() {
         let base = &baseline["operations"][op];
+        if base.is_null() && !baseline["unbaselined_operations"][op].is_null() {
+            operation_verdicts.insert(op.clone(), "no-baseline".into());
+            continue;
+        }
         if base.is_null() {
             // The baseline has no lane for this operation (an evicted lane
             // recorded before lanes existed, a new label); say so instead of
@@ -831,6 +846,48 @@ mod tests {
         (0..5)
             .map(|offset| row(elapsed + f64::from(offset) / 10.0))
             .collect()
+    }
+    #[test]
+    fn acceptance_ignores_the_unprepared_first_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rows = five(10.0);
+        let mut first = row(30.0);
+        first["cache_state"] = "cold".into();
+        rows.insert(0, first);
+        let baseline = dir.path().join("baseline.json");
+        save_baseline(&rows, &baseline, "h", "sha").unwrap();
+        let saved = crate::case::read_json(&baseline).unwrap();
+        assert_eq!(saved["operations"]["download"]["samples"], 5);
+        assert_eq!(saved["operations"]["download"]["cache_state"], "warm");
+    }
+    #[test]
+    fn an_under_sampled_incidental_stage_stays_out_of_the_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        let baseline = dir.path().join("baseline.json");
+        let ledger = dir.path().join("ledger.jsonl");
+        let mut rows = five(10.0);
+        for offset in 0..4 {
+            let mut wipe = row(1.0 + f64::from(offset) / 10.0);
+            wipe["op"] = "wipe-db".into();
+            rows.push(wipe);
+        }
+        save_baseline(&rows, &baseline, "h", "sha").unwrap();
+        let saved = crate::case::read_json(&baseline).unwrap();
+        assert_eq!(saved["operations"]["download"]["samples"], 5);
+        assert!(saved["operations"]["wipe-db"].is_null());
+        assert_eq!(saved["unbaselined_operations"]["wipe-db"]["samples"], 4);
+
+        let comparison = compare(&rows, &baseline, &ledger).unwrap();
+        assert_eq!(comparison["verdict"], "ok");
+        assert_eq!(comparison["operation_verdicts"]["wipe-db"], "no-baseline");
+        assert_eq!(comparison["flags"], json!([]));
+
+        let only_wipes: Vec<Value> = rows
+            .iter()
+            .filter(|r| r["op"] == "wipe-db")
+            .cloned()
+            .collect();
+        assert!(save_baseline(&only_wipes, &dir.path().join("wipes.json"), "h", "sha").is_err());
     }
     #[test]
     fn baselines_persist_and_validate_the_run_profile() {

@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
+mod accept;
 mod calibrate;
 mod case;
 mod collect;
@@ -44,6 +45,11 @@ enum Command {
         validate_only: bool,
         #[arg(long)]
         no_build: bool,
+    },
+    /// Accept a baseline from a finished run without repeating it.
+    Accept {
+        /// The run directory, `testkit/runs/<case-id>/<run-id>`.
+        run_dir: PathBuf,
     },
     /// Run several cases one after another; a failure does not stop the rest.
     Suite {
@@ -230,6 +236,9 @@ fn main() -> Result<()> {
                 },
             )?;
             print_json(&result)?;
+        }
+        Command::Accept { run_dir } => {
+            print_json(&accept::execute(repo_root, &absolute(repo_root, &run_dir))?)?;
         }
         Command::Suite {
             filter,
