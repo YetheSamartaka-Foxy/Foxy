@@ -43,21 +43,22 @@ pub(super) fn remote_parts_format_id(
     detected.filter(|format_id| game_formats.is_empty() || game_formats.contains(format_id))
 }
 
-pub(super) fn parse_local_content_layout(
+pub(super) fn parse_local_content_layout_from(
     format_id: &str,
-    file_path: &str,
+    reader: &mut dyn foxy_formats::BufReadSeek,
+    file_len: u64,
 ) -> Result<LocalLayout, String> {
     builtin_registry()
-        .parse_local_layout_for_format(format_id, Path::new(file_path))
+        .parse_local_layout_for_format_from(format_id, reader, file_len)
         .map_err(|err| err.to_string())
 }
 
-pub(super) fn map_local_part_spans(
-    parts: &[FoxyModFilePart],
+pub(super) fn map_local_part_spans<'a>(
+    parts: impl IntoIterator<Item = &'a FoxyModFilePart>,
     layout: &LocalLayout,
 ) -> Vec<Option<LocalPartSpan>> {
     let display_paths: Vec<_> = parts
-        .iter()
+        .into_iter()
         .map(|part| part_display_path(&part.path))
         .collect();
     layout.map_part_spans(display_paths)

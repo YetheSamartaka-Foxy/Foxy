@@ -1,6 +1,6 @@
 use crate::{
-    ContentFormat, FilePart, FormatError, FormatResult, LocalLayout, LocalPartSpan, is_end_part,
-    is_header_part, normalize_part_path,
+    BufReadSeek, ContentFormat, FilePart, FormatError, FormatResult, LocalLayout, LocalPartSpan,
+    is_end_part, is_header_part, normalize_part_path,
 };
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Seek};
@@ -65,28 +65,39 @@ impl ContentFormat for Pac1Format {
     }
 
     fn parse_local_layout(&self, path: &Path) -> FormatResult<LocalLayout> {
-        let layout = parse_pac1_layout(path)?;
-        let mut parts_by_path: HashMap<String, VecDeque<LocalPartSpan>> = HashMap::new();
-        let mut entry_payload_bytes = 0u64;
-        for part in layout.parts {
-            if is_header_part(&part.path) || is_end_part(&part.path) {
-                continue;
-            }
-            if !is_pac1_gap_part(&part.path) {
-                entry_payload_bytes = entry_payload_bytes.saturating_add(part.span.length);
-            }
-            parts_by_path
-                .entry(normalize_part_path(&part.path))
-                .or_default()
-                .push_back(part.span);
+        Ok(pac1_local_layout(parse_pac1_layout(path)?))
+    }
+
+    fn parse_local_layout_from(
+        &self,
+        reader: &mut dyn BufReadSeek,
+        file_len: u64,
+    ) -> FormatResult<LocalLayout> {
+        Ok(pac1_local_layout(parse_pac1_layout_from(reader, file_len)?))
+    }
+}
+
+fn pac1_local_layout(layout: Pac1Layout) -> LocalLayout {
+    let mut parts_by_path: HashMap<String, VecDeque<LocalPartSpan>> = HashMap::new();
+    let mut entry_payload_bytes = 0u64;
+    for part in layout.parts {
+        if is_header_part(&part.path) || is_end_part(&part.path) {
+            continue;
         }
-        Ok(LocalLayout {
-            header: layout.header,
-            end: layout.end,
-            parts_by_path,
-            entry_count: layout.entry_count,
-            entry_payload_bytes,
-        })
+        if !is_pac1_gap_part(&part.path) {
+            entry_payload_bytes = entry_payload_bytes.saturating_add(part.span.length);
+        }
+        parts_by_path
+            .entry(normalize_part_path(&part.path))
+            .or_default()
+            .push_back(part.span);
+    }
+    LocalLayout {
+        header: layout.header,
+        end: layout.end,
+        parts_by_path,
+        entry_count: layout.entry_count,
+        entry_payload_bytes,
     }
 }
 
@@ -146,8 +157,16 @@ fn parse_pac1_layout(file_path: &Path) -> FormatResult<Pac1Layout> {
             ))
         })?
         .len();
+    parse_pac1_layout_from(&mut file, file_len)
+}
 
-    let chunks = read_pac1_chunks(&mut file, file_len)?;
+fn parse_pac1_layout_from(
+    file: &mut (impl Read + Seek + ?Sized),
+    file_len: u64,
+) -> FormatResult<Pac1Layout> {
+    file.seek(std::io::SeekFrom::Start(0))
+        .map_err(|err| FormatError::new(format!("failed to rewind PAC1: {err}")))?;
+    let chunks = read_pac1_chunks(file, file_len)?;
     let file_chunk = chunks
         .iter()
         .find(|chunk| &chunk.tag == FILE_TAG)
@@ -178,7 +197,10 @@ fn parse_pac1_layout(file_path: &Path) -> FormatResult<Pac1Layout> {
     build_layout(file_len, entries)
 }
 
-fn read_pac1_chunks(file: &mut std::fs::File, file_len: u64) -> FormatResult<Vec<ChunkInfo>> {
+fn read_pac1_chunks(
+    file: &mut (impl Read + Seek + ?Sized),
+    file_len: u64,
+) -> FormatResult<Vec<ChunkInfo>> {
     let mut head = [0u8; 12];
     file.read_exact(&mut head)
         .map_err(|err| FormatError::new(format!("failed to read PAC1 header: {err}")))?;
@@ -568,6 +590,21 @@ mod tests {
             cursor += part.length;
         }
         assert_eq!(cursor, file_len);
+    }
+
+    #[test]
+    fn layout_from_a_shared_reader_matches_the_path_parse() {
+        let path = fixture_pak();
+        let bytes = std::fs::read(path.as_path()).unwrap();
+        let from_path = Pac1Format.parse_local_layout(path.as_path()).unwrap();
+        let mut reader = std::io::BufReader::new(std::io::Cursor::new(bytes.clone()));
+        std::io::Read::read_exact(&mut reader, &mut [0u8; 3]).unwrap();
+
+        let from_reader = Pac1Format
+            .parse_local_layout_from(&mut reader, bytes.len() as u64)
+            .unwrap();
+
+        assert_eq!(from_reader, from_path);
     }
 
     #[test]

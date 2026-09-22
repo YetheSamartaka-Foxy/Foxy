@@ -1,5 +1,5 @@
 use super::format_layout::{
-    map_local_part_spans, parse_local_content_layout, remote_parts_format_id,
+    map_local_part_spans, parse_local_content_layout_from, remote_parts_format_id,
 };
 use super::*;
 use foxy_formats::LocalPartSpan;
@@ -194,101 +194,24 @@ pub(super) async fn calculate_part_hashes(
     };
     metrics.metadata_elapsed = metadata_started.elapsed();
 
-    // Detect local archive layout for local span remapping before opening the file
-    let layout_started = Instant::now();
     let remote_format_id = remote_parts_format_id(file_path, &parts, game_formats);
-    let local_span_overrides = if let (PartSpanSource::DetectLocalLayout, Some(format_id)) =
-        (span_source, remote_format_id)
-    {
-        metrics.layout_files = 1;
-        let parser_path = file_path.to_string();
-        let parser_started = Instant::now();
-        match tokio::task::spawn_blocking(move || {
-            parse_local_content_layout(format_id, &parser_path)
-        })
-        .await
-        {
-            Ok(Ok(layout)) => {
-                metrics.layout_parse_elapsed = parser_started.elapsed();
-                metrics.layout_entries = layout.entry_count;
-                metrics.layout_entry_payload_bytes = layout.entry_payload_bytes;
-                let header_len = layout.header.length;
-                let end_start = layout.end.start;
-                let end_len = layout.end.length;
-                let map_started = Instant::now();
-                let spans = map_local_part_spans(&parts, &layout);
-                metrics.layout_map_elapsed = map_started.elapsed();
-                let mapped = spans.iter().filter(|span| span.is_some()).count();
-                let fallback = total_parts.saturating_sub(mapped);
-                metrics.mapped_parts = mapped;
-                metrics.fallback_parts = fallback;
-                debug!(
-                    "Local {} span remap for {}: mapped_parts={} fallback_parts={} header_len={} end_start={} end_len={}",
-                    format_id, pbo_name, mapped, fallback, header_len, end_start, end_len
-                );
-                Arc::new(spans)
-            }
-            Ok(Err(err)) => {
-                metrics.layout_parse_elapsed = parser_started.elapsed();
-                warn!(
-                    "Local {} span remap failed for {}: {}. Falling back to remote offsets.",
-                    format_id, pbo_name, err
-                );
-                metrics.fallback_parts = total_parts;
-                Arc::new(vec![None; total_parts])
-            }
-            Err(err) => {
-                metrics.layout_parse_elapsed = parser_started.elapsed();
-                warn!(
-                    "Local {} span remap task failed for {}: {}. Falling back to remote offsets.",
-                    format_id, pbo_name, err
-                );
-                metrics.fallback_parts = total_parts;
-                Arc::new(vec![None; total_parts])
-            }
-        }
-    } else {
-        if span_source == PartSpanSource::RemoteLayout && remote_format_id.is_some() {
-            metrics.remote_span_files = 1;
-            debug!(
-                "Using remote part spans for freshly materialized download {} (parts={})",
-                pbo_name, total_parts
-            );
-        }
-        Arc::new(vec![None; total_parts])
+    let layout_format = match (span_source, remote_format_id) {
+        (PartSpanSource::DetectLocalLayout, Some(format_id)) => Some(format_id),
+        _ => None,
     };
-    metrics.layout_elapsed = layout_started.elapsed();
-    if metrics.layout_files > 0 && (total_parts >= 64 || metrics.layout_elapsed.as_millis() >= 100)
-    {
-        info!(
-            "Content layout metrics: file={} parts={} entries={} entry_payload_bytes={} mapped_parts={} fallback_parts={} parse={:.3}s map={:.3}s total={:.3}s",
-            pbo_name,
-            total_parts,
-            metrics.layout_entries,
-            metrics.layout_entry_payload_bytes,
-            metrics.mapped_parts,
-            metrics.fallback_parts,
-            metrics.layout_parse_elapsed.as_secs_f64(),
-            metrics.layout_map_elapsed.as_secs_f64(),
-            metrics.layout_elapsed.as_secs_f64()
+    if span_source == PartSpanSource::RemoteLayout && remote_format_id.is_some() {
+        metrics.remote_span_files = 1;
+        debug!(
+            "Using remote part spans for freshly materialized download {} (parts={})",
+            pbo_name, total_parts
         );
     }
 
     // Attach original index to preserve order after offset-sorted processing
     let mut indexed_parts: Vec<(usize, FoxyModFilePart)> = parts.into_iter().enumerate().collect();
 
-    // Sort parts by effective start offset for sequential disk I/O.
-    // This dramatically improves read-ahead prefetch and reduces random seeks.
-    let span_overrides = local_span_overrides.clone();
-    indexed_parts.sort_by_key(|(idx, part)| {
-        span_overrides
-            .get(*idx)
-            .and_then(|span| *span)
-            .map(|s| s.start)
-            .unwrap_or(part.remote_start)
-    });
-
     let file_path_owned = file_path.to_string();
+    let file_name = pbo_name.to_string();
 
     // Acquire one semaphore permit for the entire file - sequential processing
     // uses a single blocking thread instead of one per part.
@@ -315,9 +238,7 @@ pub(super) async fn calculate_part_hashes(
     let blocking_progress = progress.clone();
     let estimated_bytes = metrics.estimated_bytes;
     let result = tokio::task::spawn_blocking(move || {
-        // Timed per file rather than per part: a 562-entry PBO would otherwise
-        // charge the profiler more events than the hashing does work.
-        let profiled = crate::core::utils::profiling::FsTimer::start();
+        let mut layout_metrics = LayoutMetrics::default();
         let file = match std::fs::File::open(&file_path_owned) {
             Ok(f) => f,
             Err(e) => {
@@ -326,13 +247,39 @@ pub(super) async fn calculate_part_hashes(
                 if let Some(progress) = &blocking_progress {
                     progress.mark_parts_done(total_part_count, estimated_bytes);
                 }
-                return (indexed_parts, None);
+                return (indexed_parts, None, layout_metrics);
             }
         };
 
         const HASH_READER_CAPACITY: usize = 4 * 1024 * 1024;
         let mut reader = std::io::BufReader::with_capacity(HASH_READER_CAPACITY, file);
-        let mut reader_pos: Option<u64> = Some(0);
+        let span_overrides = match layout_format {
+            Some(format_id) => resolve_local_spans(
+                format_id,
+                &mut reader,
+                file_metadata.len(),
+                &indexed_parts,
+                &file_name,
+                &mut layout_metrics,
+            ),
+            None => vec![None; indexed_parts.len()],
+        };
+        // Sort parts by effective start offset for sequential disk I/O.
+        indexed_parts.sort_by_key(|(idx, part)| {
+            span_overrides
+                .get(*idx)
+                .and_then(|span| *span)
+                .map(|s| s.start)
+                .unwrap_or(part.remote_start)
+        });
+        let mut reader_pos: Option<u64> = if layout_metrics.attempted {
+            reader.stream_position().ok()
+        } else {
+            Some(0)
+        };
+        // Timed per file rather than per part: a 562-entry PBO would otherwise
+        // charge the profiler more events than the hashing does work.
+        let profiled = crate::core::utils::profiling::FsTimer::start();
 
         // Fixed-size buffer reused across all parts - caps memory regardless of part size
         const HASH_BUF_SIZE: usize = 64 * 1024;
@@ -488,16 +435,17 @@ pub(super) async fn calculate_part_hashes(
             )
             .ok()
         };
-        (indexed_parts, content_hash)
+        (indexed_parts, content_hash, layout_metrics)
     })
     .await;
-    metrics.blocking_hash_elapsed = blocking_started.elapsed();
+    let blocking_elapsed = blocking_started.elapsed();
     // _permit is dropped here, releasing the semaphore slot
 
-    let (mut final_parts, content_hash) = match result {
+    let (mut final_parts, content_hash, layout_metrics) = match result {
         Ok(parts) => parts,
         Err(e) => {
             error!("Part hashing task panicked for {}: {}", pbo_name, e);
+            metrics.blocking_hash_elapsed = blocking_elapsed;
             metrics.total_elapsed = started_at.elapsed();
             return PartHashCalculation {
                 parts: Vec::new(),
@@ -506,6 +454,30 @@ pub(super) async fn calculate_part_hashes(
             };
         }
     };
+    metrics.layout_files = usize::from(layout_metrics.attempted);
+    metrics.layout_parse_elapsed = layout_metrics.parse_elapsed;
+    metrics.layout_map_elapsed = layout_metrics.map_elapsed;
+    metrics.layout_elapsed = layout_metrics.parse_elapsed + layout_metrics.map_elapsed;
+    metrics.layout_entries = layout_metrics.entries;
+    metrics.layout_entry_payload_bytes = layout_metrics.entry_payload_bytes;
+    metrics.mapped_parts = layout_metrics.mapped_parts;
+    metrics.fallback_parts = layout_metrics.fallback_parts;
+    metrics.blocking_hash_elapsed = blocking_elapsed.saturating_sub(metrics.layout_elapsed);
+    if metrics.layout_files > 0 && (total_parts >= 64 || metrics.layout_elapsed.as_millis() >= 100)
+    {
+        info!(
+            "Content layout metrics: file={} parts={} entries={} entry_payload_bytes={} mapped_parts={} fallback_parts={} parse={:.3}s map={:.3}s total={:.3}s",
+            pbo_name,
+            total_parts,
+            metrics.layout_entries,
+            metrics.layout_entry_payload_bytes,
+            metrics.mapped_parts,
+            metrics.fallback_parts,
+            metrics.layout_parse_elapsed.as_secs_f64(),
+            metrics.layout_map_elapsed.as_secs_f64(),
+            metrics.layout_elapsed.as_secs_f64()
+        );
+    }
 
     // Restore original order
     final_parts.sort_by_key(|(idx, _)| *idx);
@@ -527,10 +499,188 @@ pub(super) async fn calculate_part_hashes(
     }
 }
 
+#[derive(Default)]
+struct LayoutMetrics {
+    attempted: bool,
+    parse_elapsed: std::time::Duration,
+    map_elapsed: std::time::Duration,
+    entries: usize,
+    entry_payload_bytes: u64,
+    mapped_parts: usize,
+    fallback_parts: usize,
+}
+
+/// Parses the archive layout through the hash reader, so the header read runs
+/// straight on into the payload instead of costing a second open and a second
+/// trip to the start of the file. `indexed_parts` must be in original order.
+fn resolve_local_spans(
+    format_id: &str,
+    reader: &mut dyn foxy_formats::BufReadSeek,
+    file_len: u64,
+    indexed_parts: &[(usize, FoxyModFilePart)],
+    file_name: &str,
+    metrics: &mut LayoutMetrics,
+) -> Vec<Option<LocalPartSpan>> {
+    metrics.attempted = true;
+    let total_parts = indexed_parts.len();
+    let parse_started = Instant::now();
+    let parsed = parse_local_content_layout_from(format_id, reader, file_len);
+    metrics.parse_elapsed = parse_started.elapsed();
+    match parsed {
+        Ok(layout) => {
+            metrics.entries = layout.entry_count;
+            metrics.entry_payload_bytes = layout.entry_payload_bytes;
+            let map_started = Instant::now();
+            let spans = map_local_part_spans(indexed_parts.iter().map(|(_, part)| part), &layout);
+            metrics.map_elapsed = map_started.elapsed();
+            metrics.mapped_parts = spans.iter().filter(|span| span.is_some()).count();
+            metrics.fallback_parts = total_parts.saturating_sub(metrics.mapped_parts);
+            debug!(
+                "Local {} span remap for {}: mapped_parts={} fallback_parts={} header_len={} end_start={} end_len={}",
+                format_id,
+                file_name,
+                metrics.mapped_parts,
+                metrics.fallback_parts,
+                layout.header.length,
+                layout.end.start,
+                layout.end.length
+            );
+            spans
+        }
+        Err(err) => {
+            warn!(
+                "Local {} span remap failed for {}: {}. Falling back to remote offsets.",
+                format_id, file_name, err
+            );
+            metrics.fallback_parts = total_parts;
+            vec![None; total_parts]
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
+
+    fn pbo_entry(bytes: &mut Vec<u8>, name: &[u8], length: u32) {
+        bytes.extend_from_slice(name);
+        bytes.push(0);
+        bytes.extend_from_slice(&[0u8; 16]);
+        bytes.extend_from_slice(&length.to_le_bytes());
+    }
+
+    #[tokio::test]
+    async fn local_layout_is_parsed_through_the_hash_reader_and_every_part_matches() {
+        let mut bytes = vec![0u8];
+        bytes.extend_from_slice(b"sreV");
+        bytes.extend_from_slice(&[0u8; 17]);
+        pbo_entry(&mut bytes, b"a.txt", 5);
+        pbo_entry(&mut bytes, b"b.txt", 3);
+        pbo_entry(&mut bytes, b"", 0);
+        let header_len = bytes.len();
+        bytes.extend_from_slice(b"alphabet");
+        bytes.extend_from_slice(b"TAIL");
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(&bytes).unwrap();
+
+        let spans = [
+            ("$$HEADER$$", 0, header_len),
+            ("a.txt", header_len, 5),
+            ("b.txt", header_len + 5, 3),
+            ("$$END$$", header_len + 8, 4),
+        ];
+        let parts: Vec<FoxyModFilePart> = spans
+            .iter()
+            .enumerate()
+            .map(|(order, (name, start, len))| FoxyModFilePart {
+                path: crate::core::models::modification_file_part::part_storage_path(
+                    name,
+                    order as i64,
+                ),
+                // Remote offsets from another build of the archive; only the
+                // local layout can place these parts.
+                remote_start: *start as u64 + 100,
+                remote_length: *len as u64,
+                remote_checksum: blake3::hash(&bytes[*start..*start + *len])
+                    .to_hex()
+                    .to_uppercase(),
+                data_order: order as i64,
+                ..Default::default()
+            })
+            .collect();
+
+        let result = calculate_part_hashes(
+            parts,
+            file.path().to_str().unwrap(),
+            Arc::new(Semaphore::new(1)),
+            PartSpanSource::DetectLocalLayout,
+            &[foxy_formats::PBO_FORMAT_ID],
+            None,
+            None,
+        )
+        .await;
+
+        assert_eq!(result.metrics.layout_files, 1);
+        assert_eq!(result.metrics.mapped_parts, 4);
+        assert_eq!(result.metrics.fallback_parts, 0);
+        for (part, (name, start, len)) in result.parts.iter().zip(spans) {
+            assert_eq!(part.local_start, start as u64, "{name}");
+            assert_eq!(part.local_length, len as u64, "{name}");
+            assert_eq!(part.local_checksum, part.remote_checksum, "{name}");
+        }
+        assert_eq!(
+            result.content_hash.as_deref(),
+            Some(
+                crate::core::utils::content_hash::fast_file_content_hash(
+                    file.path().to_str().unwrap()
+                )
+                .unwrap()
+                .as_str()
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn unreadable_local_layout_falls_back_to_remote_offsets() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(b"not a pbo at all").unwrap();
+        let parts = vec![
+            FoxyModFilePart {
+                path: "$$HEADER$$".to_string(),
+                remote_start: 0,
+                remote_length: 4,
+                remote_checksum: blake3::hash(b"not ").to_hex().to_uppercase(),
+                data_order: 0,
+                ..Default::default()
+            },
+            FoxyModFilePart {
+                path: "$$END$$".to_string(),
+                remote_start: 4,
+                remote_length: 12,
+                remote_checksum: blake3::hash(b"a pbo at all").to_hex().to_uppercase(),
+                data_order: 1,
+                ..Default::default()
+            },
+        ];
+
+        let result = calculate_part_hashes(
+            parts,
+            file.path().to_str().unwrap(),
+            Arc::new(Semaphore::new(1)),
+            PartSpanSource::DetectLocalLayout,
+            &[foxy_formats::PBO_FORMAT_ID],
+            None,
+            None,
+        )
+        .await;
+
+        assert_eq!(result.metrics.layout_files, 1);
+        assert_eq!(result.metrics.fallback_parts, 2);
+        for part in &result.parts {
+            assert_eq!(part.local_checksum, part.remote_checksum);
+        }
+    }
 
     #[tokio::test]
     async fn shorter_local_file_hashes_readable_parts_for_delta_planning() {

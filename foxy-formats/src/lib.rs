@@ -3,6 +3,7 @@ mod pbo;
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
+use std::io::{BufRead, Seek};
 use std::path::Path;
 
 pub use pac1::{
@@ -79,12 +80,26 @@ impl std::error::Error for FormatError {}
 
 pub type FormatResult<T> = Result<T, FormatError>;
 
+/// An open archive a layout parser can read through without owning it, so a
+/// caller that goes on to hash the file keeps one handle and one buffer.
+pub trait BufReadSeek: BufRead + Seek {}
+
+impl<T: BufRead + Seek + ?Sized> BufReadSeek for T {}
+
 pub trait ContentFormat: Send + Sync {
     fn id(&self) -> &'static str;
     fn matches(&self, path: &Path, head: &[u8]) -> bool;
     fn remote_layout_matches(&self, part_paths: &[&str]) -> bool;
     fn parse_parts(&self, path: &Path) -> FormatResult<Vec<FilePart>>;
     fn parse_local_layout(&self, path: &Path) -> FormatResult<LocalLayout>;
+    /// [`ContentFormat::parse_local_layout`] over an open file of `file_len`
+    /// bytes. The reader may start anywhere and is left wherever the parse
+    /// finished.
+    fn parse_local_layout_from(
+        &self,
+        reader: &mut dyn BufReadSeek,
+        file_len: u64,
+    ) -> FormatResult<LocalLayout>;
 }
 
 pub struct FormatRegistry {
@@ -134,6 +149,20 @@ impl FormatRegistry {
             )));
         };
         format.parse_local_layout(path)
+    }
+
+    pub fn parse_local_layout_for_format_from(
+        &self,
+        format_id: &str,
+        reader: &mut dyn BufReadSeek,
+        file_len: u64,
+    ) -> FormatResult<LocalLayout> {
+        let Some(format) = self.formats.iter().find(|format| format.id() == format_id) else {
+            return Err(FormatError::new(format!(
+                "unknown content format: {format_id}"
+            )));
+        };
+        format.parse_local_layout_from(reader, file_len)
     }
 
     fn matching_format(&self, path: &Path) -> Option<&dyn ContentFormat> {

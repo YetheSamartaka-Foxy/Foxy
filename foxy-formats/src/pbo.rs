@@ -1,9 +1,9 @@
 use crate::{
-    ContentFormat, FilePart, FormatError, FormatResult, LocalLayout, LocalPartSpan, is_end_part,
-    is_header_part, is_pac1_gap_part, normalize_part_path,
+    BufReadSeek, ContentFormat, FilePart, FormatError, FormatResult, LocalLayout, LocalPartSpan,
+    is_end_part, is_header_part, is_pac1_gap_part, normalize_part_path,
 };
 use std::collections::{HashMap, VecDeque};
-use std::io::{BufRead, Read, Seek};
+use std::io::{BufRead, Read};
 use std::path::Path;
 
 pub const PBO_FORMAT_ID: &str = "pbo";
@@ -65,23 +65,34 @@ impl ContentFormat for PboFormat {
     }
 
     fn parse_local_layout(&self, path: &Path) -> FormatResult<LocalLayout> {
-        let layout = parse_pbo_layout(path)?;
-        let mut parts_by_path: HashMap<String, VecDeque<LocalPartSpan>> = HashMap::new();
-        let mut entry_payload_bytes = 0u64;
-        for entry in layout.entries {
-            entry_payload_bytes = entry_payload_bytes.saturating_add(entry.span.length);
-            parts_by_path
-                .entry(normalize_part_path(&entry.path))
-                .or_default()
-                .push_back(entry.span);
-        }
-        Ok(LocalLayout {
-            header: layout.header,
-            end: layout.end,
-            parts_by_path,
-            entry_count: layout.entry_count,
-            entry_payload_bytes,
-        })
+        Ok(pbo_local_layout(parse_pbo_layout(path)?))
+    }
+
+    fn parse_local_layout_from(
+        &self,
+        reader: &mut dyn BufReadSeek,
+        file_len: u64,
+    ) -> FormatResult<LocalLayout> {
+        Ok(pbo_local_layout(parse_pbo_layout_from(reader, file_len)?))
+    }
+}
+
+fn pbo_local_layout(layout: PboLayout) -> LocalLayout {
+    let mut parts_by_path: HashMap<String, VecDeque<LocalPartSpan>> = HashMap::new();
+    let mut entry_payload_bytes = 0u64;
+    for entry in layout.entries {
+        entry_payload_bytes = entry_payload_bytes.saturating_add(entry.span.length);
+        parts_by_path
+            .entry(normalize_part_path(&entry.path))
+            .or_default()
+            .push_back(entry.span);
+    }
+    LocalLayout {
+        header: layout.header,
+        end: layout.end,
+        parts_by_path,
+        entry_count: layout.entry_count,
+        entry_payload_bytes,
     }
 }
 
@@ -113,6 +124,20 @@ fn parse_pbo_layout(file_path: &Path) -> FormatResult<PboLayout> {
         })?
         .len();
     let mut file = std::io::BufReader::with_capacity(128 * 1024, file);
+    parse_pbo_layout_from(&mut file, file_len)
+}
+
+/// Reads the header front to back without seeking, so a caller's buffer
+/// keeps the payload that follows the header.
+fn parse_pbo_layout_from(file: &mut dyn BufReadSeek, file_len: u64) -> FormatResult<PboLayout> {
+    if file
+        .stream_position()
+        .map_err(|e| FormatError::new(format!("failed to resolve PBO position: {e}")))?
+        != 0
+    {
+        file.seek(std::io::SeekFrom::Start(0))
+            .map_err(|e| FormatError::new(format!("failed to rewind PBO: {e}")))?;
+    }
 
     let mut first = [0u8; 1];
     file.read_exact(&mut first)
@@ -134,34 +159,38 @@ fn parse_pbo_layout(file_path: &Path) -> FormatResult<PboLayout> {
         )));
     }
 
-    file.seek(std::io::SeekFrom::Current(16))
+    let mut header_fields = [0u8; 16];
+    file.read_exact(&mut header_fields)
         .map_err(|e| FormatError::new(format!("failed to skip PBO header fields: {e}")))?;
 
-    let mut marker = [0u8; 1];
-    file.read_exact(&mut marker)
-        .map_err(|e| FormatError::new(format!("failed to read PBO extension marker: {e}")))?;
-    if marker[0] != 0 {
-        file.seek(std::io::SeekFrom::Current(-1))
-            .map_err(|e| FormatError::new(format!("failed to rewind PBO marker: {e}")))?;
-        let _ = read_pbo_cstring(&mut file)?;
-        let _ = read_pbo_cstring(&mut file)?;
+    let marker = file
+        .fill_buf()
+        .map_err(|e| FormatError::new(format!("failed to read PBO extension marker: {e}")))?
+        .first()
+        .copied()
+        .ok_or_else(|| FormatError::new("unexpected EOF at PBO extension marker"))?;
+    if marker == 0 {
+        file.consume(1);
+    } else {
+        let _ = read_pbo_cstring(file)?;
+        let _ = read_pbo_cstring(file)?;
         loop {
-            let name = read_pbo_cstring(&mut file)?;
+            let name = read_pbo_cstring(file)?;
             if name.is_empty() {
                 break;
             }
-            let _value = read_pbo_cstring(&mut file)?;
+            let _value = read_pbo_cstring(file)?;
         }
     }
 
     let mut raw_entries: Vec<(String, u64)> = Vec::new();
     loop {
-        let name = read_pbo_cstring(&mut file)?;
-        let _packing_method = read_pbo_u32(&mut file)?;
-        let _size = read_pbo_u32(&mut file)?;
-        let _reserved = read_pbo_u32(&mut file)?;
-        let _timestamp = read_pbo_u32(&mut file)?;
-        let data_size = read_pbo_u32(&mut file)? as u64;
+        let name = read_pbo_cstring(file)?;
+        let _packing_method = read_pbo_u32(file)?;
+        let _size = read_pbo_u32(file)?;
+        let _reserved = read_pbo_u32(file)?;
+        let _timestamp = read_pbo_u32(file)?;
+        let data_size = read_pbo_u32(file)? as u64;
 
         if name.is_empty() {
             break;
@@ -208,7 +237,7 @@ fn parse_pbo_layout(file_path: &Path) -> FormatResult<PboLayout> {
     })
 }
 
-fn read_pbo_cstring(file: &mut impl BufRead) -> FormatResult<Vec<u8>> {
+fn read_pbo_cstring(file: &mut (impl BufRead + ?Sized)) -> FormatResult<Vec<u8>> {
     const MAX_LEN: usize = 8 * 1024;
     let mut out = Vec::with_capacity(128);
     loop {
@@ -239,7 +268,7 @@ fn read_pbo_cstring(file: &mut impl BufRead) -> FormatResult<Vec<u8>> {
     Ok(out)
 }
 
-fn read_pbo_u32(file: &mut impl Read) -> FormatResult<u32> {
+fn read_pbo_u32(file: &mut (impl Read + ?Sized)) -> FormatResult<u32> {
     let mut raw = [0u8; 4];
     file.read_exact(&mut raw)
         .map_err(|e| FormatError::new(format!("failed to read PBO u32: {e}")))?;
@@ -290,6 +319,69 @@ mod tests {
         assert_eq!(parts[2].path, PBO_END_PART);
         assert_eq!(parts[2].start, header_len + 4);
         assert_eq!(parts[2].length, 4);
+    }
+
+    struct SeekCountingReader {
+        inner: std::io::Cursor<Vec<u8>>,
+        moving_seeks: usize,
+    }
+
+    impl Read for SeekCountingReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.inner.read(buf)
+        }
+    }
+
+    impl std::io::Seek for SeekCountingReader {
+        fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+            if pos != std::io::SeekFrom::Current(0) {
+                self.moving_seeks += 1;
+            }
+            self.inner.seek(pos)
+        }
+    }
+
+    fn pbo_with_extension_header() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.push(0);
+        bytes.extend_from_slice(b"sreV");
+        bytes.extend_from_slice(&[0u8; 16]);
+        bytes.extend_from_slice(b"prefix\0a\\b\0\0");
+        push_entry(&mut bytes, b"Data\\Thing.bin", 4);
+        push_entry(&mut bytes, b"", 0);
+        bytes.extend_from_slice(b"DATA");
+        bytes.extend_from_slice(b"TAIL");
+        bytes
+    }
+
+    #[test]
+    fn layout_from_a_shared_reader_matches_the_path_parse_without_seeking() {
+        for (name, bytes) in [
+            ("plain.pbo", std::fs::read(fixture_pbo().as_path()).unwrap()),
+            ("extended.pbo", pbo_with_extension_header()),
+        ] {
+            let path = tempfile_file::write(name, &bytes);
+            let from_path = PboFormat.parse_local_layout(path.as_path()).unwrap();
+            let mut reader = std::io::BufReader::with_capacity(
+                4 * 1024 * 1024,
+                SeekCountingReader {
+                    inner: std::io::Cursor::new(bytes.clone()),
+                    moving_seeks: 0,
+                },
+            );
+
+            let from_reader = PboFormat
+                .parse_local_layout_from(&mut reader, bytes.len() as u64)
+                .unwrap();
+
+            assert_eq!(from_reader, from_path, "{name}");
+            assert_eq!(reader.get_ref().moving_seeks, 0, "{name}");
+            assert_eq!(
+                std::io::Seek::stream_position(&mut reader).unwrap(),
+                from_reader.header.length,
+                "{name}"
+            );
+        }
     }
 
     #[test]
