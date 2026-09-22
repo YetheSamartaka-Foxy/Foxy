@@ -227,12 +227,13 @@ Client-side mods are always excluded; add `--mod-line-include-optional` to appen
 the optional mods as well.
 
 Nested mod paths such as `@ace/optionals/@ace_noactionmenu` publish the nested
-folder as a standalone `@ace_noactionmenu` mod. Add `--prune-unused-optionals
---yes` to omit the root `optionals` directory from the published `@ace` copy.
-The source mod is untouched; `--yes` accepts removal of optionals already in
-the output from an earlier run. Put the nested path in `requiredMods` to include
-it in the default server line; entries in `optionalMods` need
-`--mod-line-include-optional`.
+folder as a standalone `@ace_noactionmenu` mod. Add `--prune-unused-optionals`
+to omit the root `optionals` directory from the published `@ace` copy. The
+source mod is untouched. When the output still holds an `optionals` directory
+from an earlier run, the command lists it and asks for `--yes` before removing
+it; a fresh or already-pruned output needs no `--yes`. Put the nested path in
+`requiredMods` to include it in the default server line; entries in
+`optionalMods` need `--mod-line-include-optional`.
 
 To keep a server launch script in step with the generated repository, list it in
 `modLineFiles`:
@@ -326,7 +327,7 @@ For pool output, `--clean --dry-run` lists orphaned generated pool folders and
 symlinks that would be removed. Run `--clean --yes` to remove them after a
 successful regeneration. Cleanup does not remove unrelated directories. A pool
 outside the output directory needs an inventory from a previous `create-space`
-run before cleanup is allowed. `--prune-unused-optionals --yes` also works with
+run before cleanup is allowed. `--prune-unused-optionals` also works with
 `copy` and `pool` layouts, but cannot be used with `link`, which publishes the
 source directory itself. Each repository gets its own `server_mod_line.txt`, and
 the `modLineFiles` of its own config are rewritten with that repository's line.

@@ -88,7 +88,7 @@ pub enum Command {
         /// Include optional mods in the printed server launch line
         #[arg(long)]
         mod_line_include_optional: bool,
-        /// Omit root-level optionals folders from published mods; requires --yes
+        /// Omit root-level optionals folders from published mods; needs --yes only to remove ones already published
         #[arg(long)]
         prune_unused_optionals: bool,
         /// Accept removal of previously published optional files
@@ -146,7 +146,7 @@ pub enum Command {
         /// Regenerate only this repository folder (repeatable)
         #[arg(long, value_name = "FOLDER")]
         only: Vec<String>,
-        /// Omit root-level optionals folders from published mods; requires --yes
+        /// Omit root-level optionals folders from published mods; needs --yes only to remove ones already published
         #[arg(long)]
         prune_unused_optionals: bool,
         /// Optional Foxy app update source URL for every generated repo.json (wins over config values)

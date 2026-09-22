@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::Result;
 use serde::Serialize;
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -6,7 +6,7 @@ use std::path::Path;
 
 use crate::cli::{GenerationMode, SpaceLayout};
 use crate::types::ResolvedMod;
-use crate::{discover, incremental, keys, output, space};
+use crate::{discover, incremental, keys, output, published, space};
 
 #[derive(Serialize)]
 pub struct PlannedAction {
@@ -42,30 +42,9 @@ impl BuildPlan {
         use_incremental: bool,
     ) -> Result<()> {
         let mod_dir = root.join(&item.mod_name);
-        if prune && mod_dir.exists() {
-            let metadata = std::fs::symlink_metadata(&mod_dir)?;
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                bail!(
-                    "Cannot prune optionals from non-directory {}",
-                    mod_dir.display()
-                );
-            }
-            for entry in std::fs::read_dir(&mod_dir)? {
-                let entry = entry?;
-                if entry
-                    .file_name()
-                    .to_string_lossy()
-                    .eq_ignore_ascii_case("optionals")
-                {
-                    let path = entry.path();
-                    let metadata = std::fs::symlink_metadata(&path)?;
-                    if metadata.file_type().is_symlink() {
-                        bail!("Refusing to prune symlink {}", path.display());
-                    }
-                    if metadata.is_dir() {
-                        self.add("remove", &path, 0);
-                    }
-                }
+        if prune {
+            for path in published::optionals_in(&mod_dir)? {
+                self.add("remove", &path, 0);
             }
         }
         let files = discover::discover_files_with_pruning(&item.source_path, prune)?;

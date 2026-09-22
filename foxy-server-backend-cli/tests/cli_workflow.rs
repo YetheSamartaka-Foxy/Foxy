@@ -256,3 +256,70 @@ fn only_rebuilds_selected_repository_and_preserves_space_manifest() {
             .unwrap();
     assert_eq!(manifest["entries"].as_array().unwrap().len(), 2);
 }
+
+#[test]
+fn space_prune_asks_for_yes_only_when_published_optionals_exist() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("mods").join("@one");
+    std::fs::create_dir_all(source.join("optionals")).unwrap();
+    std::fs::write(source.join("data.txt"), b"one").unwrap();
+    std::fs::write(source.join("optionals").join("unused.pbo"), b"unused").unwrap();
+    write_json(
+        &dir.path().join("one.json"),
+        json!({
+            "repoName": "one",
+            "basePath": dir.path().join("mods"),
+            "requiredMods": [{"modName": "@one"}]
+        }),
+    );
+    let space = dir.path().join("space.json");
+    write_json(
+        &space,
+        json!({
+            "name": "Test Space",
+            "baseUrl": "https://example.com/repos/",
+            "repositories": [{"config": "one.json", "folder": "one"}]
+        }),
+    );
+    let output = dir.path().join("output");
+    let bin = env!("CARGO_BIN_EXE_foxy-server-backend-cli");
+    let run = |yes: bool| {
+        let mut command = Command::new(bin);
+        command
+            .args(["--json", "create-space"])
+            .arg(&space)
+            .arg(&output)
+            .args(["--no-progress", "--prune-unused-optionals"]);
+        if yes {
+            command.arg("--yes");
+        }
+        command.output().unwrap()
+    };
+
+    let fresh = run(false);
+    assert!(
+        fresh.status.success(),
+        "{}",
+        String::from_utf8_lossy(&fresh.stderr)
+    );
+    let published = output.join("one").join("@one").join("optionals");
+    assert!(output.join("one").join("@one").join("data.txt").exists());
+    assert!(!published.exists());
+
+    std::fs::create_dir_all(&published).unwrap();
+    std::fs::write(published.join("old.pbo"), b"old").unwrap();
+    let refused = run(false);
+    assert!(!refused.status.success());
+    let result: Value = serde_json::from_slice(&refused.stdout).unwrap();
+    assert!(result["error"].as_str().unwrap().contains("--yes"));
+    assert!(published.join("old.pbo").exists());
+
+    let accepted = run(true);
+    assert!(
+        accepted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    assert!(!published.exists());
+    assert!(source.join("optionals").join("unused.pbo").exists());
+}

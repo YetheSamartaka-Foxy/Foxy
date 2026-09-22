@@ -361,8 +361,11 @@ fn run_create(
 
     println!("Loading config from: {}", config_path.display());
     let (config, resolved_mods) = config::load_config(config_path)?;
-    if prune_unused_optionals && !yes {
-        anyhow::bail!("--prune-unused-optionals removes published files; re-run with --yes");
+    if prune_unused_optionals {
+        published::confirm_prune(
+            &published::published_optionals(output_dir, &resolved_mods)?,
+            yes,
+        )?;
     }
 
     println!(
@@ -856,5 +859,60 @@ mod generation_tests {
         )
         .unwrap();
         assert!(verify::verify(&output).is_err());
+    }
+
+    fn prune_options(yes: bool) -> CreateOptions<'static> {
+        CreateOptions {
+            app_update_url: None,
+            threads: 1,
+            mode: GenerationMode::Foxy,
+            no_progress: true,
+            mod_line: mod_line::ModLineOptions {
+                prefix: "",
+                include_optional: false,
+            },
+            prune_unused_optionals: true,
+            dry_run: false,
+            incremental: false,
+            atomic: false,
+            report: false,
+            yes,
+            keys: KeyCollectionRequest {
+                enabled: false,
+                dest: None,
+                additional_sources: vec![],
+            },
+        }
+    }
+
+    #[test]
+    fn prune_asks_for_yes_only_when_published_optionals_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("mods").join("@ace");
+        std::fs::create_dir_all(source.join("optionals")).unwrap();
+        std::fs::write(source.join("main.pbo"), b"main").unwrap();
+        std::fs::write(source.join("optionals").join("unused.pbo"), b"unused").unwrap();
+        let config = dir.path().join("config.json");
+        let value = serde_json::json!({
+            "repoName": "ACE test",
+            "basePath": dir.path().join("mods"),
+            "requiredMods": [{"modName": "@ace"}]
+        });
+        std::fs::write(&config, serde_json::to_vec(&value).unwrap()).unwrap();
+        let output = dir.path().join("output");
+
+        run_create(&config, &output, prune_options(false)).unwrap();
+        assert!(output.join("@ace").join("main.pbo").exists());
+        assert!(!output.join("@ace").join("optionals").exists());
+
+        let published = output.join("@ace").join("optionals");
+        std::fs::create_dir_all(&published).unwrap();
+        std::fs::write(published.join("old.pbo"), b"old").unwrap();
+        let err = run_create(&config, &output, prune_options(false)).unwrap_err();
+        assert!(err.to_string().contains("--yes"));
+        assert!(published.join("old.pbo").exists());
+
+        run_create(&config, &output, prune_options(true)).unwrap();
+        assert!(!published.exists());
     }
 }

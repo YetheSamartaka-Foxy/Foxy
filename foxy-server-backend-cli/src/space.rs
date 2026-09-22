@@ -350,6 +350,17 @@ fn identity(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// The mods a pool build copies: each shared name taken from its first use.
+fn pool_mods(space: &LoadedSpace, groups: &[SharedMod]) -> Vec<ResolvedMod> {
+    groups
+        .iter()
+        .map(|group| {
+            let (r, m) = group.uses[0];
+            space.repos[r].mods[m].clone()
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Symlinks
 // ---------------------------------------------------------------------------
@@ -616,11 +627,7 @@ fn build_pool(ctx: &LayoutContext<'_>, pool_dir: &Path) -> Result<LayoutResult> 
     std::fs::create_dir_all(pool_dir)
         .with_context(|| format!("Failed to create pool dir {}", pool_dir.display()))?;
 
-    let unique: Vec<ResolvedMod> = ctx
-        .groups
-        .iter()
-        .map(|group| ctx.slot(group.uses[0].0, group.uses[0].1).clone())
-        .collect();
+    let unique = pool_mods(ctx.space, ctx.groups);
     println!(
         "Copying {} distinct mods into pool {}",
         unique.len(),
@@ -823,9 +830,6 @@ pub fn cmd_create_space(
     if prune_unused_optionals && layout == SpaceLayout::Link {
         bail!("--prune-unused-optionals cannot be used with --layout link");
     }
-    if prune_unused_optionals && !yes && !dry_run {
-        bail!("--prune-unused-optionals removes published files; re-run with --yes");
-    }
     if clean && layout != SpaceLayout::Pool {
         bail!("--clean requires --layout pool");
     }
@@ -993,10 +997,25 @@ pub fn cmd_create_space(
 
     crate::configure_thread_pool(threads)?;
 
+    let pool_dir = pool_dir.unwrap_or_else(|| output_dir.join(DEFAULT_POOL_DIR));
+    if prune_unused_optionals {
+        let mut found = Vec::new();
+        if layout == SpaceLayout::Pool {
+            found = published::published_optionals(&pool_dir, &pool_mods(&space, &groups))?;
+        } else {
+            for repo in &space.repos {
+                found.extend(published::published_optionals(
+                    &output_dir.join(&repo.folder),
+                    &repo.mods,
+                )?);
+            }
+        }
+        published::confirm_prune(&found, yes)?;
+    }
+
     std::fs::create_dir_all(output_dir)
         .with_context(|| format!("Failed to create output dir: {}", output_dir.display()))?;
 
-    let pool_dir = pool_dir.unwrap_or_else(|| output_dir.join(DEFAULT_POOL_DIR));
     let keys_dir = key_collection
         .dest
         .clone()
