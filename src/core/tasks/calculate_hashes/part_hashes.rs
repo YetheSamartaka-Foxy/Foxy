@@ -112,6 +112,11 @@ impl PartHashProgress {
     }
 }
 
+pub(super) const HASH_READER_CAPACITY: usize = 4 * 1024 * 1024;
+/// On a rotational disk the two hash workers take turns on one head, so each
+/// larger request pays for its seek with four times more data.
+pub(super) const ROTATIONAL_HASH_READER_CAPACITY: usize = 16 * 1024 * 1024;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum PartSpanSource {
     #[default]
@@ -125,6 +130,7 @@ pub(super) async fn calculate_part_hashes(
     semaphore: Arc<Semaphore>,
     span_source: PartSpanSource,
     game_formats: &[&'static str],
+    reader_capacity: usize,
     progress: Option<PartHashProgress>,
     cancel: Option<watch::Receiver<bool>>,
 ) -> PartHashCalculation {
@@ -252,8 +258,7 @@ pub(super) async fn calculate_part_hashes(
                 }
             };
 
-        const HASH_READER_CAPACITY: usize = 4 * 1024 * 1024;
-        let mut reader = std::io::BufReader::with_capacity(HASH_READER_CAPACITY, file);
+        let mut reader = std::io::BufReader::with_capacity(reader_capacity, file);
         let span_overrides = match layout_format {
             Some(format_id) => resolve_local_spans(
                 format_id,
@@ -624,6 +629,7 @@ mod tests {
             Arc::new(Semaphore::new(1)),
             PartSpanSource::DetectLocalLayout,
             &[foxy_formats::PBO_FORMAT_ID],
+            HASH_READER_CAPACITY,
             None,
             None,
         )
@@ -678,6 +684,7 @@ mod tests {
             Arc::new(Semaphore::new(1)),
             PartSpanSource::DetectLocalLayout,
             &[foxy_formats::PBO_FORMAT_ID],
+            HASH_READER_CAPACITY,
             None,
             None,
         )
@@ -718,6 +725,7 @@ mod tests {
             Arc::new(Semaphore::new(1)),
             PartSpanSource::RemoteLayout,
             &[],
+            HASH_READER_CAPACITY,
             None,
             None,
         )
@@ -840,6 +848,7 @@ mod tests {
             Arc::new(Semaphore::new(1)),
             PartSpanSource::RemoteLayout,
             &[],
+            HASH_READER_CAPACITY,
             None,
             None,
         )
@@ -869,6 +878,7 @@ mod tests {
             Arc::new(Semaphore::new(1)),
             PartSpanSource::RemoteLayout,
             &[],
+            HASH_READER_CAPACITY,
             None,
             None,
         )
@@ -899,6 +909,7 @@ mod tests {
             Arc::new(Semaphore::new(1)),
             PartSpanSource::RemoteLayout,
             &[],
+            HASH_READER_CAPACITY,
             None,
             Some(cancel_rx),
         )
@@ -927,6 +938,7 @@ mod tests {
             Arc::new(Semaphore::new(1)),
             PartSpanSource::RemoteLayout,
             &[],
+            HASH_READER_CAPACITY,
             None,
             None,
         )

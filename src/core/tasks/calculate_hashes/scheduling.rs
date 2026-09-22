@@ -624,8 +624,8 @@ pub(super) fn build_file_hash_jobs(
     jobs
 }
 
-/// The inputs `select_blake3_read_strategy` needs, resolved once per run and
-/// carried down to each whole-file hash.
+/// The storage inputs a file's hash reads depend on, resolved once per run and
+/// carried down to every file.
 #[derive(Clone, Copy)]
 pub(super) struct WholeFileHashIo {
     profile: HashIoProfilePreference,
@@ -642,6 +642,21 @@ impl WholeFileHashIo {
 
     fn strategy_for(&self, path: &Path, len: u64) -> Blake3ReadStrategy {
         select_blake3_read_strategy(self.profile, self.storage_class, len, path)
+    }
+
+    fn part_reader_capacity(&self) -> usize {
+        if self.rotational() {
+            super::part_hashes::ROTATIONAL_HASH_READER_CAPACITY
+        } else {
+            super::part_hashes::HASH_READER_CAPACITY
+        }
+    }
+
+    fn rotational(&self) -> bool {
+        matches!(
+            self.storage_class,
+            HashStorageClass::Hdd | HashStorageClass::Removable
+        )
     }
 }
 
@@ -867,6 +882,7 @@ pub(super) async fn recalculate_parts_for_jobs(
                             sem,
                             span_source,
                             game_formats,
+                            hash_io.part_reader_capacity(),
                             part_progress,
                             cancel.clone(),
                         )
@@ -2602,6 +2618,19 @@ mod tests {
     }
 
     // ── job_estimated_bytes ─────────────────────────────────────────────
+
+    #[test]
+    fn rotational_storage_reads_parts_in_larger_requests() {
+        let io = |storage| WholeFileHashIo::new(HashIoProfilePreference::Auto, storage);
+        assert_eq!(
+            io(HashStorageClass::Hdd).part_reader_capacity(),
+            super::super::part_hashes::ROTATIONAL_HASH_READER_CAPACITY
+        );
+        assert_eq!(
+            io(HashStorageClass::Ssd).part_reader_capacity(),
+            super::super::part_hashes::HASH_READER_CAPACITY
+        );
+    }
 
     #[test]
     fn hash_jobs_run_heavy_first_then_small_files_in_path_order() {
