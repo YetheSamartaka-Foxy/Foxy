@@ -30,7 +30,9 @@ use std::time::Instant;
 use crate::cli::{GenerationMode, SpaceLayout};
 use crate::published;
 use crate::types::{Checksums, ProcessedMod, RepoConfig, ResolvedMod};
-use crate::{KeyCollectionRequest, artifacts, config, hash, keys, mod_line, planner, srf};
+use crate::{
+    KeyCollectionRequest, artifacts, config, hash, keys, mod_line, mod_line_files, planner, srf,
+};
 
 mod cleanup;
 
@@ -89,6 +91,9 @@ pub struct SpaceRepo {
     pub address: String,
     pub required: bool,
     pub config: RepoConfig,
+    /// The repository config file, kept so its relative entries (`modLineFiles`)
+    /// resolve from the same directory as under `create`.
+    pub config_path: PathBuf,
     pub mods: Vec<ResolvedMod>,
 }
 
@@ -167,6 +172,7 @@ pub fn load_space_config(path: &Path) -> Result<LoadedSpace> {
             address,
             required: repo_ref.required,
             config: repo_config,
+            config_path: repo_config_path,
             mods,
         });
     }
@@ -788,7 +794,7 @@ pub fn cmd_create_space(
     config_path: &Path,
     output_dir: &Path,
     options: CreateSpaceOptions<'_>,
-) -> Result<()> {
+) -> Result<Vec<mod_line_files::PendingUpdate>> {
     let CreateSpaceOptions {
         layout,
         pool_dir,
@@ -911,6 +917,23 @@ pub fn cmd_create_space(
         );
     }
 
+    let launch_files: Vec<Vec<PathBuf>> = space
+        .repos
+        .iter()
+        .map(|repo| mod_line_files::resolve(&repo.config, &repo.config_path))
+        .collect();
+    for (repo, files) in space.repos.iter().zip(&launch_files) {
+        mod_line_files::check(files, &mod_line::launch_flags(repo.config.game))
+            .with_context(|| format!("Repository {}", repo.folder))?;
+    }
+    mod_line_files::ensure_distinct(
+        space
+            .repos
+            .iter()
+            .map(|repo| repo.folder.as_str())
+            .zip(launch_files.iter().map(Vec::as_slice)),
+    )?;
+
     if dry_run {
         let pool_dir = pool_dir.unwrap_or_else(|| output_dir.join(DEFAULT_POOL_DIR));
         let mut plan = planner::create_space(
@@ -961,8 +984,11 @@ pub fn cmd_create_space(
                 )?;
             }
         }
+        for path in launch_files.iter().flatten() {
+            plan.add("update-mod-line", path, 0);
+        }
         plan.show();
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     crate::configure_thread_pool(threads)?;
@@ -1090,18 +1116,22 @@ pub fn cmd_create_space(
         Vec::new()
     };
 
-    let server_lines: Vec<String> = space
+    let launch_params: Vec<Vec<mod_line::LaunchParam>> = space
         .repos
         .iter()
         .enumerate()
         .map(|(r, repo)| {
-            mod_line::build_server_launch_line(
+            mod_line::build_launch_params(
                 &repo.config,
                 &built.repo_mods[r],
                 &repo.mods,
                 mod_line_options,
             )
         })
+        .collect();
+    let server_lines: Vec<String> = launch_params
+        .iter()
+        .map(|params| mod_line::render_launch_params(params))
         .collect();
     for (r, line) in server_lines.iter().enumerate() {
         published::write_server_mod_line(&ctx.repo_dir(r), line)?;
@@ -1235,7 +1265,11 @@ pub fn cmd_create_space(
         "perRepoKeyConflicts": repo_key_reports.iter().map(|(dest, report)| serde_json::json!({"path": dest, "names": report.conflicts})).collect::<Vec<_>>(),
     }));
 
-    Ok(())
+    Ok(launch_files
+        .into_iter()
+        .zip(launch_params)
+        .map(|(files, params)| mod_line_files::PendingUpdate { files, params })
+        .collect())
 }
 
 fn mb(bytes: u64) -> f64 {

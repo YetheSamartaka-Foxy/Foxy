@@ -18,6 +18,7 @@ mod hash;
 mod incremental;
 mod keys;
 mod mod_line;
+mod mod_line_files;
 mod operations;
 mod output;
 mod planner;
@@ -174,13 +175,14 @@ fn main() -> Result<()> {
                 let before = (report && !dry_run)
                     .then(|| report::snapshot(&output))
                     .transpose()?;
-                if atomic && !dry_run {
+                let pending = if atomic && !dry_run {
                     staging::publish(&output, |stage| {
                         space::cmd_create_space(&config, stage, options)
-                    })?;
+                    })?
                 } else {
-                    space::cmd_create_space(&config, &output, options)?;
-                }
+                    space::cmd_create_space(&config, &output, options)?
+                };
+                mod_line_files::apply_all(&pending)?;
                 if let Some(before) = before {
                     report::print(&report::compare(&before, &report::snapshot(&output)?));
                 }
@@ -305,6 +307,11 @@ fn cmd_create(
                 options.prune_unused_optionals,
             )?;
         }
+        let launch_files = mod_line_files::resolve(&config, config_path);
+        mod_line_files::check(&launch_files, &mod_line::launch_flags(config.game))?;
+        for path in &launch_files {
+            plan.add("update-mod-line", path, 0);
+        }
         plan.show();
         return Ok(());
     }
@@ -316,11 +323,12 @@ fn cmd_create(
         .then(|| report::snapshot(output_dir))
         .transpose()?;
     configure_thread_pool(options.threads)?;
-    if options.atomic {
-        staging::publish(output_dir, |stage| run_create(config_path, stage, options))?;
+    let pending = if options.atomic {
+        staging::publish(output_dir, |stage| run_create(config_path, stage, options))?
     } else {
-        run_create(config_path, output_dir, options)?;
-    }
+        run_create(config_path, output_dir, options)?
+    };
+    mod_line_files::apply_all(std::slice::from_ref(&pending))?;
     if let Some(before) = before {
         report::print(&report::compare(&before, &report::snapshot(output_dir)?));
     }
@@ -331,7 +339,7 @@ fn run_create(
     config_path: &std::path::Path,
     output_dir: &std::path::Path,
     options: CreateOptions<'_>,
-) -> Result<()> {
+) -> Result<mod_line_files::PendingUpdate> {
     let CreateOptions {
         app_update_url,
         threads,
@@ -368,6 +376,8 @@ fn run_create(
     for warning in &warnings {
         log::warn!("{}", warning);
     }
+    let launch_files = mod_line_files::resolve(&config, config_path);
+    mod_line_files::check(&launch_files, &mod_line::launch_flags(config.game))?;
 
     for m in &resolved_mods {
         println!(
@@ -477,12 +487,9 @@ fn run_create(
         }
     }
 
-    let server_line = mod_line::build_server_launch_line(
-        &config,
-        &processed_mods,
-        &resolved_mods,
-        mod_line_options,
-    );
+    let launch_params =
+        mod_line::build_launch_params(&config, &processed_mods, &resolved_mods, mod_line_options);
+    let server_line = mod_line::render_launch_params(&launch_params);
     published::write_server_mod_line(output_dir, &server_line)?;
     println!();
     println!("Server mod line:");
@@ -497,7 +504,10 @@ fn run_create(
         "keyConflicts": key_report.as_ref().map(|(_, report)| report.conflicts.clone()).unwrap_or_default(),
     }));
 
-    Ok(())
+    Ok(mod_line_files::PendingUpdate {
+        files: launch_files,
+        params: launch_params,
+    })
 }
 
 pub(crate) fn configure_thread_pool(threads: usize) -> Result<()> {

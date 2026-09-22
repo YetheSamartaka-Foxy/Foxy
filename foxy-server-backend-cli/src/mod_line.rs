@@ -12,20 +12,90 @@ pub struct ModLineOptions<'a> {
     pub include_optional: bool,
 }
 
-/// The server launch line for a generated repository, shaped for the game the
-/// config names: Arma 3 gets `-mod=`, Arma Reforger `-addonsDir ... -addons ...`.
-/// `sources` are the resolved mods the repository was built from; Reforger mod
-/// ids are read from their `.gproj` files.
-pub fn build_server_launch_line(
+const ARMA3_MOD_FLAG: &str = "-mod";
+const REFORGER_ADDONS_DIR_FLAG: &str = "-addonsDir";
+const REFORGER_ADDONS_FLAG: &str = "-addons";
+
+/// One parameter of the generated server launch line, kept apart from the
+/// rendered line so `modLineFiles` can look up the same flag in an existing
+/// launch script and replace only its value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchParam {
+    pub flag: &'static str,
+    /// `true` for `-flag=value`, `false` for `-flag value`.
+    pub attached: bool,
+    pub value: String,
+}
+
+impl LaunchParam {
+    fn attached(flag: &'static str, value: String) -> Self {
+        Self {
+            flag,
+            attached: true,
+            value,
+        }
+    }
+
+    fn token(flag: &'static str, value: String) -> Self {
+        Self {
+            flag,
+            attached: false,
+            value,
+        }
+    }
+
+    pub fn render(&self) -> String {
+        if self.attached {
+            format!("{}={}", self.flag, self.value)
+        } else {
+            format!("{} {}", self.flag, self.value)
+        }
+    }
+}
+
+/// The parameters a game's launch line is made of, with empty values, so a
+/// launch script can be checked for them before a repository is generated.
+pub fn launch_flags(game: RepoGame) -> Vec<LaunchParam> {
+    match game {
+        RepoGame::Arma3 => vec![LaunchParam::attached(ARMA3_MOD_FLAG, String::new())],
+        RepoGame::Reforger => vec![
+            LaunchParam::token(REFORGER_ADDONS_DIR_FLAG, String::new()),
+            LaunchParam::token(REFORGER_ADDONS_FLAG, String::new()),
+        ],
+    }
+}
+
+/// The server launch parameters for a generated repository, shaped for the game
+/// the config names: Arma 3 gets `-mod=`, Arma Reforger `-addonsDir` plus
+/// `-addons`. `sources` are the resolved mods the repository was built from;
+/// Reforger mod ids are read from their `.gproj` files.
+pub fn build_launch_params(
     config: &RepoConfig,
     mods: &[ProcessedMod],
     sources: &[ResolvedMod],
     options: ModLineOptions<'_>,
-) -> String {
+) -> Vec<LaunchParam> {
     match config.game {
-        RepoGame::Arma3 => build_mod_line(config.dlc_content.as_ref(), mods, options),
-        RepoGame::Reforger => build_reforger_addons_line(mods, sources, options),
+        RepoGame::Arma3 => vec![LaunchParam::attached(
+            ARMA3_MOD_FLAG,
+            mod_line_value(config.dlc_content.as_ref(), mods, options),
+        )],
+        RepoGame::Reforger => vec![
+            LaunchParam::token(REFORGER_ADDONS_DIR_FLAG, reforger_addons_dir(options)),
+            LaunchParam::token(
+                REFORGER_ADDONS_FLAG,
+                reforger_addon_ids(mods, sources, options).join(","),
+            ),
+        ],
     }
+}
+
+pub fn render_launch_params(params: &[LaunchParam]) -> String {
+    params
+        .iter()
+        .map(LaunchParam::render)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Config keys that only mean something for Arma 3; a Reforger config that
@@ -55,16 +125,15 @@ pub fn game_config_warnings(config: &RepoConfig, sources: &[ResolvedMod]) -> Vec
     warnings
 }
 
-/// Builds the `-addonsDir <root> -addons <id,...>` launch parameters for an
-/// Arma Reforger server. `-addons` takes mod ids separated by commas; the id is
-/// the `.gproj` GUID, then the `.gproj` project ID, then a Workshop
-/// `ServerData.json` id, and finally the folder name, matching the client.
-/// Disabled and client-side mods are skipped like in the Arma 3 line.
-pub fn build_reforger_addons_line(
+/// The `-addons` ids of an Arma Reforger server line: the `.gproj` GUID, then
+/// the `.gproj` project ID, then a Workshop `ServerData.json` id, and finally
+/// the folder name, matching the client. Disabled and client-side mods are
+/// skipped like in the Arma 3 line.
+fn reforger_addon_ids(
     mods: &[ProcessedMod],
     sources: &[ResolvedMod],
     options: ModLineOptions<'_>,
-) -> String {
+) -> Vec<String> {
     let mut ids: Vec<String> = Vec::new();
     for m in mods {
         if !m.enabled || m.client_side {
@@ -84,14 +153,16 @@ pub fn build_reforger_addons_line(
             ids.push(id);
         }
     }
+    ids
+}
 
+fn reforger_addons_dir(options: ModLineOptions<'_>) -> String {
     let prefix = options.prefix.trim().trim_end_matches(['/', '\\']);
-    let addons_dir = if prefix.is_empty() {
+    if prefix.is_empty() {
         ".".to_string()
     } else {
         prefix.replace('\\', "/")
-    };
-    format!("-addonsDir {} -addons {}", addons_dir, ids.join(","))
+    }
 }
 
 /// The `-addons` value for a Reforger addon folder: `.gproj` GUID, `.gproj`
@@ -164,12 +235,12 @@ fn read_server_data_id(dir: &Path) -> Option<String> {
     (!id.is_empty()).then(|| id.to_ascii_uppercase())
 }
 
-/// Builds the `-mod=` launch parameter for a generated repository.
+/// The `-mod=` value for a generated repository.
 ///
 /// Creator DLC codes come first (Arma resolves them from the game install),
 /// then the repository mod folders. Disabled and client-side mods are never
 /// emitted: client-side mods are not meant to be loaded by a server.
-pub fn build_mod_line(
+fn mod_line_value(
     dlc_content: Option<&DlcContent>,
     mods: &[ProcessedMod],
     options: ModLineOptions<'_>,
@@ -195,12 +266,12 @@ pub fn build_mod_line(
         entries.push(format!("{}{}", prefix, m.mod_name));
     }
 
-    let mut line = String::from("-mod=");
+    let mut value = String::new();
     for entry in &entries {
-        line.push_str(entry);
-        line.push(';');
+        value.push_str(entry);
+        value.push(';');
     }
-    line
+    value
 }
 
 fn normalize_prefix(prefix: &str) -> String {
@@ -243,6 +314,37 @@ mod tests {
             enabled: true,
             client_side,
         }
+    }
+
+    fn build_server_launch_line(
+        config: &RepoConfig,
+        mods: &[ProcessedMod],
+        sources: &[ResolvedMod],
+        options: ModLineOptions<'_>,
+    ) -> String {
+        render_launch_params(&build_launch_params(config, mods, sources, options))
+    }
+
+    fn build_mod_line(
+        dlc_content: Option<&DlcContent>,
+        mods: &[ProcessedMod],
+        options: ModLineOptions<'_>,
+    ) -> String {
+        LaunchParam::attached(ARMA3_MOD_FLAG, mod_line_value(dlc_content, mods, options)).render()
+    }
+
+    fn build_reforger_addons_line(
+        mods: &[ProcessedMod],
+        sources: &[ResolvedMod],
+        options: ModLineOptions<'_>,
+    ) -> String {
+        render_launch_params(&[
+            LaunchParam::token(REFORGER_ADDONS_DIR_FLAG, reforger_addons_dir(options)),
+            LaunchParam::token(
+                REFORGER_ADDONS_FLAG,
+                reforger_addon_ids(mods, sources, options).join(","),
+            ),
+        ])
     }
 
     fn write_gproj(root: &Path, folder: &str, body: &str) -> std::path::PathBuf {

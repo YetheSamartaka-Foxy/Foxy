@@ -18,11 +18,15 @@ pub fn set_details(value: Value) {
     *DETAILS.get_or_init(|| Mutex::new(None)).lock().unwrap() = Some(value);
 }
 
-pub fn replace_output_path(output: &std::path::Path) {
+pub fn insert_detail(key: &str, value: Value) {
     let mut details = DETAILS.get_or_init(|| Mutex::new(None)).lock().unwrap();
-    if let Some(Value::Object(value)) = details.as_mut() {
-        value.insert("output".to_string(), json!(output));
+    if let Some(Value::Object(object)) = details.as_mut() {
+        object.insert(key.to_string(), value);
     }
+}
+
+pub fn replace_output_path(output: &std::path::Path) {
+    insert_detail("output", json!(output));
 }
 
 pub fn print_result(command: &str, result: &Result<()>) {

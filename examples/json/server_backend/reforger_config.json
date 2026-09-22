@@ -12,6 +12,7 @@
   "iconImagePath": "icon.png",
   "repoImagePath": "repo.png",
   "clientParameters": "-noSplash",
+  "modLineFiles": ["server/start-reforger.sh"],
   "repoBasicAuthentication": {
     "username": "",
     "password": ""

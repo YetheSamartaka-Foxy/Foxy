@@ -4,17 +4,38 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::types::{RepoGame, ResolvedMod};
-use crate::{config, discover, keys, mod_line, output, space};
+use crate::{config, discover, keys, mod_line, mod_line_files, output, space};
 
 pub fn validate(config_path: &Path, is_space: bool, output_dir: Option<&Path>) -> Result<()> {
     let repositories: Vec<(String, Vec<ResolvedMod>)> = if is_space {
-        space::load_space_config(config_path)?
+        let space = space::load_space_config(config_path)?;
+        let launch_files: Vec<Vec<PathBuf>> = space
+            .repos
+            .iter()
+            .map(|repo| mod_line_files::resolve(&repo.config, &repo.config_path))
+            .collect();
+        for (repo, files) in space.repos.iter().zip(&launch_files) {
+            mod_line_files::check(files, &mod_line::launch_flags(repo.config.game))
+                .with_context(|| format!("Repository {}", repo.folder))?;
+        }
+        mod_line_files::ensure_distinct(
+            space
+                .repos
+                .iter()
+                .map(|repo| repo.folder.as_str())
+                .zip(launch_files.iter().map(Vec::as_slice)),
+        )?;
+        space
             .repos
             .into_iter()
             .map(|repo| (repo.folder, repo.mods))
             .collect()
     } else {
         let (config, mods) = config::load_config(config_path)?;
+        mod_line_files::check(
+            &mod_line_files::resolve(&config, config_path),
+            &mod_line::launch_flags(config.game),
+        )?;
         vec![(config.repo_name, mods)]
     };
     let mut total_mods = 0;

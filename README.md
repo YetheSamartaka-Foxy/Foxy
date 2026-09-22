@@ -234,6 +234,34 @@ the output from an earlier run. Put the nested path in `requiredMods` to include
 it in the default server line; entries in `optionalMods` need
 `--mod-line-include-optional`.
 
+To keep a server launch script in step with the generated repository, list it in
+`modLineFiles`:
+
+```json
+{
+  "repoName": "My Repository",
+  "basePath": ".",
+  "modLineFiles": ["../server/start-server.cmd", "/opt/arma3/start.sh"],
+  "requiredMods": [{ "modName": "@cba_a3", "enabled": true }]
+}
+```
+
+After a successful generation, every listed file keeps its content except for the
+value of the launch parameters Foxy produces: `-mod=` for Arma 3, `-addonsDir`
+and `-addons` for Arma Reforger. Quoting is preserved, so
+`start.exe "-mod=@old;" -config=server.cfg` becomes
+`start.exe "-mod=mods/@cba_a3;" -config=server.cfg` and nothing else on the line
+moves. Every occurrence in a file is updated; `--mod=`, `-modules=`, and
+`-addons` inside `-addonsDir` are left alone. Relative paths resolve from the
+config file's own directory.
+
+A listed file that does not exist, is not UTF-8 text, or has no such parameter to
+replace fails the run before any hashing starts, so a typo never leaves a server
+silently running the old mod set. `validate` performs the same check, `--dry-run`
+lists the files as `update-mod-line` actions without touching them, and the
+rewrite runs only once the repository output is published (including with
+`--atomic`). In a space, two repositories may not list the same file.
+
 A config with `"game": "reforger"` (`new --game reforger` writes one) hashes the
 unpacked addon folders the same way, including the `.pak` entries inside them, and
 prints an Arma Reforger server line instead: `-addonsDir <prefix or .> -addons
@@ -300,7 +328,8 @@ successful regeneration. Cleanup does not remove unrelated directories. A pool
 outside the output directory needs an inventory from a previous `create-space`
 run before cleanup is allowed. `--prune-unused-optionals --yes` also works with
 `copy` and `pool` layouts, but cannot be used with `link`, which publishes the
-source directory itself. Each repository gets its own `server_mod_line.txt`.
+source directory itself. Each repository gets its own `server_mod_line.txt`, and
+the `modLineFiles` of its own config are rewritten with that repository's line.
 
 The web server must follow symlinks for `pool` and `link` (nginx does by
 default; Apache needs `Options FollowSymLinks`). A mod name that appears in

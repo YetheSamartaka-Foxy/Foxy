@@ -123,6 +123,11 @@ pub struct RepoConfig {
     pub servers: Vec<ServerEntry>,
     #[serde(rename = "dlcContent", default)]
     pub dlc_content: Option<DlcContent>,
+    /// Launch scripts or server configs whose existing launch parameters are
+    /// rewritten with the generated line. Relative entries resolve from the
+    /// directory of the config file that lists them.
+    #[serde(rename = "modLineFiles", default)]
+    pub mod_line_files: Vec<String>,
 }
 
 /// Arma 3 DLC suggestions published in `repo.json` as `dlcContent`. Config

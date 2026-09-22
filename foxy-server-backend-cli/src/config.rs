@@ -170,6 +170,7 @@ pub fn template_config_value(game: RepoGame) -> serde_json::Value {
             "iconImagePath": "icon.png",
             "repoImagePath": "repo.png",
             "clientParameters": "",
+            "modLineFiles": [],
             "dlcContent": {
                 "csla": false,
                 "ef": false,
@@ -208,6 +209,7 @@ pub fn template_config_value(game: RepoGame) -> serde_json::Value {
             "iconImagePath": "icon.png",
             "repoImagePath": "repo.png",
             "clientParameters": "-noSplash",
+            "modLineFiles": [],
             "repoBasicAuthentication": {
                 "username": "",
                 "password": ""

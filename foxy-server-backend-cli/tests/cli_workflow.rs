@@ -7,6 +7,85 @@ fn write_json(path: &Path, value: Value) {
 }
 
 #[test]
+fn mod_line_files_are_rewritten_after_a_successful_create() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("mods").join("@mod");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("data.txt"), b"data").unwrap();
+    let script = dir.path().join("start-server.cmd");
+    let original = "@echo off\r\narma3server_x64.exe -mod=mods/@stale; -config=server.cfg\r\n";
+    std::fs::write(&script, original).unwrap();
+    let config = dir.path().join("config.json");
+    write_json(
+        &config,
+        json!({
+            "repoName": "Test",
+            "basePath": dir.path().join("mods"),
+            "requiredMods": [{"modName": "@mod"}],
+            "modLineFiles": ["start-server.cmd"]
+        }),
+    );
+    let output = dir.path().join("output");
+    let bin = env!("CARGO_BIN_EXE_foxy-server-backend-cli");
+
+    let preview = Command::new(bin)
+        .args(["--json", "create"])
+        .arg(&config)
+        .arg(&output)
+        .arg("--dry-run")
+        .output()
+        .unwrap();
+    assert!(preview.status.success());
+    let result: Value = serde_json::from_slice(&preview.stdout).unwrap();
+    assert!(
+        result["details"]["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "update-mod-line")
+    );
+    assert_eq!(std::fs::read_to_string(&script).unwrap(), original);
+
+    let built = Command::new(bin)
+        .args(["--json", "create"])
+        .arg(&config)
+        .arg(&output)
+        .args(["--no-progress", "--mod-line-prefix", "mods"])
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let result: Value = serde_json::from_slice(&built.stdout).unwrap();
+    assert_eq!(result["details"]["modLineFiles"][0]["replaced"], 1);
+    assert_eq!(
+        std::fs::read_to_string(&script).unwrap(),
+        "@echo off\r\narma3server_x64.exe -mod=mods/@mod; -config=server.cfg\r\n"
+    );
+
+    std::fs::write(&script, "arma3server_x64.exe -config=server.cfg\r\n").unwrap();
+    let missing = Command::new(bin)
+        .args(["--json", "create"])
+        .arg(&config)
+        .arg(&output)
+        .arg("--no-progress")
+        .output()
+        .unwrap();
+    assert!(!missing.status.success());
+    let result: Value = serde_json::from_slice(&missing.stdout).unwrap();
+    assert!(
+        result["error"]
+            .as_str()
+            .unwrap()
+            .contains("no -mod parameter"),
+        "{}",
+        result["error"]
+    );
+}
+
+#[test]
 fn json_preview_atomic_create_and_verify() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("mods").join("@mod");
