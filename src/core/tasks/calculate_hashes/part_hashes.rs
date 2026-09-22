@@ -114,8 +114,8 @@ impl PartHashProgress {
 
 pub(super) const HASH_READER_CAPACITY: usize = 4 * 1024 * 1024;
 /// On a rotational disk the two hash workers take turns on one head, so each
-/// larger request pays for its seek with four times more data.
-pub(super) const ROTATIONAL_HASH_READER_CAPACITY: usize = 16 * 1024 * 1024;
+/// larger request pays for its seek with more data.
+pub(super) const ROTATIONAL_HASH_READER_CAPACITY: usize = 32 * 1024 * 1024;
 
 /// How one file's parts are located and read.
 #[derive(Clone, Copy)]
