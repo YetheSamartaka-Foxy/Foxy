@@ -29,6 +29,7 @@ pub struct RunOptions {
     pub accept: bool,
     pub validate_only: bool,
     pub no_build: bool,
+    pub progress_probe_ms: u64,
 }
 
 struct ContextRun<'a> {
@@ -40,6 +41,7 @@ struct ContextRun<'a> {
     timeout: Duration,
     mode: &'a str,
     gate: u32,
+    progress_probe: Option<Duration>,
     /// The live GUI child, when the case runs on the GUI harness. The `startup`
     /// operation replaces it, so it cannot be owned by `execute` alone.
     gui: &'a RefCell<Option<launch::ManagedChild>>,
@@ -133,6 +135,87 @@ fn ui_probe_summary(samples: &[Value]) -> Value {
         "fps_min": fps.first(),
         "rtt_ms_p50": pick(50),
         "rtt_ms_p95": pick(95),
+    })
+}
+
+/// Polls the app's hash progress fraction beside an operation, so a run can
+/// say whether the bar a user watches tracks the work or races ahead of it.
+struct ProgressProbe {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<thread::JoinHandle<Vec<(f64, f64)>>>,
+}
+
+impl ProgressProbe {
+    fn start(exe: &Path, config: &Path, env: &Environment, interval: Duration) -> Self {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (exe, config, env, flag) = (
+            exe.to_owned(),
+            config.to_owned(),
+            env.clone(),
+            Arc::clone(&stop),
+        );
+        let thread = thread::spawn(move || {
+            let started = Instant::now();
+            let mut samples = Vec::new();
+            while !flag.load(std::sync::atomic::Ordering::Relaxed) {
+                if let Ok(response) = driver::call(
+                    &exe,
+                    &config,
+                    &["progress".to_owned()],
+                    &env,
+                    Duration::from_secs(30),
+                ) && let Some(fraction) = response.data["recheck_hash_progress"].as_f64()
+                {
+                    samples.push((started.elapsed().as_secs_f64(), fraction));
+                }
+                thread::sleep(interval);
+            }
+            samples
+        });
+        Self {
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    fn finish(mut self, elapsed_s: f64) -> Value {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let samples = self
+            .thread
+            .take()
+            .and_then(|thread| thread.join().ok())
+            .unwrap_or_default();
+        progress_probe_summary(&samples, elapsed_s)
+    }
+}
+
+/// How far the sampled fraction strays from elapsed time over the operation,
+/// in percentage points. Linear is the target a user reads the bar against;
+/// the fraction at each quarter of elapsed time shows where it runs ahead.
+fn progress_probe_summary(samples: &[(f64, f64)], elapsed_s: f64) -> Value {
+    let elapsed_s = elapsed_s.max(f64::EPSILON);
+    let gaps: Vec<f64> = samples
+        .iter()
+        .map(|(t, fraction)| (fraction - t / elapsed_s).abs() * 100.0)
+        .collect();
+    let at = |share: f64| {
+        samples
+            .iter()
+            .min_by(|a, b| {
+                (a.0 / elapsed_s - share)
+                    .abs()
+                    .total_cmp(&(b.0 / elapsed_s - share).abs())
+            })
+            .map(|(_, fraction)| (fraction * 1000.0).round() / 10.0)
+    };
+    json!({
+        "samples": samples.len(),
+        "max_gap_points": gaps.iter().copied().reduce(f64::max).map(|gap| (gap * 10.0).round() / 10.0),
+        "mean_gap_points": (!gaps.is_empty())
+            .then(|| (gaps.iter().sum::<f64>() / gaps.len() as f64 * 10.0).round() / 10.0),
+        "percent_at_quarter": at(0.25),
+        "percent_at_half": at(0.5),
+        "percent_at_three_quarters": at(0.75),
     })
 }
 
@@ -504,6 +587,9 @@ impl ContextRun<'_> {
             .as_u64()
             .filter(|ms| *ms > 0)
             .map(|ms| UiProbe::start(self.exe, self.config, self.env, Duration::from_millis(ms)));
+        let progress_probe = self
+            .progress_probe
+            .map(|interval| ProgressProbe::start(self.exe, self.config, self.env, interval));
         let started = Instant::now();
         self.data(&[
             "invoke",
@@ -582,12 +668,16 @@ impl ContextRun<'_> {
         }
         let elapsed = started.elapsed().as_secs_f64();
         let ui_probe = probe.map(UiProbe::finish);
+        let progress_probe = progress_probe.map(|probe| probe.finish(elapsed));
         let mut summary = self.data(&["download-summary", "--include-telemetry"])?;
         if !cancel_quiescent_ms.is_null() {
             summary["cancel_quiescent_ms"] = cancel_quiescent_ms;
         }
         if let Some(ui_probe) = ui_probe {
             summary["ui_probe"] = ui_probe;
+        }
+        if let Some(progress_probe) = progress_probe {
+            summary["progress_probe"] = progress_probe;
         }
         let progress = self.data(&["progress"])?;
         let snapshot = self.data(&["snapshot"])?;
@@ -986,6 +1076,8 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
             timeout,
             mode: &options.database_mode,
             gate: options.db_write_gate,
+            progress_probe: (options.progress_probe_ms > 0)
+                .then(|| Duration::from_millis(options.progress_probe_ms)),
             gui: &gui,
             pid: &pid,
         };
@@ -1338,5 +1430,33 @@ mod cache_state_tests {
         assert_eq!(counts["part_files"], 1);
         assert_eq!(counts["part_meta_files"], 1);
         assert_eq!(counts["patch_temp_files"], 1);
+    }
+}
+
+#[cfg(test)]
+mod progress_probe_tests {
+    use super::progress_probe_summary;
+
+    #[test]
+    fn a_linear_bar_has_no_gap_and_a_front_loaded_bar_does() {
+        let linear: Vec<(f64, f64)> = (0..=10)
+            .map(|i| (f64::from(i), f64::from(i) / 10.0))
+            .collect();
+        let summary = progress_probe_summary(&linear, 10.0);
+        assert_eq!(summary["samples"], 11);
+        assert_eq!(summary["max_gap_points"], 0.0);
+        assert_eq!(summary["percent_at_half"], 50.0);
+
+        let front_loaded = [(1.0, 0.44), (5.0, 0.76), (10.0, 1.0)];
+        let summary = progress_probe_summary(&front_loaded, 10.0);
+        assert_eq!(summary["max_gap_points"], 34.0);
+        assert_eq!(summary["percent_at_half"], 76.0);
+    }
+
+    #[test]
+    fn no_samples_reports_no_gap() {
+        let summary = progress_probe_summary(&[], 10.0);
+        assert_eq!(summary["samples"], 0);
+        assert!(summary["max_gap_points"].is_null());
     }
 }

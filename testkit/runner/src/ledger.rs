@@ -159,6 +159,9 @@ pub fn build_row(
     if summary["ui_probe"].is_object() {
         sums["ui_probe"] = summary["ui_probe"].clone();
     }
+    if summary["progress_probe"].is_object() {
+        sums["progress_probe"] = summary["progress_probe"].clone();
+    }
     metadata["summary"] = sums;
     // Null when the artifact predates the memory lane, which keeps `replay`
     // byte-identical over recorded runs.

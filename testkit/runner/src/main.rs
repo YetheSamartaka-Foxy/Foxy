@@ -45,6 +45,11 @@ enum Command {
         validate_only: bool,
         #[arg(long)]
         no_build: bool,
+        /// Sample the app's hash progress fraction at this interval during
+        /// each GUI operation and score how far it strays from linear; 0 is off.
+        /// A run flag rather than a case field, so frozen cases keep their hash.
+        #[arg(long, default_value_t = 0)]
+        progress_probe_ms: u64,
     },
     /// Accept a baseline from a finished run without repeating it.
     Accept {
@@ -223,6 +228,7 @@ fn main() -> Result<()> {
             accept,
             validate_only,
             no_build,
+            progress_probe_ms,
         } => {
             let result = run::execute(
                 repo_root,
@@ -233,6 +239,7 @@ fn main() -> Result<()> {
                     accept,
                     validate_only,
                     no_build,
+                    progress_probe_ms,
                 },
             )?;
             print_json(&result)?;

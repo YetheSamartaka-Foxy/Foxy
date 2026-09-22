@@ -149,7 +149,10 @@ the persistence and purge records and derives their gate-1 DB ratios;
 `tail_deficit_bytes` (the transfer stage split around its plateau, present
 once a window reached 90% of the peak); `summary.ui_probe` (`samples`,
 `frame_ms_max`, `frame_ms_p95_worst`, `fps_min`, `rtt_ms_p50`, `rtt_ms_p95`)
-on an operation that ran with `ui_probe_ms`; and
+on an operation that ran with `ui_probe_ms`; `summary.progress_probe`
+on an operation of a run made with `--progress-probe-ms`; `memory.read_transfer_bytes`
+(every byte the process read during the operation, page-cache hits included,
+so a re-read the disk counters hide still shows); and
 `breakdown.run_metrics.patch_range_requests` / `patch_gap_bytes` /
 `patch_copy_bytes` for the locality of a patch fetch and `patch_cancelled`
 for attempts a cancel interrupted; `startup_probe.first_answer_s` /

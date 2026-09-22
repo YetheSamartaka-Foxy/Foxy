@@ -10,7 +10,9 @@
 //! given back, which is what an allocation regression moves. `WorkingSetSize`
 //! is resident pages, which the OS trims under pressure, so it tracks what the
 //! machine feels rather than what Foxy holds. Both are recorded; the ledger
-//! gates on commit.
+//! gates on commit. The process I/O read counter rides along: it counts every
+//! byte the process read, page-cache hits included, so it exposes re-reads a
+//! disk counter would hide.
 
 use serde_json::{Value, json};
 use std::{
@@ -42,6 +44,7 @@ struct Counters {
     private: u64,
     peak_working_set: u64,
     page_faults: u64,
+    read_transfer: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -56,7 +59,9 @@ fn read(pid: u32) -> Option<Counters> {
         Foundation::CloseHandle,
         System::{
             ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX},
-            Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+            Threading::{
+                GetProcessIoCounters, IO_COUNTERS, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+            },
         },
     };
     unsafe {
@@ -67,12 +72,15 @@ fn read(pid: u32) -> Option<Counters> {
         let mut counters: PROCESS_MEMORY_COUNTERS_EX = std::mem::zeroed();
         counters.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32;
         let ok = K32GetProcessMemoryInfo(handle, (&raw mut counters).cast(), counters.cb);
+        let mut io: IO_COUNTERS = std::mem::zeroed();
+        let io_ok = GetProcessIoCounters(handle, &raw mut io);
         CloseHandle(handle);
         (ok != 0).then_some(Counters {
             working_set: counters.WorkingSetSize as u64,
             private: counters.PrivateUsage as u64,
             peak_working_set: counters.PeakWorkingSetSize as u64,
             page_faults: u64::from(counters.PageFaultCount),
+            read_transfer: if io_ok != 0 { io.ReadTransferCount } else { 0 },
         })
     }
 }
@@ -239,6 +247,10 @@ fn summarize(samples: &[Sample], interval: Duration, settle_ms: u64) -> Value {
             .counters
             .page_faults
             .saturating_sub(samples[0].counters.page_faults),
+        "read_transfer_bytes": samples[samples.len() - 1]
+            .counters
+            .read_transfer
+            .saturating_sub(samples[0].counters.read_transfer),
     })
 }
 
@@ -254,6 +266,7 @@ mod tests {
                 private,
                 peak_working_set: private,
                 page_faults: elapsed_ms,
+                read_transfer: elapsed_ms * 10,
             },
         }
     }
@@ -279,6 +292,7 @@ mod tests {
         assert_eq!(stats["retained_private_bytes"], 200);
         assert_eq!(stats["growth_private_bytes"], 100);
         assert_eq!(stats["transient_private_bytes"], 700);
+        assert_eq!(stats["read_transfer_bytes"], 16_000);
     }
 
     #[test]

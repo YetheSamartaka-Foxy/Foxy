@@ -141,6 +141,15 @@ included, so an upper bound on input latency, not a frame time). Expect on
 `summary.ui_probe.frame_ms_max` to fail an operation that bought its
 throughput by blocking the UI thread.
 
+`foxy-testkit run --progress-probe-ms <ms>` polls the app's `progress`
+intent at that cadence during every GUI operation of the run and records
+`summary.progress_probe`: `samples`, `max_gap_points` and `mean_gap_points`
+(how far the hash progress fraction strays from elapsed time, in percentage
+points) and `percent_at_quarter`, `percent_at_half` and
+`percent_at_three_quarters`. It is a run flag rather than a case field so a
+frozen case keeps its hash; the polling costs one driver call per interval,
+so keep the interval in seconds on a timed lane.
+
 `run_metrics` also carries the redundant-work counters the checker cases
 assert on: `hash_work_bytes` (bytes read by every `SOL op=hash` run in the
 operation), `tree_verify_runs` (targeted tree-hash verifies the quick scan

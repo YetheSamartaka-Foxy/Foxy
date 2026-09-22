@@ -98,6 +98,7 @@ pub fn execute(root: &Path, options: &SuiteOptions) -> Result<Value> {
                 accept: false,
                 validate_only: options.validate_only,
                 no_build: options.no_build,
+                progress_probe_ms: 0,
             },
         );
         let (status, detail) = match &outcome {
@@ -183,6 +184,7 @@ pub fn sweep(
                     accept: false,
                     validate_only: false,
                     no_build: true,
+                    progress_probe_ms: 0,
                 },
             );
             let status = match &outcome {
