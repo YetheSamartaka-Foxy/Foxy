@@ -159,6 +159,16 @@ pub(crate) fn fast_file_content_hash_from_reader<R: std::io::Read + std::io::See
     Ok(blake3_hex(hasher))
 }
 
+/// [`fast_file_content_hash_from_reader`] for a handle wrapped in a large
+/// `BufReader`. Sampling goes to the inner handle: a seek discards the buffer,
+/// so every 16 KB sample through the wrapper would refill all of it.
+pub(crate) fn fast_file_content_hash_from_buffered<R: std::io::Read + std::io::Seek>(
+    reader: &mut std::io::BufReader<R>,
+    metadata: &std::fs::Metadata,
+) -> std::io::Result<String> {
+    fast_file_content_hash_from_reader(reader.get_mut(), metadata)
+}
+
 /// Compute a whole-file BLAKE3 hash (synchronous, for use inside `spawn_blocking`).
 /// Returns the first 32 hex characters for DB column compatibility.
 pub(crate) fn blake3_file_hash(path: &Path) -> std::io::Result<String> {
@@ -915,6 +925,61 @@ mod tests {
             blake3_mmap_file_hash_full(&dir.path().join("missing.bin"), Blake3ReadStrategy::Mmap)
                 .is_none()
         );
+    }
+
+    struct CountingReader<R> {
+        inner: R,
+        read_bytes: u64,
+    }
+
+    impl<R: std::io::Read> std::io::Read for CountingReader<R> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let read = self.inner.read(buf)?;
+            self.read_bytes += read as u64;
+            Ok(read)
+        }
+    }
+
+    impl<R: std::io::Seek> std::io::Seek for CountingReader<R> {
+        fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+            self.inner.seek(pos)
+        }
+    }
+
+    #[test]
+    fn buffered_fingerprint_matches_the_path_fingerprint_and_reads_only_samples() {
+        let dir = tempfile::tempdir().unwrap();
+        let sizes = [0usize, 1, 128 * 1024, 128 * 1024 + 1, 5 * 1024 * 1024 + 7];
+        for size in sizes {
+            let path = dir.path().join(format!("file-{size}.bin"));
+            let bytes: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+            std::fs::write(&path, &bytes).unwrap();
+            let metadata = std::fs::metadata(&path).unwrap();
+            let file = std::fs::File::open(&path).unwrap();
+            let mut reader = std::io::BufReader::with_capacity(
+                4 * 1024 * 1024,
+                CountingReader {
+                    inner: file,
+                    read_bytes: 0,
+                },
+            );
+            std::io::copy(&mut reader, &mut std::io::sink()).unwrap();
+            let after_full_read = reader.get_ref().read_bytes;
+
+            let buffered = fast_file_content_hash_from_buffered(&mut reader, &metadata).unwrap();
+
+            assert_eq!(
+                buffered,
+                fast_file_content_hash(path.to_str().unwrap()).unwrap(),
+                "size {size}"
+            );
+            let sample_reads = reader.get_ref().read_bytes - after_full_read;
+            let whole_file_limit = 8 * 16 * 1024;
+            assert!(
+                sample_reads <= (size as u64).min(whole_file_limit),
+                "size {size} read {sample_reads} bytes for its samples"
+            );
+        }
     }
 
     #[test]

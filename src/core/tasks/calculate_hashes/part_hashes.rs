@@ -460,7 +460,7 @@ pub(super) async fn calculate_part_hashes(
         let content_hash = if cancelled || consecutive_read_failures >= MAX_READ_FAILURES {
             None
         } else {
-            crate::core::utils::content_hash::fast_file_content_hash_from_reader(
+            crate::core::utils::content_hash::fast_file_content_hash_from_buffered(
                 &mut reader,
                 &file_metadata,
             )
