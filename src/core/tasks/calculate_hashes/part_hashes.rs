@@ -239,17 +239,18 @@ pub(super) async fn calculate_part_hashes(
     let estimated_bytes = metrics.estimated_bytes;
     let result = tokio::task::spawn_blocking(move || {
         let mut layout_metrics = LayoutMetrics::default();
-        let file = match std::fs::File::open(&file_path_owned) {
-            Ok(f) => f,
-            Err(e) => {
-                warn!("Failed to open file {}: {}", file_path_owned, e);
-                let total_part_count = indexed_parts.len();
-                if let Some(progress) = &blocking_progress {
-                    progress.mark_parts_done(total_part_count, estimated_bytes);
+        let file =
+            match crate::core::utils::content_hash::open_for_sequential_read(&file_path_owned) {
+                Ok(f) => f,
+                Err(e) => {
+                    warn!("Failed to open file {}: {}", file_path_owned, e);
+                    let total_part_count = indexed_parts.len();
+                    if let Some(progress) = &blocking_progress {
+                        progress.mark_parts_done(total_part_count, estimated_bytes);
+                    }
+                    return (indexed_parts, None, layout_metrics);
                 }
-                return (indexed_parts, None, layout_metrics);
-            }
-        };
+            };
 
         const HASH_READER_CAPACITY: usize = 4 * 1024 * 1024;
         let mut reader = std::io::BufReader::with_capacity(HASH_READER_CAPACITY, file);

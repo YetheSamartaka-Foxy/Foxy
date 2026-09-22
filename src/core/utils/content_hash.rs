@@ -280,6 +280,22 @@ pub(crate) fn fast_file_content_hash_from_buffered<R: std::io::Read + std::io::S
     fast_file_content_hash_from_reader(reader.get_mut(), metadata)
 }
 
+/// Opens a file the caller reads front to back once. On Windows the
+/// sequential-scan hint lets the cache manager read further ahead and release
+/// the pages behind the reader first, so a long pass does not push the rest
+/// of the machine's cache out.
+pub(crate) fn open_for_sequential_read(path: impl AsRef<Path>) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_SEQUENTIAL_SCAN: u32 = 0x0800_0000;
+        options.custom_flags(FILE_FLAG_SEQUENTIAL_SCAN);
+    }
+    options.open(path)
+}
+
 /// Compute a whole-file BLAKE3 hash (synchronous, for use inside `spawn_blocking`).
 /// Returns the first 32 hex characters for DB column compatibility.
 pub(crate) fn blake3_file_hash(path: &Path) -> std::io::Result<String> {
