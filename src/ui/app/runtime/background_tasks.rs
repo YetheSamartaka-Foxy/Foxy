@@ -531,6 +531,7 @@ impl Foxy {
                     total_files,
                     checked_parts,
                     total_parts,
+                    ..
                 } => {
                     let state = self
                         .quick_scan_progress_by_instance

@@ -3367,6 +3367,9 @@ impl Foxy {
         let recheck_hash = self
             .recheck_hash_counter
             .map(|(done, total)| json!({ "done": done, "total": total }));
+        let recheck_hash_bytes = self
+            .recheck_hash_byte_counter
+            .map(|(done, total)| json!({ "done": done, "total": total }));
         json!({
             "busy": self.agent_gui_busy(),
             "busy_reasons": self.agent_gui_busy_reasons(),
@@ -3384,6 +3387,8 @@ impl Foxy {
             "recheck_stage_label": self.recheck_stage_label,
             "recheck_stage_percent": self.recheck_stage_percent,
             "recheck_hash_counter": recheck_hash,
+            "recheck_hash_bytes": recheck_hash_bytes,
+            "recheck_hash_progress": self.recheck_hash_progress_fraction(),
             "update_modal_open": self.update_modal_open,
         })
     }

@@ -181,6 +181,7 @@ impl Foxy {
             self.recheck_stage_percent = Self::initial_recheck_stage_label(mode).map(|_| 0.05);
             self.recheck_hash_counter = None;
             self.recheck_hash_part_counter = None;
+            self.recheck_hash_byte_counter = None;
             self.recheck_hash_estimate = None;
             self.last_hash_progress_repaint = None;
             self.download_hash_sample_at = None;

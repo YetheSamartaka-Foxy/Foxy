@@ -1,4 +1,6 @@
-use super::part_hashes::{PartHashProgress, PartSpanSource, calculate_part_hashes};
+use super::part_hashes::{
+    HashRunCounters, PartHashProgress, PartSpanSource, calculate_part_hashes,
+};
 use super::*;
 use crate::core::utils::content_hash::{
     Blake3ReadStrategy, blake3_mmap_file_hash_full, is_blake3_checksum, select_blake3_read_strategy,
@@ -8,7 +10,7 @@ use crate::core::utils::speed_of_light::{SolLight, op_id_extra, sol_line};
 use crate::ui::types::HashIoProfilePreference;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 use sysinfo::Disks;
 
@@ -40,17 +42,21 @@ pub(super) struct FileHashResult {
 pub(super) struct HashRunProgress {
     total_files: usize,
     total_parts: usize,
+    total_bytes: u64,
     initial_files_done: usize,
     initial_parts_done: usize,
+    initial_bytes_done: u64,
 }
 
 impl HashRunProgress {
-    fn new(total_files: usize, total_parts: usize) -> Self {
+    fn new(total_files: usize, total_parts: usize, total_bytes: u64) -> Self {
         Self {
             total_files,
             total_parts,
+            total_bytes,
             initial_files_done: 0,
             initial_parts_done: 0,
+            initial_bytes_done: 0,
         }
     }
 }
@@ -763,13 +769,20 @@ pub(super) async fn recalculate_parts_for_jobs(
     let semaphore = Arc::new(Semaphore::new(global_part_concurrency));
     let game_formats = crate::core::game::registry().active().content_formats();
 
-    // Shared counter for completed files - used for progress reporting
-    let files_done = Arc::new(AtomicUsize::new(
-        progress.initial_files_done.min(progress.total_files),
-    ));
-    let parts_done = Arc::new(AtomicUsize::new(
-        progress.initial_parts_done.min(progress.total_parts),
-    ));
+    let counters = HashRunCounters {
+        files_done: Arc::new(AtomicUsize::new(
+            progress.initial_files_done.min(progress.total_files),
+        )),
+        total_files: progress.total_files,
+        parts_done: Arc::new(AtomicUsize::new(
+            progress.initial_parts_done.min(progress.total_parts),
+        )),
+        total_parts: progress.total_parts,
+        bytes_done: Arc::new(AtomicU64::new(
+            progress.initial_bytes_done.min(progress.total_bytes),
+        )),
+        total_bytes: progress.total_bytes,
+    };
     let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     // Prioritize heavy files first so big PBOs are not starved behind many tiny 1-part files.
@@ -778,9 +791,14 @@ pub(super) async fn recalculate_parts_for_jobs(
     let cancel_receiver = cancel_rx.cloned();
     let results = stream::iter(jobs.into_iter().map(|job| {
         let sem = semaphore.clone();
-        let done_counter = files_done.clone();
-        let part_counter = parts_done.clone();
+        let counters = counters.clone();
         let ptx = progress_sender.clone();
+        let job_bytes = job_estimated_bytes(&job);
+        let part_bytes: u64 = job
+            .indexed_parts
+            .iter()
+            .map(|(_, part)| part.remote_length)
+            .sum();
         let cancel = cancel_receiver.clone();
         let cancelled_flag = cancelled.clone();
         async move {
@@ -797,7 +815,8 @@ pub(super) async fn recalculate_parts_for_jobs(
                 || cancel.as_ref().is_some_and(|rx| *rx.borrow())
             {
                 cancelled_flag.store(true, Ordering::Relaxed);
-                let completed = done_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                counters.bytes_done.fetch_add(job_bytes, Ordering::Relaxed);
+                let completed = counters.files_done.fetch_add(1, Ordering::Relaxed) + 1;
                 if completed.is_multiple_of(500) || completed == progress.total_files {
                     info!(
                         "Phase 1 progress: {}/{} files hashed (cancelling)",
@@ -839,15 +858,9 @@ pub(super) async fn recalculate_parts_for_jobs(
                 } else {
                     let parts_only: Vec<FoxyModFilePart> =
                         indexed_parts.iter().map(|(_, p)| p.clone()).collect();
-                    let part_progress = ptx.clone().map(|tx| {
-                        PartHashProgress::new(
-                            part_counter.clone(),
-                            progress.total_parts,
-                            done_counter.clone(),
-                            progress.total_files,
-                            tx,
-                        )
-                    });
+                    let part_progress = ptx
+                        .clone()
+                        .map(|tx| PartHashProgress::new(counters.clone(), tx));
                     (
                         calculate_part_hashes(
                             parts_only,
@@ -875,17 +888,15 @@ pub(super) async fn recalculate_parts_for_jobs(
                     .collect()
             };
 
-            // Report file-level progress
-            let completed = done_counter.fetch_add(1, Ordering::Relaxed) + 1;
+            // Parts report their own bytes; whole-file jobs and part lists
+            // without lengths are counted here, once the file is done.
+            let part_reported = if ptx.is_some() { part_bytes } else { 0 };
+            counters
+                .bytes_done
+                .fetch_add(job_bytes.saturating_sub(part_reported), Ordering::Relaxed);
+            let completed = counters.files_done.fetch_add(1, Ordering::Relaxed) + 1;
             if let Some(ref tx) = ptx {
-                let _ = tx.send(ProgressEvent::RecheckHashProgress {
-                    checked_files: completed.min(progress.total_files),
-                    total_files: progress.total_files,
-                    checked_parts: part_counter
-                        .load(Ordering::Relaxed)
-                        .min(progress.total_parts),
-                    total_parts: progress.total_parts,
-                });
+                let _ = tx.send(counters.event());
             }
             if completed.is_multiple_of(500) || completed == progress.total_files {
                 info!(
@@ -1376,6 +1387,7 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
 ) -> (Vec<FileHashResult>, HashProfileDecision, bool) {
     let operation_id = context.operation_id();
     let total_parts: usize = jobs.iter().map(|job| job.indexed_parts.len()).sum();
+    let total_bytes: u64 = jobs.iter().map(job_estimated_bytes).sum();
     let algorithm = hash_algorithm_label(&jobs);
     let resource_profile = ResourceProfile::sample();
     let storage_class = detect_hash_storage_class(&jobs);
@@ -1430,7 +1442,7 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
             limits.file_concurrency,
             limits.global_part_concurrency,
             progress_tx,
-            HashRunProgress::new(total_files, total_parts),
+            HashRunProgress::new(total_files, total_parts, total_bytes),
             cancel_rx,
             WholeFileHashIo::new(profile, storage_class),
         )
@@ -1483,7 +1495,7 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
             limits.file_concurrency,
             limits.global_part_concurrency,
             progress_tx,
-            HashRunProgress::new(total_files, total_parts),
+            HashRunProgress::new(total_files, total_parts, total_bytes),
             cancel_rx,
             WholeFileHashIo::new(effective_profile, storage_class),
         )
@@ -1550,7 +1562,7 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
             initial_limits.file_concurrency,
             initial_limits.global_part_concurrency,
             progress_tx,
-            HashRunProgress::new(total_files, total_parts),
+            HashRunProgress::new(total_files, total_parts, total_bytes),
             cancel_rx,
             WholeFileHashIo::new(initial_profile, storage_class),
         )
@@ -1616,6 +1628,7 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
     let mut benchmark_results: Vec<FileHashResult> = Vec::new();
     let mut benchmark_hashed_bytes = 0u64;
     let mut valid_trials: Vec<(HashIoProfilePreference, f64, bool)> = Vec::new();
+    let mut trial_progress = HashRunProgress::new(total_files, total_parts, total_bytes);
     if let Some(tx) = progress_tx {
         let _ = tx.send(ProgressEvent::Stage {
             label: "Hashing profile".to_string(),
@@ -1656,8 +1669,8 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
             group_jobs,
             limits.file_concurrency,
             limits.global_part_concurrency,
-            None,
-            HashRunProgress::new(total_files, total_parts),
+            progress_tx,
+            trial_progress,
             cancel_rx,
             WholeFileHashIo::new(profile, storage_class),
         )
@@ -1695,6 +1708,9 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
         // the profile; they are never recomputed.
         let sufficient = benchmark_metrics_are_sufficient(&metrics);
         benchmark_hashed_bytes = benchmark_hashed_bytes.saturating_add(metrics.hashed_bytes);
+        trial_progress.initial_files_done += group_files;
+        trial_progress.initial_parts_done += group_parts;
+        trial_progress.initial_bytes_done += group_bytes;
         benchmark_results.extend(results);
         if cancelled {
             let benchmarked_files = benchmark_results.len();
@@ -1750,8 +1766,10 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
             HashRunProgress {
                 total_files,
                 total_parts,
+                total_bytes,
                 initial_files_done: benchmark_file_count,
                 initial_parts_done: benchmark_total_parts,
+                initial_bytes_done: benchmark_bytes,
             },
             cancel_rx,
             WholeFileHashIo::new(initial_profile, storage_class),
@@ -1842,6 +1860,8 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
             total_files,
             checked_parts: benchmark_total_parts.min(total_parts),
             total_parts,
+            checked_bytes: benchmark_bytes.min(total_bytes),
+            total_bytes,
         });
         let remaining_bytes: u64 = jobs.iter().map(job_estimated_bytes).sum();
         let _ = tx.send(ProgressEvent::HashEstimate {
@@ -1858,8 +1878,10 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
         HashRunProgress {
             total_files,
             total_parts,
+            total_bytes,
             initial_files_done: benchmark_file_count,
             initial_parts_done: benchmark_total_parts,
+            initial_bytes_done: benchmark_bytes,
         },
         cancel_rx,
         WholeFileHashIo::new(best_profile, storage_class),

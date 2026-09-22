@@ -32,62 +32,83 @@ pub(super) struct PartHashCalculation {
     pub(super) content_hash: Option<String>,
 }
 
+/// Shared counters of one hash run, advanced by every file's hasher.
 #[derive(Clone)]
-pub(super) struct PartHashProgress {
-    parts_done: Arc<AtomicUsize>,
-    total_parts: usize,
-    files_done: Arc<AtomicUsize>,
-    total_files: usize,
-    progress_tx: Sender<ProgressEvent>,
+pub(super) struct HashRunCounters {
+    pub(super) files_done: Arc<AtomicUsize>,
+    pub(super) total_files: usize,
+    pub(super) parts_done: Arc<AtomicUsize>,
+    pub(super) total_parts: usize,
+    pub(super) bytes_done: Arc<AtomicU64>,
+    pub(super) total_bytes: u64,
 }
 
-impl PartHashProgress {
-    pub(super) fn new(
-        parts_done: Arc<AtomicUsize>,
-        total_parts: usize,
-        files_done: Arc<AtomicUsize>,
-        total_files: usize,
-        progress_tx: Sender<ProgressEvent>,
-    ) -> Self {
-        Self {
-            parts_done,
-            total_parts,
-            files_done,
-            total_files,
-            progress_tx,
-        }
-    }
-
-    pub(super) fn mark_parts_done(&self, count: usize) {
-        if count == 0 {
-            return;
-        }
-
-        const PART_PROGRESS_INTERVAL: usize = 512;
-        let checked_parts = self
-            .parts_done
-            .fetch_add(count, Ordering::Relaxed)
-            .saturating_add(count)
-            .min(self.total_parts);
-        let previous_parts = checked_parts.saturating_sub(count);
-        let crossed_interval =
-            checked_parts / PART_PROGRESS_INTERVAL != previous_parts / PART_PROGRESS_INTERVAL;
-
-        if crossed_interval || checked_parts == self.total_parts {
-            self.emit(checked_parts);
-        }
-    }
-
-    fn emit(&self, checked_parts: usize) {
-        let _ = self.progress_tx.send(ProgressEvent::RecheckHashProgress {
+impl HashRunCounters {
+    pub(super) fn event(&self) -> ProgressEvent {
+        ProgressEvent::RecheckHashProgress {
             checked_files: self
                 .files_done
                 .load(Ordering::Relaxed)
                 .min(self.total_files),
             total_files: self.total_files,
-            checked_parts,
+            checked_parts: self
+                .parts_done
+                .load(Ordering::Relaxed)
+                .min(self.total_parts),
             total_parts: self.total_parts,
-        });
+            checked_bytes: self
+                .bytes_done
+                .load(Ordering::Relaxed)
+                .min(self.total_bytes),
+            total_bytes: self.total_bytes,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct PartHashProgress {
+    counters: HashRunCounters,
+    progress_tx: Sender<ProgressEvent>,
+}
+
+impl PartHashProgress {
+    pub(super) fn new(counters: HashRunCounters, progress_tx: Sender<ProgressEvent>) -> Self {
+        Self {
+            counters,
+            progress_tx,
+        }
+    }
+
+    /// `bytes` is the estimated size of the parts, so a file of a few huge
+    /// parts still moves a byte-weighted bar between part intervals.
+    pub(super) fn mark_parts_done(&self, count: usize, bytes: u64) {
+        if count == 0 && bytes == 0 {
+            return;
+        }
+
+        const PART_PROGRESS_INTERVAL: usize = 512;
+        const BYTE_PROGRESS_INTERVAL: u64 = 64 * 1024 * 1024;
+        let counters = &self.counters;
+        let checked_parts = counters
+            .parts_done
+            .fetch_add(count, Ordering::Relaxed)
+            .saturating_add(count)
+            .min(counters.total_parts);
+        let previous_parts = checked_parts.saturating_sub(count);
+        let checked_bytes = counters
+            .bytes_done
+            .fetch_add(bytes, Ordering::Relaxed)
+            .saturating_add(bytes)
+            .min(counters.total_bytes);
+        let previous_bytes = checked_bytes.saturating_sub(bytes);
+        let crossed_parts =
+            checked_parts / PART_PROGRESS_INTERVAL != previous_parts / PART_PROGRESS_INTERVAL;
+        let crossed_bytes =
+            checked_bytes / BYTE_PROGRESS_INTERVAL != previous_bytes / BYTE_PROGRESS_INTERVAL;
+
+        if crossed_parts || crossed_bytes || checked_parts == counters.total_parts {
+            let _ = self.progress_tx.send(counters.event());
+        }
     }
 }
 
@@ -154,7 +175,7 @@ pub(super) async fn calculate_part_hashes(
             metrics.metadata_elapsed = metadata_started.elapsed();
             metrics.total_elapsed = started_at.elapsed();
             if let Some(progress) = &progress {
-                progress.mark_parts_done(total_parts);
+                progress.mark_parts_done(total_parts, metrics.estimated_bytes);
             }
             return PartHashCalculation {
                 parts: parts
@@ -277,7 +298,7 @@ pub(super) async fn calculate_part_hashes(
         metrics.semaphore_wait_elapsed = semaphore_started.elapsed();
         metrics.total_elapsed = started_at.elapsed();
         if let Some(progress) = &progress {
-            progress.mark_parts_done(total_parts);
+            progress.mark_parts_done(total_parts, metrics.estimated_bytes);
         }
         return PartHashCalculation {
             parts: indexed_parts.into_iter().map(|(_, part)| part).collect(),
@@ -292,6 +313,7 @@ pub(super) async fn calculate_part_hashes(
     // (one per part) and lets the OS read-ahead prefetcher work efficiently.
     let blocking_started = Instant::now();
     let blocking_progress = progress.clone();
+    let estimated_bytes = metrics.estimated_bytes;
     let result = tokio::task::spawn_blocking(move || {
         // Timed per file rather than per part: a 562-entry PBO would otherwise
         // charge the profiler more events than the hashing does work.
@@ -302,7 +324,7 @@ pub(super) async fn calculate_part_hashes(
                 warn!("Failed to open file {}: {}", file_path_owned, e);
                 let total_part_count = indexed_parts.len();
                 if let Some(progress) = &blocking_progress {
-                    progress.mark_parts_done(total_part_count);
+                    progress.mark_parts_done(total_part_count, estimated_bytes);
                 }
                 return (indexed_parts, None);
             }
@@ -331,7 +353,7 @@ pub(super) async fn calculate_part_hashes(
                 part.local_length = 0;
                 part.local_start = 0;
                 if let Some(progress) = &blocking_progress {
-                    progress.mark_parts_done(1);
+                    progress.mark_parts_done(1, part.remote_length);
                 }
                 continue;
             }
@@ -341,7 +363,7 @@ pub(super) async fn calculate_part_hashes(
                 part.local_length = 0;
                 part.local_start = 0;
                 if let Some(progress) = &blocking_progress {
-                    progress.mark_parts_done(1);
+                    progress.mark_parts_done(1, part.remote_length);
                 }
                 continue;
             }
@@ -366,7 +388,7 @@ pub(super) async fn calculate_part_hashes(
                     part.local_length = 0;
                     part.local_start = 0;
                     if let Some(progress) = &blocking_progress {
-                        progress.mark_parts_done(1);
+                        progress.mark_parts_done(1, part.remote_length);
                     }
                     continue;
                 }
@@ -394,7 +416,7 @@ pub(super) async fn calculate_part_hashes(
                 consecutive_read_failures += 1;
                 reader_pos = None;
                 if let Some(progress) = &blocking_progress {
-                    progress.mark_parts_done(1);
+                    progress.mark_parts_done(1, part.remote_length);
                 }
                 continue;
             }
@@ -436,7 +458,7 @@ pub(super) async fn calculate_part_hashes(
                     );
                 }
                 if let Some(progress) = &blocking_progress {
-                    progress.mark_parts_done(1);
+                    progress.mark_parts_done(1, part.remote_length);
                 }
                 continue;
             }
@@ -446,7 +468,7 @@ pub(super) async fn calculate_part_hashes(
             part.local_length = chosen_span.length;
             part.local_start = chosen_span.start;
             if let Some(progress) = &blocking_progress {
-                progress.mark_parts_done(1);
+                progress.mark_parts_done(1, part.remote_length);
             }
         }
 
@@ -564,10 +586,14 @@ mod tests {
     ) {
         let (tx, rx) = tokio::sync::broadcast::channel(64);
         let progress = PartHashProgress::new(
-            Arc::new(AtomicUsize::new(0)),
-            total_parts,
-            Arc::new(AtomicUsize::new(0)),
-            total_files,
+            HashRunCounters {
+                files_done: Arc::new(AtomicUsize::new(0)),
+                total_files,
+                parts_done: Arc::new(AtomicUsize::new(0)),
+                total_parts,
+                bytes_done: Arc::new(AtomicU64::new(0)),
+                total_bytes: 1 << 40,
+            },
             tx,
         );
         (progress, rx)
@@ -585,46 +611,65 @@ mod tests {
     #[test]
     fn mark_parts_done_zero_count_does_not_emit() {
         let (progress, mut rx) = progress_with_channel(1000, 10);
-        progress.mark_parts_done(0);
+        progress.mark_parts_done(0, 0);
         assert!(rx.try_recv().is_err());
     }
 
     #[test]
     fn mark_parts_done_below_interval_does_not_emit() {
         let (progress, mut rx) = progress_with_channel(1000, 10);
-        progress.mark_parts_done(100);
+        progress.mark_parts_done(100, 0);
         assert!(rx.try_recv().is_err());
     }
 
     #[test]
     fn mark_parts_done_crossing_interval_emits() {
         let (progress, mut rx) = progress_with_channel(1000, 10);
-        progress.mark_parts_done(512);
+        progress.mark_parts_done(512, 0);
         assert_eq!(recv_checked_parts(&mut rx), Some(512));
     }
 
     #[test]
     fn mark_parts_done_reaching_total_emits_even_below_interval() {
         let (progress, mut rx) = progress_with_channel(100, 4);
-        progress.mark_parts_done(100);
+        progress.mark_parts_done(100, 0);
         assert_eq!(recv_checked_parts(&mut rx), Some(100));
     }
 
     #[test]
     fn mark_parts_done_clamps_reported_parts_to_total() {
         let (progress, mut rx) = progress_with_channel(10, 2);
-        progress.mark_parts_done(50);
+        progress.mark_parts_done(50, 0);
         assert_eq!(recv_checked_parts(&mut rx), Some(10));
     }
 
     #[test]
     fn mark_parts_done_accumulates_across_calls() {
         let (progress, mut rx) = progress_with_channel(1000, 10);
-        progress.mark_parts_done(300);
+        progress.mark_parts_done(300, 0);
         assert!(rx.try_recv().is_err());
-        progress.mark_parts_done(300);
+        progress.mark_parts_done(300, 0);
         // 600 crosses the 512 boundary.
         assert_eq!(recv_checked_parts(&mut rx), Some(600));
+    }
+
+    #[test]
+    fn mark_parts_done_emits_on_byte_intervals_between_part_intervals() {
+        let (progress, mut rx) = progress_with_channel(1000, 10);
+        progress.mark_parts_done(1, 32 * 1024 * 1024);
+        assert!(rx.try_recv().is_err());
+        progress.mark_parts_done(1, 32 * 1024 * 1024);
+        match rx.try_recv() {
+            Ok(ProgressEvent::RecheckHashProgress {
+                checked_parts,
+                checked_bytes,
+                ..
+            }) => {
+                assert_eq!(checked_parts, 2);
+                assert_eq!(checked_bytes, 64 * 1024 * 1024);
+            }
+            other => panic!("expected a progress event, got {other:?}"),
+        }
     }
 
     // ── calculate_part_hashes edge cases ────────────────────────────────

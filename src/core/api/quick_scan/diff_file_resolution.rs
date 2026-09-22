@@ -212,6 +212,8 @@ pub(super) async fn compute_file_diffs(
             total_files: deep_scan_files_total,
             checked_parts: checked_files,
             total_parts: deep_scan_files_total,
+            checked_bytes: 0,
+            total_bytes: 0,
         });
     }
 
@@ -323,6 +325,8 @@ pub(super) async fn compute_file_diffs(
                         total_files: deep_scan_files_total,
                         checked_parts: checked_files,
                         total_parts: deep_scan_files_total,
+                        checked_bytes: 0,
+                        total_bytes: 0,
                     });
                 }
                 let file_content_mismatch =

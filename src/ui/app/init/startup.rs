@@ -461,6 +461,7 @@ impl Foxy {
             recheck_stage_percent: None,
             recheck_hash_counter: None,
             recheck_hash_part_counter: None,
+            recheck_hash_byte_counter: None,
             recheck_hash_estimate: None,
             last_hash_progress_repaint: None,
             download_hash_sample_at: None,

@@ -142,7 +142,10 @@ pub fn stage_rows(records: &[&BenchmarkRecord]) -> Vec<BarRow> {
     let mut names: Vec<String> = Vec::new();
     for record in records {
         for stage in &record.stages {
-            if !names.contains(&stage.name) {
+            if !names.contains(&stage.name)
+                && !crate::core::benchmarks::record::ACTION_TOTAL_STAGES
+                    .contains(&stage.name.as_str())
+            {
                 names.push(stage.name.clone());
             }
         }
@@ -288,5 +291,27 @@ mod tests {
         );
         assert_eq!(stage_rows(&[&a]).len(), 1);
         assert_eq!(stage_rows(&[&a, &b]).len(), 2);
+    }
+
+    #[test]
+    fn stage_rows_leave_out_the_enclosing_action_total() {
+        let a = record(
+            vec![],
+            vec![
+                BenchmarkStage {
+                    name: "tree_hash_bootstrap".into(),
+                    seconds: 822.0,
+                    details: String::new(),
+                },
+                BenchmarkStage {
+                    name: "download_skip_after_quick_verify".into(),
+                    seconds: 829.0,
+                    details: String::new(),
+                },
+            ],
+        );
+        let rows = stage_rows(&[&a]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "tree_hash_bootstrap");
     }
 }

@@ -354,6 +354,8 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
             total_files,
             checked_parts: 0,
             total_parts,
+            checked_bytes: 0,
+            total_bytes: 0,
         });
         let _ = tx.send(ProgressEvent::Stage {
             label: format!("Hashing 0/{} files", total_files),

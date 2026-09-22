@@ -289,6 +289,8 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
             total_files,
             checked_parts: 0,
             total_parts,
+            checked_bytes: 0,
+            total_bytes: 0,
         });
         let _ = tx.send(ProgressEvent::Stage {
             label: format!("Hashing 0/{} files", total_files),

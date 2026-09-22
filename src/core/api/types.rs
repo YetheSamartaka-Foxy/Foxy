@@ -74,6 +74,10 @@ pub enum ProgressEvent {
         total_files: usize,
         checked_parts: usize,
         total_parts: usize,
+        /// Estimated bytes covered so far; 0 of 0 when the sender does not
+        /// track bytes, and consumers then fall back to parts.
+        checked_bytes: u64,
+        total_bytes: u64,
     },
     DownloadMod {
         mod_name: String,

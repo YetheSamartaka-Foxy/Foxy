@@ -619,6 +619,7 @@ impl Foxy {
                         .saturating_add(merged_bytes_done.saturating_sub(prev_bytes_done));
                     self.recheck_hash_counter = None;
                     self.recheck_hash_part_counter = None;
+                    self.recheck_hash_byte_counter = None;
                     self.update_download_speed();
                     self.needs_repaint = true;
                 }
@@ -627,12 +628,16 @@ impl Foxy {
                     total_files,
                     checked_parts,
                     total_parts,
+                    checked_bytes,
+                    total_bytes,
                 } if self.current_sync_mode == Some(SyncMode::Download) => {
                     if self.download_transfer_progress_active() {
                         continue;
                     }
                     self.recheck_hash_counter = Some((*checked_files, *total_files));
                     self.recheck_hash_part_counter = Some((*checked_parts, *total_parts));
+                    self.recheck_hash_byte_counter =
+                        (*total_bytes > 0).then_some((*checked_bytes, *total_bytes));
                     self.needs_repaint = true;
                 }
                 ProgressEvent::RecheckHashProgress {
@@ -640,6 +645,8 @@ impl Foxy {
                     total_files,
                     checked_parts,
                     total_parts,
+                    checked_bytes,
+                    total_bytes,
                 } if matches!(
                     self.current_sync_mode,
                     Some(
@@ -652,6 +659,8 @@ impl Foxy {
                 {
                     self.recheck_hash_counter = Some((*checked_files, *total_files));
                     self.recheck_hash_part_counter = Some((*checked_parts, *total_parts));
+                    self.recheck_hash_byte_counter =
+                        (*total_bytes > 0).then_some((*checked_bytes, *total_bytes));
                     // Throttle repaints for hash progress to avoid overwhelming
                     // the renderer during heavy operations (thousands of events).
                     let now = Instant::now();
@@ -1079,6 +1088,7 @@ impl Foxy {
                     self.recheck_stage_percent = None;
                     self.recheck_hash_counter = None;
                     self.recheck_hash_part_counter = None;
+                    self.recheck_hash_byte_counter = None;
                     self.recheck_hash_estimate = None;
                     self.memory_diagnostics_last_logged_stage_key = None;
                     if self.syncing_repository.is_none() && !self.deferred_fs_scan.is_empty() {
@@ -1117,6 +1127,7 @@ impl Foxy {
                             }
                             self.recheck_hash_counter = None;
                             self.recheck_hash_part_counter = None;
+                            self.recheck_hash_byte_counter = None;
                         } else if label == "Hashing..." {
                             if self.hash_stage_started_at.is_none() {
                                 self.hash_stage_started_at = Some(now);
@@ -1169,6 +1180,7 @@ impl Foxy {
                         if !Self::stage_label_uses_hash_counter(label) {
                             self.recheck_hash_counter = None;
                             self.recheck_hash_part_counter = None;
+                            self.recheck_hash_byte_counter = None;
                             self.recheck_hash_estimate = None;
                         }
                         self.needs_repaint = true;

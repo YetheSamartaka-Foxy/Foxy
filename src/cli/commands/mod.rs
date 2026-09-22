@@ -533,6 +533,7 @@ fn run_repository_sync(
                     total_files,
                     checked_parts,
                     total_parts,
+                    ..
                 } => {
                     if !quiet && last_print.elapsed() >= Duration::from_millis(300) {
                         if total_parts > 0 {
