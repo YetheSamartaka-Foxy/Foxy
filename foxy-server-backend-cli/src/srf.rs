@@ -1,4 +1,5 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
+use serde_json::Value;
 use std::path::Path;
 
 use crate::cli::GenerationMode;
@@ -9,6 +10,25 @@ use crate::types::{
 };
 
 pub const FOXY_MODE_VERSION: &str = "FoxyModeV1";
+
+/// Read back a generated manifest (`repo.json`, `foxy_addons.json`,
+/// `foxy_addon.json`, `mod.srf`).
+///
+/// Published manifests are often hand-edited on the server, so a UTF-8 BOM is
+/// stripped the way the client's fetch path does instead of failing with a bare
+/// `expected value at line 1 column 1`.
+pub fn read_manifest(path: &Path) -> Result<Value> {
+    let bytes =
+        std::fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    if bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF]) {
+        bail!(
+            "{} is UTF-16 encoded; save it as UTF-8 JSON",
+            path.display()
+        );
+    }
+    let json = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&bytes);
+    serde_json::from_slice(json).with_context(|| format!("Failed to parse {}", path.display()))
+}
 
 // ---------------------------------------------------------------------------
 // SwiftyMode: mod.srf
@@ -267,6 +287,22 @@ pub fn copy_and_hash_image(image_path: &str, base: &Path, output_dir: &Path) -> 
 mod tests {
     use super::*;
     use crate::types::{Checksums, FilePart, ModFile};
+
+    #[test]
+    fn read_manifest_accepts_a_utf8_bom_and_names_bad_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("repo.json");
+        std::fs::write(&path, b"\xEF\xBB\xBF{\"repoName\":\"Test\"}").unwrap();
+        assert_eq!(read_manifest(&path).unwrap()["repoName"], "Test");
+
+        std::fs::write(&path, b"\xFF\xFE{\0").unwrap();
+        let err = format!("{:#}", read_manifest(&path).unwrap_err());
+        assert!(err.contains("UTF-16"), "{err}");
+
+        std::fs::write(&path, b"not json").unwrap();
+        let err = format!("{:#}", read_manifest(&path).unwrap_err());
+        assert!(err.contains("repo.json"), "{err}");
+    }
 
     #[test]
     fn mod_srf_serializes_swifty_compatibility_fields() {

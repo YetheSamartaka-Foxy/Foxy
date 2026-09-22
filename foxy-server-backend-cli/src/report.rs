@@ -1,10 +1,10 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::json;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::output;
+use crate::{output, srf};
 
 #[derive(Clone)]
 pub struct ModState {
@@ -44,14 +44,13 @@ pub fn snapshot(output: &Path) -> Result<Snapshot> {
 }
 
 fn read_repo(dir: &Path, prefix: &str, result: &mut Snapshot) -> Result<()> {
-    let repo: Value = serde_json::from_slice(&std::fs::read(dir.join("repo.json"))?)?;
+    let repo = srf::read_manifest(&dir.join("repo.json"))?;
     let manifest = if repo["foxyMode"].is_string() {
         dir.join("foxy_addons.json")
     } else {
         dir.join("repo.json")
     };
-    let value: Value = serde_json::from_slice(&std::fs::read(&manifest)?)
-        .with_context(|| format!("Failed to parse {}", manifest.display()))?;
+    let value = srf::read_manifest(&manifest)?;
     for list in ["requiredMods", "optionalMods"] {
         for item in value[list].as_array().into_iter().flatten() {
             let Some(name) = item["modName"].as_str() else {
@@ -60,8 +59,7 @@ fn read_repo(dir: &Path, prefix: &str, result: &mut Snapshot) -> Result<()> {
             let checksum = item["checkSum"].as_str().unwrap_or_default().to_string();
             let mod_dir = dir.join(name);
             let bytes = if mod_dir.join("foxy_addon.json").is_file() {
-                let addon: Value =
-                    serde_json::from_slice(&std::fs::read(mod_dir.join("foxy_addon.json"))?)?;
+                let addon = srf::read_manifest(&mod_dir.join("foxy_addon.json"))?;
                 addon["files"]
                     .as_array()
                     .into_iter()
@@ -69,8 +67,7 @@ fn read_repo(dir: &Path, prefix: &str, result: &mut Snapshot) -> Result<()> {
                     .filter_map(|file| file["length"].as_u64())
                     .sum()
             } else if mod_dir.join("mod.srf").is_file() {
-                let addon: Value =
-                    serde_json::from_slice(&std::fs::read(mod_dir.join("mod.srf"))?)?;
+                let addon = srf::read_manifest(&mod_dir.join("mod.srf"))?;
                 addon["Files"]
                     .as_array()
                     .into_iter()

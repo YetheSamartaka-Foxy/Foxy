@@ -5,7 +5,7 @@ use std::path::Path;
 
 use crate::cli::GenerationMode;
 use crate::types::ResolvedMod;
-use crate::{hash, output};
+use crate::{hash, output, srf};
 
 pub fn verify(output_dir: &Path) -> Result<()> {
     let mut repositories = 0;
@@ -36,14 +36,11 @@ pub fn verify(output_dir: &Path) -> Result<()> {
 }
 
 fn verify_repo(dir: &Path) -> Result<usize> {
-    let repo: Value = serde_json::from_slice(&std::fs::read(dir.join("repo.json"))?)?;
+    let repo = srf::read_manifest(&dir.join("repo.json"))?;
     let foxy_path = dir.join("foxy_addons.json");
     let has_foxy = repo["foxyMode"].is_string();
     let foxy: Option<Value> = if has_foxy {
-        Some(serde_json::from_slice(
-            &std::fs::read(&foxy_path)
-                .with_context(|| format!("Missing {}", foxy_path.display()))?,
-        )?)
+        Some(srf::read_manifest(&foxy_path)?)
     } else {
         None
     };
@@ -92,16 +89,12 @@ fn verify_repo(dir: &Path) -> Result<usize> {
             )?;
             let mut actual = actual.into_iter().next().context("No hashed mod")?;
             let addon: Option<Value> = if mode != GenerationMode::Swifty {
-                Some(serde_json::from_slice(&std::fs::read(
-                    path.join("foxy_addon.json"),
-                )?)?)
+                Some(srf::read_manifest(&path.join("foxy_addon.json"))?)
             } else {
                 None
             };
             let srf: Option<Value> = if mode != GenerationMode::Foxy {
-                Some(serde_json::from_slice(&std::fs::read(
-                    path.join("mod.srf"),
-                )?)?)
+                Some(srf::read_manifest(&path.join("mod.srf"))?)
             } else {
                 None
             };
@@ -170,15 +163,15 @@ fn verify_repo(dir: &Path) -> Result<usize> {
             if computed != expected {
                 bail!("Checksum mismatch for {}", path.display());
             }
-            if let Some(addon) = &addon {
-                if addon["checksum"].as_str() != Some(actual.checksums.unwrap_blake3()) {
-                    bail!("Per-mod manifest checksum mismatch for {}", path.display());
-                }
+            if let Some(addon) = &addon
+                && addon["checksum"].as_str() != Some(actual.checksums.unwrap_blake3())
+            {
+                bail!("Per-mod manifest checksum mismatch for {}", path.display());
             }
-            if let Some(srf) = &srf {
-                if srf["Checksum"].as_str() != Some(actual.checksums.unwrap_md5()) {
-                    bail!("Swifty manifest checksum mismatch for {}", path.display());
-                }
+            if let Some(srf) = &srf
+                && srf["Checksum"].as_str() != Some(actual.checksums.unwrap_md5())
+            {
+                bail!("Swifty manifest checksum mismatch for {}", path.display());
             }
             if mode == GenerationMode::Hybrid {
                 let listed = repo[list]
