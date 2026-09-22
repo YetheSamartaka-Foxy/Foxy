@@ -1,5 +1,5 @@
 use super::part_hashes::{
-    HashRunCounters, PartHashProgress, PartSpanSource, calculate_part_hashes,
+    HashRunCounters, PartHashProgress, PartReadOptions, PartSpanSource, calculate_part_hashes,
 };
 use super::*;
 use crate::core::utils::content_hash::{
@@ -880,9 +880,11 @@ pub(super) async fn recalculate_parts_for_jobs(
                             parts_only,
                             &file_path,
                             sem,
-                            span_source,
-                            game_formats,
-                            hash_io.part_reader_capacity(),
+                            PartReadOptions {
+                                span_source,
+                                game_formats,
+                                reader_capacity: hash_io.part_reader_capacity(),
+                            },
                             part_progress,
                             cancel.clone(),
                         )

@@ -117,6 +117,15 @@ pub(super) const HASH_READER_CAPACITY: usize = 4 * 1024 * 1024;
 /// larger request pays for its seek with four times more data.
 pub(super) const ROTATIONAL_HASH_READER_CAPACITY: usize = 16 * 1024 * 1024;
 
+/// How one file's parts are located and read.
+#[derive(Clone, Copy)]
+pub(super) struct PartReadOptions<'a> {
+    pub(super) span_source: PartSpanSource,
+    /// The active game's declared container formats.
+    pub(super) game_formats: &'a [&'static str],
+    pub(super) reader_capacity: usize,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum PartSpanSource {
     #[default]
@@ -128,12 +137,15 @@ pub(super) async fn calculate_part_hashes(
     parts: Vec<FoxyModFilePart>,
     file_path: &str,
     semaphore: Arc<Semaphore>,
-    span_source: PartSpanSource,
-    game_formats: &[&'static str],
-    reader_capacity: usize,
+    read: PartReadOptions<'_>,
     progress: Option<PartHashProgress>,
     cancel: Option<watch::Receiver<bool>>,
 ) -> PartHashCalculation {
+    let PartReadOptions {
+        span_source,
+        game_formats,
+        reader_capacity,
+    } = read;
     let pbo_name = Path::new(file_path)
         .file_name()
         .and_then(|name| name.to_str())
@@ -627,9 +639,11 @@ mod tests {
             parts,
             file.path().to_str().unwrap(),
             Arc::new(Semaphore::new(1)),
-            PartSpanSource::DetectLocalLayout,
-            &[foxy_formats::PBO_FORMAT_ID],
-            HASH_READER_CAPACITY,
+            PartReadOptions {
+                span_source: PartSpanSource::DetectLocalLayout,
+                game_formats: &[foxy_formats::PBO_FORMAT_ID],
+                reader_capacity: HASH_READER_CAPACITY,
+            },
             None,
             None,
         )
@@ -682,9 +696,11 @@ mod tests {
             parts,
             file.path().to_str().unwrap(),
             Arc::new(Semaphore::new(1)),
-            PartSpanSource::DetectLocalLayout,
-            &[foxy_formats::PBO_FORMAT_ID],
-            HASH_READER_CAPACITY,
+            PartReadOptions {
+                span_source: PartSpanSource::DetectLocalLayout,
+                game_formats: &[foxy_formats::PBO_FORMAT_ID],
+                reader_capacity: HASH_READER_CAPACITY,
+            },
             None,
             None,
         )
@@ -723,9 +739,11 @@ mod tests {
             parts,
             file.path().to_str().unwrap(),
             Arc::new(Semaphore::new(1)),
-            PartSpanSource::RemoteLayout,
-            &[],
-            HASH_READER_CAPACITY,
+            PartReadOptions {
+                span_source: PartSpanSource::RemoteLayout,
+                game_formats: &[],
+                reader_capacity: HASH_READER_CAPACITY,
+            },
             None,
             None,
         )
@@ -846,9 +864,11 @@ mod tests {
             Vec::new(),
             "ignored",
             Arc::new(Semaphore::new(1)),
-            PartSpanSource::RemoteLayout,
-            &[],
-            HASH_READER_CAPACITY,
+            PartReadOptions {
+                span_source: PartSpanSource::RemoteLayout,
+                game_formats: &[],
+                reader_capacity: HASH_READER_CAPACITY,
+            },
             None,
             None,
         )
@@ -876,9 +896,11 @@ mod tests {
             parts,
             missing.to_str().unwrap(),
             Arc::new(Semaphore::new(1)),
-            PartSpanSource::RemoteLayout,
-            &[],
-            HASH_READER_CAPACITY,
+            PartReadOptions {
+                span_source: PartSpanSource::RemoteLayout,
+                game_formats: &[],
+                reader_capacity: HASH_READER_CAPACITY,
+            },
             None,
             None,
         )
@@ -907,9 +929,11 @@ mod tests {
             parts,
             file.path().to_str().unwrap(),
             Arc::new(Semaphore::new(1)),
-            PartSpanSource::RemoteLayout,
-            &[],
-            HASH_READER_CAPACITY,
+            PartReadOptions {
+                span_source: PartSpanSource::RemoteLayout,
+                game_formats: &[],
+                reader_capacity: HASH_READER_CAPACITY,
+            },
             None,
             Some(cancel_rx),
         )
@@ -936,9 +960,11 @@ mod tests {
             parts,
             file.path().to_str().unwrap(),
             Arc::new(Semaphore::new(1)),
-            PartSpanSource::RemoteLayout,
-            &[],
-            HASH_READER_CAPACITY,
+            PartReadOptions {
+                span_source: PartSpanSource::RemoteLayout,
+                game_formats: &[],
+                reader_capacity: HASH_READER_CAPACITY,
+            },
             None,
             None,
         )
