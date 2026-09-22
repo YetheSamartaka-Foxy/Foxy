@@ -800,7 +800,11 @@ pub(super) async fn recalculate_parts_for_jobs(
     };
     let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    order_hash_jobs(&mut jobs);
+    if hash_io.rotational() {
+        order_hash_jobs_physically(&mut jobs).await;
+    } else {
+        order_hash_jobs(&mut jobs);
+    }
     let progress_sender = progress_tx.cloned();
     let cancel_receiver = cancel_rx.cloned();
     let results = stream::iter(jobs.into_iter().map(|job| {
@@ -958,6 +962,34 @@ fn order_hash_jobs(jobs: &mut [FileHashJob]) {
             (true, Reverse(0), job.file_path.to_ascii_lowercase())
         }
     });
+}
+
+/// Rotational storage reads jobs in on-disk order, one sweep of the platter,
+/// so the two workers read neighbouring files and every move of the head is
+/// short. Resident and unlocatable files follow in path order.
+async fn order_hash_jobs_physically(jobs: &mut Vec<FileHashJob>) {
+    let started = Instant::now();
+    let paths: Vec<String> = jobs.iter().map(|job| job.file_path.clone()).collect();
+    let clusters = tokio::task::spawn_blocking(move || {
+        paths
+            .iter()
+            .map(|path| super::physical_order::first_cluster(Path::new(path)))
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap_or_default();
+    if clusters.len() != jobs.len() {
+        order_hash_jobs(jobs);
+        return;
+    }
+    let located =
+        super::physical_order::sort_by_first_cluster(jobs, clusters, |job| job.file_path.as_str());
+    info!(
+        "Hash job physical order: files={} located={} elapsed={:.3}s",
+        jobs.len(),
+        located,
+        started.elapsed().as_secs_f64()
+    );
 }
 
 fn job_estimated_bytes(job: &FileHashJob) -> u64 {

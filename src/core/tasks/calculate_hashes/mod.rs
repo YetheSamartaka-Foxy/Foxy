@@ -43,6 +43,7 @@ mod file_hashes;
 mod format_layout;
 mod part_hashes;
 mod persistence;
+mod physical_order;
 mod pipeline;
 mod propagation;
 mod scheduling;
