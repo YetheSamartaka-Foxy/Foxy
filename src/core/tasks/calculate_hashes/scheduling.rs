@@ -785,8 +785,7 @@ pub(super) async fn recalculate_parts_for_jobs(
     };
     let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    // Prioritize heavy files first so big PBOs are not starved behind many tiny 1-part files.
-    jobs.sort_by_key(|job| Reverse(job.indexed_parts.len()));
+    order_hash_jobs(&mut jobs);
     let progress_sender = progress_tx.cloned();
     let cancel_receiver = cancel_rx.cloned();
     let results = stream::iter(jobs.into_iter().map(|job| {
@@ -924,6 +923,23 @@ pub(super) async fn recalculate_parts_for_jobs(
     let was_cancelled =
         cancelled.load(Ordering::Relaxed) || cancel_rx.as_ref().is_some_and(|rx| *rx.borrow());
     (results, was_cancelled)
+}
+
+/// Below this size a file costs about as much in seeking as in reading on a
+/// rotational disk.
+const SMALL_HASH_JOB_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Heavy files first so big archives are not starved behind many tiny files,
+/// then the small-file tail in path order, which keeps the files of one addon
+/// (downloaded together) next to each other on disk.
+fn order_hash_jobs(jobs: &mut [FileHashJob]) {
+    jobs.sort_by_cached_key(|job| {
+        if job_estimated_bytes(job) >= SMALL_HASH_JOB_BYTES {
+            (false, Reverse(job.indexed_parts.len()), String::new())
+        } else {
+            (true, Reverse(0), job.file_path.to_ascii_lowercase())
+        }
+    });
 }
 
 fn job_estimated_bytes(job: &FileHashJob) -> u64 {
@@ -2586,6 +2602,35 @@ mod tests {
     }
 
     // ── job_estimated_bytes ─────────────────────────────────────────────
+
+    #[test]
+    fn hash_jobs_run_heavy_first_then_small_files_in_path_order() {
+        let job = |path: &str, parts: usize, bytes_per_part: u64| FileHashJob {
+            file_path: path.to_string(),
+            ..test_job(parts, bytes_per_part)
+        };
+        let mut jobs = vec![
+            job("D:/repo/@b/addons/small.pbo", 40, 1024),
+            job("D:/repo/@a/addons/big.pbo", 10, 8 * 1024 * 1024),
+            job("D:/repo/@A/mod.cpp", 1, 100),
+            job("D:/repo/@c/addons/huge.pbo", 400, 1024 * 1024),
+            job("D:/repo/@b/addons/small.pbo.bisign", 1, 500),
+        ];
+
+        order_hash_jobs(&mut jobs);
+
+        let order: Vec<&str> = jobs.iter().map(|job| job.file_path.as_str()).collect();
+        assert_eq!(
+            order,
+            [
+                "D:/repo/@c/addons/huge.pbo",
+                "D:/repo/@a/addons/big.pbo",
+                "D:/repo/@A/mod.cpp",
+                "D:/repo/@b/addons/small.pbo",
+                "D:/repo/@b/addons/small.pbo.bisign",
+            ]
+        );
+    }
 
     #[test]
     fn job_estimated_bytes_sums_part_lengths() {
