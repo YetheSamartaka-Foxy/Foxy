@@ -102,29 +102,14 @@ pub(crate) fn fast_file_content_hash_from_reader<R: std::io::Read + std::io::See
     reader: &mut R,
     metadata: &std::fs::Metadata,
 ) -> std::io::Result<String> {
-    const SAMPLE_CHUNK_BYTES: usize = 16 * 1024;
-    const SAMPLE_SLOTS: u64 = 8;
-
     let file_len = metadata.len();
-    let modified_ns = metadata
-        .modified()
-        .ok()
-        .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"FOXY_FILE_CONTENT_HASH_V2");
-    hasher.update(&file_len.to_le_bytes());
-    hasher.update(&modified_ns.to_le_bytes());
-
+    let mut hasher = fingerprint_hasher(metadata);
     if file_len == 0 {
         return Ok(blake3_hex(hasher));
     }
 
-    let sample_chunk = SAMPLE_CHUNK_BYTES as u64;
-    let mut sample_buf = vec![0u8; SAMPLE_CHUNK_BYTES];
-
-    if file_len <= sample_chunk.saturating_mul(SAMPLE_SLOTS) {
+    let mut sample_buf = vec![0u8; FINGERPRINT_SAMPLE_BYTES];
+    if fingerprint_hashes_whole_file(file_len) {
         reader.seek(std::io::SeekFrom::Start(0))?;
         loop {
             let read = reader.read(&mut sample_buf)?;
@@ -137,18 +122,7 @@ pub(crate) fn fast_file_content_hash_from_reader<R: std::io::Read + std::io::See
         return Ok(blake3_hex(hasher));
     }
 
-    let max_offset = file_len.saturating_sub(sample_chunk);
-    let mut last_offset = u64::MAX;
-    for slot in 0..SAMPLE_SLOTS {
-        let offset = if SAMPLE_SLOTS <= 1 {
-            0
-        } else {
-            max_offset.saturating_mul(slot) / (SAMPLE_SLOTS - 1)
-        };
-        if offset == last_offset {
-            continue;
-        }
-        last_offset = offset;
+    for offset in fingerprint_sample_offsets(file_len) {
         reader.seek(std::io::SeekFrom::Start(offset))?;
         let read = reader.read(&mut sample_buf)?;
         hasher.update(&offset.to_le_bytes());
@@ -157,6 +131,143 @@ pub(crate) fn fast_file_content_hash_from_reader<R: std::io::Read + std::io::See
     }
 
     Ok(blake3_hex(hasher))
+}
+
+const FINGERPRINT_SAMPLE_BYTES: usize = 16 * 1024;
+const FINGERPRINT_SLOTS: u64 = 8;
+
+fn fingerprint_hasher(metadata: &std::fs::Metadata) -> blake3::Hasher {
+    let modified_ns = metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"FOXY_FILE_CONTENT_HASH_V2");
+    hasher.update(&metadata.len().to_le_bytes());
+    hasher.update(&modified_ns.to_le_bytes());
+    hasher
+}
+
+fn fingerprint_hashes_whole_file(file_len: u64) -> bool {
+    file_len <= (FINGERPRINT_SAMPLE_BYTES as u64).saturating_mul(FINGERPRINT_SLOTS)
+}
+
+/// Start offsets of the sampled blocks of a file above the whole-file limit,
+/// each a full [`FINGERPRINT_SAMPLE_BYTES`] inside the file.
+fn fingerprint_sample_offsets(file_len: u64) -> Vec<u64> {
+    let max_offset = file_len.saturating_sub(FINGERPRINT_SAMPLE_BYTES as u64);
+    let mut offsets: Vec<u64> = (0..FINGERPRINT_SLOTS)
+        .map(|slot| max_offset.saturating_mul(slot) / (FINGERPRINT_SLOTS - 1))
+        .collect();
+    offsets.dedup();
+    offsets
+}
+
+/// Collects the blocks [`fast_file_content_hash`] samples while a caller
+/// streams the file for its own reasons, so the fingerprint costs no second
+/// read and does not depend on the page cache still holding the file.
+pub(crate) struct FingerprintTap {
+    hasher: blake3::Hasher,
+    whole_file: bool,
+    slots: Vec<TapSlot>,
+}
+
+struct TapSlot {
+    offset: u64,
+    bytes: Vec<u8>,
+    /// Disjoint, sorted byte ranges of `bytes` seen so far.
+    covered: Vec<(usize, usize)>,
+}
+
+impl TapSlot {
+    fn cover(&mut self, start: usize, end: usize) {
+        self.covered.push((start, end));
+        self.covered.sort_unstable();
+        let mut merged: Vec<(usize, usize)> = Vec::with_capacity(self.covered.len());
+        for (start, end) in self.covered.drain(..) {
+            match merged.last_mut() {
+                Some(last) if start <= last.1 => last.1 = last.1.max(end),
+                _ => merged.push((start, end)),
+            }
+        }
+        self.covered = merged;
+    }
+
+    fn complete(&self) -> bool {
+        self.covered == [(0, self.bytes.len())]
+    }
+}
+
+impl FingerprintTap {
+    pub(crate) fn new(metadata: &std::fs::Metadata) -> Self {
+        let file_len = metadata.len();
+        let whole_file = fingerprint_hashes_whole_file(file_len);
+        let slots = if file_len == 0 {
+            Vec::new()
+        } else if whole_file {
+            vec![TapSlot {
+                offset: 0,
+                bytes: vec![0; file_len as usize],
+                covered: Vec::new(),
+            }]
+        } else {
+            fingerprint_sample_offsets(file_len)
+                .into_iter()
+                .map(|offset| TapSlot {
+                    offset,
+                    bytes: vec![0; FINGERPRINT_SAMPLE_BYTES],
+                    covered: Vec::new(),
+                })
+                .collect()
+        };
+        Self {
+            hasher: fingerprint_hasher(metadata),
+            whole_file,
+            slots,
+        }
+    }
+
+    /// Record `data`, which the caller read from `offset` in the file.
+    pub(crate) fn observe(&mut self, offset: u64, data: &[u8]) {
+        let data_end = offset.saturating_add(data.len() as u64);
+        for slot in &mut self.slots {
+            let slot_end = slot.offset + slot.bytes.len() as u64;
+            let start = offset.max(slot.offset);
+            let end = data_end.min(slot_end);
+            if start >= end {
+                continue;
+            }
+            let into = (start - slot.offset) as usize;
+            let from = (start - offset) as usize;
+            let len = (end - start) as usize;
+            slot.bytes[into..into + len].copy_from_slice(&data[from..from + len]);
+            slot.cover(into, into + len);
+        }
+    }
+
+    /// The fingerprint, or `None` when some sampled byte was never observed
+    /// and the caller has to read the samples itself.
+    pub(crate) fn finish(self) -> Option<String> {
+        if !self.slots.iter().all(TapSlot::complete) {
+            return None;
+        }
+        let mut hasher = self.hasher;
+        for slot in &self.slots {
+            if self.whole_file {
+                for chunk in slot.bytes.chunks(FINGERPRINT_SAMPLE_BYTES) {
+                    hasher.update(&(chunk.len() as u64).to_le_bytes());
+                    hasher.update(chunk);
+                }
+            } else {
+                hasher.update(&slot.offset.to_le_bytes());
+                hasher.update(&(slot.bytes.len() as u64).to_le_bytes());
+                hasher.update(&slot.bytes);
+            }
+        }
+        Some(blake3_hex(hasher))
+    }
 }
 
 /// [`fast_file_content_hash_from_reader`] for a handle wrapped in a large
@@ -944,6 +1055,67 @@ mod tests {
         fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
             self.inner.seek(pos)
         }
+    }
+
+    #[test]
+    fn fingerprint_tap_matches_the_path_fingerprint_whatever_the_read_pattern() {
+        let dir = tempfile::tempdir().unwrap();
+        let sizes = [
+            1usize,
+            16 * 1024,
+            128 * 1024,
+            128 * 1024 + 1,
+            700_001,
+            5 * 1024 * 1024 + 7,
+        ];
+        for size in sizes {
+            let path = dir.path().join(format!("tap-{size}.bin"));
+            let bytes: Vec<u8> = (0..size).map(|i| (i * 7 % 253) as u8).collect();
+            std::fs::write(&path, &bytes).unwrap();
+            let metadata = std::fs::metadata(&path).unwrap();
+            let expected = fast_file_content_hash(path.to_str().unwrap()).unwrap();
+
+            for chunk in [1000usize, 64 * 1024, 5_000_000] {
+                let mut tap = FingerprintTap::new(&metadata);
+                for (index, piece) in bytes.chunks(chunk).enumerate() {
+                    tap.observe((index * chunk) as u64, piece);
+                }
+                assert_eq!(
+                    tap.finish().as_deref(),
+                    Some(expected.as_str()),
+                    "size {size} chunk {chunk}"
+                );
+            }
+
+            let mut reversed = FingerprintTap::new(&metadata);
+            let pieces: Vec<(usize, &[u8])> = bytes
+                .chunks(3000)
+                .enumerate()
+                .map(|(index, piece)| (index * 3000, piece))
+                .collect();
+            for (offset, piece) in pieces.iter().rev() {
+                reversed.observe(*offset as u64, piece);
+            }
+            reversed.observe(0, &bytes[..bytes.len().min(5000)]);
+            assert_eq!(
+                reversed.finish().as_deref(),
+                Some(expected.as_str()),
+                "size {size} reversed"
+            );
+        }
+    }
+
+    #[test]
+    fn fingerprint_tap_gives_up_when_a_sample_was_never_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gap.bin");
+        let bytes = vec![7u8; 1024 * 1024];
+        std::fs::write(&path, &bytes).unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        let mut tap = FingerprintTap::new(&metadata);
+        tap.observe(0, &bytes[..450_000]);
+        tap.observe(450_100, &bytes[450_100..]);
+        assert!(tap.finish().is_none());
     }
 
     #[test]

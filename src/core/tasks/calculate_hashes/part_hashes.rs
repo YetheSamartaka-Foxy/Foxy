@@ -26,9 +26,9 @@ pub(super) struct PartHashMetrics {
 pub(super) struct PartHashCalculation {
     pub(super) parts: Vec<FoxyModFilePart>,
     pub(super) metrics: PartHashMetrics,
-    /// Sampled fingerprint taken right after the parts were read, while the
-    /// file was still in the page cache. `None` when the file could not be read
-    /// or the pass was cancelled before it finished.
+    /// Sampled fingerprint built from the bytes the hash pass read, re-reading
+    /// only samples the parts did not cover. `None` when the file could not be
+    /// read or the pass was cancelled before it finished.
     pub(super) content_hash: Option<String>,
 }
 
@@ -284,6 +284,7 @@ pub(super) async fn calculate_part_hashes(
         // Fixed-size buffer reused across all parts - caps memory regardless of part size
         const HASH_BUF_SIZE: usize = 64 * 1024;
         let mut buf = vec![0u8; HASH_BUF_SIZE];
+        let mut fingerprint = crate::core::utils::content_hash::FingerprintTap::new(&file_metadata);
         // Track consecutive read failures; after too many, skip remaining parts
         // to avoid log spam and wasted I/O on corrupted/truncated files.
         const MAX_READ_FAILURES: usize = 3;
@@ -384,6 +385,10 @@ pub(super) async fn calculate_part_hashes(
                     break;
                 }
                 hasher.update(&buf[..chunk]);
+                fingerprint.observe(
+                    chosen_span.start + (total_len - remaining) as u64,
+                    &buf[..chunk],
+                );
                 remaining -= chunk;
             }
             if read_ok {
@@ -429,11 +434,13 @@ pub(super) async fn calculate_part_hashes(
         let content_hash = if cancelled || consecutive_read_failures >= MAX_READ_FAILURES {
             None
         } else {
-            crate::core::utils::content_hash::fast_file_content_hash_from_buffered(
-                &mut reader,
-                &file_metadata,
-            )
-            .ok()
+            fingerprint.finish().or_else(|| {
+                crate::core::utils::content_hash::fast_file_content_hash_from_buffered(
+                    &mut reader,
+                    &file_metadata,
+                )
+                .ok()
+            })
         };
         (indexed_parts, content_hash, layout_metrics)
     })
