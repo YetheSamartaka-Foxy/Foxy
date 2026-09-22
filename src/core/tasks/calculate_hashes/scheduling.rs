@@ -330,9 +330,13 @@ fn is_large_part_workload(job_count: usize, total_parts: usize) -> bool {
     total_parts >= 128 && avg_parts_per_file(job_count, total_parts) > 32.0
 }
 
+/// Hash workers on a rotational disk with a large-part workload. With large
+/// reads a single stream keeps the head on one file instead of alternating.
+const HDD_LARGE_PART_WORKERS: usize = 1;
+
 fn apply_storage_limit(mut limits: HashSchedulerLimits, avg_parts: f64) -> HashSchedulerLimits {
     if limits.storage_class == HashStorageClass::Hdd && avg_parts > 32.0 {
-        let cap = 2usize;
+        let cap = HDD_LARGE_PART_WORKERS;
         limits.file_concurrency = limits.file_concurrency.min(cap).max(1);
         limits.global_part_concurrency = limits.global_part_concurrency.min(cap).max(1);
         limits.reason = format!(
@@ -2428,7 +2432,7 @@ mod tests {
     }
 
     #[test]
-    fn hdd_large_part_workload_caps_aggressive_to_two_workers() {
+    fn hdd_large_part_workload_caps_aggressive_workers() {
         let limits = hash_scheduler_limits_for_environment(
             100,
             10_000,
@@ -2436,8 +2440,8 @@ mod tests {
             normal_resources(),
             HashStorageClass::Hdd,
         );
-        assert_eq!(limits.file_concurrency, 2);
-        assert_eq!(limits.global_part_concurrency, 2);
+        assert_eq!(limits.file_concurrency, HDD_LARGE_PART_WORKERS);
+        assert_eq!(limits.global_part_concurrency, HDD_LARGE_PART_WORKERS);
         assert!(limits.reason.contains("hdd large-part cap"));
     }
 
@@ -2540,8 +2544,8 @@ mod tests {
             HashStorageClass::Hdd,
             "test",
         );
-        assert_eq!(limits.file_concurrency, 2);
-        assert_eq!(limits.global_part_concurrency, 2);
+        assert_eq!(limits.file_concurrency, HDD_LARGE_PART_WORKERS);
+        assert_eq!(limits.global_part_concurrency, HDD_LARGE_PART_WORKERS);
         assert!(limits.reason.contains("hdd large-part cap"));
     }
 
