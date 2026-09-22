@@ -95,8 +95,10 @@ Local content hashes must be file and folder based, not part based:
 
 Part checksums are not part of the quick content hash layer.
 
-The file fingerprint is taken by the hash pass itself, right after a file's
-parts were read and while it is still in the page cache, and handed to the
+The file fingerprint is taken by the hash pass itself: the part hasher copies
+the eight sampled blocks out of the bytes it streams (`FingerprintTap`), and
+reads a block back only when no part covered it, so the fingerprint costs no
+second read and does not depend on the page cache. It is handed to the
 content-hash refresh through the operation's `FoxyContext`
 (`record_fresh_file_content_hashes` / `take_fresh_file_content_hash`). A
 delta-patched file is fingerprinted the same way by the patch orchestrator
@@ -106,6 +108,15 @@ never sampled either. The refresh samples the disk only for files no hash
 pass in the same operation fingerprinted. On rotational media the eight
 sampled reads per file cost more than a minute per few thousand files once the pass has evicted them; the
 fingerprint describes the same bytes the tree hash does either way.
+
+Hash reads open files with the sequential-scan hint and parse an archive's
+layout through the same 4 MiB reader that hashes it (16 MiB on rotational
+storage), so the table of contents and the payload after it are one read.
+On rotational storage the jobs run in order of each file's first cluster, one
+sweep of the platter, with files that have no extent of their own after them
+in path order; other storage runs files of at least 16 MiB heaviest first and
+the small-file tail in path order. Order and read size never change which
+bytes are hashed.
 
 ### Download Target
 
