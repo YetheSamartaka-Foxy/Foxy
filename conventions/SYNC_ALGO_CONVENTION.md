@@ -110,15 +110,38 @@ sampled reads per file cost more than a minute per few thousand files once the p
 fingerprint describes the same bytes the tree hash does either way.
 
 Hash reads parse an archive's layout through the same reader that hashes it,
-so the table of contents and the payload after it are one read. The reader is
-4 MiB, or 128 MiB with the sequential-scan hint on rotational storage, where
-the two workers share one head and every seek must buy a long read; on SSD
-the hint cost about 9% on the full TFR Main recheck and is not used.
-On rotational storage the jobs run in order of each file's first cluster, one
-sweep of the platter, with files that have no extent of their own after them
-in path order; other storage runs files of at least 16 MiB heaviest first and
-the small-file tail in path order. Order and read size never change which
-bytes are hashed.
+so the table of contents and the payload after it are one read, and the
+parts are hashed straight out of the reader's buffer. Existing files
+(`PartSpanSource::DetectLocalLayout`) on a local disk are read around the
+Windows cache (`direct_read.rs`: `FILE_FLAG_NO_BUFFERING`, aligned blocks,
+several reads in flight on one overlapped handle, buffers pooled per run). On
+rotational storage a `DiskTurn` lets one file issue reads at a time, from its
+first read until its last is issued, so the head streams one file and the
+next file's first read queues behind the current file's last. Freshly
+downloaded files keep the cached reader, because their pages may still be
+dirty in the cache. The cached reader is 4 MiB, or 128 MiB with the
+sequential-scan hint on rotational storage; it is also the fallback when a
+non-cached open fails. On rotational storage the jobs run in order of each
+file's first cluster, one sweep of the platter, with files that have no
+extent of their own after them in path order; other storage runs files of at
+least 16 MiB heaviest first and the small-file tail in path order. On SSD the
+long part of an Auto run adjusts its worker count by throughput each second
+(`adaptive.rs`). Order, read size and reader never change which bytes are
+hashed.
+
+Every hash run of a sync operation also refreshes a verified-hash record
+(`verified_hashes.json` beside `database.db`, `verified_record.rs`): for each
+file whose parts all matched the remote at the remote offsets, and whose NTFS
+identity (volume, file id, size, write and change time, change-journal USN)
+was the same before and after the read, it stores that identity, a signature
+of the manifest's parts and the fingerprint. A whole-database wipe leaves the
+record in place. When the database holds no local state for a file, a sync
+other than an integrity recheck or a force redownload restores the file's
+parts from the record instead of reading it, but only while the identity and
+the parts signature are exactly as recorded. A repository's "wipe database
+entries" also drops its folder's entries, so the next check reads every file.
+The record proves the file was not written since it was read; it cannot see
+a sector that decays without a write, which only an integrity recheck finds.
 
 ### Download Target
 

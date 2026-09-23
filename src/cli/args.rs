@@ -1266,6 +1266,11 @@ pub enum RepoSyncMode {
 pub struct RepoWipeDbArgs {
     #[command(flatten)]
     pub selector: RepoSelectorArgs,
+    #[arg(
+        long,
+        help = "Keep the folder's verified-hash record, so the next check may restore unchanged files instead of reading them"
+    )]
+    pub keep_hash_record: bool,
 }
 
 #[derive(Args, Debug)]

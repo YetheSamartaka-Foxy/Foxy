@@ -23,6 +23,10 @@ pub(super) struct FileHashJob {
     pub(super) file_remote_checksum: String,
     pub(super) indexed_parts: Vec<(usize, FoxyModFilePart)>,
     pub(super) span_source: PartSpanSource,
+    /// The database already holds a local checksum for the file or a part.
+    pub(super) has_local_baseline: bool,
+    /// Capture the file identity around the hash, for the verified-hash record.
+    pub(super) capture_identity: bool,
 }
 
 pub(super) struct FileHashResult {
@@ -37,6 +41,9 @@ pub(super) struct FileHashResult {
     pub(super) parts_count: usize,
     pub(super) missing_file: bool,
     pub(super) part_metrics: super::part_hashes::PartHashMetrics,
+    /// Set when the file matched the remote and did not change while it was
+    /// read, for the verified-hash record.
+    pub(super) verified: Option<super::verified_record::VerifiedFile>,
 }
 
 #[derive(Clone, Copy)]
@@ -612,6 +619,10 @@ pub(super) fn build_file_hash_jobs(
                     .map(|p| (part_idx, p))
             })
             .collect();
+        let has_local_baseline = !file.local_checksum.is_empty()
+            || indexed_parts
+                .iter()
+                .any(|(_, part)| !part.local_checksum.is_empty());
         indexed_parts.sort_by_key(|(_, part)| part.data_order);
         jobs.push(FileHashJob {
             file_idx,
@@ -620,6 +631,8 @@ pub(super) fn build_file_hash_jobs(
             file_remote_checksum: file.remote_checksum.clone(),
             indexed_parts,
             span_source,
+            has_local_baseline,
+            capture_identity: false,
         });
     }
     jobs
@@ -881,6 +894,8 @@ pub(super) async fn recalculate_parts_for_jobs(
                 file_remote_checksum,
                 indexed_parts,
                 span_source,
+                has_local_baseline: _,
+                capture_identity,
             } = job;
             let parts_count = indexed_parts.len();
             if cancelled_flag.load(Ordering::Relaxed)
@@ -905,10 +920,27 @@ pub(super) async fn recalculate_parts_for_jobs(
                     parts_count,
                     missing_file: false,
                     part_metrics: Default::default(),
+                    verified: None,
                 };
             }
             let file_started = Instant::now();
             let missing_file = !Path::new(&file_path).exists();
+            let record_check = if capture_identity {
+                super::verified_record::capture_identity_async(&file_path)
+                    .await
+                    .map(|identity| {
+                        (
+                            identity,
+                            super::verified_record::parts_signature(
+                                &file_remote_checksum,
+                                &indexed_parts,
+                            ),
+                            file_remote_checksum.clone(),
+                        )
+                    })
+            } else {
+                None
+            };
             let (part_calculation, whole_file_checksum) =
                 if indexed_parts.is_empty() && !file_remote_checksum.is_empty() {
                     let (checksum, content_hash, metrics) = calculate_whole_file_checksum(
@@ -966,6 +998,24 @@ pub(super) async fn recalculate_parts_for_jobs(
                     .map(|((part_idx, _), updated_part)| (part_idx, updated_part))
                     .collect()
             };
+            let verified = match record_check {
+                Some((before, signature, remote_checksum))
+                    if super::verified_record::result_is_clean(
+                        &remote_checksum,
+                        &updated_parts,
+                        whole_file_checksum.as_deref(),
+                    ) =>
+                {
+                    let after = super::verified_record::capture_identity_async(&file_path).await;
+                    (after.as_ref() == Some(&before)).then_some(
+                        super::verified_record::VerifiedFile {
+                            identity: before,
+                            signature,
+                        },
+                    )
+                }
+                _ => None,
+            };
 
             // Parts report their own bytes; whole-file jobs and part lists
             // without lengths are counted here, once the file is done.
@@ -994,6 +1044,7 @@ pub(super) async fn recalculate_parts_for_jobs(
                 parts_count,
                 missing_file,
                 part_metrics: part_calculation.metrics,
+                verified,
             }
         }
     }))
@@ -1503,7 +1554,63 @@ pub(super) fn log_addon_hash_metrics(label: &str, data_tree: &Tree, results: &[F
     }
 }
 
+/// Hashes `jobs`, restoring from the operation's verified-hash record the
+/// files it proves untouched, and refreshing the record from what was read.
 pub(super) async fn recalculate_parts_for_jobs_with_profile(
+    mut jobs: Vec<FileHashJob>,
+    context: &FoxyContext,
+    requested_profile: HashIoProfilePreference,
+    sticky_auto_profile: Option<HashIoProfilePreference>,
+    progress_tx: Option<&Sender<ProgressEvent>>,
+    total_files: usize,
+    cancel_rx: Option<&watch::Receiver<bool>>,
+) -> (Vec<FileHashResult>, HashProfileDecision, bool) {
+    let Some(record) = context.verified_hash_record.clone() else {
+        return hash_jobs_with_profile(
+            jobs,
+            context,
+            requested_profile,
+            sticky_auto_profile,
+            progress_tx,
+            total_files,
+            cancel_rx,
+        )
+        .await;
+    };
+    for job in &mut jobs {
+        job.capture_identity = true;
+    }
+    let (mut restored, jobs) = super::verified_record::restore(&record, jobs).await;
+    let (mut results, decision, cancelled) = if jobs.is_empty() && !restored.is_empty() {
+        (
+            Vec::new(),
+            HashProfileDecision {
+                reason: "every file restored from the verified-hash record".to_string(),
+                sticky: false,
+                ..HashProfileDecision::manual(requested_profile)
+            },
+            false,
+        )
+    } else {
+        hash_jobs_with_profile(
+            jobs,
+            context,
+            requested_profile,
+            sticky_auto_profile,
+            progress_tx,
+            total_files.saturating_sub(restored.len()),
+            cancel_rx,
+        )
+        .await
+    };
+    if !cancelled {
+        super::verified_record::update(&record, restored.iter().chain(&results)).await;
+    }
+    results.append(&mut restored);
+    (results, decision, cancelled)
+}
+
+async fn hash_jobs_with_profile(
     mut jobs: Vec<FileHashJob>,
     context: &FoxyContext,
     requested_profile: HashIoProfilePreference,
@@ -2145,6 +2252,55 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn only_files_that_match_the_remote_carry_a_verified_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let job = |name: &str, content: &[u8], remote: &[u8]| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, content).unwrap();
+            FileHashJob {
+                file_path: path.to_str().unwrap().to_owned(),
+                file_length: content.len() as u64,
+                indexed_parts: vec![(
+                    0,
+                    FoxyModFilePart {
+                        remote_length: remote.len() as u64,
+                        remote_checksum: blake3::hash(remote).to_hex().to_uppercase(),
+                        ..Default::default()
+                    },
+                )],
+                capture_identity: true,
+                ..test_job(0, 0)
+            }
+        };
+        let jobs = vec![
+            job("clean.pbo", b"same bytes", b"same bytes"),
+            job("stale.pbo", b"old bytes!", b"new bytes!"),
+        ];
+        let (results, cancelled) = recalculate_parts_for_jobs(
+            jobs,
+            2,
+            2,
+            None,
+            HashRunProgress::new(2, 2, 20),
+            None,
+            WholeFileHashIo::new(HashIoProfilePreference::Auto, HashStorageClass::Ssd),
+        )
+        .await;
+        assert!(!cancelled);
+        let verified = |name: &str| {
+            results
+                .iter()
+                .find(|result| result.file_path.ends_with(name))
+                .unwrap()
+                .verified
+                .is_some()
+        };
+        assert!(verified("clean.pbo"));
+        assert!(!verified("stale.pbo"));
+    }
+
     fn test_job(parts: usize, bytes_per_part: u64) -> FileHashJob {
         FileHashJob {
             file_idx: 0,
@@ -2163,6 +2319,8 @@ mod tests {
                 })
                 .collect(),
             span_source: PartSpanSource::DetectLocalLayout,
+            has_local_baseline: false,
+            capture_identity: false,
         }
     }
 

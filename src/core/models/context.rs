@@ -63,6 +63,9 @@ pub(crate) struct FoxyContext {
     /// follows in the same operation to consume instead of re-sampling the
     /// file from a cold disk.
     fresh_file_content_hashes: Arc<Mutex<HashMap<u64, String>>>,
+    /// The verified-hash record this operation refreshes, and may restore from.
+    pub(crate) verified_hash_record:
+        Option<crate::core::tasks::calculate_hashes::VerifiedHashRecordUse>,
 }
 
 #[derive(Clone)]
@@ -96,6 +99,7 @@ impl FoxyContext {
             pending_download_targets: Arc::new(Mutex::new(Vec::new())),
             pending_patch_clear_ids: Arc::new(Mutex::new(Vec::new())),
             fresh_file_content_hashes: Arc::new(Mutex::new(HashMap::new())),
+            verified_hash_record: None,
         }
     }
 
@@ -278,6 +282,14 @@ impl FoxyContext {
 
     pub(crate) fn with_repository_space_shared_path(mut self, shared_path: Option<String>) -> Self {
         self.repository_space_shared_path = shared_path;
+        self
+    }
+
+    pub(crate) fn with_verified_hash_record(
+        mut self,
+        record: crate::core::tasks::calculate_hashes::VerifiedHashRecordUse,
+    ) -> Self {
+        self.verified_hash_record = Some(record);
         self
     }
 

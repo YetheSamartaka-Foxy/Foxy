@@ -288,6 +288,7 @@ impl Foxy {
                     &original_repo_address,
                     &original_repo_path_raw,
                     &original_repo_name,
+                    false,
                 );
             }
             if addr_changed {
@@ -299,7 +300,7 @@ impl Foxy {
             }
             if wipe_repository_db_entries {
                 info!("Wiping repository database entries from settings view");
-                self.wipe_repository_database_entries(repo_index);
+                self.wipe_repository_database_entries(repo_index, true);
             }
             if recheck_repository_integrity {
                 info!("Triggering full repository integrity recheck");

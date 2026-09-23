@@ -67,7 +67,9 @@ impl Foxy {
         });
     }
 
-    pub fn wipe_repository_database_entries(&mut self, repo_idx: usize) {
+    /// `forget_hash_record` also drops the folder's verified-hash record, so the
+    /// next check reads every file; the user wipe does, a measurement may not.
+    pub fn wipe_repository_database_entries(&mut self, repo_idx: usize, forget_hash_record: bool) {
         if self.repository_sync_active() || self.is_direct_download_running() {
             warn!("Repository database wipe ignored: sync worker is currently active");
             return;
@@ -97,6 +99,7 @@ impl Foxy {
             &normalized_url,
             &repo.path,
             &repo.name,
+            forget_hash_record,
         );
     }
 
@@ -237,6 +240,7 @@ impl Foxy {
         repository_url: &str,
         local_path: &str,
         repo_name: &str,
+        forget_hash_record: bool,
     ) {
         let normalized_url = Self::normalize_repo_url(repository_url);
 
@@ -274,6 +278,9 @@ impl Foxy {
         let repaint_ctx = self.repaint_ctx.clone();
         std::thread::spawn(move || {
             let started_at = Instant::now();
+            if forget_hash_record {
+                crate::core::tasks::calculate_hashes::forget_verified_hashes_under(&thread_path);
+            }
             let purge_result = match Runtime::new() {
                 Ok(rt) => rt
                     .block_on(purge_repository_db_only_by_url_and_path(

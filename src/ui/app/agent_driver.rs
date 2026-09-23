@@ -5097,7 +5097,11 @@ impl Foxy {
             }
             "wipe-repo-db" => {
                 let index = self.agent_gui_resolve_repo_index(params)?;
-                self.wipe_repository_database_entries(index);
+                let keep_hash_record = params
+                    .get("keep-hash-record")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                self.wipe_repository_database_entries(index, !keep_hash_record);
             }
             "save-benchmark" => {
                 let draft = self.benchmark_prompt.take().ok_or_else(|| {
@@ -5421,8 +5425,8 @@ const AGENT_ACTIONS: &[AgentAction] = &[
     AgentAction {
         name: "wipe-repo-db",
         destructive: true,
-        params: "repo-index",
-        summary: "Wipe a repository's database entries (busy reason repository-db-wipe)",
+        params: "repo-index, keep-hash-record?",
+        summary: "Wipe a repository's database entries and its verified-hash record, unless keep-hash-record is true (busy reason repository-db-wipe)",
     },
     AgentAction {
         name: "save-benchmark",

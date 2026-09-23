@@ -51,6 +51,7 @@ mod propagation;
 mod scheduling;
 mod segment_verified;
 mod storage_probe;
+mod verified_record;
 
 pub(crate) use context::RepositoryHashContext;
 pub(crate) use file_hashes::{
@@ -77,3 +78,4 @@ pub(crate) use segment_verified::{
     PatchedFileSegments, PatchedSegment, apply_segment_verified_files,
 };
 pub(crate) use storage_probe::STORAGE_READ_MEASUREMENT_UPSERT_SQL;
+pub(crate) use verified_record::{VerifiedHashRecordUse, forget_verified_hashes_under};

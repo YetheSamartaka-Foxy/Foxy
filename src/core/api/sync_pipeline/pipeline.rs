@@ -27,7 +27,7 @@ use crate::core::models::pending_update::fetch_pending_update_for_context;
 use crate::core::models::repository::load_repository_by_remote_url_and_local_path;
 use crate::core::tasks::calculate_hashes::{
     AddonHashMetrics, HashCalculationResult, HashPhaseTimings, PatchedFileSegments,
-    RepositoryHashContext, calculate_hashes_for_files_in_tree_with_profile,
+    RepositoryHashContext, VerifiedHashRecordUse, calculate_hashes_for_files_in_tree_with_profile,
     calculate_hashes_for_files_with_profile, calculate_hashes_with_tree_and_profile_cancellable,
     finalize_repository_hashes_from_mods, finalize_repository_hashes_from_tree,
     pre_propagate_sibling_checksums, propagate_checksums_to_siblings,
@@ -903,7 +903,10 @@ async fn run_repository_pipeline(
             .with_force_full_downloads(mode == SyncMode::Download && force_full_downloads)
             .with_target_local_path(local_path.clone())
             .with_repository_space_shared_path(repository_space_shared_path.clone())
-            .with_operation_id(operation_id.as_str()),
+            .with_operation_id(operation_id.as_str())
+            .with_verified_hash_record(VerifiedHashRecordUse::for_active_space(
+                mode != SyncMode::RecheckIntegrity && !force_redownload,
+            )),
     );
     summary.push(StageEntry::new("create_context", stage.elapsed()));
     stage = std::time::Instant::now();
@@ -962,7 +965,8 @@ async fn run_repository_pipeline(
                     .clone()
                     .with_download_target_queueing(builds_download_plan)
                     .with_target_local_path(local_path.clone())
-                    .with_repository_space_shared_path(repository_space_shared_path.clone()),
+                    .with_repository_space_shared_path(repository_space_shared_path.clone())
+                    .with_verified_hash_record(VerifiedHashRecordUse::for_active_space(true)),
             );
             summary.push(
                 StageEntry::new("part_rebuild_escalation", stage.elapsed())

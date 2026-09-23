@@ -1942,7 +1942,7 @@ impl Foxy {
                 self.delete_repository_by_index(idx, delete_local_files);
             }
             RepositoryContextConfirmAction::WipeRepositoryDb(idx) => {
-                self.wipe_repository_database_entries(idx);
+                self.wipe_repository_database_entries(idx, true);
             }
             RepositoryContextConfirmAction::ForceRedownload(idx) => {
                 self.force_redownload_repository(idx);

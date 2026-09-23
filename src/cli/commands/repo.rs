@@ -242,7 +242,7 @@ fn cmd_repo_wipe_db(cli: &CliArgs, args: RepoWipeDbArgs) -> Result<CommandSucces
         return Ok(CommandSuccess {
             action: "repo.wipe-db".to_string(),
             message: "Dry-run: repo wipe-db previewed".to_string(),
-            data: json!({"repository": repo.name, "repository_url": normalized, "dry_run": true}),
+            data: json!({"repository": repo.name, "repository_url": normalized, "dry_run": true, "keep_hash_record": args.keep_hash_record}),
             exit_code: exit_codes::SUCCESS,
         });
     }
@@ -253,11 +253,14 @@ fn cmd_repo_wipe_db(cli: &CliArgs, args: RepoWipeDbArgs) -> Result<CommandSucces
     runtime
         .block_on(purge_repository_db_only_by_url(&normalized))
         .map_err(|e| CommandError::operation("repo.wipe-db", format!("Failed: {}", e)))?;
+    if !args.keep_hash_record {
+        crate::core::tasks::calculate_hashes::forget_verified_hashes_under(&repo.path);
+    }
 
     Ok(CommandSuccess {
         action: "repo.wipe-db".to_string(),
         message: format!("Repository DB wiped for {}", repo.name),
-        data: json!({"repository": repo.name, "repository_url": normalized}),
+        data: json!({"repository": repo.name, "repository_url": normalized, "keep_hash_record": args.keep_hash_record}),
         exit_code: exit_codes::SUCCESS,
     })
 }
