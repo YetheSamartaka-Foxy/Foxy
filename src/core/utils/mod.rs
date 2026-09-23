@@ -16,3 +16,4 @@ pub mod resource_profile;
 pub mod resource_sampler;
 pub mod speed_of_light;
 pub mod storage_compat;
+pub mod thread_cpu;

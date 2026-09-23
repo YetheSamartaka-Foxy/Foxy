@@ -33,6 +33,7 @@ pub(crate) struct PipelineSummary {
     pub repo_url: String,
     pub overall_start: Instant,
     pub stages: Vec<StageEntry>,
+    thread_cpu_at_start: crate::core::utils::thread_cpu::ThreadCpuSnapshot,
 }
 
 impl PipelineSummary {
@@ -48,6 +49,7 @@ impl PipelineSummary {
             repo_url: repo_url.into(),
             overall_start: start,
             stages: Vec::new(),
+            thread_cpu_at_start: crate::core::utils::thread_cpu::snapshot(),
         }
     }
 
@@ -67,6 +69,15 @@ impl PipelineSummary {
             repo_label,
             self.stages.len(),
             total_secs
+        );
+        let (thread_groups, exited) = crate::core::utils::thread_cpu::breakdown(
+            &self.thread_cpu_at_start,
+            &crate::core::utils::thread_cpu::snapshot(),
+        );
+        info!(
+            "Pipeline thread CPU: op={} {}",
+            self.operation_id,
+            crate::core::utils::thread_cpu::describe(&thread_groups, exited)
         );
 
         // Calculate column widths based on actual content
