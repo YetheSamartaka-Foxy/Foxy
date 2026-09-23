@@ -888,6 +888,7 @@ pub(super) async fn recalculate_parts_for_jobs(
                                 span_source,
                                 game_formats,
                                 reader_capacity: hash_io.part_reader_capacity(),
+                                sequential_scan: hash_io.rotational(),
                             },
                             part_progress,
                             cancel.clone(),

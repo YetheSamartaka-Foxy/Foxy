@@ -124,6 +124,8 @@ pub(super) struct PartReadOptions<'a> {
     /// The active game's declared container formats.
     pub(super) game_formats: &'a [&'static str],
     pub(super) reader_capacity: usize,
+    /// Open with the sequential-scan hint, meant for rotational storage.
+    pub(super) sequential_scan: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -145,6 +147,7 @@ pub(super) async fn calculate_part_hashes(
         span_source,
         game_formats,
         reader_capacity,
+        sequential_scan,
     } = read;
     let pbo_name = Path::new(file_path)
         .file_name()
@@ -257,18 +260,22 @@ pub(super) async fn calculate_part_hashes(
     let estimated_bytes = metrics.estimated_bytes;
     let result = tokio::task::spawn_blocking(move || {
         let mut layout_metrics = LayoutMetrics::default();
-        let file =
-            match crate::core::utils::content_hash::open_for_sequential_read(&file_path_owned) {
-                Ok(f) => f,
-                Err(e) => {
-                    warn!("Failed to open file {}: {}", file_path_owned, e);
-                    let total_part_count = indexed_parts.len();
-                    if let Some(progress) = &blocking_progress {
-                        progress.mark_parts_done(total_part_count, estimated_bytes);
-                    }
-                    return (indexed_parts, None, layout_metrics);
+        let opened = if sequential_scan {
+            crate::core::utils::content_hash::open_for_sequential_read(&file_path_owned)
+        } else {
+            std::fs::File::open(&file_path_owned)
+        };
+        let file = match opened {
+            Ok(f) => f,
+            Err(e) => {
+                warn!("Failed to open file {}: {}", file_path_owned, e);
+                let total_part_count = indexed_parts.len();
+                if let Some(progress) = &blocking_progress {
+                    progress.mark_parts_done(total_part_count, estimated_bytes);
                 }
-            };
+                return (indexed_parts, None, layout_metrics);
+            }
+        };
 
         // A small file never fills a large buffer, so it does not allocate one.
         let capacity = usize::try_from(file_metadata.len())
@@ -647,6 +654,7 @@ mod tests {
                 span_source: PartSpanSource::DetectLocalLayout,
                 game_formats: &[foxy_formats::PBO_FORMAT_ID],
                 reader_capacity: HASH_READER_CAPACITY,
+                sequential_scan: false,
             },
             None,
             None,
@@ -704,6 +712,7 @@ mod tests {
                 span_source: PartSpanSource::DetectLocalLayout,
                 game_formats: &[foxy_formats::PBO_FORMAT_ID],
                 reader_capacity: HASH_READER_CAPACITY,
+                sequential_scan: false,
             },
             None,
             None,
@@ -747,6 +756,7 @@ mod tests {
                 span_source: PartSpanSource::RemoteLayout,
                 game_formats: &[],
                 reader_capacity: HASH_READER_CAPACITY,
+                sequential_scan: false,
             },
             None,
             None,
@@ -872,6 +882,7 @@ mod tests {
                 span_source: PartSpanSource::RemoteLayout,
                 game_formats: &[],
                 reader_capacity: HASH_READER_CAPACITY,
+                sequential_scan: false,
             },
             None,
             None,
@@ -904,6 +915,7 @@ mod tests {
                 span_source: PartSpanSource::RemoteLayout,
                 game_formats: &[],
                 reader_capacity: HASH_READER_CAPACITY,
+                sequential_scan: false,
             },
             None,
             None,
@@ -937,6 +949,7 @@ mod tests {
                 span_source: PartSpanSource::RemoteLayout,
                 game_formats: &[],
                 reader_capacity: HASH_READER_CAPACITY,
+                sequential_scan: false,
             },
             None,
             Some(cancel_rx),
@@ -968,6 +981,7 @@ mod tests {
                 span_source: PartSpanSource::RemoteLayout,
                 game_formats: &[],
                 reader_capacity: HASH_READER_CAPACITY,
+                sequential_scan: false,
             },
             None,
             None,
