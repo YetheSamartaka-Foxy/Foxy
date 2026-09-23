@@ -1,3 +1,4 @@
+use super::direct_read::DirectReadPlan;
 use super::part_hashes::{
     HashRunCounters, PartHashProgress, PartReadOptions, PartSpanSource, calculate_part_hashes,
 };
@@ -658,7 +659,38 @@ impl WholeFileHashIo {
             HashStorageClass::Hdd | HashStorageClass::Removable
         )
     }
+
+    /// Existing files on a local disk are read around the cache: one file at a
+    /// time on rotational storage, a read ahead of the hasher on SSD.
+    fn direct_read_plan(&self) -> Option<DirectReadPlan> {
+        if !cfg!(windows) {
+            return None;
+        }
+        match self.storage_class {
+            HashStorageClass::Hdd | HashStorageClass::Removable => Some(DirectReadPlan::new(
+                ROTATIONAL_DIRECT_BLOCK,
+                ROTATIONAL_DIRECT_DEPTH,
+                0,
+                true,
+            )),
+            HashStorageClass::Ssd => Some(DirectReadPlan::new(
+                SSD_DIRECT_BLOCK,
+                SSD_DIRECT_DEPTH,
+                SSD_DIRECT_MIN_LEN,
+                false,
+            )),
+            HashStorageClass::Unknown => None,
+        }
+    }
 }
+
+const ROTATIONAL_DIRECT_BLOCK: usize = 16 * 1024 * 1024;
+const ROTATIONAL_DIRECT_DEPTH: usize = 4;
+const SSD_DIRECT_BLOCK: usize = 4 * 1024 * 1024;
+const SSD_DIRECT_DEPTH: usize = 2;
+/// Below this a file is one read either way, and a cached copy may still
+/// answer it from memory.
+const SSD_DIRECT_MIN_LEN: u64 = 1024 * 1024;
 
 async fn calculate_whole_file_checksum(
     file_path: String,
@@ -805,6 +837,7 @@ pub(super) async fn recalculate_parts_for_jobs(
     } else {
         order_hash_jobs(&mut jobs);
     }
+    let direct_plan = hash_io.direct_read_plan();
     let progress_sender = progress_tx.cloned();
     let cancel_receiver = cancel_rx.cloned();
     let results = stream::iter(jobs.into_iter().map(|job| {
@@ -818,6 +851,7 @@ pub(super) async fn recalculate_parts_for_jobs(
             .map(|(_, part)| part.remote_length)
             .sum();
         let cancel = cancel_receiver.clone();
+        let direct_plan = direct_plan.clone();
         let cancelled_flag = cancelled.clone();
         async move {
             let FileHashJob {
@@ -889,6 +923,9 @@ pub(super) async fn recalculate_parts_for_jobs(
                                 game_formats,
                                 reader_capacity: hash_io.part_reader_capacity(),
                                 sequential_scan: hash_io.rotational(),
+                                direct: direct_plan
+                                    .as_ref()
+                                    .filter(|_| span_source == PartSpanSource::DetectLocalLayout),
                             },
                             part_progress,
                             cancel.clone(),
@@ -1145,6 +1182,7 @@ struct HashRunMetrics {
     layout_entry_payload_bytes: u64,
     mapped_parts: usize,
     fallback_parts: usize,
+    direct_files: usize,
 }
 
 impl HashRunMetrics {
@@ -1171,6 +1209,7 @@ impl HashRunMetrics {
             metrics.layout_entry_payload_bytes += result.part_metrics.layout_entry_payload_bytes;
             metrics.mapped_parts += result.part_metrics.mapped_parts;
             metrics.fallback_parts += result.part_metrics.fallback_parts;
+            metrics.direct_files += result.part_metrics.direct_files;
         }
         metrics
     }
@@ -1297,7 +1336,7 @@ fn log_hash_run_metrics(
 ) {
     let metrics = HashRunMetrics::from_results(results);
     info!(
-        "Hash part run metrics: label={} profile={} wall={:.3}s files={} missing_files={} parts={} estimated_bytes={} hashed_bytes={} file_elapsed_sum={:.3}s file_elapsed_max={:.3}s part_total_sum={:.3}s metadata_sum={:.3}s layout_sum={:.3}s layout_parse_sum={:.3}s layout_map_sum={:.3}s semaphore_wait_sum={:.3}s blocking_hash_sum={:.3}s layout_files={} remote_span_files={} layout_entries={} layout_entry_payload_bytes={} mapped_parts={} fallback_parts={}",
+        "Hash part run metrics: label={} profile={} wall={:.3}s files={} missing_files={} parts={} estimated_bytes={} hashed_bytes={} file_elapsed_sum={:.3}s file_elapsed_max={:.3}s part_total_sum={:.3}s metadata_sum={:.3}s layout_sum={:.3}s layout_parse_sum={:.3}s layout_map_sum={:.3}s semaphore_wait_sum={:.3}s blocking_hash_sum={:.3}s layout_files={} remote_span_files={} layout_entries={} layout_entry_payload_bytes={} mapped_parts={} fallback_parts={} direct_files={}",
         label,
         selected_profile,
         wall_elapsed.as_secs_f64(),
@@ -1320,7 +1359,8 @@ fn log_hash_run_metrics(
         metrics.layout_entries,
         metrics.layout_entry_payload_bytes,
         metrics.mapped_parts,
-        metrics.fallback_parts
+        metrics.fallback_parts,
+        metrics.direct_files
     );
     // Speed-of-light accounting (see conventions/SPEED_OF_LIGHT.md, O3).
     // No absolute light is computed in-app; compare this rate to the best

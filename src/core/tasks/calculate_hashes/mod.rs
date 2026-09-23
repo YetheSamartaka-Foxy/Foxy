@@ -39,6 +39,7 @@ const MAX_FILE_JOB_CONCURRENCY: usize = 256;
 const PERSIST_LOG_INTERVAL: usize = 25_000;
 
 mod context;
+mod direct_read;
 mod file_hashes;
 mod format_layout;
 mod part_hashes;

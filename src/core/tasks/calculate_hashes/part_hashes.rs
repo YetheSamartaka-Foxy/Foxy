@@ -1,8 +1,10 @@
+use super::direct_read::{DirectReadPlan, DirectReader};
 use super::format_layout::{
     map_local_part_spans, parse_local_content_layout_from, remote_parts_format_id,
 };
 use super::*;
 use foxy_formats::LocalPartSpan;
+use std::io::BufRead;
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct PartHashMetrics {
@@ -21,6 +23,8 @@ pub(super) struct PartHashMetrics {
     pub(super) layout_entry_payload_bytes: u64,
     pub(super) mapped_parts: usize,
     pub(super) fallback_parts: usize,
+    /// 1 when the file was read around the cache.
+    pub(super) direct_files: usize,
 }
 
 pub(super) struct PartHashCalculation {
@@ -126,6 +130,8 @@ pub(super) struct PartReadOptions<'a> {
     pub(super) reader_capacity: usize,
     /// Open with the sequential-scan hint, meant for rotational storage.
     pub(super) sequential_scan: bool,
+    /// Read around the cache instead, when the file is long enough.
+    pub(super) direct: Option<&'a DirectReadPlan>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -148,7 +154,9 @@ pub(super) async fn calculate_part_hashes(
         game_formats,
         reader_capacity,
         sequential_scan,
+        direct,
     } = read;
+    let direct = direct.cloned();
     let pbo_name = Path::new(file_path)
         .file_name()
         .and_then(|name| name.to_str())
@@ -260,28 +268,37 @@ pub(super) async fn calculate_part_hashes(
     let estimated_bytes = metrics.estimated_bytes;
     let result = tokio::task::spawn_blocking(move || {
         let mut layout_metrics = LayoutMetrics::default();
-        let opened = if sequential_scan {
-            crate::core::utils::content_hash::open_for_sequential_read(&file_path_owned)
-        } else {
-            std::fs::File::open(&file_path_owned)
-        };
-        let file = match opened {
-            Ok(f) => f,
-            Err(e) => {
-                warn!("Failed to open file {}: {}", file_path_owned, e);
-                let total_part_count = indexed_parts.len();
-                if let Some(progress) = &blocking_progress {
-                    progress.mark_parts_done(total_part_count, estimated_bytes);
-                }
-                return (indexed_parts, None, layout_metrics);
+        let file_len = file_metadata.len();
+        let direct_reader = direct
+            .filter(|plan| file_len >= plan.min_len)
+            .and_then(|plan| DirectReader::open(&file_path_owned, file_len, &plan));
+        let mut reader = match direct_reader {
+            Some(reader) => HashReader::Direct(reader),
+            None => {
+                let opened = if sequential_scan {
+                    crate::core::utils::content_hash::open_for_sequential_read(&file_path_owned)
+                } else {
+                    std::fs::File::open(&file_path_owned)
+                };
+                let file = match opened {
+                    Ok(f) => f,
+                    Err(e) => {
+                        warn!("Failed to open file {}: {}", file_path_owned, e);
+                        let total_part_count = indexed_parts.len();
+                        if let Some(progress) = &blocking_progress {
+                            progress.mark_parts_done(total_part_count, estimated_bytes);
+                        }
+                        return (indexed_parts, None, layout_metrics);
+                    }
+                };
+                // A small file never fills a large buffer, so it does not allocate one.
+                let capacity = usize::try_from(file_len)
+                    .unwrap_or(usize::MAX)
+                    .clamp(8 * 1024, reader_capacity.max(8 * 1024));
+                HashReader::Cached(std::io::BufReader::with_capacity(capacity, file))
             }
         };
-
-        // A small file never fills a large buffer, so it does not allocate one.
-        let capacity = usize::try_from(file_metadata.len())
-            .unwrap_or(usize::MAX)
-            .clamp(8 * 1024, reader_capacity.max(8 * 1024));
-        let mut reader = std::io::BufReader::with_capacity(capacity, file);
+        layout_metrics.direct = matches!(reader, HashReader::Direct(_));
         let span_overrides = match layout_format {
             Some(format_id) => resolve_local_spans(
                 format_id,
@@ -310,9 +327,6 @@ pub(super) async fn calculate_part_hashes(
         // charge the profiler more events than the hashing does work.
         let profiled = crate::core::utils::profiling::FsTimer::start();
 
-        // Fixed-size buffer reused across all parts - caps memory regardless of part size
-        const HASH_BUF_SIZE: usize = 64 * 1024;
-        let mut buf = vec![0u8; HASH_BUF_SIZE];
         let mut fingerprint = crate::core::utils::content_hash::FingerprintTap::new(&file_metadata);
         // Track consecutive read failures; after too many, skip remaining parts
         // to avoid log spam and wasted I/O on corrupted/truncated files.
@@ -403,21 +417,30 @@ pub(super) async fn calculate_part_hashes(
             let mut remaining = total_len;
             let mut read_ok = true;
 
+            // Hashed straight out of the reader's buffer, with no copy.
             while remaining > 0 {
-                let chunk = remaining.min(HASH_BUF_SIZE);
-                if let Err(e) = reader.read_exact(&mut buf[..chunk]) {
-                    if consecutive_read_failures == 0 {
-                        warn!("Read failed for {}: {}", file_path_owned, e);
+                let available = match reader.fill_buf() {
+                    Ok([]) => Err(std::io::ErrorKind::UnexpectedEof.into()),
+                    other => other,
+                };
+                let available = match available {
+                    Ok(available) => available,
+                    Err(e) => {
+                        if consecutive_read_failures == 0 {
+                            warn!("Read failed for {}: {}", file_path_owned, e);
+                        }
+                        read_ok = false;
+                        reader_pos = None;
+                        break;
                     }
-                    read_ok = false;
-                    reader_pos = None;
-                    break;
-                }
-                hasher.update(&buf[..chunk]);
+                };
+                let chunk = remaining.min(available.len());
+                hasher.update(&available[..chunk]);
                 fingerprint.observe(
                     chosen_span.start + (total_len - remaining) as u64,
-                    &buf[..chunk],
+                    &available[..chunk],
                 );
+                reader.consume(chunk);
                 remaining -= chunk;
             }
             if read_ok {
@@ -463,13 +486,9 @@ pub(super) async fn calculate_part_hashes(
         let content_hash = if cancelled || consecutive_read_failures >= MAX_READ_FAILURES {
             None
         } else {
-            fingerprint.finish().or_else(|| {
-                crate::core::utils::content_hash::fast_file_content_hash_from_buffered(
-                    &mut reader,
-                    &file_metadata,
-                )
-                .ok()
-            })
+            fingerprint
+                .finish()
+                .or_else(|| reader.sampled_fingerprint(&file_path_owned, &file_metadata))
         };
         (indexed_parts, content_hash, layout_metrics)
     })
@@ -490,6 +509,7 @@ pub(super) async fn calculate_part_hashes(
             };
         }
     };
+    metrics.direct_files = usize::from(layout_metrics.direct);
     metrics.layout_files = usize::from(layout_metrics.attempted);
     metrics.layout_parse_elapsed = layout_metrics.parse_elapsed;
     metrics.layout_map_elapsed = layout_metrics.map_elapsed;
@@ -535,8 +555,78 @@ pub(super) async fn calculate_part_hashes(
     }
 }
 
+/// The reader one file's parts are hashed through.
+enum HashReader {
+    Cached(std::io::BufReader<std::fs::File>),
+    Direct(DirectReader),
+}
+
+impl HashReader {
+    /// The sampled fingerprint read directly, for a file whose parts left a
+    /// sample unread. The direct reader would fetch a whole block per sample.
+    fn sampled_fingerprint(&mut self, path: &str, metadata: &std::fs::Metadata) -> Option<String> {
+        match self {
+            Self::Cached(reader) => {
+                crate::core::utils::content_hash::fast_file_content_hash_from_buffered(
+                    reader, metadata,
+                )
+                .ok()
+            }
+            Self::Direct(_) => {
+                let mut file = std::fs::File::open(path).ok()?;
+                crate::core::utils::content_hash::fast_file_content_hash_from_reader(
+                    &mut file, metadata,
+                )
+                .ok()
+            }
+        }
+    }
+}
+
+impl Read for HashReader {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Cached(reader) => reader.read(out),
+            Self::Direct(reader) => reader.read(out),
+        }
+    }
+}
+
+impl std::io::BufRead for HashReader {
+    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+        match self {
+            Self::Cached(reader) => reader.fill_buf(),
+            Self::Direct(reader) => reader.fill_buf(),
+        }
+    }
+
+    fn consume(&mut self, amount: usize) {
+        match self {
+            Self::Cached(reader) => reader.consume(amount),
+            Self::Direct(reader) => reader.consume(amount),
+        }
+    }
+}
+
+impl Seek for HashReader {
+    fn seek(&mut self, from: std::io::SeekFrom) -> std::io::Result<u64> {
+        match self {
+            Self::Cached(reader) => reader.seek(from),
+            Self::Direct(reader) => reader.seek(from),
+        }
+    }
+
+    fn seek_relative(&mut self, offset: i64) -> std::io::Result<()> {
+        match self {
+            Self::Cached(reader) => reader.seek_relative(offset),
+            Self::Direct(reader) => reader.seek_relative(offset),
+        }
+    }
+}
+
 #[derive(Default)]
 struct LayoutMetrics {
+    direct: bool,
     attempted: bool,
     parse_elapsed: std::time::Duration,
     map_elapsed: std::time::Duration,
@@ -655,6 +745,7 @@ mod tests {
                 game_formats: &[foxy_formats::PBO_FORMAT_ID],
                 reader_capacity: HASH_READER_CAPACITY,
                 sequential_scan: false,
+                direct: None,
             },
             None,
             None,
@@ -671,6 +762,87 @@ mod tests {
         }
         assert_eq!(
             result.content_hash.as_deref(),
+            Some(
+                crate::core::utils::content_hash::fast_file_content_hash(
+                    file.path().to_str().unwrap()
+                )
+                .unwrap()
+                .as_str()
+            )
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn direct_reads_hash_every_part_and_the_fingerprint_like_cached_reads() {
+        let bytes: Vec<u8> = (0..900_001usize).map(|i| (i * 7 + i / 13) as u8).collect();
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(&bytes).unwrap();
+        // Out of order, one past the end, and a gap between 700_000 and 710_000.
+        let spans = [
+            (400_000usize, 300_000usize),
+            (0, 131_072),
+            (131_072, 268_928),
+            (710_000, 190_001),
+            (899_990, 20),
+        ];
+        let parts = || -> Vec<FoxyModFilePart> {
+            spans
+                .iter()
+                .enumerate()
+                .map(|(order, (start, len))| FoxyModFilePart {
+                    remote_start: *start as u64,
+                    remote_length: *len as u64,
+                    remote_checksum: blake3::hash(&bytes[*start..(*start + *len).min(bytes.len())])
+                        .to_hex()
+                        .to_uppercase(),
+                    data_order: order as i64,
+                    ..Default::default()
+                })
+                .collect()
+        };
+        let hash_with = |direct: Option<DirectReadPlan>| {
+            let parts = parts();
+            let path = file.path().to_str().unwrap().to_owned();
+            async move {
+                calculate_part_hashes(
+                    parts,
+                    &path,
+                    Arc::new(Semaphore::new(1)),
+                    PartReadOptions {
+                        span_source: PartSpanSource::RemoteLayout,
+                        game_formats: &[],
+                        reader_capacity: HASH_READER_CAPACITY,
+                        sequential_scan: false,
+                        direct: direct.as_ref(),
+                    },
+                    None,
+                    None,
+                )
+                .await
+            }
+        };
+
+        let cached = hash_with(None).await;
+        for (depth, one_stream) in [(1, false), (2, true), (4, false)] {
+            let direct =
+                hash_with(Some(DirectReadPlan::new(64 * 1024, depth, 0, one_stream))).await;
+            assert_eq!(direct.metrics.direct_files, 1);
+            assert_eq!(direct.content_hash, cached.content_hash);
+            for (direct_part, cached_part) in direct.parts.iter().zip(&cached.parts) {
+                assert_eq!(direct_part.local_checksum, cached_part.local_checksum);
+                assert_eq!(direct_part.local_start, cached_part.local_start);
+                assert_eq!(direct_part.local_length, cached_part.local_length);
+            }
+        }
+        assert!(
+            cached.parts[..4]
+                .iter()
+                .all(|part| part.local_checksum == part.remote_checksum)
+        );
+        assert!(cached.parts[4].local_checksum.is_empty());
+        assert_eq!(
+            cached.content_hash.as_deref(),
             Some(
                 crate::core::utils::content_hash::fast_file_content_hash(
                     file.path().to_str().unwrap()
@@ -713,6 +885,7 @@ mod tests {
                 game_formats: &[foxy_formats::PBO_FORMAT_ID],
                 reader_capacity: HASH_READER_CAPACITY,
                 sequential_scan: false,
+                direct: None,
             },
             None,
             None,
@@ -757,6 +930,7 @@ mod tests {
                 game_formats: &[],
                 reader_capacity: HASH_READER_CAPACITY,
                 sequential_scan: false,
+                direct: None,
             },
             None,
             None,
@@ -883,6 +1057,7 @@ mod tests {
                 game_formats: &[],
                 reader_capacity: HASH_READER_CAPACITY,
                 sequential_scan: false,
+                direct: None,
             },
             None,
             None,
@@ -916,6 +1091,7 @@ mod tests {
                 game_formats: &[],
                 reader_capacity: HASH_READER_CAPACITY,
                 sequential_scan: false,
+                direct: None,
             },
             None,
             None,
@@ -950,6 +1126,7 @@ mod tests {
                 game_formats: &[],
                 reader_capacity: HASH_READER_CAPACITY,
                 sequential_scan: false,
+                direct: None,
             },
             None,
             Some(cancel_rx),
@@ -982,6 +1159,7 @@ mod tests {
                 game_formats: &[],
                 reader_capacity: HASH_READER_CAPACITY,
                 sequential_scan: false,
+                direct: None,
             },
             None,
             None,
