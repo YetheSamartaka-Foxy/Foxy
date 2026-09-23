@@ -14,6 +14,9 @@
 - Scheduled jobs, cleanup folders, additional search folders, and pending update state now belong to the game space they were created in rather than being shared by every game.
 - PBO parsing is now shared between the app and the repository generator, and `.pak` (PAC1) archives are parsed for per-entry delta sync and verification.
 
+## Fixed
+- On Windows, text fields sometimes hid the blinking text cursor and every keystroke played the Windows error sound until you switched to another window and back. Foxy now takes back keyboard focus on its own.
+
 # 1.1.0
 ## Added
 - Repository visual folders let repositories be grouped, colored, and collapsed in the repository list, independently of repository spaces, with drag-and-drop into folders, folder-level quick check / recheck / update actions, and an option to remove contained repositories when a folder is deleted.

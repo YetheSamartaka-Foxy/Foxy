@@ -207,6 +207,7 @@ impl Foxy {
         let ctx = ui.ctx().clone();
         self.repaint_ctx = Some(ctx.clone());
 
+        super::keyboard_focus::repair_lost_keyboard_focus();
         self.apply_runtime_palette_visuals(&ctx);
         self.apply_runtime_ui_scale(&ctx);
         self.invalidate_galley_caches_on_font_atlas_change(&ctx);

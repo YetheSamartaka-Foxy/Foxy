@@ -1,5 +1,6 @@
 mod background_tasks;
 mod game_space_switch;
+mod keyboard_focus;
 mod progress_events;
 mod startup_sync;
 mod storage_notice;
