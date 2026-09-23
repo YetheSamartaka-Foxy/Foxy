@@ -39,19 +39,23 @@ impl DebugModal {
         match self {
             DebugModal::AppUpdate => {
                 let current_version = env!("CARGO_PKG_VERSION").to_string();
+                let latest = preview_next_version(&current_version);
+                let (versions, changelogs) = preview_app_update_versions(&current_version, &latest);
                 app.app_update_status =
                     crate::core::tasks::app_update::UpdateCheckStatus::Available(
                         crate::core::tasks::app_update::AppUpdateInfo {
                             source_base_url: String::new(),
                             manifest: crate::core::tasks::app_update::UpdateManifest {
                                 schema_version: 1,
-                                latest: preview_next_version(&current_version),
-                                versions: Vec::new(),
+                                latest,
+                                versions,
                             },
                             current_version,
-                            fetched_changelogs: Vec::new(),
+                            fetched_changelogs: changelogs.clone(),
                         },
                     );
+                app.app_update_changelogs = changelogs;
+                app.app_update_changelogs_requested = true;
                 app.pending_app_update_prompt = true;
             }
             DebugModal::DbSchemaWipe => {
@@ -125,6 +129,82 @@ fn preview_storage_notice() -> crate::ui::app::runtime::StorageCompatNotice {
     }
 }
 
+/// Manifest entries and changelogs for the app update preview, so the update
+/// and version browser views render changelogs and download buttons exactly as
+/// a real release does. The text is placeholder data, deliberately English only.
+fn preview_app_update_versions(
+    current: &str,
+    latest: &str,
+) -> (
+    Vec<crate::core::tasks::app_update::VersionEntry>,
+    Vec<crate::core::tasks::app_update::ChangelogVersion>,
+) {
+    use crate::core::tasks::app_update::{
+        ChangelogSection, ChangelogVersion, PlatformEntry, VersionEntry, current_platform_key,
+        default_installer_hash_algorithm,
+    };
+
+    let version_entry = |version: &str, installer_size: u64| VersionEntry {
+        version: version.to_string(),
+        changelog: format!("changelogs/{version}.json"),
+        platforms: [(
+            current_platform_key().to_string(),
+            PlatformEntry {
+                installer_path: format!("installers/Foxy-{version}-setup.exe"),
+                installer_hash: "0".repeat(64),
+                installer_hash_algorithm: default_installer_hash_algorithm(),
+                installer_size,
+            },
+        )]
+        .into_iter()
+        .collect(),
+    };
+    let section = |title: &str, items: &[&str]| ChangelogSection {
+        title: title.to_string(),
+        items: items.iter().map(|item| item.to_string()).collect(),
+    };
+
+    let versions = vec![
+        version_entry(latest, 48_234_496),
+        version_entry(current, 47_710_208),
+    ];
+    let changelogs = vec![
+        ChangelogVersion {
+            version: latest.to_string(),
+            date: "Preview release".to_string(),
+            sections: vec![
+                section(
+                    "Added",
+                    &[
+                        "Preview entry: repositories can be rechecked in bulk after a database reset.",
+                        "Preview entry: the update prompt shows the installed and new version side by side.",
+                    ],
+                ),
+                section(
+                    "Changed",
+                    &["Preview entry: startup prompts use a stronger warning style."],
+                ),
+                section(
+                    "Fixed",
+                    &[
+                        "Preview entry: a long changelog line wraps inside the update view instead of widening the window past the screen edge.",
+                        "Preview entry: the footer update badge stays visible at every font size.",
+                    ],
+                ),
+            ],
+        },
+        ChangelogVersion {
+            version: current.to_string(),
+            date: "Installed release".to_string(),
+            sections: vec![section(
+                "Fixed",
+                &["Preview entry: placeholder notes for the version you are running."],
+            )],
+        },
+    ];
+    (versions, changelogs)
+}
+
 /// Bump the last numeric component of a semver-ish string for preview copy.
 /// Falls back to a suffixed label when the version has no trailing number.
 fn preview_next_version(current: &str) -> String {
@@ -173,6 +253,25 @@ mod tests {
     #[test]
     fn preview_version_falls_back_for_non_numeric_tail() {
         assert_eq!(preview_next_version("1.2.0-rc1"), "1.2.0-rc1-preview");
+    }
+
+    #[test]
+    fn app_update_preview_offers_an_installer_and_changelog_for_the_latest_version() {
+        let (versions, changelogs) = preview_app_update_versions("1.2.0", "1.2.1");
+        let latest = versions
+            .iter()
+            .find(|entry| entry.version == "1.2.1")
+            .expect("latest version entry");
+        assert!(
+            latest
+                .platforms
+                .contains_key(crate::core::tasks::app_update::current_platform_key())
+        );
+        assert!(
+            changelogs
+                .iter()
+                .any(|changelog| changelog.version == "1.2.1" && !changelog.sections.is_empty())
+        );
     }
 
     #[test]

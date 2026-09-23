@@ -142,6 +142,8 @@ impl Foxy {
     ) {
         let current = env!("CARGO_PKG_VERSION");
         let latest = &info.manifest.latest;
+        let heading_size = egui::TextStyle::Heading.resolve(ui.style()).size;
+        let download_button_height = Self::adaptive_button_height(heading_size, 64.0);
 
         ui.horizontal(|ui| {
             ui.label(format!("{}: v{}", self.t("Current version"), current));
@@ -154,7 +156,7 @@ impl Foxy {
         ui.label(RichText::new(self.t("Changelog")).strong());
 
         ScrollArea::vertical()
-            .max_height(ui.available_height() - 60.0)
+            .max_height(ui.available_height() - download_button_height - 24.0)
             .auto_shrink([false; 2])
             .show(ui, |ui| {
                 if self.app_update_changelogs.is_empty() && !self.app_update_changelogs_requested {
@@ -185,10 +187,22 @@ impl Foxy {
                     self.t("Download Update"),
                     format_mb(platform.installer_size)
                 );
-                let download_btn = ui.add_sized(
-                    Vec2::new(220.0, 36.0),
-                    Button::new(RichText::new(btn_text).color(self.color_text_normal())),
-                );
+                let download_btn = ui
+                    .vertical_centered(|ui| {
+                        self.add_sized_primary_button(
+                            ui,
+                            Vec2::new(ui.available_width().min(480.0), download_button_height),
+                            Button::new(
+                                RichText::new(btn_text)
+                                    .size(heading_size)
+                                    .strong()
+                                    .color(crate::ui::palette::ON_STRONG_FILL),
+                            )
+                            .corner_radius(egui::CornerRadius::same(8)),
+                            true,
+                        )
+                    })
+                    .inner;
                 if download_btn.hovered() {
                     ui.ctx()
                         .output_mut(|o| o.cursor_icon = CursorIcon::PointingHand);

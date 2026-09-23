@@ -237,6 +237,13 @@ impl Foxy {
     }
 
     pub fn start_installer_download(&mut self, version_entry: &VersionEntry) {
+        if self.previewing_debug_modal(DebugModal::AppUpdate) {
+            log::info!(
+                "Debug modal preview: skipping installer download for v{}",
+                version_entry.version
+            );
+            return;
+        }
         let platform_key = app_update::current_platform_key();
         let Some(platform) = version_entry.platforms.get(platform_key) else {
             self.app_update_status = UpdateCheckStatus::Failed(format!(

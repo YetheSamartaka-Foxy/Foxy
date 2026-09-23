@@ -182,15 +182,20 @@ impl Foxy {
                         &self.app_update_status,
                         crate::core::tasks::app_update::UpdateCheckStatus::Available(_)
                     ) {
-                        let update_btn = ui.add_sized(
-                            Vec2::new(footer_icon_button_size.x + 20.0, footer_icon_button_size.y),
+                        ui.add_space(4.0);
+                        let update_btn = ui.add(
                             Button::new(
                                 RichText::new(format!("\u{2B06} {}", self.t("Update")))
                                     .size(footer_text_size)
-                                    .color(self.color_primary_accent()),
+                                    .strong()
+                                    .color(crate::ui::palette::ON_STRONG_FILL),
                             )
-                            .frame(false),
+                            .fill(self.color_action_destructive())
+                            .stroke(egui::Stroke::new(1.0, self.color_error()))
+                            .corner_radius(egui::CornerRadius::same(6))
+                            .min_size(Vec2::new(0.0, footer_icon_button_size.y - 4.0)),
                         );
+                        ui.add_space(4.0);
                         if update_btn.hovered() {
                             ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                         }

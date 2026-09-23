@@ -49,8 +49,8 @@ pub const ACTION_INFO: Color32 = Color32::from_rgb(50, 50, 200);
 /// Red action color used by destructive/pending update actions
 pub const ACTION_DESTRUCTIVE: Color32 = Color32::from_rgb(200, 50, 50);
 
-/// Text and glyphs drawn on top of a destructive fill, in every theme
-pub const ON_DESTRUCTIVE: Color32 = Color32::WHITE;
+/// Text and glyphs drawn on a saturated accent or destructive fill, in every theme
+pub const ON_STRONG_FILL: Color32 = Color32::WHITE;
 
 /// Green used to indicate enabled checkbox states
 pub const CHECKBOX_ENABLED: Color32 = Color32::from_rgb(70, 170, 70);
