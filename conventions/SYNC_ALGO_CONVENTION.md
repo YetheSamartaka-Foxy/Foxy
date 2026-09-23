@@ -109,9 +109,11 @@ pass in the same operation fingerprinted. On rotational media the eight
 sampled reads per file cost more than a minute per few thousand files once the pass has evicted them; the
 fingerprint describes the same bytes the tree hash does either way.
 
-Hash reads open files with the sequential-scan hint and parse an archive's
-layout through the same 4 MiB reader that hashes it (64 MiB on rotational
-storage), so the table of contents and the payload after it are one read.
+Hash reads parse an archive's layout through the same reader that hashes it,
+so the table of contents and the payload after it are one read. The reader is
+4 MiB, or 64 MiB with the sequential-scan hint on rotational storage, where
+the two workers share one head and every seek must buy a long read; on SSD
+the hint cost about 9% on the full TFR Main recheck and is not used.
 On rotational storage the jobs run in order of each file's first cluster, one
 sweep of the platter, with files that have no extent of their own after them
 in path order; other storage runs files of at least 16 MiB heaviest first and
