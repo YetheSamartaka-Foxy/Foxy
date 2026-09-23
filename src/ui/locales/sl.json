@@ -1734,5 +1734,9 @@
     "Files per second": "Datotek na sekundo",
     "CPU (all cores)": "CPE (vsa jedra)",
     "CPU (one core = 100%)": "CPE (eno jedro = 100%)",
-    "Benchmark exported to {path}.": "Primerjalno merilo je bilo izvoženo v {path}."
+    "Benchmark exported to {path}.": "Primerjalno merilo je bilo izvoženo v {path}.",
+    "Swap A and B": "Zamenjaj A in B",
+    "Exchange which benchmark is A and which is B": "Zamenja, kateri primerjalni test je A in kateri B",
+    "Oldest as A": "Najstarejši kot A",
+    "When on, the older benchmark is always A. When off, A is the one selected first.": "Ko je vklopljeno, je starejši primerjalni test vedno A. Ko je izklopljeno, je A tisti, ki je bil izbran prvi."
 }

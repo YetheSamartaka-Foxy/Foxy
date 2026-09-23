@@ -1734,5 +1734,9 @@
     "Files per second": "Datoteke u sekundi",
     "CPU (all cores)": "CPU (sve jezgre)",
     "CPU (one core = 100%)": "CPU (jedna jezgra = 100%)",
-    "Benchmark exported to {path}.": "Referentna vrijednost izvezena u {path}."
+    "Benchmark exported to {path}.": "Referentna vrijednost izvezena u {path}.",
+    "Swap A and B": "Zamijeni A i B",
+    "Exchange which benchmark is A and which is B": "Zamjenjuje koje je mjerilo A, a koje B",
+    "Oldest as A": "Najstarije kao A",
+    "When on, the older benchmark is always A. When off, A is the one selected first.": "Kada je uključeno, starije mjerilo uvijek je A. Kada je isključeno, A je ono koje je prvo odabrano."
 }

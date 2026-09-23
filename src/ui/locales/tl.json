@@ -1734,5 +1734,9 @@
     "Files per second": "Mga file kada segundo",
     "CPU (all cores)": "CPU (lahat ng core)",
     "CPU (one core = 100%)": "CPU (isang core = 100%)",
-    "Benchmark exported to {path}.": "Na-export ang benchmark sa {path}."
+    "Benchmark exported to {path}.": "Na-export ang benchmark sa {path}.",
+    "Swap A and B": "Pagpalitin ang A at B",
+    "Exchange which benchmark is A and which is B": "Pinagpapalit kung aling pamantayan ang A at alin ang B",
+    "Oldest as A": "Pinakaluma bilang A",
+    "When on, the older benchmark is always A. When off, A is the one selected first.": "Kapag naka-on, ang mas lumang pamantayan ay palaging A. Kapag naka-off, ang A ay ang unang napili."
 }

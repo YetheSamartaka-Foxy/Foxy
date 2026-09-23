@@ -270,7 +270,7 @@ impl Foxy {
         ui.horizontal_wrapped(|ui| {
             let selected: Vec<(String, String)> = self
                 .benchmarks_view
-                .selected
+                .compare_order()
                 .iter()
                 .filter_map(|id| {
                     self.benchmarks_view
@@ -298,6 +298,7 @@ impl Foxy {
             if compare.clicked() {
                 self.benchmarks_view.compare_open = true;
             }
+            self.render_compare_order_controls(ui);
             for (index, (id, name)) in selected.iter().enumerate() {
                 let letter = if index == 0 { "A" } else { "B" };
                 self.benchmark_letter_tag(ui, letter, palette::BENCHMARK_SERIES[index]);

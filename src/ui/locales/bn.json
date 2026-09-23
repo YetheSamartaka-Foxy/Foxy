@@ -1734,5 +1734,9 @@
     "Files per second": "প্রতি সেকেন্ডে ফাইল",
     "CPU (all cores)": "CPU (সমস্ত কোর)",
     "CPU (one core = 100%)": "CPU (এক কোর = 100%)",
-    "Benchmark exported to {path}.": "বেঞ্চমার্ক {path} এ রপ্তানি করা হয়েছে।"
+    "Benchmark exported to {path}.": "বেঞ্চমার্ক {path} এ রপ্তানি করা হয়েছে।",
+    "Swap A and B": "A ও B অদলবদল করুন",
+    "Exchange which benchmark is A and which is B": "কোন বেঞ্চমার্ক A এবং কোনটি B তা অদলবদল করুন",
+    "Oldest as A": "পুরোনোটি A হিসেবে",
+    "When on, the older benchmark is always A. When off, A is the one selected first.": "চালু থাকলে পুরোনো বেঞ্চমার্কটি সবসময় A হয়। বন্ধ থাকলে প্রথমে নির্বাচিতটি A হয়।"
 }

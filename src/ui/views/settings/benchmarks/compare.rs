@@ -242,10 +242,28 @@ impl Foxy {
         ui.add_space(8.0);
     }
 
+    /// "Oldest as A" toggle and an A/B swap, shared by the list toolbar and
+    /// the comparison header.
+    pub(super) fn render_compare_order_controls(&mut self, ui: &mut Ui) {
+        let can_swap = self.benchmarks_view.selected.len() == 2;
+        if ui
+            .add_enabled(can_swap, egui::Button::new(self.t("Swap A and B")))
+            .on_hover_text(self.t("Exchange which benchmark is A and which is B"))
+            .clicked()
+        {
+            self.benchmarks_view.swap_compare_order();
+        }
+        let label = self.t("Oldest as A");
+        Self::ui_state_checkbox(ui, &mut self.benchmarks_view.compare_by_date, label)
+            .on_hover_text(self.t(
+                "When on, the older benchmark is always A. When off, A is the one selected first.",
+            ));
+    }
+
     pub(super) fn render_benchmark_compare(&mut self, ui: &mut Ui) {
+        let order = self.benchmarks_view.compare_order();
         let [Some(a), Some(b)] = [0, 1].map(|index| {
-            self.benchmarks_view
-                .selected
+            order
                 .get(index)
                 .and_then(|id| self.benchmarks_view.record(id))
                 .cloned()
@@ -268,6 +286,7 @@ impl Foxy {
                 if ui.button(self.t("Back to list")).clicked() {
                     self.benchmarks_view.compare_open = false;
                 }
+                self.render_compare_order_controls(ui);
             });
         });
         ui.add_space(6.0);

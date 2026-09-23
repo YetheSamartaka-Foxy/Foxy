@@ -1734,5 +1734,9 @@
     "Files per second": "Файлов в секунду",
     "CPU (all cores)": "ЦП (все ядра)",
     "CPU (one core = 100%)": "ЦП (одно ядро ​​= 100%)",
-    "Benchmark exported to {path}.": "Тест экспортирован в {path}."
+    "Benchmark exported to {path}.": "Тест экспортирован в {path}.",
+    "Swap A and B": "Поменять A и B местами",
+    "Exchange which benchmark is A and which is B": "Меняет местами, какой тест считается A, а какой B",
+    "Oldest as A": "Более ранний как A",
+    "When on, the older benchmark is always A. When off, A is the one selected first.": "Если включено, более ранний тест всегда будет A. Если выключено, A будет тест, выбранный первым."
 }

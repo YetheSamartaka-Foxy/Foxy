@@ -1734,5 +1734,9 @@
     "Files per second": "Файлів за секунду",
     "CPU (all cores)": "ЦПУ (всі ядра)",
     "CPU (one core = 100%)": "ЦПУ (одне ядро = 100%)",
-    "Benchmark exported to {path}.": "Бенчмарк експортовано до {path}."
+    "Benchmark exported to {path}.": "Бенчмарк експортовано до {path}.",
+    "Swap A and B": "Поміняти A і B місцями",
+    "Exchange which benchmark is A and which is B": "Міняє місцями, який показник є A, а який B",
+    "Oldest as A": "Старіший як A",
+    "When on, the older benchmark is always A. When off, A is the one selected first.": "Якщо ввімкнено, старіший показник завжди A. Якщо вимкнено, A буде той, що вибраний першим."
 }

@@ -1734,5 +1734,9 @@
     "Files per second": "Fájlok másodpercenként",
     "CPU (all cores)": "CPU (minden mag)",
     "CPU (one core = 100%)": "CPU (egy mag = 100%)",
-    "Benchmark exported to {path}.": "A benchmark exportálva ide: {path}."
+    "Benchmark exported to {path}.": "A benchmark exportálva ide: {path}.",
+    "Swap A and B": "A és B felcserélése",
+    "Exchange which benchmark is A and which is B": "Felcseréli, melyik benchmark az A és melyik a B",
+    "Oldest as A": "A legrégebbi legyen az A",
+    "When on, the older benchmark is always A. When off, A is the one selected first.": "Bekapcsolva mindig a régebbi benchmark az A. Kikapcsolva az A az elsőként kiválasztott."
 }

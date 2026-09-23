@@ -1734,5 +1734,9 @@
     "Files per second": "Faili sekundē",
     "CPU (all cores)": "CPU (visi kodoli)",
     "CPU (one core = 100%)": "CPU (viens kodols = 100%)",
-    "Benchmark exported to {path}.": "Etalona eksports uz {path}."
+    "Benchmark exported to {path}.": "Etalona eksports uz {path}.",
+    "Swap A and B": "Apmainīt A un B",
+    "Exchange which benchmark is A and which is B": "Apmaina, kurš etalons ir A un kurš ir B",
+    "Oldest as A": "Vecākais kā A",
+    "When on, the older benchmark is always A. When off, A is the one selected first.": "Ja ieslēgts, vecākais etalons vienmēr ir A. Ja izslēgts, A ir tas, kas atlasīts pirmais."
 }

@@ -1734,5 +1734,9 @@
     "Files per second": "الملفات في الثانية",
     "CPU (all cores)": "CPU (جميع النوى)",
     "CPU (one core = 100%)": "CPU (نواة واحدة = 100%)",
-    "Benchmark exported to {path}.": "تم تصدير اختبار الأداء إلى {path}."
+    "Benchmark exported to {path}.": "تم تصدير اختبار الأداء إلى {path}.",
+    "Swap A and B": "تبديل A وB",
+    "Exchange which benchmark is A and which is B": "تبديل اختبار الأداء الذي يمثل A والذي يمثل B",
+    "Oldest as A": "الأقدم كـ A",
+    "When on, the older benchmark is always A. When off, A is the one selected first.": "عند التفعيل، يكون اختبار الأداء الأقدم دائمًا A. عند الإيقاف، يكون A هو الذي تم تحديده أولًا."
 }

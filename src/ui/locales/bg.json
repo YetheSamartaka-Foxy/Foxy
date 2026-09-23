@@ -1734,5 +1734,9 @@
     "Files per second": "Файлове в секунда",
     "CPU (all cores)": "CPU (всички ядра)",
     "CPU (one core = 100%)": "CPU (едно ядро ​​= 100%)",
-    "Benchmark exported to {path}.": "Бенчмарк, експортиран към {path}."
+    "Benchmark exported to {path}.": "Бенчмарк, експортиран към {path}.",
+    "Swap A and B": "Размени A и B",
+    "Exchange which benchmark is A and which is B": "Разменя кой бенчмарк е A и кой е B",
+    "Oldest as A": "Най-старият като A",
+    "When on, the older benchmark is always A. When off, A is the one selected first.": "Когато е включено, по-старият бенчмарк винаги е A. Когато е изключено, A е първият избран."
 }

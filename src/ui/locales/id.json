@@ -1734,5 +1734,9 @@
     "Files per second": "File per detik",
     "CPU (all cores)": "CPU (semua inti)",
     "CPU (one core = 100%)": "CPU (satu inti = 100%)",
-    "Benchmark exported to {path}.": "Tolok ukur diekspor ke {path}."
+    "Benchmark exported to {path}.": "Tolok ukur diekspor ke {path}.",
+    "Swap A and B": "Tukar A dan B",
+    "Exchange which benchmark is A and which is B": "Menukar tolok ukur mana yang menjadi A dan mana yang menjadi B",
+    "Oldest as A": "Terlama sebagai A",
+    "When on, the older benchmark is always A. When off, A is the one selected first.": "Jika aktif, tolok ukur yang lebih lama selalu menjadi A. Jika nonaktif, A adalah yang dipilih pertama."
 }

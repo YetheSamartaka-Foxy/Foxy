@@ -1734,5 +1734,9 @@
     "Files per second": "Fișiere pe secundă",
     "CPU (all cores)": "CPU (toate nucleele)",
     "CPU (one core = 100%)": "CPU (un nucleu = 100%)",
-    "Benchmark exported to {path}.": "Benchmark exportat în {path}."
+    "Benchmark exported to {path}.": "Benchmark exportat în {path}.",
+    "Swap A and B": "Inversează A și B",
+    "Exchange which benchmark is A and which is B": "Inversează care test de performanță este A și care este B",
+    "Oldest as A": "Cel mai vechi ca A",
+    "When on, the older benchmark is always A. When off, A is the one selected first.": "Când este activat, testul de performanță mai vechi este întotdeauna A. Când este dezactivat, A este cel selectat primul."
 }

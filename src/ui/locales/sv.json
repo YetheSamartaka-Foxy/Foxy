@@ -1734,5 +1734,9 @@
     "Files per second": "Filer per sekund",
     "CPU (all cores)": "CPU (alla kärnor)",
     "CPU (one core = 100%)": "CPU (en kärna = 100%)",
-  "Benchmark exported to {path}.": "Prestandatest exporterat till {path}."
+  "Benchmark exported to {path}.": "Prestandatest exporterat till {path}.",
+  "Swap A and B": "Byt plats på A och B",
+  "Exchange which benchmark is A and which is B": "Byter vilket riktmärke som är A och vilket som är B",
+  "Oldest as A": "Äldst som A",
+  "When on, the older benchmark is always A. When off, A is the one selected first.": "När det är på är det äldre riktmärket alltid A. När det är av är A det som valdes först."
 }

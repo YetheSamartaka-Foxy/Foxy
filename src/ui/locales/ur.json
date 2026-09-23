@@ -1734,5 +1734,9 @@
     "Files per second": "فی سیکنڈ فائلیں",
     "CPU (all cores)": "سی پی یو (تمام کورز)",
     "CPU (one core = 100%)": "سی پی یو (ایک کور = 100%)",
-    "Benchmark exported to {path}.": "بینچ مارک {path} پر برآمد کر دیا گیا۔"
+    "Benchmark exported to {path}.": "بینچ مارک {path} پر برآمد کر دیا گیا۔",
+    "Swap A and B": "A اور B کو آپس میں بدلیں",
+    "Exchange which benchmark is A and which is B": "بدلیں کہ کون سا بینچ مارک A ہے اور کون سا B",
+    "Oldest as A": "سب سے پرانا بطور A",
+    "When on, the older benchmark is always A. When off, A is the one selected first.": "آن ہونے پر پرانا بینچ مارک ہمیشہ A ہوتا ہے۔ آف ہونے پر A وہ ہوتا ہے جو پہلے منتخب کیا گیا تھا۔"
 }

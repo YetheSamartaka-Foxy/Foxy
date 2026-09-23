@@ -1734,5 +1734,9 @@
     "Files per second": "Αρχεία ανά δευτερόλεπτο",
     "CPU (all cores)": "CPU (όλοι οι πυρήνες)",
     "CPU (one core = 100%)": "CPU (ένας πυρήνας = 100%)",
-    "Benchmark exported to {path}.": "Το μέτρηση επιδόσεων εξήχθη σε {path}."
+    "Benchmark exported to {path}.": "Το μέτρηση επιδόσεων εξήχθη σε {path}.",
+    "Swap A and B": "Εναλλαγή A και B",
+    "Exchange which benchmark is A and which is B": "Εναλλάσσει ποια μέτρηση επιδόσεων είναι η A και ποια η B",
+    "Oldest as A": "Η παλαιότερη ως A",
+    "When on, the older benchmark is always A. When off, A is the one selected first.": "Όταν είναι ενεργό, η παλαιότερη μέτρηση επιδόσεων είναι πάντα η A. Όταν είναι ανενεργό, A είναι αυτή που επιλέχθηκε πρώτη."
 }

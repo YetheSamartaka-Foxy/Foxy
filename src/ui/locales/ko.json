@@ -1734,5 +1734,9 @@
     "Files per second": "초당 파일 수",
     "CPU (all cores)": "CPU(모든 코어)",
     "CPU (one core = 100%)": "CPU(코어 1개 = 100%)",
-    "Benchmark exported to {path}.": "벤치마크를 {path}로 내보냈습니다."
+    "Benchmark exported to {path}.": "벤치마크를 {path}로 내보냈습니다.",
+    "Swap A and B": "A와 B 바꾸기",
+    "Exchange which benchmark is A and which is B": "어느 벤치마크가 A이고 어느 것이 B인지 서로 바꿉니다",
+    "Oldest as A": "오래된 것을 A로",
+    "When on, the older benchmark is always A. When off, A is the one selected first.": "켜면 더 오래된 벤치마크가 항상 A가 됩니다. 끄면 먼저 선택한 벤치마크가 A가 됩니다."
 }

@@ -41,7 +41,7 @@ impl Foxy {
         let Some(record) = self.benchmarks_view.record(id) else {
             return;
         };
-        let file_name = format!("{}.zip", record.id);
+        let file_name = crate::core::benchmarks::export::export_file_name(record);
         let chart_count = Self::benchmark_chart_count(record);
         let dest = crate::ui::app::agent_support::save_file(|| {
             rfd::FileDialog::new()

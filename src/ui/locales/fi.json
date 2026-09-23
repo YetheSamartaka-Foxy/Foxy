@@ -1734,5 +1734,9 @@
     "Files per second": "Tiedostoja sekunnissa",
     "CPU (all cores)": "CPU (kaikki ytimet)",
     "CPU (one core = 100%)": "CPU (yksi ydin = 100 %)",
-    "Benchmark exported to {path}.": "Suorituskykymittaus vietiin {path}."
+    "Benchmark exported to {path}.": "Suorituskykymittaus vietiin {path}.",
+    "Swap A and B": "Vaihda A ja B",
+    "Exchange which benchmark is A and which is B": "Vaihtaa, kumpi suorituskykymittaus on A ja kumpi B",
+    "Oldest as A": "Vanhin A:ksi",
+    "When on, the older benchmark is always A. When off, A is the one selected first.": "Kun käytössä, vanhempi suorituskykymittaus on aina A. Kun pois käytöstä, A on ensimmäisenä valittu."
 }

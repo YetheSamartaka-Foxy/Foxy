@@ -1734,5 +1734,9 @@
     "Files per second": "每秒文件数",
     "CPU (all cores)": "CPU（所有核心）",
     "CPU (one core = 100%)": "CPU（一个核心 = 100%）",
-  "Benchmark exported to {path}.": "基准测试已导出到 {path}。"
+  "Benchmark exported to {path}.": "基准测试已导出到 {path}。",
+  "Swap A and B": "交换 A 和 B",
+  "Exchange which benchmark is A and which is B": "交换哪个基准为 A、哪个为 B",
+  "Oldest as A": "较旧的作为 A",
+  "When on, the older benchmark is always A. When off, A is the one selected first.": "开启时，较旧的基准始终为 A。关闭时，A 为最先选择的基准。"
 }

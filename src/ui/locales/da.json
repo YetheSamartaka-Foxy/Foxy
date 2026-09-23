@@ -1734,5 +1734,9 @@
     "Files per second": "Filer pr. sekund",
     "CPU (all cores)": "CPU (alle kerner)",
     "CPU (one core = 100%)": "CPU (én kerne = 100%)",
-    "Benchmark exported to {path}.": "Benchmark eksporteret til {path}."
+    "Benchmark exported to {path}.": "Benchmark eksporteret til {path}.",
+    "Swap A and B": "Byt om på A og B",
+    "Exchange which benchmark is A and which is B": "Bytter om på, hvilken benchmark der er A, og hvilken der er B",
+    "Oldest as A": "Ældste som A",
+    "When on, the older benchmark is always A. When off, A is the one selected first.": "Når slået til, er den ældre benchmark altid A. Når slået fra, er A den, der blev valgt først."
 }

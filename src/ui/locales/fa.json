@@ -1734,5 +1734,9 @@
     "Files per second": "فایل ها در ثانیه",
     "CPU (all cores)": "CPU (همه هسته ها)",
     "CPU (one core = 100%)": "CPU (یک هسته = 100%)",
-    "Benchmark exported to {path}.": "بنچمارک به {path} صادر شد."
+    "Benchmark exported to {path}.": "بنچمارک به {path} صادر شد.",
+    "Swap A and B": "جابه‌جایی A و B",
+    "Exchange which benchmark is A and which is B": "جابه‌جا کردن اینکه کدام بنچمارک A و کدام B است",
+    "Oldest as A": "قدیمی‌ترین به‌عنوان A",
+    "When on, the older benchmark is always A. When off, A is the one selected first.": "وقتی روشن است، بنچمارک قدیمی‌تر همیشه A است. وقتی خاموش است، A همانی است که اول انتخاب شده."
 }

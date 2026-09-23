@@ -1734,5 +1734,9 @@
     "Files per second": "फ़ाइलें प्रति सेकंड",
     "CPU (all cores)": "सीपीयू (सभी कोर)",
     "CPU (one core = 100%)": "सीपीयू (एक कोर = 100%)",
-    "Benchmark exported to {path}.": "बेंचमार्क {path} पर निर्यात किया गया।"
+    "Benchmark exported to {path}.": "बेंचमार्क {path} पर निर्यात किया गया।",
+    "Swap A and B": "A और B की अदला-बदली करें",
+    "Exchange which benchmark is A and which is B": "कौन-सा बेंचमार्क A है और कौन-सा B, इसकी अदला-बदली करें",
+    "Oldest as A": "सबसे पुराना A के रूप में",
+    "When on, the older benchmark is always A. When off, A is the one selected first.": "चालू होने पर पुराना बेंचमार्क हमेशा A होता है। बंद होने पर A वह होता है जिसे पहले चुना गया था।"
 }

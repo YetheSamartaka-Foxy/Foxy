@@ -1734,5 +1734,9 @@
     "Files per second": "Faile sekundis",
     "CPU (all cores)": "CPU (kõik tuumad)",
     "CPU (one core = 100%)": "CPU (üks tuum = 100%)",
-    "Benchmark exported to {path}.": "Võrdlusanalüüs eksporditi {path}."
+    "Benchmark exported to {path}.": "Võrdlusanalüüs eksporditi {path}.",
+    "Swap A and B": "Vaheta A ja B",
+    "Exchange which benchmark is A and which is B": "Vahetab, milline jõudlustest on A ja milline B",
+    "Oldest as A": "Vanim kui A",
+    "When on, the older benchmark is always A. When off, A is the one selected first.": "Kui see on sees, on vanem jõudlustest alati A. Kui see on väljas, on A esimesena valitud test."
 }

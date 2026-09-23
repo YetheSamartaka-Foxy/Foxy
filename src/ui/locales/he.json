@@ -1734,5 +1734,9 @@
     "Files per second": "קבצים בשנייה",
     "CPU (all cores)": "CPU (כל הליבות)",
     "CPU (one core = 100%)": "CPU (ליבה אחת = 100%)",
-    "Benchmark exported to {path}.": "Benchmark מיוצא אל {path}."
+    "Benchmark exported to {path}.": "Benchmark מיוצא אל {path}.",
+    "Swap A and B": "החלף בין A ל-B",
+    "Exchange which benchmark is A and which is B": "מחליף איזו בדיקת ביצועים היא A ואיזו B",
+    "Oldest as A": "הישנה ביותר כ-A",
+    "When on, the older benchmark is always A. When off, A is the one selected first.": "כשמופעל, בדיקת הביצועים הישנה יותר היא תמיד A. כשכבוי, A היא זו שנבחרה ראשונה."
 }

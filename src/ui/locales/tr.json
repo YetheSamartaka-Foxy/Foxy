@@ -1734,5 +1734,9 @@
     "Files per second": "Saniye başına dosya",
     "CPU (all cores)": "CPU (tüm çekirdekler)",
     "CPU (one core = 100%)": "İşlemci (bir çekirdek = %100)",
-  "Benchmark exported to {path}.": "Benchmark {path} konumuna aktarıldı."
+  "Benchmark exported to {path}.": "Benchmark {path} konumuna aktarıldı.",
+  "Swap A and B": "A ve B'yi değiştir",
+  "Exchange which benchmark is A and which is B": "Hangi benchmark'ın A, hangisinin B olduğunu değiştirir",
+  "Oldest as A": "En eski A olsun",
+  "When on, the older benchmark is always A. When off, A is the one selected first.": "Açıkken daha eski benchmark her zaman A olur. Kapalıyken A, ilk seçilen benchmark olur."
 }

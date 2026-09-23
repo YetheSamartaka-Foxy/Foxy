@@ -1734,5 +1734,9 @@
     "Files per second": "Tệp mỗi giây",
     "CPU (all cores)": "CPU (tất cả các nhân)",
     "CPU (one core = 100%)": "CPU (một lõi = 100%)",
-  "Benchmark exported to {path}.": "Đã xuất benchmark sang {path}."
+  "Benchmark exported to {path}.": "Đã xuất benchmark sang {path}.",
+  "Swap A and B": "Hoán đổi A và B",
+  "Exchange which benchmark is A and which is B": "Hoán đổi chỉ số chuẩn nào là A và chỉ số chuẩn nào là B",
+  "Oldest as A": "Cũ nhất là A",
+  "When on, the older benchmark is always A. When off, A is the one selected first.": "Khi bật, chỉ số chuẩn cũ hơn luôn là A. Khi tắt, A là mục được chọn trước."
 }

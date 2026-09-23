@@ -1734,5 +1734,9 @@
     "Files per second": "Failai per sekundę",
     "CPU (all cores)": "CPU (visi branduoliai)",
     "CPU (one core = 100%)": "CPU (vienas branduolys = 100%)",
-    "Benchmark exported to {path}.": "Palyginimas eksportuotas į {path}."
+    "Benchmark exported to {path}.": "Palyginimas eksportuotas į {path}.",
+    "Swap A and B": "Sukeisti A ir B",
+    "Exchange which benchmark is A and which is B": "Sukeičia, kuris etalonas yra A, o kuris B",
+    "Oldest as A": "Seniausias kaip A",
+    "When on, the older benchmark is always A. When off, A is the one selected first.": "Įjungus senesnis etalonas visada yra A. Išjungus A yra tas, kuris pasirinktas pirmas."
 }

@@ -1734,5 +1734,9 @@
     "Files per second": "Soubory za sekundu",
     "CPU (all cores)": "CPU (všechna jádra)",
     "CPU (one core = 100%)": "CPU (jedno jádro = 100 %)",
-    "Benchmark exported to {path}.": "Benchmark exportován do {path}."
+    "Benchmark exported to {path}.": "Benchmark exportován do {path}.",
+    "Swap A and B": "Prohodit A a B",
+    "Exchange which benchmark is A and which is B": "Prohodí, který benchmark je A a který B",
+    "Oldest as A": "Nejstarší jako A",
+    "When on, the older benchmark is always A. When off, A is the one selected first.": "Když je zapnuto, starší benchmark je vždy A. Když je vypnuto, A je ten vybraný jako první."
 }

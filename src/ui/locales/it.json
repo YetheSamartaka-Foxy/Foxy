@@ -1734,5 +1734,9 @@
     "Files per second": "File al secondo",
     "CPU (all cores)": "CPU (tutti i core)",
     "CPU (one core = 100%)": "CPU (un core = 100%)",
-    "Benchmark exported to {path}.": "Benchmark esportato in {path}."
+    "Benchmark exported to {path}.": "Benchmark esportato in {path}.",
+    "Swap A and B": "Scambia A e B",
+    "Exchange which benchmark is A and which is B": "Scambia quale benchmark è A e quale è B",
+    "Oldest as A": "Il più vecchio come A",
+    "When on, the older benchmark is always A. When off, A is the one selected first.": "Se attivo, il benchmark più vecchio è sempre A. Se disattivo, A è quello selezionato per primo."
 }

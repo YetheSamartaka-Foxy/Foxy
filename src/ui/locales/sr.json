@@ -1734,5 +1734,9 @@
     "Files per second": "Фајлови по секунди",
     "CPU (all cores)": "ЦПУ (сви језгри)",
     "CPU (one core = 100%)": "ЦПУ (једно језгро = 100%)",
-    "Benchmark exported to {path}.": "Бенчмарк је извезен у {path}."
+    "Benchmark exported to {path}.": "Бенчмарк је извезен у {path}.",
+    "Swap A and B": "Замени A и B",
+    "Exchange which benchmark is A and which is B": "Замењује које мерило перформанси је A, а које B",
+    "Oldest as A": "Најстарије као A",
+    "When on, the older benchmark is always A. When off, A is the one selected first.": "Када је укључено, старије мерило перформанси је увек A. Када је искључено, A је оно које је прво изабрано."
 }

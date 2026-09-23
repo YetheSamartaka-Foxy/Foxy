@@ -126,6 +126,8 @@ pub struct BenchmarksViewState {
     pub expanded: HashSet<String>,
     /// Up to two ids picked for the comparison view, in pick order.
     pub selected: Vec<String>,
+    /// Compare the older start as A regardless of pick order.
+    pub compare_by_date: bool,
     pub compare_open: bool,
     pub pending_remove: Option<String>,
     pub focused_row: Option<String>,
@@ -149,6 +151,7 @@ impl Default for BenchmarksViewState {
             show_hidden: false,
             expanded: HashSet::new(),
             selected: Vec::new(),
+            compare_by_date: true,
             compare_open: false,
             pending_remove: None,
             focused_row: None,
@@ -245,6 +248,28 @@ impl BenchmarksViewState {
         }
     }
 
+    /// Selected ids as A then B.
+    pub fn compare_order(&self) -> Vec<String> {
+        let picked: Vec<(&str, i64)> = self
+            .selected
+            .iter()
+            .filter_map(|id| {
+                self.record(id)
+                    .map(|record| (id.as_str(), record.started_at))
+            })
+            .collect();
+        compare_order(&picked, self.compare_by_date)
+    }
+
+    /// Swap A and B. Date order cannot express a swap, so it switches to pick
+    /// order with the current pair reversed.
+    pub fn swap_compare_order(&mut self) {
+        let mut order = self.compare_order();
+        order.reverse();
+        self.selected = order;
+        self.compare_by_date = false;
+    }
+
     pub fn forget(&mut self, id: &str) {
         self.records.retain(|record| record.id != id);
         self.expanded.remove(id);
@@ -258,6 +283,16 @@ impl BenchmarksViewState {
             self.pending_remove = None;
         }
     }
+}
+
+/// `picked` is (id, started_at) in pick order; `by_date` puts the older start
+/// first, keeping pick order for equal starts.
+fn compare_order(picked: &[(&str, i64)], by_date: bool) -> Vec<String> {
+    let mut order = picked.to_vec();
+    if by_date {
+        order.sort_by_key(|(_, started_at)| *started_at);
+    }
+    order.into_iter().map(|(id, _)| id.to_owned()).collect()
 }
 
 pub struct BenchmarkChannels {
@@ -601,5 +636,20 @@ impl Foxy {
             );
             crate::core::api::set_extended_diagnostics(diagnostics);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compare_order;
+
+    #[test]
+    fn compare_order_puts_older_first_by_date_and_keeps_pick_order_otherwise() {
+        let picked = [("newer", 200), ("older", 100)];
+        assert_eq!(compare_order(&picked, true), vec!["older", "newer"]);
+        assert_eq!(compare_order(&picked, false), vec!["newer", "older"]);
+        let tie = [("first", 100), ("second", 100)];
+        assert_eq!(compare_order(&tie, true), vec!["first", "second"]);
+        assert_eq!(compare_order(&[("only", 5)], true), vec!["only"]);
     }
 }

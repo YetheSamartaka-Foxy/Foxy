@@ -5,6 +5,7 @@ use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use chrono::TimeZone;
 use zip::CompressionMethod;
 use zip::write::SimpleFileOptions;
 
@@ -50,6 +51,31 @@ pub fn write_zip(
 
     zip.finish().context("finalize benchmark zip")?;
     Ok(())
+}
+
+/// `foxy-bm-<version>-<local start datetime>-<kind>.zip`. The version keeps
+/// only file-name-safe characters so an odd build string cannot add a path.
+pub fn export_file_name(record: &BenchmarkRecord) -> String {
+    let version: String = record
+        .build
+        .version
+        .trim()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+'))
+        .collect();
+    let version = if version.is_empty() {
+        "unknown".to_owned()
+    } else {
+        version
+    };
+    let started = chrono::Local
+        .timestamp_opt(record.started_at, 0)
+        .single()
+        .map_or_else(
+            || "unknown".to_owned(),
+            |at| at.format("%Y%m%d-%H%M%S").to_string(),
+        );
+    format!("foxy-bm-{version}-{started}-{}.zip", record.kind.slug())
 }
 
 /// Human-readable digest of the record for people who do not open the JSON.
@@ -364,5 +390,25 @@ best_measured: not comparable
             .read_to_string(&mut log)
             .unwrap();
         assert_eq!(log, "[x] line one\n");
+    }
+
+    #[test]
+    fn export_file_name_carries_version_start_and_kind() {
+        let mut record = record();
+        record.build.version = "1.2.0".into();
+        record.started_at = chrono::Local
+            .with_ymd_and_hms(2026, 9, 23, 14, 5, 9)
+            .single()
+            .expect("local time")
+            .timestamp();
+        assert_eq!(
+            export_file_name(&record),
+            "foxy-bm-1.2.0-20260923-140509-update.zip"
+        );
+        record.build.version = " ../x ".into();
+        record.kind = BenchmarkKind::QuickCheck;
+        assert!(export_file_name(&record).starts_with("foxy-bm-..x-20260923-140509-quick-check"));
+        record.build.version = String::new();
+        assert!(export_file_name(&record).starts_with("foxy-bm-unknown-"));
     }
 }

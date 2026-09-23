@@ -1734,5 +1734,9 @@
     "Files per second": "ไฟล์ต่อวินาที",
     "CPU (all cores)": "ซีพียู (ทุกคอร์)",
     "CPU (one core = 100%)": "ซีพียู (หนึ่งคอร์ = 100%)",
-  "Benchmark exported to {path}.": "ส่งออกเบนช์มาร์กไปยัง {path} แล้ว"
+  "Benchmark exported to {path}.": "ส่งออกเบนช์มาร์กไปยัง {path} แล้ว",
+  "Swap A and B": "สลับ A และ B",
+  "Exchange which benchmark is A and which is B": "สลับว่าเกณฑ์มาตรฐานใดเป็น A และใดเป็น B",
+  "Oldest as A": "เก่าสุดเป็น A",
+  "When on, the older benchmark is always A. When off, A is the one selected first.": "เมื่อเปิด เกณฑ์มาตรฐานที่เก่ากว่าจะเป็น A เสมอ เมื่อปิด A จะเป็นรายการที่เลือกก่อน"
 }

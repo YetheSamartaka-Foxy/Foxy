@@ -1734,5 +1734,9 @@
     "Files per second": "1 秒あたりのファイル数",
     "CPU (all cores)": "CPU（全コア）",
     "CPU (one core = 100%)": "CPU (1 コア = 100%)",
-    "Benchmark exported to {path}.": "ベンチマークは {path} にエクスポートされました。"
+    "Benchmark exported to {path}.": "ベンチマークは {path} にエクスポートされました。",
+    "Swap A and B": "AとBを入れ替え",
+    "Exchange which benchmark is A and which is B": "どちらのベンチマークをAとBにするかを入れ替えます",
+    "Oldest as A": "古い方をAにする",
+    "When on, the older benchmark is always A. When off, A is the one selected first.": "オンの場合、古い方のベンチマークが常にAになります。オフの場合、先に選択したものがAになります。"
 }
