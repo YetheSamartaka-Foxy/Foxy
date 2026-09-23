@@ -100,7 +100,12 @@ write `module.id() == "arma3"`.
   activates exactly its own mod set on join, so the marking has nothing to mean
   there and no surface offers it.
 - `creator_dlc` gates the Creator DLC checkboxes in a repository's launch
-  settings (Arma 3 only). The other launch checkboxes come from
+  settings (Arma 3 only) and the join-preflight Creator DLC sections, which
+  offer to enable the DLCs the server runs and disable enabled ones it does
+  not. Servers report Creator DLCs as flagged entries in the rules payload's
+  mod list (`ARMA3_CREATOR_DLCS` maps their Steam app IDs to `-mod=` codes);
+  when that payload does not decode, the server's DLCs are unknown and no DLC
+  change is offered. The other launch checkboxes come from
   `GameModule::repository_launch_flags`: Arma 3's map to dedicated `Repository`
   fields, every other game's toggle a token in `additional_params`, which is
   also where a `repo.json` `clientParameters` string lands.

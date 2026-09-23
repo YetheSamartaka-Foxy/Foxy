@@ -1,7 +1,9 @@
 use super::{LaunchDispatchResult, spawn_launch_process};
 use crate::core::addon_metadata::load_addon_display_name_snapshot;
 use crate::core::arma3_missions::EditorMission;
-use crate::core::arma3_server_query::{ServerAddonQueryResult, query_server_addon_requirements};
+use crate::core::arma3_server_query::{
+    ServerAddonQueryResult, creator_dlc_by_app_id, query_server_addon_requirements,
+};
 use crate::core::steam::{self, SteamEnsureResult};
 use crate::ui::app::{
     Foxy, JoinPreflightQueryResult, PendingJoinPreflightQuery, PendingJoinStatusQuery,
@@ -537,13 +539,20 @@ impl Foxy {
         display_names: &crate::core::addon_metadata::AddonDisplayNameSnapshot,
     ) {
         Self::log_join_preflight_query_output(repo_name, server, result);
-        let addon_state = Self::build_join_preflight_state(
+        let mut addon_state = Self::build_join_preflight_state(
             effective,
             &self.repository_view_state.repositories,
             server,
             repo_name,
             &result.requirements,
             display_names,
+        );
+        Self::merge_join_preflight_dlc_changes(
+            &mut addon_state,
+            effective,
+            server,
+            repo_name,
+            result,
         );
         if let Some(preflight) = &addon_state {
             info!(
@@ -568,6 +577,64 @@ impl Foxy {
             );
         }
         self.present_join_preflight(ctx, effective, server, repo_name, addon_state);
+    }
+
+    /// Adds the Creator DLC differences to the join modal. Skipped when the
+    /// server's DLC list could not be decoded, since an unknown list must not
+    /// be read as "the server runs no DLCs".
+    fn merge_join_preflight_dlc_changes(
+        state: &mut Option<crate::ui::app::PendingJoinPreflightState>,
+        effective: &Repository,
+        server: &RepositoryServer,
+        repo_name: &str,
+        result: &ServerAddonQueryResult,
+    ) {
+        if !crate::core::game::registry()
+            .active()
+            .capabilities()
+            .creator_dlc
+        {
+            return;
+        }
+        let Some(server_app_ids) = result
+            .server_browser_protocol
+            .as_ref()
+            .and_then(|protocol| protocol.creator_dlc_app_ids.as_deref())
+        else {
+            info!(
+                "Join DLC preflight skipped for repository {} server {}:{}: server did not report a decodable Creator DLC list",
+                repo_name, server.address, server.port
+            );
+            return;
+        };
+        let unknown_app_ids = server_app_ids
+            .iter()
+            .filter(|app_id| creator_dlc_by_app_id(**app_id).is_none())
+            .collect::<Vec<_>>();
+        if !unknown_app_ids.is_empty() {
+            warn!(
+                "Join DLC preflight for repository {} server {}:{}: server runs unrecognized Creator DLC app IDs {:?}",
+                repo_name, server.address, server.port, unknown_app_ids
+            );
+        }
+        let (dlc_enable, dlc_disable) = Self::join_preflight_dlc_changes(effective, server_app_ids);
+        if dlc_enable.is_empty() && dlc_disable.is_empty() {
+            info!(
+                "Join DLC preflight for repository {} server {}:{}: Creator DLCs already match the server",
+                repo_name, server.address, server.port
+            );
+            return;
+        }
+        let state = state.get_or_insert_with(|| {
+            crate::ui::app::PendingJoinPreflightState::empty(
+                repo_name,
+                server.clone(),
+                effective.clone(),
+                false,
+            )
+        });
+        state.dlc_enable = dlc_enable;
+        state.dlc_disable = dlc_disable;
     }
 
     /// Single convergence point that decides whether to open the join preflight
@@ -606,19 +673,16 @@ impl Foxy {
                     steam_required && !steam_running
                 );
                 self.pending_join_preflight = Some(crate::ui::app::PendingJoinPreflightState {
-                    repo_name: repo_name.to_string(),
-                    server: server.clone(),
-                    original_repository: effective.clone(),
-                    suggestions: Vec::new(),
-                    ambiguous: Vec::new(),
-                    known_remote: Vec::new(),
-                    extra_enabled: Vec::new(),
-                    unavailable_enabled: Vec::new(),
                     ts3_required,
                     ts3_running,
                     steam_required,
                     steam_running,
-                    launch_only: false,
+                    ..crate::ui::app::PendingJoinPreflightState::empty(
+                        repo_name,
+                        server.clone(),
+                        effective.clone(),
+                        false,
+                    )
                 });
             }
             None => {
@@ -701,19 +765,15 @@ impl Foxy {
             );
             self.prelaunch_recheck_at = None;
             self.pending_join_preflight = Some(crate::ui::app::PendingJoinPreflightState {
-                repo_name: repo_name.to_string(),
-                server: RepositoryServer::default(),
-                original_repository: effective.clone(),
-                suggestions: Vec::new(),
-                ambiguous: Vec::new(),
-                known_remote: Vec::new(),
-                extra_enabled: Vec::new(),
                 unavailable_enabled,
-                ts3_required: false,
-                ts3_running: false,
                 steam_required,
                 steam_running,
-                launch_only: true,
+                ..crate::ui::app::PendingJoinPreflightState::empty(
+                    repo_name,
+                    RepositoryServer::default(),
+                    effective.clone(),
+                    true,
+                )
             });
             return;
         }
@@ -773,7 +833,7 @@ impl Foxy {
 
         if let Some(protocol) = &result.server_browser_protocol {
             info!(
-                "Join addon preflight Server Browser Protocol 3 for repository {} server {}:{}: version={}, difficulty={:?}, ai_level={:?}, dlc_flags={:?}, mods={}",
+                "Join addon preflight Server Browser Protocol 3 for repository {} server {}:{}: version={}, difficulty={:?}, ai_level={:?}, dlc_flags={:?}, official_dlc={:?}, creator_dlc_app_ids={:?}, mods={}",
                 repo_name,
                 server.address,
                 server.port,
@@ -781,6 +841,8 @@ impl Foxy {
                 protocol.difficulty,
                 protocol.ai_level,
                 protocol.dlc_flags,
+                protocol.official_dlc_names(),
+                protocol.creator_dlc_app_ids,
                 protocol.mods.len()
             );
             if !protocol.mods.is_empty() {

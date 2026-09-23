@@ -1,8 +1,8 @@
 use super::arma3_editor_display_name;
 use crate::ui::app::{
-    Foxy, JoinPreflightAddonOrigin, JoinPreflightKnownRemoteAddon, JoinPreflightMatchConfidence,
-    PendingJoinPreflightState, PendingRepositoryDuplicateAddAction, RepositoryContextConfirmAction,
-    RepositorySpaceImportContinuation,
+    Foxy, JoinPreflightAddonOrigin, JoinPreflightDlcChange, JoinPreflightKnownRemoteAddon,
+    JoinPreflightMatchConfidence, PendingJoinPreflightState, PendingRepositoryDuplicateAddAction,
+    RepositoryContextConfirmAction, RepositorySpaceImportContinuation,
 };
 use crate::ui::types::{RepoState, RepositorySpaceBulkMode};
 use crate::ui::views::galley_cache;
@@ -29,10 +29,12 @@ impl Foxy {
         let mut pending_changed = false;
         let mut remote_download_request = None;
 
-        let has_addon_actions = !pending.suggestions.is_empty()
+        let has_addon_list_actions = !pending.suggestions.is_empty()
             || !pending.ambiguous.is_empty()
             || !pending.known_remote.is_empty()
             || !pending.extra_enabled.is_empty();
+        let has_dlc_changes = pending.has_dlc_changes();
+        let has_addon_actions = has_addon_list_actions || has_dlc_changes;
 
         let ts3_attention = pending.ts3_required && !pending.ts3_running;
         let steam_attention = pending.steam_required && !pending.steam_running;
@@ -81,6 +83,8 @@ impl Foxy {
             } else {
                 self.t("Ready to join")
             }
+        } else if !has_addon_list_actions {
+            self.t("Match the server's Creator DLCs?")
         } else if pending.extra_enabled.is_empty()
             || !pending.suggestions.is_empty()
             || !pending.ambiguous.is_empty()
@@ -116,6 +120,11 @@ impl Foxy {
                         }
                         if !pending.extra_enabled.is_empty() {
                             ui.label(self.t("Enabled additional/external addons"));
+                        }
+                        if has_dlc_changes {
+                            ui.label(self.t(
+                                "The server runs different Creator DLCs than this repository has enabled.",
+                            ));
                         }
                     });
 
@@ -380,6 +389,16 @@ impl Foxy {
                     });
                 }
 
+                if !pending.dlc_enable.is_empty() {
+                    ui.add_space(10.0);
+                    pending_changed |= self.join_preflight_dlc_section(
+                        ui,
+                        self.t("Creator DLCs the server requires"),
+                        self.t("Ticked DLCs are enabled for this join."),
+                        &mut pending.dlc_enable,
+                    );
+                }
+
                 if !pending.extra_enabled.is_empty() {
                     ui.add_space(10.0);
                     self.join_preflight_section(ui, |ui| {
@@ -423,6 +442,16 @@ impl Foxy {
                                 }
                             });
                     });
+                }
+
+                if !pending.dlc_disable.is_empty() {
+                    ui.add_space(10.0);
+                    pending_changed |= self.join_preflight_dlc_section(
+                        ui,
+                        self.t("Enabled Creator DLCs the server does not use"),
+                        self.t("Ticked DLCs are disabled for this join."),
+                        &mut pending.dlc_disable,
+                    );
                 }
 
                 if !pending.unavailable_enabled.is_empty() {
@@ -486,17 +515,26 @@ impl Foxy {
                         .known_remote
                         .iter()
                         .any(|remote| remote.selected && !remote.available);
+                    let selected_dlc_changes = pending
+                        .dlc_enable
+                        .iter()
+                        .chain(&pending.dlc_disable)
+                        .any(|dlc| dlc.selected);
                     if !pending.suggestions.is_empty()
                         || selected_ambiguous_suggestions
                         || !pending.known_remote.is_empty()
                         || !pending.extra_enabled.is_empty()
+                        || has_dlc_changes
                     {
                         let has_selected_addons = selected_local_suggestions
                             || selected_ambiguous_suggestions
                             || selected_known_remote
-                            || has_extra_enabled;
+                            || has_extra_enabled
+                            || selected_dlc_changes;
                         let action_label = if selected_missing_known_remote {
                             self.t("Standalone download")
+                        } else if !has_addon_list_actions {
+                            self.t("Launch with selected DLC changes")
                         } else {
                             self.t("Launch with selected addons")
                         };
@@ -515,8 +553,10 @@ impl Foxy {
                     // With no addon actions this is a TeamSpeak/Steam-only modal,
                     // so the button just proceeds: "Launch" for a plain launch,
                     // "Join" for a server join, rather than "Launch without ...".
-                    let launch_without_label = if has_addon_actions {
+                    let launch_without_label = if has_addon_list_actions {
                         self.t("Launch without suggested addons")
+                    } else if has_dlc_changes {
+                        self.t("Launch without DLC changes")
                     } else if pending.launch_only {
                         self.t("Launch")
                     } else {
@@ -752,6 +792,42 @@ impl Foxy {
                 ui.set_min_width(ui.available_width());
                 add_contents(ui);
             });
+    }
+
+    /// Renders one Creator DLC change list; returns whether a tick changed.
+    fn join_preflight_dlc_section(
+        &self,
+        ui: &mut Ui,
+        title: String,
+        hint: String,
+        changes: &mut [JoinPreflightDlcChange],
+    ) -> bool {
+        let mut changed = false;
+        self.join_preflight_section(ui, |ui| {
+            ui.label(RichText::new(title).strong());
+            ui.label(RichText::new(hint).color(self.color_text_dim()));
+            ui.add_space(6.0);
+            for dlc in changes.iter_mut() {
+                self.join_preflight_row(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        let checkbox = Self::ui_state_checkbox(ui, &mut dlc.selected, dlc.name);
+                        if checkbox.hovered() {
+                            ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                        }
+                        if checkbox.changed() {
+                            changed = true;
+                            info!(
+                                "Toggled join preflight Creator DLC {} to selected={}",
+                                dlc.code, dlc.selected
+                            );
+                        }
+                        self.join_preflight_badge(ui, self.t("Creator DLC"));
+                    });
+                });
+                ui.add_space(4.0);
+            }
+        });
+        changed
     }
 
     fn join_preflight_row(&self, ui: &mut Ui, add_contents: impl FnOnce(&mut Ui)) {

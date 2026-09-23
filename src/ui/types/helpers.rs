@@ -33,6 +33,20 @@ pub fn selected_creator_dlc_codes(repo: &Repository) -> Vec<&'static str> {
     codes
 }
 
+pub fn set_creator_dlc_enabled(repo: &mut Repository, code: &str, enabled: bool) {
+    let flag = match code {
+        "csla" => &mut repo.csla,
+        "ef" => &mut repo.ef,
+        "gm" => &mut repo.gm,
+        "rf" => &mut repo.rf,
+        "spe" => &mut repo.spe,
+        "vn" => &mut repo.vn,
+        "ws" => &mut repo.ws,
+        _ => return,
+    };
+    *flag = enabled;
+}
+
 pub fn split_additional_launch_params(params: &str) -> Vec<String> {
     let mut args = Vec::new();
     let mut current = String::new();

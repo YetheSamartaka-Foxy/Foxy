@@ -450,6 +450,15 @@ pub struct JoinPreflightUnavailableAddon {
     pub path: String,
 }
 
+/// A Creator DLC whose enablement differs from what the joined server runs.
+/// Ticked applies the change (enable or disable) for this launch only.
+#[derive(Clone, Debug)]
+pub struct JoinPreflightDlcChange {
+    pub code: &'static str,
+    pub name: &'static str,
+    pub selected: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct PendingJoinPreflightState {
     pub repo_name: String,
@@ -463,6 +472,10 @@ pub struct PendingJoinPreflightState {
     /// Informational only: the launcher skips them, so the modal warns about
     /// them rather than letting them disappear silently.
     pub unavailable_enabled: Vec<JoinPreflightUnavailableAddon>,
+    /// Creator DLCs the server runs that are disabled for this repository.
+    pub dlc_enable: Vec<JoinPreflightDlcChange>,
+    /// Creator DLCs enabled for this repository that the server does not run.
+    pub dlc_disable: Vec<JoinPreflightDlcChange>,
     /// Repository ships TeamSpeak plugins and the running-check is enabled.
     pub ts3_required: bool,
     /// Latest result of the TeamSpeak-running process check.
@@ -475,6 +488,38 @@ pub struct PendingJoinPreflightState {
     /// "Join" action, so there is no server to connect to. The `server` field
     /// holds a placeholder and the launch must not pass connection params.
     pub launch_only: bool,
+}
+
+impl PendingJoinPreflightState {
+    /// A modal state with no addon, DLC or pre-launch findings yet.
+    pub fn empty(
+        repo_name: &str,
+        server: RepositoryServer,
+        original_repository: Repository,
+        launch_only: bool,
+    ) -> Self {
+        Self {
+            repo_name: repo_name.to_string(),
+            server,
+            original_repository,
+            suggestions: Vec::new(),
+            ambiguous: Vec::new(),
+            known_remote: Vec::new(),
+            extra_enabled: Vec::new(),
+            unavailable_enabled: Vec::new(),
+            dlc_enable: Vec::new(),
+            dlc_disable: Vec::new(),
+            ts3_required: false,
+            ts3_running: false,
+            steam_required: false,
+            steam_running: false,
+            launch_only,
+        }
+    }
+
+    pub fn has_dlc_changes(&self) -> bool {
+        !self.dlc_enable.is_empty() || !self.dlc_disable.is_empty()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

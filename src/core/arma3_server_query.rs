@@ -38,6 +38,94 @@ pub struct ServerBrowserProtocol3 {
     pub ai_level: Option<u16>,
     pub dlc_flags: Option<u16>,
     pub mods: Vec<ServerBrowserProtocol3Mod>,
+    /// Steam app IDs of the Creator DLCs the server runs. `Some` only when the
+    /// payload decoded with the full Arma 3 layout, where Creator DLC entries
+    /// are distinguishable from mods; `None` means the server's DLCs are unknown.
+    #[serde(default)]
+    pub creator_dlc_app_ids: Option<Vec<u32>>,
+}
+
+impl ServerBrowserProtocol3 {
+    pub fn official_dlc_names(&self) -> Vec<&'static str> {
+        self.dlc_flags.map(official_dlc_names).unwrap_or_default()
+    }
+}
+
+/// An Arma 3 Creator DLC: the `-mod=` code the game resolves from its own
+/// install, and the Steam app ID servers report it under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Arma3CreatorDlc {
+    pub code: &'static str,
+    pub name: &'static str,
+    pub app_id: u32,
+}
+
+pub const ARMA3_CREATOR_DLCS: [Arma3CreatorDlc; 7] = [
+    Arma3CreatorDlc {
+        code: "csla",
+        name: "CSLA Iron Curtain",
+        app_id: 1_294_440,
+    },
+    Arma3CreatorDlc {
+        code: "ef",
+        name: "Expeditionary Forces",
+        app_id: 2_647_830,
+    },
+    Arma3CreatorDlc {
+        code: "gm",
+        name: "Global Mobilization",
+        app_id: 1_042_220,
+    },
+    Arma3CreatorDlc {
+        code: "rf",
+        name: "Reaction Forces",
+        app_id: 2_647_760,
+    },
+    Arma3CreatorDlc {
+        code: "spe",
+        name: "Spearhead 1944",
+        app_id: 1_175_380,
+    },
+    Arma3CreatorDlc {
+        code: "vn",
+        name: "S.O.G. Prairie Fire",
+        app_id: 1_227_700,
+    },
+    Arma3CreatorDlc {
+        code: "ws",
+        name: "Western Sahara",
+        app_id: 1_681_170,
+    },
+];
+
+pub fn creator_dlc_by_app_id(app_id: u32) -> Option<&'static Arma3CreatorDlc> {
+    ARMA3_CREATOR_DLCS.iter().find(|dlc| dlc.app_id == app_id)
+}
+
+const OFFICIAL_DLC_FLAGS: [(u16, &str); 13] = [
+    (0x0001, "Karts"),
+    (0x0002, "Marksmen"),
+    (0x0004, "Helicopters"),
+    (0x0008, "Zeus"),
+    (0x0010, "Apex"),
+    (0x0020, "Jets"),
+    (0x0040, "Laws of War"),
+    (0x0080, "Malden"),
+    (0x0100, "Tac-Ops"),
+    (0x0200, "Tanks"),
+    (0x0400, "Contact"),
+    (0x0800, "Contact (Platform)"),
+    (0x1000, "Art of War"),
+];
+
+/// Names of the official DLCs set in a server's DLC bitmask. Official DLCs load
+/// automatically when owned, so this is informational only.
+pub fn official_dlc_names(mask: u16) -> Vec<&'static str> {
+    OFFICIAL_DLC_FLAGS
+        .iter()
+        .filter(|(bit, _)| mask & bit != 0)
+        .map(|(_, name)| *name)
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,7 +155,14 @@ pub fn query_server_addon_requirements(
         .or_else(|| extract_server_browser_protocol3_from_rules(&rules.text_rules));
     let mut requirements =
         merge_requirement_sources(&rules.text_rules, server_browser_protocol.as_ref());
-    requirements.extend(extract_binary_chunk_addon_requirements(&rules.raw_rules));
+    // The name scanner also picks up signature key names, so it is only a
+    // fallback for payloads the full layout decoder could not read.
+    let full_layout_decoded = server_browser_protocol
+        .as_ref()
+        .is_some_and(|protocol| protocol.creator_dlc_app_ids.is_some());
+    if !full_layout_decoded {
+        requirements.extend(extract_binary_chunk_addon_requirements(&rules.raw_rules));
+    }
     deduplicate_requirements(&mut requirements);
 
     Ok(ServerAddonQueryResult {
@@ -438,6 +533,9 @@ fn read_length_prefixed_string(
 }
 
 pub fn parse_server_browser_protocol3(data: &[u8]) -> Result<ServerBrowserProtocol3, Error> {
+    if let Ok(parsed) = parse_arma3_server_browser_payload(data) {
+        return Ok(parsed);
+    }
     let mut candidates = Vec::new();
     if let Ok(parsed) = parse_server_browser_protocol3_layout(data, true) {
         candidates.push(parsed);
@@ -499,7 +597,128 @@ fn parse_server_browser_protocol3_layout(
         ai_level,
         dlc_flags,
         mods,
+        creator_dlc_app_ids: None,
     })
+}
+
+const CREATOR_DLC_ID_FLAG: u8 = 0x10;
+
+/// Decodes the layout Arma 3 servers publish in their chunked A2S_RULES
+/// payload: version and flags bytes, the official DLC bitmask, difficulty, one
+/// hash per DLC bit, then mods (Creator DLCs are flagged in the ID-length byte
+/// and carry no name) and signatures. The whole payload must be consumed, so a
+/// misread layout is rejected rather than yielding garbage entries.
+fn parse_arma3_server_browser_payload(data: &[u8]) -> Result<ServerBrowserProtocol3, Error> {
+    let first = parse_arma3_server_browser_payload_layout(data, true);
+    if first.is_ok() || data.get(4) != Some(&0) {
+        return first;
+    }
+    // Some servers omit the second difficulty byte when the first one is zero.
+    parse_arma3_server_browser_payload_layout(data, false)
+}
+
+fn parse_arma3_server_browser_payload_layout(
+    data: &[u8],
+    two_difficulty_bytes: bool,
+) -> Result<ServerBrowserProtocol3, Error> {
+    let mut cursor = 0;
+    let version = read_u8(data, &mut cursor)?;
+    if version != 3 {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            format!("Unsupported Server Browser Protocol version {}", version),
+        ));
+    }
+    let _flags = read_u8(data, &mut cursor)?;
+    let dlc_flags = read_u16_le(data, &mut cursor)?;
+    let difficulty_bits = read_u8(data, &mut cursor)?;
+    if two_difficulty_bytes {
+        let _crosshair = read_u8(data, &mut cursor)?;
+    }
+    for _ in 0..dlc_flags.count_ones() {
+        let _dlc_hash = read_u32_le(data, &mut cursor)?;
+    }
+
+    let mods_count = read_u8(data, &mut cursor)?;
+    let mut mods = Vec::with_capacity(usize::from(mods_count));
+    let mut creator_dlc_app_ids = Vec::new();
+    for _ in 0..mods_count {
+        let _mod_hash = read_u32_le(data, &mut cursor)?;
+        let id_meta = read_u8(data, &mut cursor)?;
+        if id_meta & CREATOR_DLC_ID_FLAG != 0 {
+            let app_id = match id_meta & 0x0F {
+                3 | 4 => u64::from(read_u32_le(data, &mut cursor)?),
+                8 => read_u64_le(data, &mut cursor)?,
+                other => return Err(invalid_mod_id_length(other)),
+            };
+            let app_id = u32::try_from(app_id).map_err(|_| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    "Server Browser Protocol 3 Creator DLC app ID is out of range",
+                )
+            })?;
+            creator_dlc_app_ids.push(app_id);
+            continue;
+        }
+        if id_meta > 8 {
+            return Err(invalid_mod_id_length(id_meta));
+        }
+        let workshop_id = read_le_uint(data, &mut cursor, usize::from(id_meta))?;
+        let name_len = read_u8(data, &mut cursor)?;
+        let display_name = read_length_prefixed_string(data, &mut cursor, usize::from(name_len))?;
+        if !display_name.is_empty() {
+            mods.push(ServerBrowserProtocol3Mod {
+                display_name,
+                workshop_id: workshop_id.filter(|id| *id > 0).map(|id| id.to_string()),
+            });
+        }
+    }
+
+    let signatures_count = read_u8(data, &mut cursor)?;
+    for _ in 0..signatures_count {
+        let len = read_u8(data, &mut cursor)?;
+        skip_bytes(data, &mut cursor, usize::from(len))?;
+    }
+    if cursor != data.len() {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "Server Browser Protocol 3 payload has unexpected trailing bytes",
+        ));
+    }
+
+    Ok(ServerBrowserProtocol3 {
+        version: u32::from(version),
+        difficulty: Some(u16::from(difficulty_bits & 0b111)),
+        ai_level: Some(u16::from((difficulty_bits >> 3) & 0b111)),
+        dlc_flags: Some(dlc_flags),
+        mods,
+        creator_dlc_app_ids: Some(creator_dlc_app_ids),
+    })
+}
+
+fn invalid_mod_id_length(value: u8) -> Error {
+    Error::new(
+        ErrorKind::InvalidData,
+        format!("Server Browser Protocol 3 mod ID length byte 0x{value:02X} is not supported"),
+    )
+}
+
+fn read_le_uint(data: &[u8], cursor: &mut usize, len: usize) -> Result<Option<u64>, Error> {
+    if len == 0 {
+        return Ok(None);
+    }
+    if data.len().saturating_sub(*cursor) < len {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "Server Browser Protocol 3 payload ended before mod ID field",
+        ));
+    }
+    let value = data[*cursor..*cursor + len]
+        .iter()
+        .rev()
+        .fold(0u64, |acc, byte| (acc << 8) | u64::from(*byte));
+    *cursor += len;
+    Ok(Some(value))
 }
 
 fn read_protocol_mod_id(
@@ -595,9 +814,31 @@ fn reassemble_binary_rule_chunks(raw_rules: &[(Vec<u8>, Vec<u8>)]) -> Option<Vec
 
     let mut payload = Vec::new();
     for idx in 1..=total {
-        payload.extend_from_slice(ordered.get(&idx)?);
+        append_unescaped_rule_chunk(&mut payload, ordered.get(&idx)?);
     }
     Some(payload)
+}
+
+/// A2S rule values are NUL-terminated, so the server escapes the payload:
+/// `01 01` is `01`, `01 02` is `00` and `01 03` is `FF`.
+fn append_unescaped_rule_chunk(payload: &mut Vec<u8>, chunk: &[u8]) {
+    let mut bytes = chunk.iter().copied().peekable();
+    while let Some(byte) = bytes.next() {
+        if byte == 0x01 {
+            let decoded = match bytes.peek() {
+                Some(0x01) => Some(0x01),
+                Some(0x02) => Some(0x00),
+                Some(0x03) => Some(0xFF),
+                _ => None,
+            };
+            if let Some(decoded) = decoded {
+                bytes.next();
+                payload.push(decoded);
+                continue;
+            }
+        }
+        payload.push(byte);
+    }
 }
 
 fn extract_length_prefixed_display_names(payload: &[u8]) -> Vec<String> {
@@ -1089,6 +1330,127 @@ mod tests {
         assert_eq!(split.payload, b"ab");
     }
 
+    fn arma3_payload_with_creator_dlc() -> Vec<u8> {
+        let mut payload = vec![3, 0];
+        payload.extend_from_slice(&0x0410u16.to_le_bytes());
+        payload.extend_from_slice(&[0x4A, 0x01]);
+        payload.extend_from_slice(&0xAAAA_AAAAu32.to_le_bytes());
+        payload.extend_from_slice(&0xBBBB_BBBBu32.to_le_bytes());
+        payload.push(3);
+        payload.extend_from_slice(&0x1111_1111u32.to_le_bytes());
+        payload.push(0x13);
+        payload.extend_from_slice(&1_042_220u32.to_le_bytes());
+        payload.extend_from_slice(&0x2222_2222u32.to_le_bytes());
+        payload.push(4);
+        payload.extend_from_slice(&463_939_057u32.to_le_bytes());
+        payload.push(4);
+        payload.extend_from_slice(b"@ace");
+        payload.extend_from_slice(&0x3333_3333u32.to_le_bytes());
+        payload.push(0);
+        payload.push(7);
+        payload.extend_from_slice(b"Local 1");
+        payload.push(1);
+        payload.push(3);
+        payload.extend_from_slice(b"ace");
+        payload
+    }
+
+    #[test]
+    fn parses_arma3_payload_with_official_and_creator_dlc() {
+        let parsed = parse_server_browser_protocol3(&arma3_payload_with_creator_dlc())
+            .expect("Arma 3 payload should parse");
+
+        assert_eq!(parsed.version, 3);
+        assert_eq!(parsed.dlc_flags, Some(0x0410));
+        assert_eq!(parsed.official_dlc_names(), vec!["Apex", "Contact"]);
+        assert_eq!(parsed.difficulty, Some(2));
+        assert_eq!(parsed.ai_level, Some(1));
+        assert_eq!(parsed.creator_dlc_app_ids, Some(vec![1_042_220]));
+        assert_eq!(parsed.mods.len(), 2);
+        assert_eq!(parsed.mods[0].display_name, "@ace");
+        assert_eq!(parsed.mods[0].workshop_id.as_deref(), Some("463939057"));
+        assert_eq!(parsed.mods[1].display_name, "Local 1");
+        assert_eq!(parsed.mods[1].workshop_id, None);
+    }
+
+    #[test]
+    fn arma3_payload_without_creator_dlc_reports_empty_known_list() {
+        let mut payload = vec![3, 0, 0, 0, 0x0A, 0x00, 1];
+        payload.extend_from_slice(&0x1111_1111u32.to_le_bytes());
+        payload.push(8);
+        payload.extend_from_slice(&450_814_997u64.to_le_bytes());
+        payload.push(7);
+        payload.extend_from_slice(b"@cba_a3");
+        payload.push(0);
+
+        let parsed = parse_server_browser_protocol3(&payload).expect("payload should parse");
+
+        assert_eq!(parsed.creator_dlc_app_ids, Some(Vec::new()));
+        assert_eq!(parsed.mods[0].workshop_id.as_deref(), Some("450814997"));
+    }
+
+    #[test]
+    fn arma3_payload_accepts_single_difficulty_byte_when_zero() {
+        let mut payload = vec![3, 0, 0, 0, 0, 1];
+        payload.extend_from_slice(&0x1111_1111u32.to_le_bytes());
+        payload.extend_from_slice(&[0, 3]);
+        payload.extend_from_slice(b"abc");
+        payload.push(0);
+
+        let parsed = parse_server_browser_protocol3(&payload).expect("payload should parse");
+
+        assert_eq!(parsed.creator_dlc_app_ids, Some(Vec::new()));
+        assert_eq!(parsed.mods[0].display_name, "abc");
+    }
+
+    #[test]
+    fn arma3_payload_with_trailing_bytes_is_not_a_full_layout_decode() {
+        let mut payload = arma3_payload_with_creator_dlc();
+        payload.push(0xEE);
+
+        let parsed = parse_arma3_server_browser_payload(&payload);
+
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn extracts_creator_dlc_from_escaped_rule_chunks() {
+        let payload = arma3_payload_with_creator_dlc();
+        let mut escaped = Vec::new();
+        for byte in payload {
+            match byte {
+                0x00 => escaped.extend_from_slice(&[0x01, 0x02]),
+                0x01 => escaped.extend_from_slice(&[0x01, 0x01]),
+                0xFF => escaped.extend_from_slice(&[0x01, 0x03]),
+                other => escaped.push(other),
+            }
+        }
+        let split = escaped.len() / 2;
+        let raw_rules = vec![
+            (vec![2, 2], escaped[split..].to_vec()),
+            (vec![1, 2], escaped[..split].to_vec()),
+        ];
+
+        let parsed = extract_server_browser_protocol3_from_raw_rules(&raw_rules)
+            .expect("escaped chunks should decode");
+
+        assert_eq!(parsed.creator_dlc_app_ids, Some(vec![1_042_220]));
+        assert_eq!(parsed.mods[0].display_name, "@ace");
+    }
+
+    #[test]
+    fn maps_creator_dlc_app_ids_to_launch_codes() {
+        assert_eq!(
+            creator_dlc_by_app_id(1_681_170).map(|dlc| dlc.code),
+            Some("ws")
+        );
+        assert_eq!(
+            creator_dlc_by_app_id(1_227_700).map(|dlc| dlc.code),
+            Some("vn")
+        );
+        assert!(creator_dlc_by_app_id(107_410).is_none());
+    }
+
     #[test]
     fn parses_server_browser_protocol3_with_dlc_flags() {
         let mut payload = Vec::new();
@@ -1160,6 +1522,7 @@ mod tests {
                     workshop_id: Some("620019431".to_string()),
                 },
             ],
+            creator_dlc_app_ids: None,
         };
 
         let requirements = merge_requirement_sources(&rules, Some(&protocol));
