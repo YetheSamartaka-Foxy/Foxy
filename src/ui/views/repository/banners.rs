@@ -147,10 +147,7 @@ impl Foxy {
             .sync_started_at
             .map(|started| started.elapsed())
             .unwrap_or_default();
-        let progress = self.recheck_hash_progress_fraction().or_else(|| {
-            self.recheck_stage_percent
-                .map(|percent| percent.clamp(0.0, 1.0))
-        });
+        let progress = self.recheck_progress_fraction();
 
         Some(RepositoryCheckStatusBanner {
             title,
@@ -658,6 +655,25 @@ impl Foxy {
             self.recheck_hash_counter,
         )
     }
+
+    /// The check banner's bar: the hash fraction while hashing, else the stage
+    /// percent, never below the highest hash fraction already shown.
+    pub(crate) fn recheck_progress_fraction(&self) -> Option<f32> {
+        held_progress(
+            self.recheck_hash_progress_fraction().or_else(|| {
+                self.recheck_stage_percent
+                    .map(|percent| percent.clamp(0.0, 1.0))
+            }),
+            self.recheck_progress_peak,
+        )
+    }
+}
+
+fn held_progress(current: Option<f32>, peak: Option<f32>) -> Option<f32> {
+    match (current, peak) {
+        (Some(current), Some(peak)) => Some(current.max(peak)),
+        (current, peak) => current.or(peak),
+    }
 }
 
 /// Bytes when the hasher reports them, else parts, else files: heavy
@@ -684,6 +700,17 @@ mod hash_eta_tests {
         assert_eq!(Foxy::format_hash_eta(86_700_000_000, 107_000_000), "14 min");
         assert_eq!(Foxy::format_hash_eta(50_000_000, 100_000_000), "1 s");
         assert_eq!(Foxy::format_hash_eta(1_000, 0), "17 min");
+    }
+
+    #[test]
+    fn check_progress_never_falls_below_the_hash_peak() {
+        use super::held_progress;
+        assert_eq!(held_progress(Some(0.86), Some(0.9998)), Some(0.9998));
+        assert_eq!(held_progress(Some(0.2), Some(0.9998)), Some(0.9998));
+        assert_eq!(held_progress(Some(1.0), Some(0.9998)), Some(1.0));
+        assert_eq!(held_progress(Some(0.3), None), Some(0.3));
+        assert_eq!(held_progress(None, Some(0.5)), Some(0.5));
+        assert_eq!(held_progress(None, None), None);
     }
 
     #[test]

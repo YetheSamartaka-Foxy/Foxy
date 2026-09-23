@@ -434,6 +434,9 @@ pub struct Foxy {
     pub recheck_hash_counter: Option<(usize, usize)>,
     pub recheck_hash_part_counter: Option<(usize, usize)>,
     pub recheck_hash_byte_counter: Option<(u64, u64)>,
+    /// Highest hash fraction shown in this check, so the post-hash stages,
+    /// which carry their own lower percents, never move the bar backward.
+    pub recheck_progress_peak: Option<f32>,
     /// `(remaining_bytes, bytes_per_sec)` from the hash benchmark sample, shown
     /// as size and ETA next to the hash counter while a baseline runs.
     pub recheck_hash_estimate: Option<(u64, u64)>,

@@ -412,8 +412,7 @@ impl Foxy {
             .download_progress
             .as_ref()
             .map(|(_, percent)| *percent)
-            .or_else(|| self.recheck_hash_progress_fraction())
-            .or(self.recheck_stage_percent)
+            .or_else(|| self.recheck_progress_fraction())
             .unwrap_or(0.0)
             .clamp(0.0, 1.0)
             * 100.0;

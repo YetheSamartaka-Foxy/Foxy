@@ -3389,6 +3389,7 @@ impl Foxy {
             "recheck_hash_counter": recheck_hash,
             "recheck_hash_bytes": recheck_hash_bytes,
             "recheck_hash_progress": self.recheck_hash_progress_fraction(),
+            "recheck_progress": self.recheck_progress_fraction(),
             "update_modal_open": self.update_modal_open,
         })
     }

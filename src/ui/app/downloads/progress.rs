@@ -147,6 +147,7 @@ impl Foxy {
         self.recheck_hash_counter = None;
         self.recheck_hash_part_counter = None;
         self.recheck_hash_byte_counter = None;
+        self.recheck_progress_peak = None;
         self.download_hash_sample_at = None;
         self.download_hash_sample_files = 0;
         self.download_hash_sample_parts = 0;
