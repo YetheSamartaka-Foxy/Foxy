@@ -1458,6 +1458,10 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
     let algorithm = hash_algorithm_label(&jobs);
     let resource_profile = ResourceProfile::sample();
     let storage_class = detect_hash_storage_class(&jobs);
+    info!(
+        "Hash run power: {}",
+        crate::core::utils::power::sample().summary()
+    );
     super::storage_probe::log_storage_read_measurement(
         context,
         &jobs,

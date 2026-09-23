@@ -64,6 +64,7 @@ fn describe_machine(record: &mut BenchmarkRecord) {
             &record.repository.local_path,
         )
         .to_string();
+    record.machine.power = crate::core::utils::power::sample();
 }
 
 /// Everything the save does off the UI thread: slice the log, describe the

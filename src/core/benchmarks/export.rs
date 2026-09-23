@@ -137,13 +137,14 @@ pub fn summary_text(record: &BenchmarkRecord, best: Option<&BestComparison>) -> 
     line(
         "machine",
         format!(
-            "{} | {} x{} | {:.1} GB RAM | repo storage {} | hash profile {}",
+            "{} | {} x{} | {:.1} GB RAM | repo storage {} | hash profile {} | power {}",
             record.machine.os,
             record.machine.cpu,
             record.machine.cpu_cores,
             record.machine.total_memory_bytes as f64 / 1024.0 / 1024.0 / 1024.0,
             record.machine.repository_storage_class,
-            record.machine.hash_io_profile
+            record.machine.hash_io_profile,
+            record.machine.power.summary()
         ),
     );
     let m = &record.metrics;

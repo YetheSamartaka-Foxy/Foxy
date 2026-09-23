@@ -112,6 +112,10 @@ pub struct BenchmarkMachine {
     pub hash_io_profile: String,
     pub download_speed_limit_mbps: Option<u32>,
     pub extended_diagnostics: bool,
+    /// Power source and plan when the record was saved. Empty on records
+    /// written before it was stored.
+    #[serde(default)]
+    pub power: crate::core::utils::power::PowerStatus,
 }
 
 /// One point of the 1 Hz series the UI records while the action runs. Rates
