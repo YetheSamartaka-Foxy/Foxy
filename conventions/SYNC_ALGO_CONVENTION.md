@@ -110,7 +110,7 @@ sampled reads per file cost more than a minute per few thousand files once the p
 fingerprint describes the same bytes the tree hash does either way.
 
 Hash reads open files with the sequential-scan hint and parse an archive's
-layout through the same 4 MiB reader that hashes it (16 MiB on rotational
+layout through the same 4 MiB reader that hashes it (64 MiB on rotational
 storage), so the table of contents and the payload after it are one read.
 On rotational storage the jobs run in order of each file's first cluster, one
 sweep of the platter, with files that have no extent of their own after them

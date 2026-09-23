@@ -270,7 +270,11 @@ pub(super) async fn calculate_part_hashes(
                 }
             };
 
-        let mut reader = std::io::BufReader::with_capacity(reader_capacity, file);
+        // A small file never fills a large buffer, so it does not allocate one.
+        let capacity = usize::try_from(file_metadata.len())
+            .unwrap_or(usize::MAX)
+            .clamp(8 * 1024, reader_capacity.max(8 * 1024));
+        let mut reader = std::io::BufReader::with_capacity(capacity, file);
         let span_overrides = match layout_format {
             Some(format_id) => resolve_local_spans(
                 format_id,
