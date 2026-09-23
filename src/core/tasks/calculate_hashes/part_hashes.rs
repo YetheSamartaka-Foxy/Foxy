@@ -25,6 +25,8 @@ pub(super) struct PartHashMetrics {
     pub(super) fallback_parts: usize,
     /// 1 when the file was read around the cache.
     pub(super) direct_files: usize,
+    /// 1 when a non-cached read failed and the file was read through the cache.
+    pub(super) direct_fallback_files: usize,
 }
 
 pub(super) struct PartHashCalculation {
@@ -272,44 +274,60 @@ pub(super) async fn calculate_part_hashes(
         let direct_reader = direct
             .filter(|plan| file_len >= plan.min_len)
             .and_then(|plan| DirectReader::open(&file_path_owned, file_len, &plan));
+        let open_cached = || {
+            HashReader::open_cached(&file_path_owned, file_len, reader_capacity, sequential_scan)
+        };
         let mut reader = match direct_reader {
             Some(reader) => HashReader::Direct(reader),
-            None => {
-                let opened = if sequential_scan {
-                    crate::core::utils::content_hash::open_for_sequential_read(&file_path_owned)
-                } else {
-                    std::fs::File::open(&file_path_owned)
-                };
-                let file = match opened {
-                    Ok(f) => f,
-                    Err(e) => {
-                        warn!("Failed to open file {}: {}", file_path_owned, e);
-                        let total_part_count = indexed_parts.len();
-                        if let Some(progress) = &blocking_progress {
-                            progress.mark_parts_done(total_part_count, estimated_bytes);
-                        }
-                        return (indexed_parts, None, layout_metrics);
+            None => match open_cached() {
+                Ok(reader) => reader,
+                Err(e) => {
+                    warn!("Failed to open file {}: {}", file_path_owned, e);
+                    let total_part_count = indexed_parts.len();
+                    if let Some(progress) = &blocking_progress {
+                        progress.mark_parts_done(total_part_count, estimated_bytes);
                     }
-                };
-                // A small file never fills a large buffer, so it does not allocate one.
-                let capacity = usize::try_from(file_len)
-                    .unwrap_or(usize::MAX)
-                    .clamp(8 * 1024, reader_capacity.max(8 * 1024));
-                HashReader::Cached(std::io::BufReader::with_capacity(capacity, file))
-            }
+                    return (indexed_parts, None, layout_metrics);
+                }
+            },
         };
         layout_metrics.direct = matches!(reader, HashReader::Direct(_));
-        let span_overrides = match layout_format {
+        let mut span_overrides = match layout_format {
             Some(format_id) => resolve_local_spans(
                 format_id,
                 &mut reader,
-                file_metadata.len(),
+                file_len,
                 &indexed_parts,
                 &file_name,
                 &mut layout_metrics,
             ),
             None => vec![None; indexed_parts.len()],
         };
+        // A disk or filter that refuses non-cached reads must not turn into
+        // parts placed at remote offsets, so the layout is read again.
+        if let Some(format_id) = layout_format
+            && reader.direct_failed()
+            && let Ok(cached) = open_cached()
+        {
+            warn!(
+                "Non-cached read failed for {}; reading it through the cache",
+                file_name
+            );
+            reader = cached;
+            layout_metrics = LayoutMetrics {
+                direct: true,
+                direct_fallback: true,
+                ..Default::default()
+            };
+            span_overrides = resolve_local_spans(
+                format_id,
+                &mut reader,
+                file_len,
+                &indexed_parts,
+                &file_name,
+                &mut layout_metrics,
+            );
+        }
         // Sort parts by effective start offset for sequential disk I/O.
         indexed_parts.sort_by_key(|(idx, part)| {
             span_overrides
@@ -385,87 +403,58 @@ pub(super) async fn calculate_part_hashes(
                 }
             };
 
-            let seek_result = match reader_pos {
-                Some(pos) if pos == chosen_span.start => Ok(()),
-                Some(pos) => match i64::try_from(chosen_span.start as i128 - pos as i128) {
-                    Ok(delta) => reader.seek_relative(delta),
-                    Err(_) => reader
-                        .seek(std::io::SeekFrom::Start(chosen_span.start))
-                        .map(|_| ()),
-                },
-                None => reader
-                    .seek(std::io::SeekFrom::Start(chosen_span.start))
-                    .map(|_| ()),
-            };
-            if let Err(e) = seek_result {
-                if consecutive_read_failures == 0 {
-                    warn!("Seek failed for {}: {}", file_path_owned, e);
-                }
-                part.local_checksum = String::new();
-                part.local_length = 0;
-                part.local_start = 0;
-                consecutive_read_failures += 1;
-                reader_pos = None;
-                if let Some(progress) = &blocking_progress {
-                    progress.mark_parts_done(1, part.remote_length);
-                }
-                continue;
-            }
-            reader_pos = Some(chosen_span.start);
-
-            let mut hasher = FlexHasher::from_checksum(&part.remote_checksum);
-            let mut remaining = total_len;
-            let mut read_ok = true;
-
-            // Hashed straight out of the reader's buffer, with no copy.
-            while remaining > 0 {
-                let available = match reader.fill_buf() {
-                    Ok([]) => Err(std::io::ErrorKind::UnexpectedEof.into()),
-                    other => other,
-                };
-                let available = match available {
-                    Ok(available) => available,
-                    Err(e) => {
-                        if consecutive_read_failures == 0 {
-                            warn!("Read failed for {}: {}", file_path_owned, e);
-                        }
-                        read_ok = false;
-                        reader_pos = None;
-                        break;
-                    }
-                };
-                let chunk = remaining.min(available.len());
-                hasher.update(&available[..chunk]);
-                fingerprint.observe(
-                    chosen_span.start + (total_len - remaining) as u64,
-                    &available[..chunk],
+            let mut hashed = hash_span(
+                &mut reader,
+                &mut reader_pos,
+                chosen_span,
+                total_len,
+                &part.remote_checksum,
+                &mut fingerprint,
+            );
+            if hashed.is_err()
+                && reader.direct_failed()
+                && let Ok(cached) = open_cached()
+            {
+                warn!(
+                    "Non-cached read failed for {}; reading it through the cache",
+                    file_name
                 );
-                reader.consume(chunk);
-                remaining -= chunk;
-            }
-            if read_ok {
-                reader_pos = Some(chosen_span.start.saturating_add(chosen_span.length));
+                reader = cached;
+                reader_pos = None;
+                layout_metrics.direct_fallback = true;
+                hashed = hash_span(
+                    &mut reader,
+                    &mut reader_pos,
+                    chosen_span,
+                    total_len,
+                    &part.remote_checksum,
+                    &mut fingerprint,
+                );
             }
 
-            let local_checksum = hasher.finalize_hex();
-
-            if !read_ok {
-                part.local_checksum = String::new();
-                part.local_length = 0;
-                part.local_start = 0;
-                consecutive_read_failures += 1;
-                if consecutive_read_failures == MAX_READ_FAILURES {
-                    let remaining_parts = total_part_count.saturating_sub(*idx + 1);
-                    warn!(
-                        "Read failures exceeded limit ({}) for {}; skipping {} remaining parts",
-                        MAX_READ_FAILURES, file_path_owned, remaining_parts
-                    );
+            let local_checksum = match hashed {
+                Ok(checksum) => checksum,
+                Err(e) => {
+                    if consecutive_read_failures == 0 {
+                        warn!("Read failed for {}: {}", file_path_owned, e);
+                    }
+                    part.local_checksum = String::new();
+                    part.local_length = 0;
+                    part.local_start = 0;
+                    consecutive_read_failures += 1;
+                    if consecutive_read_failures == MAX_READ_FAILURES {
+                        let remaining_parts = total_part_count.saturating_sub(*idx + 1);
+                        warn!(
+                            "Read failures exceeded limit ({}) for {}; skipping {} remaining parts",
+                            MAX_READ_FAILURES, file_path_owned, remaining_parts
+                        );
+                    }
+                    if let Some(progress) = &blocking_progress {
+                        progress.mark_parts_done(1, part.remote_length);
+                    }
+                    continue;
                 }
-                if let Some(progress) = &blocking_progress {
-                    progress.mark_parts_done(1, part.remote_length);
-                }
-                continue;
-            }
+            };
 
             consecutive_read_failures = 0;
             part.local_checksum = local_checksum;
@@ -510,6 +499,7 @@ pub(super) async fn calculate_part_hashes(
         }
     };
     metrics.direct_files = usize::from(layout_metrics.direct);
+    metrics.direct_fallback_files = usize::from(layout_metrics.direct_fallback);
     metrics.layout_files = usize::from(layout_metrics.attempted);
     metrics.layout_parse_elapsed = layout_metrics.parse_elapsed;
     metrics.layout_map_elapsed = layout_metrics.map_elapsed;
@@ -562,6 +552,30 @@ enum HashReader {
 }
 
 impl HashReader {
+    fn open_cached(
+        path: &str,
+        file_len: u64,
+        capacity: usize,
+        sequential_scan: bool,
+    ) -> std::io::Result<Self> {
+        let file = if sequential_scan {
+            crate::core::utils::content_hash::open_for_sequential_read(path)?
+        } else {
+            std::fs::File::open(path)?
+        };
+        // A small file never fills a large buffer, so it does not allocate one.
+        let capacity = usize::try_from(file_len)
+            .unwrap_or(usize::MAX)
+            .clamp(8 * 1024, capacity.max(8 * 1024));
+        Ok(Self::Cached(std::io::BufReader::with_capacity(
+            capacity, file,
+        )))
+    }
+
+    fn direct_failed(&self) -> bool {
+        matches!(self, Self::Direct(reader) if reader.failed())
+    }
+
     /// The sampled fingerprint read directly, for a file whose parts left a
     /// sample unread. The direct reader would fetch a whole block per sample.
     fn sampled_fingerprint(&mut self, path: &str, metadata: &std::fs::Metadata) -> Option<String> {
@@ -624,9 +638,52 @@ impl Seek for HashReader {
     }
 }
 
+/// Seeks to `span` and hashes its `len` bytes straight out of the reader's
+/// buffer, recording them in the fingerprint tap. Returns the part checksum.
+fn hash_span(
+    reader: &mut HashReader,
+    reader_pos: &mut Option<u64>,
+    span: LocalPartSpan,
+    len: usize,
+    remote_checksum: &str,
+    fingerprint: &mut crate::core::utils::content_hash::FingerprintTap,
+) -> std::io::Result<String> {
+    let seeked = match *reader_pos {
+        Some(pos) if pos == span.start => Ok(()),
+        Some(pos) => match i64::try_from(span.start as i128 - pos as i128) {
+            Ok(delta) => reader.seek_relative(delta),
+            Err(_) => reader
+                .seek(std::io::SeekFrom::Start(span.start))
+                .map(|_| ()),
+        },
+        None => reader
+            .seek(std::io::SeekFrom::Start(span.start))
+            .map(|_| ()),
+    };
+    *reader_pos = None;
+    seeked?;
+    let mut hasher = FlexHasher::from_checksum(remote_checksum);
+    let mut remaining = len;
+    while remaining > 0 {
+        let available = match reader.fill_buf()? {
+            [] => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+            available => available,
+        };
+        let chunk = remaining.min(available.len());
+        hasher.update(&available[..chunk]);
+        fingerprint.observe(span.start + (len - remaining) as u64, &available[..chunk]);
+        reader.consume(chunk);
+        remaining -= chunk;
+    }
+    *reader_pos = Some(span.start.saturating_add(span.length));
+    Ok(hasher.finalize_hex())
+}
+
 #[derive(Default)]
 struct LayoutMetrics {
     direct: bool,
+    /// A non-cached read failed and the file was read through the cache.
+    direct_fallback: bool,
     attempted: bool,
     parse_elapsed: std::time::Duration,
     map_elapsed: std::time::Duration,
@@ -736,40 +793,50 @@ mod tests {
             })
             .collect();
 
-        let result = calculate_part_hashes(
-            parts,
-            file.path().to_str().unwrap(),
-            Arc::new(Semaphore::new(1)),
-            PartReadOptions {
-                span_source: PartSpanSource::DetectLocalLayout,
-                game_formats: &[foxy_formats::PBO_FORMAT_ID],
-                reader_capacity: HASH_READER_CAPACITY,
-                sequential_scan: false,
-                direct: None,
-            },
-            None,
-            None,
-        )
-        .await;
-
-        assert_eq!(result.metrics.layout_files, 1);
-        assert_eq!(result.metrics.mapped_parts, 4);
-        assert_eq!(result.metrics.fallback_parts, 0);
-        for (part, (name, start, len)) in result.parts.iter().zip(spans) {
-            assert_eq!(part.local_start, start as u64, "{name}");
-            assert_eq!(part.local_length, len as u64, "{name}");
-            assert_eq!(part.local_checksum, part.remote_checksum, "{name}");
-        }
-        assert_eq!(
-            result.content_hash.as_deref(),
-            Some(
-                crate::core::utils::content_hash::fast_file_content_hash(
-                    file.path().to_str().unwrap()
-                )
-                .unwrap()
-                .as_str()
+        let direct = DirectReadPlan::new(64 * 1024, 2, 0, true);
+        let mut failing = direct.clone();
+        failing.fail_at = Some(0);
+        let plans = if cfg!(windows) {
+            vec![None, Some(direct), Some(failing)]
+        } else {
+            vec![None]
+        };
+        for plan in plans {
+            let result = calculate_part_hashes(
+                parts.clone(),
+                file.path().to_str().unwrap(),
+                Arc::new(Semaphore::new(1)),
+                PartReadOptions {
+                    span_source: PartSpanSource::DetectLocalLayout,
+                    game_formats: &[foxy_formats::PBO_FORMAT_ID],
+                    reader_capacity: HASH_READER_CAPACITY,
+                    sequential_scan: false,
+                    direct: plan.as_ref(),
+                },
+                None,
+                None,
             )
-        );
+            .await;
+
+            assert_eq!(result.metrics.layout_files, 1);
+            assert_eq!(result.metrics.mapped_parts, 4);
+            assert_eq!(result.metrics.fallback_parts, 0);
+            for (part, (name, start, len)) in result.parts.iter().zip(spans) {
+                assert_eq!(part.local_start, start as u64, "{name}");
+                assert_eq!(part.local_length, len as u64, "{name}");
+                assert_eq!(part.local_checksum, part.remote_checksum, "{name}");
+            }
+            assert_eq!(
+                result.content_hash.as_deref(),
+                Some(
+                    crate::core::utils::content_hash::fast_file_content_hash(
+                        file.path().to_str().unwrap()
+                    )
+                    .unwrap()
+                    .as_str()
+                )
+            );
+        }
     }
 
     #[cfg(windows)]
@@ -824,10 +891,21 @@ mod tests {
         };
 
         let cached = hash_with(None).await;
-        for (depth, one_stream) in [(1, false), (2, true), (4, false)] {
-            let direct =
-                hash_with(Some(DirectReadPlan::new(64 * 1024, depth, 0, one_stream))).await;
+        for (depth, one_stream, fail_at) in [
+            (1, false, None),
+            (2, true, None),
+            (4, false, None),
+            (2, true, Some(0)),
+            (2, false, Some(500_000)),
+        ] {
+            let mut plan = DirectReadPlan::new(64 * 1024, depth, 0, one_stream);
+            plan.fail_at = fail_at;
+            let direct = hash_with(Some(plan)).await;
             assert_eq!(direct.metrics.direct_files, 1);
+            assert_eq!(
+                direct.metrics.direct_fallback_files,
+                usize::from(fail_at.is_some())
+            );
             assert_eq!(direct.content_hash, cached.content_hash);
             for (direct_part, cached_part) in direct.parts.iter().zip(&cached.parts) {
                 assert_eq!(direct_part.local_checksum, cached_part.local_checksum);

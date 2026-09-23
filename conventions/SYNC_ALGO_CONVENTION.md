@@ -119,7 +119,9 @@ rotational storage a `DiskTurn` lets one file issue reads at a time, from its
 first read until its last is issued, so the head streams one file and the
 next file's first read queues behind the current file's last. Freshly
 downloaded files keep the cached reader, because their pages may still be
-dirty in the cache. The cached reader is 4 MiB, or 128 MiB with the
+dirty in the cache. A file whose non-cached read fails is read again
+through the cached reader, layout included, so a disk or filter driver that
+refuses non-cached reads never turns into failed parts. The cached reader is 4 MiB, or 128 MiB with the
 sequential-scan hint on rotational storage; it is also the fallback when a
 non-cached open fails. On rotational storage the jobs run in order of each
 file's first cluster, one sweep of the platter, with files that have no

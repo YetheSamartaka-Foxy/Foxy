@@ -22,6 +22,9 @@ pub(super) struct DirectReadPlan {
     pub(super) min_len: u64,
     pub(super) pool: Arc<SlotPool>,
     pub(super) turn: Option<Arc<DiskTurn>>,
+    /// Fails every read from this offset on, to exercise the callers' fallback.
+    #[cfg(test)]
+    pub(super) fail_at: Option<u64>,
 }
 
 impl DirectReadPlan {
@@ -33,6 +36,8 @@ impl DirectReadPlan {
             min_len,
             pool: Arc::new(SlotPool::default()),
             turn: one_stream.then(|| Arc::new(DiskTurn::default())),
+            #[cfg(test)]
+            fail_at: None,
         }
     }
 }
@@ -128,6 +133,10 @@ pub(super) struct DirectReader {
     pos: u64,
     /// Offset of the next read to issue; always aligned.
     next_issue: u64,
+    /// A read failed, so the caller should reread through the cache.
+    failed: bool,
+    #[cfg(test)]
+    fail_at: Option<u64>,
 }
 
 impl DirectReader {
@@ -147,7 +156,14 @@ impl DirectReader {
             in_flight: VecDeque::new(),
             pos: 0,
             next_issue: 0,
+            failed: false,
+            #[cfg(test)]
+            fail_at: plan.fail_at,
         })
+    }
+
+    pub(super) fn failed(&self) -> bool {
+        self.failed
     }
 
     fn release_turn(&mut self) {
@@ -169,10 +185,14 @@ impl DirectReader {
                 turn.acquire();
                 self.holding_turn = true;
             }
-            let mut slot = self.pool.take(self.block)?;
+            let mut slot = self
+                .pool
+                .take(self.block)
+                .inspect_err(|_| self.failed = true)?;
             let offset = self.next_issue;
             if let Err(err) = self.file.start_read(&mut slot, offset) {
                 self.pool.give(slot);
+                self.failed = true;
                 return Err(err);
             }
             self.in_flight.push_back(InFlight { slot, offset });
@@ -233,6 +253,11 @@ impl BufRead for DirectReader {
             if self.pos >= self.file_len {
                 return Ok(&[]);
             }
+            #[cfg(test)]
+            if self.fail_at.is_some_and(|at| self.pos >= at) {
+                self.failed = true;
+                return Err(io::Error::other("injected read failure"));
+            }
             self.issue_ahead()?;
             let Some(mut read) = self.in_flight.pop_front() else {
                 return Ok(&[]);
@@ -242,6 +267,7 @@ impl BufRead for DirectReader {
                 Err(err) => {
                     self.pool.give(read.slot);
                     self.restart_at(self.pos);
+                    self.failed = true;
                     return Err(err);
                 }
             };

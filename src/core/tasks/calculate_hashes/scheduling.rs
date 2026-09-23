@@ -1234,6 +1234,7 @@ struct HashRunMetrics {
     mapped_parts: usize,
     fallback_parts: usize,
     direct_files: usize,
+    direct_fallback_files: usize,
 }
 
 impl HashRunMetrics {
@@ -1261,6 +1262,7 @@ impl HashRunMetrics {
             metrics.mapped_parts += result.part_metrics.mapped_parts;
             metrics.fallback_parts += result.part_metrics.fallback_parts;
             metrics.direct_files += result.part_metrics.direct_files;
+            metrics.direct_fallback_files += result.part_metrics.direct_fallback_files;
         }
         metrics
     }
@@ -1387,7 +1389,7 @@ fn log_hash_run_metrics(
 ) {
     let metrics = HashRunMetrics::from_results(results);
     info!(
-        "Hash part run metrics: label={} profile={} wall={:.3}s files={} missing_files={} parts={} estimated_bytes={} hashed_bytes={} file_elapsed_sum={:.3}s file_elapsed_max={:.3}s part_total_sum={:.3}s metadata_sum={:.3}s layout_sum={:.3}s layout_parse_sum={:.3}s layout_map_sum={:.3}s semaphore_wait_sum={:.3}s blocking_hash_sum={:.3}s layout_files={} remote_span_files={} layout_entries={} layout_entry_payload_bytes={} mapped_parts={} fallback_parts={} direct_files={}",
+        "Hash part run metrics: label={} profile={} wall={:.3}s files={} missing_files={} parts={} estimated_bytes={} hashed_bytes={} file_elapsed_sum={:.3}s file_elapsed_max={:.3}s part_total_sum={:.3}s metadata_sum={:.3}s layout_sum={:.3}s layout_parse_sum={:.3}s layout_map_sum={:.3}s semaphore_wait_sum={:.3}s blocking_hash_sum={:.3}s layout_files={} remote_span_files={} layout_entries={} layout_entry_payload_bytes={} mapped_parts={} fallback_parts={} direct_files={} direct_fallback_files={}",
         label,
         selected_profile,
         wall_elapsed.as_secs_f64(),
@@ -1411,7 +1413,8 @@ fn log_hash_run_metrics(
         metrics.layout_entry_payload_bytes,
         metrics.mapped_parts,
         metrics.fallback_parts,
-        metrics.direct_files
+        metrics.direct_files,
+        metrics.direct_fallback_files
     );
     // Speed-of-light accounting (see conventions/SPEED_OF_LIGHT.md, O3).
     // No absolute light is computed in-app; compare this rate to the best
