@@ -249,13 +249,45 @@ deferred 448k-row part insert takes about 5.3 s. The insert runs in the
 background during hashing and only sits on the critical path when the record
 restores every file.
 
+The record case, raised to 7 repetitions, is accepted from clean `dc09a72`
+(`20260923T181710Z-162175d0`): median 11.80 s [11.54-12.44], every run
+restoring all 3,738 files in 0.48-0.53 s.
+
+### September 23 notebook export (`b1c4684`, laptop HDD)
+
+A user benchmark export, not a testkit run: the i7-9750H notebook with the
+same TFR Main payload on its `D:` hard disk, Auto selecting Conservative
+with two workers, a repository wipe from the UI and then a recheck, with
+extended diagnostics on (as in the September 22 export it is compared with).
+One run; the `D:` disk reference is not measured yet.
+
+| Metric | Sept 22 (`6bc00f3`) | Sept 23 (`b1c4684`) |
+| --- | ---: | ---: |
+| Full recheck elapsed | 829.04 s | 613.75 s (-26.0%) |
+| Hashing, whole payload | 820.64 s, 112.3 MB/s | 606.79 s, 151.9 MB/s |
+| Auto sample / held-out rate | 122.9 / 111.8 MB/s | 164.4 / 151.3 MB/s |
+| Per-file overhead (held-out) | 18.8 ms | 12.3 ms |
+| Process reads / hashed bytes | 1.200 | 1.01 |
+| Peak memory | 718 MB | 761 MB |
+
+Every file read non-cached (`direct_files` 3,738, `direct_fallback_files`
+0), with the same bytes and parts and a clean outcome. Process reads hold
+145-170 MB/s, then fall to 88-130 MB/s over the last two minutes as physical
+order reaches the inner tracks, with process CPU near 20% of one core: the run
+is disk-bound. The per-file figure is an upper bound, because the held-out
+files sit on slower zones than the sample. The power line read AC, the
+Balanced plan and the best-performance mode. The bar tracked bytes to within
+about 6 points, then stepped back from 99.98% to 86% as the post-hash stages
+reported their own percents; `dc09a72` holds the highest hash fraction shown.
+
 ## 1a. Current accepted baselines
 
 The earlier rows were regenerated with `foxy-testkit measurements` from the
 compatible accepted baseline set at checkout `956de9e`. The Sept 19 HDD row
 comes from the accepted baseline at checkout `11924bd`, and the full TFR Main
 rows are the clean `94a73d0` gates, accepted as the new baselines on
-2026-09-23 (they replace the `38e52f6` baselines of 650.98 s and 31.74 s). Rows that name an
+2026-09-23 (they replace the `38e52f6` baselines of 650.98 s and 31.74 s), plus
+the verified-hash record case from `dc09a72`. Rows that name an
 app-owned action instead of the outer driver bracket cite the same accepted
 run artifact.
 
@@ -276,6 +308,7 @@ run artifact.
 | 2026-09-18 | `perf-tfr-scifi-delta-patch-ssd` | download (O2 delta patch) | 3% (calibrated, network B1) | ssd warm | 2.13 s | 2.13 s median of 5 [2.13-2.16] | 5 | 4 files, 0.01 GB, 0.21 GB hashed | completed,completed,completed,completed,completed | 571efc1 | `20260918T110808Z-0934e668` |
 | 2026-09-23 | `perf-hdd-plan-main-recheck-hdd` | remote-refresh@evicted (O5 remote metadata refresh) | 137% (calibrated, hash B2+B6) | hdd evicted | 525.44 s | 525.44 s median of 7 [525.13-527.29] | 7 | 92.19 GB hashed | improvement | 94a73d0 | `20260923T131916Z-1e8ab768` |
 | 2026-09-23 | `perf-hdd-plan-main-recheck-ssd` | remote-refresh@evicted (O5 remote metadata refresh) | 114% (calibrated, hash B2+B6) | ssd evicted | 19.67 s | 19.67 s median of 5 [19.38-19.87] | 5 | 92.19 GB hashed | candidate-improvement | 94a73d0 | `20260923T143143Z-1a09d584` |
+| 2026-09-23 | `perf-hdd-plan-main-bootstrap-record-hdd` | remote-refresh@evicted (O5 remote metadata refresh) | 1% (calibrated, no-change B4) | hdd evicted | 11.80 s | 11.80 s median of 7 [11.54-12.44] | 7 | n/a | ok | dc09a72 | `20260923T181710Z-162175d0` |
 
 ## 1b. Shared-aggregation and patch-timeline candidate
 
