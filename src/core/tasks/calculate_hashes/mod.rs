@@ -38,6 +38,7 @@ const MAX_FILE_JOB_CONCURRENCY: usize = 256;
 /// 25,000 rows at 4 params each ≈ 100KB of bind data - trivial for SQLite.
 const PERSIST_LOG_INTERVAL: usize = 25_000;
 
+mod adaptive;
 mod context;
 mod direct_read;
 mod file_hashes;
