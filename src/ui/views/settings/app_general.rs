@@ -390,6 +390,15 @@ impl Foxy {
                             row_width,
                             changed,
                         );
+                        Self::render_wrapped_settings_checkbox(
+                            ui,
+                            true,
+                            &mut self.settings_view_state.trust_verified_hashes,
+                            tr("Skip unchanged files after a database reset"),
+                            Some(tr("After a database reset, trust files Foxy already verified and that Windows shows as untouched since, instead of reading them again. An integrity recheck always reads every file.")),
+                            row_width,
+                            changed,
+                        );
                     });
                 },
             );

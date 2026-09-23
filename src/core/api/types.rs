@@ -164,6 +164,9 @@ pub struct RepositorySyncOptions {
     pub cancel_rx: watch::Receiver<bool>,
     pub hash_algorithm_preference: crate::ui::types::HashAlgorithmPreference,
     pub hash_io_profile: crate::ui::types::HashIoProfilePreference,
+    /// Restore files the verified-hash record proves unchanged when the database
+    /// holds no state for them, instead of reading them again.
+    pub trust_verified_hashes: bool,
     /// The caller's durable addon selection, written to `addons.enabled` before
     /// the pipeline reads it. Distinct from the run's enabled overrides, which
     /// can be a transient one-shot scope (a standalone addon download narrows

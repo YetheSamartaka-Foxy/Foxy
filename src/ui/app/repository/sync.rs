@@ -346,6 +346,7 @@ impl Foxy {
                     cancel_rx,
                     hash_algorithm_preference: repo.hash_algorithm_preference,
                     hash_io_profile: self.settings_view_state.hash_io_profile,
+                    trust_verified_hashes: self.settings_view_state.trust_verified_hashes,
                     persisted_addon_selection: Some(persisted_addon_selection),
                 },
                 self.repaint_ctx.clone(),

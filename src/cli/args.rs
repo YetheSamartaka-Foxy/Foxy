@@ -1083,6 +1083,11 @@ pub struct SettingsSetArgs {
     pub extended_diagnostics_logging: Option<bool>,
     #[arg(
         long,
+        help = "After a database reset, restore files the verified-hash record proves unchanged instead of reading them again; an integrity recheck always reads every file (true/false)"
+    )]
+    pub trust_verified_hashes: Option<bool>,
+    #[arg(
+        long,
         help = "Offer to save user-triggered rechecks and updates as benchmarks; enabling also turns on extended diagnostics logging unless it was already on (true/false)"
     )]
     pub benchmarks_enabled: Option<bool>,

@@ -16,6 +16,7 @@
   "backup_directory": "",
   "download_speed_limit_mbps": null,
   "hash_io_profile": "Auto",
+  "trust_verified_hashes": true,
   "ui_renderer": "Auto",
   "locale": "system",
   "locale_preference_migrated": true,

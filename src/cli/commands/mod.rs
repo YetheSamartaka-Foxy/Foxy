@@ -474,6 +474,7 @@ fn run_repository_sync(
             cancel_rx,
             hash_algorithm_preference: repo.hash_algorithm_preference,
             hash_io_profile: settings.hash_io_profile,
+            trust_verified_hashes: settings.trust_verified_hashes,
         },
         None,
     );

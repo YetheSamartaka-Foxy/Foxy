@@ -137,7 +137,9 @@ USN where the volume keeps a journal)
 was the same before and after the read, it stores that identity, a signature
 of the manifest's parts and the fingerprint. A whole-database wipe leaves the
 record in place. When the database holds no local state for a file, a sync
-other than an integrity recheck or a force redownload restores the file's
+(unless the app setting `trust_verified_hashes`, "Skip unchanged files after a
+database reset", is off) other than an integrity recheck or a force redownload
+restores the file's
 parts from the record instead of reading it, but only while the identity and
 the parts signature are exactly as recorded. A repository's "wipe database
 entries" also drops its folder's entries, so the next check reads every file.

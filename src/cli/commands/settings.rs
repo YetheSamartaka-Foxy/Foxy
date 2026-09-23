@@ -74,6 +74,10 @@ fn cmd_settings_set(
         }
         changed = true;
     }
+    if let Some(v) = args.trust_verified_hashes {
+        state.settings.trust_verified_hashes = v;
+        changed = true;
+    }
     if let Some(v) = args.close_after_launch {
         state.settings.close_after_launch = v;
         changed = true;

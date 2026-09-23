@@ -1202,6 +1202,8 @@
     "Automatically enable DLC content specified by the repository's repo.json when launching Arma 3.": "Automatically enable DLC content specified by the repository's repo.json when launching Arma 3.",
     "Automatically run a remote data recheck for all repositories when the app starts.": "Automatically run a remote data recheck for all repositories when the app starts.",
     "Automatically run a quick local file scan for all repositories when the app starts.": "Automatically run a quick local file scan for all repositories when the app starts.",
+    "Skip unchanged files after a database reset": "Skip unchanged files after a database reset",
+    "After a database reset, trust files Foxy already verified and that Windows shows as untouched since, instead of reading them again. An integrity recheck always reads every file.": "After a database reset, trust files Foxy already verified and that Windows shows as untouched since, instead of reading them again. An integrity recheck always reads every file.",
     "Show developer debug windows for advanced diagnostics.": "Show developer debug windows for advanced diagnostics.",
     "Show or hide the memory diagnostics icon in the footer. Opens the memory diagnostics panel (F4).": "Show or hide the memory diagnostics icon in the footer. Opens the memory diagnostics panel (F4).",
     "Automatically close Foxy after Arma 3 launches.": "Automatically close Foxy after Arma 3 launches.",

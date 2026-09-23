@@ -823,6 +823,7 @@ async fn run_repository_pipeline(
         mut cancel_rx,
         hash_algorithm_preference,
         hash_io_profile,
+        trust_verified_hashes,
         persisted_addon_selection,
     } = options;
     let mut builds_download_plan = should_build_download_plan(mode, prepare_download_plan);
@@ -905,7 +906,7 @@ async fn run_repository_pipeline(
             .with_repository_space_shared_path(repository_space_shared_path.clone())
             .with_operation_id(operation_id.as_str())
             .with_verified_hash_record(VerifiedHashRecordUse::for_active_space(
-                mode != SyncMode::RecheckIntegrity && !force_redownload,
+                trust_verified_hashes && mode != SyncMode::RecheckIntegrity && !force_redownload,
             )),
     );
     summary.push(StageEntry::new("create_context", stage.elapsed()));
@@ -966,7 +967,9 @@ async fn run_repository_pipeline(
                     .with_download_target_queueing(builds_download_plan)
                     .with_target_local_path(local_path.clone())
                     .with_repository_space_shared_path(repository_space_shared_path.clone())
-                    .with_verified_hash_record(VerifiedHashRecordUse::for_active_space(true)),
+                    .with_verified_hash_record(VerifiedHashRecordUse::for_active_space(
+                        trust_verified_hashes,
+                    )),
             );
             summary.push(
                 StageEntry::new("part_rebuild_escalation", stage.elapsed())

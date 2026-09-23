@@ -101,6 +101,10 @@ pub struct SettingsViewState {
     pub download_speed_limit_mbps: Option<u32>,
     #[serde(default)]
     pub hash_io_profile: HashIoProfilePreference,
+    /// After a database reset, restore files the verified-hash record proves
+    /// unchanged instead of reading them again. An integrity recheck always reads.
+    #[serde(default = "default_trust_verified_hashes")]
+    pub trust_verified_hashes: bool,
     #[serde(default)]
     pub ui_renderer: UiRendererPreference,
     #[serde(default = "default_locale")]
@@ -224,6 +228,10 @@ fn default_auto_recheck_on_launch() -> bool {
     true
 }
 
+fn default_trust_verified_hashes() -> bool {
+    true
+}
+
 fn default_auto_quick_scan_on_launch() -> bool {
     true
 }
@@ -319,6 +327,7 @@ impl Default for SettingsViewState {
             backup_directory: String::new(),
             download_speed_limit_mbps: default_download_speed_limit_mbps(),
             hash_io_profile: HashIoProfilePreference::default(),
+            trust_verified_hashes: default_trust_verified_hashes(),
             ui_renderer: UiRendererPreference::default(),
             locale: default_locale(),
             locale_preference_migrated: true,
@@ -462,5 +471,21 @@ mod benchmark_diagnostics_tests {
         assert!(settings.set_extended_diagnostics_logging(true));
         assert!(!settings.set_benchmarks_enabled(false));
         assert!(settings.extended_diagnostics_logging);
+    }
+}
+
+#[cfg(test)]
+mod verified_hash_setting_tests {
+    use super::SettingsViewState;
+
+    #[test]
+    fn settings_saved_before_the_option_existed_trust_verified_hashes() {
+        let mut saved = serde_json::to_value(SettingsViewState::default()).unwrap();
+        saved
+            .as_object_mut()
+            .unwrap()
+            .remove("trust_verified_hashes");
+        let settings: SettingsViewState = serde_json::from_value(saved).unwrap();
+        assert!(settings.trust_verified_hashes);
     }
 }
