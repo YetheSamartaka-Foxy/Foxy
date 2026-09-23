@@ -12,6 +12,27 @@ use std::process::Command;
 use std::sync::Once;
 use std::{backtrace::Backtrace, fs};
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+/// `mi_option_page_commit_on_demand` in the bundled mimalloc 3.3 header.
+const MI_OPTION_PAGE_COMMIT_ON_DEMAND: std::ffi::c_int = 40;
+
+unsafe extern "C" {
+    fn mi_option_set(option: std::ffi::c_int, value: std::ffi::c_long);
+    #[cfg(test)]
+    fn mi_option_get(option: std::ffi::c_int) -> std::ffi::c_long;
+}
+
+/// Commit allocator pages as they are touched rather than whole, so the many
+/// hashing threads do not each hold committed memory they never use. A value
+/// set in the environment still wins.
+fn configure_allocator() {
+    if std::env::var_os("MIMALLOC_PAGE_COMMIT_ON_DEMAND").is_none() {
+        unsafe { mi_option_set(MI_OPTION_PAGE_COMMIT_ON_DEMAND, 1) };
+    }
+}
+
 // TODO: @YetheSamartaka Temporary fix for console not showing up on Windows.
 #[cfg(target_os = "windows")]
 fn attach_console() {
@@ -330,6 +351,7 @@ fn mark_wgpu_panic_for_next_launch(message: &str) {
 }
 
 fn main() {
+    configure_allocator();
     install_panic_hook();
     #[cfg(target_os = "windows")]
     install_native_crash_handler();
@@ -428,4 +450,18 @@ fn launch_ui(
     core::game::spaces::ensure_game_spaces_layout();
     core::tasks::init_database::check_and_wipe_database();
     ui::window::main(debug_mode, agent_gui, debug_modals);
+}
+
+#[cfg(test)]
+mod allocator_tests {
+    use super::*;
+
+    #[test]
+    fn page_commit_on_demand_is_set_on_the_bundled_mimalloc_3() {
+        // `mi_option_purge_delay` defaults to 1000 ms only in mimalloc 3, so
+        // this pins the option numbering the constant relies on.
+        assert_eq!(unsafe { mi_option_get(15) }, 1000);
+        configure_allocator();
+        assert_eq!(unsafe { mi_option_get(MI_OPTION_PAGE_COMMIT_ON_DEMAND) }, 1);
+    }
 }
