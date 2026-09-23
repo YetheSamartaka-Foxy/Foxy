@@ -644,8 +644,6 @@ pub(super) fn build_file_hash_jobs(
 pub(super) struct WholeFileHashIo {
     profile: HashIoProfilePreference,
     storage_class: HashStorageClass,
-    /// Adjust the worker count by throughput while the run goes.
-    adaptive: bool,
 }
 
 impl WholeFileHashIo {
@@ -653,16 +651,7 @@ impl WholeFileHashIo {
         Self {
             profile,
             storage_class,
-            adaptive: false,
         }
-    }
-
-    /// On SSD the best worker count moves with the file mix, so the long
-    /// part of an Auto run climbs from the sampled choice. A rotational disk
-    /// keeps its fixed cap and streams one file at a time.
-    fn adaptive_on_ssd(mut self) -> Self {
-        self.adaptive = self.storage_class == HashStorageClass::Ssd;
-        self
     }
 
     fn strategy_for(&self, path: &Path, len: u64) -> Blake3ReadStrategy {
@@ -862,15 +851,6 @@ pub(super) async fn recalculate_parts_for_jobs(
         order_hash_jobs(&mut jobs);
     }
     let direct_plan = hash_io.direct_read_plan();
-    let climb = hash_io
-        .adaptive
-        .then(|| super::adaptive::ConcurrencyClimb::new(global_part_concurrency));
-    let stream_width = climb
-        .as_ref()
-        .map_or(file_concurrency, |climb| file_concurrency.max(climb.hi()));
-    let _climb = climb.map(|climb| {
-        super::adaptive::spawn_climb(semaphore.clone(), counters.bytes_done.clone(), climb)
-    });
     let progress_sender = progress_tx.cloned();
     let cancel_receiver = cancel_rx.cloned();
     let results = stream::iter(jobs.into_iter().map(|job| {
@@ -1048,7 +1028,7 @@ pub(super) async fn recalculate_parts_for_jobs(
             }
         }
     }))
-    .buffer_unordered(stream_width.max(1))
+    .buffer_unordered(file_concurrency.max(1))
     .collect::<Vec<_>>()
     .await;
     let was_cancelled =
@@ -1682,7 +1662,7 @@ async fn hash_jobs_with_profile(
             progress_tx,
             HashRunProgress::new(total_files, total_parts, total_bytes),
             cancel_rx,
-            WholeFileHashIo::new(profile, storage_class).adaptive_on_ssd(),
+            WholeFileHashIo::new(profile, storage_class),
         )
         .await;
         let (results, cancelled) = results;
@@ -2122,7 +2102,7 @@ async fn hash_jobs_with_profile(
             initial_bytes_done: benchmark_bytes,
         },
         cancel_rx,
-        WholeFileHashIo::new(best_profile, storage_class).adaptive_on_ssd(),
+        WholeFileHashIo::new(best_profile, storage_class),
     )
     .await;
     let (mut remaining_results, cancelled) = remaining_results;

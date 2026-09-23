@@ -124,10 +124,8 @@ sequential-scan hint on rotational storage; it is also the fallback when a
 non-cached open fails. On rotational storage the jobs run in order of each
 file's first cluster, one sweep of the platter, with files that have no
 extent of their own after them in path order; other storage runs files of at
-least 16 MiB heaviest first and the small-file tail in path order. On SSD the
-long part of an Auto run adjusts its worker count by throughput each second
-(`adaptive.rs`). Order, read size and reader never change which bytes are
-hashed.
+least 16 MiB heaviest first and the small-file tail in path order. Order,
+read size and reader never change which bytes are hashed.
 
 Every hash run of a sync operation also refreshes a verified-hash record
 (`verified_hashes.json` beside `database.db`, `verified_record.rs`): for each
