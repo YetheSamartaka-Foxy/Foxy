@@ -111,7 +111,7 @@ fingerprint describes the same bytes the tree hash does either way.
 
 Hash reads parse an archive's layout through the same reader that hashes it,
 so the table of contents and the payload after it are one read. The reader is
-4 MiB, or 64 MiB with the sequential-scan hint on rotational storage, where
+4 MiB, or 128 MiB with the sequential-scan hint on rotational storage, where
 the two workers share one head and every seek must buy a long read; on SSD
 the hint cost about 9% on the full TFR Main recheck and is not used.
 On rotational storage the jobs run in order of each file's first cluster, one
