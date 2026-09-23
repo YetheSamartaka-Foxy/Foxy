@@ -230,13 +230,32 @@ all 3,738 files in 0.39 s and ended `early-exit-clean`.
 | 2026-09-23 | `perf-hdd-plan-main-recheck-ssd` | remote-refresh@evicted (O5 remote metadata refresh) | 114% (calibrated, hash B2+B6) | ssd evicted | 19.72 s | 31.74 s median of 5 [29.95-32.28] | 5 | 92.19 GB hashed | improvement | d7f3ac6 | `20260923T083337Z-1a0451cc` |
 | 2026-09-23 | `perf-hdd-plan-main-bootstrap-record-hdd` | remote-refresh@evicted (O5 remote metadata refresh) | 1% (calibrated, no-change B4) | hdd evicted | 10.81 s | none | 3 | n/a | ok | d7f3ac6 | `20260923T083643Z-1a968f4c` |
 
+### September 23 finishing round (`94a73d0`, accepted baselines)
+
+`94a73d0` adds the cached-reader retry after a failed non-cached read, the
+`trust_verified_hashes` setting and the power row. Clean main-tree gates:
+HDD `20260923T131916Z-1e8ab768` 7/7 at 525.13-527.29 s, median 525.44 s
+(-19.3%, `improvement`, nothing flagged); SSD `20260923T143143Z-1a09d584`
+median 19.67 s (-38.0%, `candidate-improvement`; peak private memory 1.99 GB
+is the known advisory). Both are the accepted baselines from here on. The
+record case measured 11.43 s (`20260923T143447Z-2bdc4c24`, 3 runs, too few to
+accept). The new `perf-hdd-plan-main-bootstrap-record-off-hdd` keeps the
+record but turns the setting off: it read all 92.19 GB in 527.13 s
+(`20260923T144501Z-02215bb8`) and still refreshed the record.
+
+Outside hashing, the SSD recheck spends 4.7 s in `remote_repository` (69 MB
+of gzip-served manifests over 96 requests from the public origin) and the
+deferred 448k-row part insert takes about 5.3 s. The insert runs in the
+background during hashing and only sits on the critical path when the record
+restores every file.
+
 ## 1a. Current accepted baselines
 
 The earlier rows were regenerated with `foxy-testkit measurements` from the
 compatible accepted baseline set at checkout `956de9e`. The Sept 19 HDD row
-comes from the accepted baseline at checkout `11924bd`, and the Sept 21 full
-TFR Main rows compare clean `b8acc65` with the `38e52f6` baselines accepted
-at checkout `f8a58db`. Rows that name an
+comes from the accepted baseline at checkout `11924bd`, and the full TFR Main
+rows are the clean `94a73d0` gates, accepted as the new baselines on
+2026-09-23 (they replace the `38e52f6` baselines of 650.98 s and 31.74 s). Rows that name an
 app-owned action instead of the outer driver bracket cite the same accepted
 run artifact.
 
@@ -255,8 +274,8 @@ run artifact.
 | 2026-09-18 | `perf-tfr-scifi-delta-patch-ssd` | db-persist (O7 gated write windows) | 62% median (calibrated, per-kind DB) | ssd warm, gate 1 | 11.3-21.1 ms | 10.613 ms per-kind estimate | 5 | 240 inserts, 232 updates, 205 deletes | early_exit | 571efc1 | `20260918T110808Z-0934e668` |
 | 2026-09-18 | `perf-startup-arma3-live` | startup (O8 startup) | 77% (calibrated, probe B4) | ssd warm | 3.05 s | 3.05 s median of 5 [3.02-3.06] | 5 | 11 repos | ok | 02c935e | `20260918T151335Z-18cda6f0` |
 | 2026-09-18 | `perf-tfr-scifi-delta-patch-ssd` | download (O2 delta patch) | 3% (calibrated, network B1) | ssd warm | 2.13 s | 2.13 s median of 5 [2.13-2.16] | 5 | 4 files, 0.01 GB, 0.21 GB hashed | completed,completed,completed,completed,completed | 571efc1 | `20260918T110808Z-0934e668` |
-| 2026-09-21 | `perf-hdd-plan-main-recheck-hdd` | remote-refresh@evicted (O5 remote metadata refresh) | 111% (calibrated, hash B2+B6) | hdd evicted | 648.97 s | 650.98 s median of 7 [650.38-652.61] | 7 | 92.19 GB hashed | ok | b8acc65 | `20260921T182557Z-0cd5b248` |
-| 2026-09-21 | `perf-hdd-plan-main-recheck-ssd` | remote-refresh@evicted (O5 remote metadata refresh) | 62% (calibrated, hash B2+B6) | ssd evicted | 31.38 s | 31.74 s median of 5 [29.95-32.28] | 5 | 92.19 GB hashed | ok | b8acc65 | `20260921T195356Z-1d8e32e0` |
+| 2026-09-23 | `perf-hdd-plan-main-recheck-hdd` | remote-refresh@evicted (O5 remote metadata refresh) | 137% (calibrated, hash B2+B6) | hdd evicted | 525.44 s | 525.44 s median of 7 [525.13-527.29] | 7 | 92.19 GB hashed | improvement | 94a73d0 | `20260923T131916Z-1e8ab768` |
+| 2026-09-23 | `perf-hdd-plan-main-recheck-ssd` | remote-refresh@evicted (O5 remote metadata refresh) | 114% (calibrated, hash B2+B6) | ssd evicted | 19.67 s | 19.67 s median of 5 [19.38-19.87] | 5 | 92.19 GB hashed | candidate-improvement | 94a73d0 | `20260923T143143Z-1a09d584` |
 
 ## 1b. Shared-aggregation and patch-timeline candidate
 
