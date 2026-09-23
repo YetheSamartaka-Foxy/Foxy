@@ -286,6 +286,8 @@ pub const DEFINITIONS: &[(&str, bool, f64)] = &[
     ("memory.peak_private_bytes", false, 0.15),
     ("memory.retained_private_bytes", false, 0.15),
     ("memory.growth_private_bytes", false, 0.5),
+    // Process CPU seconds over the operation, sampled beside the footprint.
+    ("memory.cpu_s", false, 0.15),
 ];
 const COUNTERS: &[&str] = &[
     "summary.downloaded_bytes",

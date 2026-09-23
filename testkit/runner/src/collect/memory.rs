@@ -12,7 +12,8 @@
 //! machine feels rather than what Foxy holds. Both are recorded; the ledger
 //! gates on commit. The process I/O read counter rides along: it counts every
 //! byte the process read, page-cache hits included, so it exposes re-reads a
-//! disk counter would hide.
+//! disk counter would hide. Process user and kernel CPU time ride along too,
+//! so an operation reports what it cost the machine as well as how long it took.
 
 use serde_json::{Value, json};
 use std::{
@@ -45,6 +46,9 @@ struct Counters {
     peak_working_set: u64,
     page_faults: u64,
     read_transfer: u64,
+    /// Process user and kernel CPU time, in 100 ns units.
+    cpu_user: u64,
+    cpu_kernel: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -60,7 +64,8 @@ fn read(pid: u32) -> Option<Counters> {
         System::{
             ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX},
             Threading::{
-                GetProcessIoCounters, IO_COUNTERS, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+                GetProcessIoCounters, GetProcessTimes, IO_COUNTERS, OpenProcess,
+                PROCESS_QUERY_LIMITED_INFORMATION,
             },
         },
     };
@@ -74,6 +79,12 @@ fn read(pid: u32) -> Option<Counters> {
         let ok = K32GetProcessMemoryInfo(handle, (&raw mut counters).cast(), counters.cb);
         let mut io: IO_COUNTERS = std::mem::zeroed();
         let io_ok = GetProcessIoCounters(handle, &raw mut io);
+        let mut times: [windows_sys::Win32::Foundation::FILETIME; 4] = std::mem::zeroed();
+        let [created, exited, kernel, user] = &mut times;
+        let times_ok = GetProcessTimes(handle, created, exited, kernel, user);
+        let ticks = |time: &windows_sys::Win32::Foundation::FILETIME| {
+            (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime)
+        };
         CloseHandle(handle);
         (ok != 0).then_some(Counters {
             working_set: counters.WorkingSetSize as u64,
@@ -81,6 +92,8 @@ fn read(pid: u32) -> Option<Counters> {
             peak_working_set: counters.PeakWorkingSetSize as u64,
             page_faults: u64::from(counters.PageFaultCount),
             read_transfer: if io_ok != 0 { io.ReadTransferCount } else { 0 },
+            cpu_user: if times_ok != 0 { ticks(&times[3]) } else { 0 },
+            cpu_kernel: if times_ok != 0 { ticks(&times[2]) } else { 0 },
         })
     }
 }
@@ -222,6 +235,11 @@ fn summarize(samples: &[Sample], interval: Duration, settle_ms: u64) -> Value {
             ])
         })
         .collect();
+    let first = samples[0].counters;
+    let last = samples[samples.len() - 1].counters;
+    let cpu_seconds = |ticks: u64| ticks as f64 / 1e7;
+    let cpu_user = cpu_seconds(last.cpu_user.saturating_sub(first.cpu_user));
+    let cpu_kernel = cpu_seconds(last.cpu_kernel.saturating_sub(first.cpu_kernel));
     json!({
         "series": series,
         "samples": samples.len(),
@@ -251,6 +269,9 @@ fn summarize(samples: &[Sample], interval: Duration, settle_ms: u64) -> Value {
             .counters
             .read_transfer
             .saturating_sub(samples[0].counters.read_transfer),
+        "cpu_user_s": cpu_user,
+        "cpu_kernel_s": cpu_kernel,
+        "cpu_s": cpu_user + cpu_kernel,
     })
 }
 
@@ -267,6 +288,8 @@ mod tests {
                 peak_working_set: private,
                 page_faults: elapsed_ms,
                 read_transfer: elapsed_ms * 10,
+                cpu_user: elapsed_ms * 20_000,
+                cpu_kernel: elapsed_ms * 5_000,
             },
         }
     }
@@ -293,6 +316,9 @@ mod tests {
         assert_eq!(stats["growth_private_bytes"], 100);
         assert_eq!(stats["transient_private_bytes"], 700);
         assert_eq!(stats["read_transfer_bytes"], 16_000);
+        assert_eq!(stats["cpu_user_s"], 3.2);
+        assert_eq!(stats["cpu_kernel_s"], 0.8);
+        assert_eq!(stats["cpu_s"], 4.0);
     }
 
     #[test]
