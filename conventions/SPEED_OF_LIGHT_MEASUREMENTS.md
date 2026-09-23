@@ -280,6 +280,42 @@ Balanced plan and the best-performance mode. The bar tracked bytes to within
 about 6 points, then stepped back from 99.98% to 86% as the post-hash stages
 reported their own percents; `dc09a72` holds the highest hash fraction shown.
 
+### September 24 CPU and memory round (`9de721a` to `486ab32`)
+
+The testkit memory lane now reports process CPU seconds per operation
+(`memory.cpu_s`, user and kernel), and saved benchmarks record CPU for every
+capture kind, so CPU changes can be screened. References on `9de721a`: SSD
+recheck 19.99 s and 38.5 CPU s (25.6 user, 12.9 kernel), peak private 1.90 GB;
+record restore 12.24 s and 16.7 CPU s, peak 1.04 GB. On the Windows heap the
+start footprint grew by 12-15 MB with every check (466 to 561 MB over five SSD
+runs).
+
+| Screen | SSD recheck | Record restore | Decision |
+| --- | --- | --- | --- |
+| mimalloc 3.3 defaults | 19.00 s, 35.9 CPU s, peak 2.87 GB | 11.47 s, 14.0 CPU s, peak 1.56 GB | faster; peak commit up, mostly untouched |
+| purge delay 0 | 19.29 s, 37.1 CPU s, peak 2.85 GB, faults +60% | not run | rejected |
+| page commit on demand | 19.26 s, 35.9 CPU s, peak 2.19 GB | not run | kept |
+| mimalloc 2.3.2 | 19.06 s, 36.4 CPU s, peak 2.97 GB | not run | rejected |
+| pooled small-file buffer | 19.02 s, 35.8 CPU s, peak 2.83 GB | not applicable | neutral, reverted |
+| final (`b96c8ab`) | 19.68 s, 36.8 CPU s, peak 2.18 GB | 11.56 s, 14.7 CPU s, peak 1.23 GB | kept |
+
+An interleaved A/B of page commit on demand (two rounds of five) measured
+19.22 s against 19.29 s with whole-page commit and 2.18 GB against 2.85 GB
+peak. The HDD screen on `eb7d673` measured 525.28 s (524.94-525.95), the same
+as the 525.44 s gate: that check is disk-bound. With mimalloc the start
+footprint stays flat (440-455 MB SSD, 449-467 MB record).
+
+The per-thread CPU line (`cff358c`) splits an SSD check into runtime and
+hash workers (about 17 s user, 9 s kernel), the UI thread (about 3 s user,
+1.5 s kernel) and renderer threads (about 4.5 s). Under the testkit the UI
+repaints every 50 ms while the driver's wait is pending; an agent attached to
+an idle window used to repaint every frame as well (0.29 cores), which
+`486ab32` limits to a 3 s window after an `fps` read (0.02 CPU s per idle 30 s).
+The HDD check's CPU (178.5 s for the same 92 GB the SSD check reads for about
+36 s) fits a steady 0.28 cores over 525 s on top of about 30 s of work, most
+likely this UI cadence rather than hashing; the HDD screen predates the
+per-thread line, so the next HDD run confirms it.
+
 ## 1a. Current accepted baselines
 
 The earlier rows were regenerated with `foxy-testkit measurements` from the
