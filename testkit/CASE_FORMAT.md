@@ -226,6 +226,7 @@ the series into `summary.memory`, mirrored into the ledger row as `memory`:
 | `retained_private_bytes` | lowest commit in the quiet window after it |
 | `growth_private_bytes` | retained minus the operation's first sample, floored at zero |
 | `transient_private_bytes` | peak minus retained: what the operation borrowed |
+| `cpu_user_s`, `cpu_kernel_s`, `cpu_s` | process CPU seconds over the operation, user, kernel and both; `memory.cpu_s` is compared with a 15% advisory band |
 | `median_private_bytes`, `peak_working_set_bytes`, `retained_working_set_bytes`, `process_peak_working_set_bytes`, `page_faults`, `samples`, `span_ms` | supporting detail |
 
 Private commit is the gated metric because the OS trims working set under

@@ -46,6 +46,14 @@ Phase 5 candidate "memory attribution" is therefore low priority and
 pursued only for evidence of unbounded growth or a renderer or allocator
 cost that is paid without any speed in return.
 
+The global allocator is mimalloc 3 (`src/main.rs`), chosen by measurement:
+less CPU and less time than the Windows process heap on every screened check,
+and no growth of the idle footprint from one check to the next. Pages are
+committed on demand, which removed about 0.65 GB of committed but unused
+memory across the SSD hash threads at no time cost; a test pins the option
+number to the bundled 3.x header, so a crate update that renumbers options
+fails the build's tests rather than setting the wrong option.
+
 ---
 
 ## Reference kinds
@@ -516,6 +524,8 @@ correctness gates.
    invent an operation peak.
 6. **Counters**: `memory.peak_private_bytes`, `retained_private_bytes`,
    `growth_private_bytes`, `transient_private_bytes` from `foxy-testkit`;
+   `memory.cpu_s` (with `cpu_user_s` and `cpu_kernel_s`) for the CPU an
+   operation cost;
    `agent-gui memory --textures` for Foxy's own buckets and the atlas.
 7. **Gates**: same useful work (bytes, files, parts); a footprint improvement
    that moves less required work is not an improvement. Per the resource
