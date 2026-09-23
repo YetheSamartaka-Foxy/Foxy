@@ -197,6 +197,14 @@ pub fn summary_text(record: &BenchmarkRecord, best: Option<&BestComparison>) -> 
     line("peak_download_bps", format!("{:.0}", m.peak_download_bps));
     line("peak_memory_bytes", m.peak_memory_bytes.to_string());
     line("avg_cpu_percent", format!("{:.1}", m.avg_cpu_percent));
+    line(
+        "cpu_user_s",
+        format!("{:.2}", m.cpu_user_ms as f64 / 1000.0),
+    );
+    line(
+        "cpu_kernel_s",
+        format!("{:.2}", m.cpu_kernel_ms as f64 / 1000.0),
+    );
     line("hash_files_total", m.hash_files_total.to_string());
     line("hash_parts_total", m.hash_parts_total.to_string());
     line("pending_updates", m.pending_updates.to_string());

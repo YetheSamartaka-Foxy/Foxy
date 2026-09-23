@@ -226,6 +226,11 @@ pub struct BenchmarkMetrics {
     pub peak_download_bps: f64,
     pub peak_memory_bytes: u64,
     pub avg_cpu_percent: f64,
+    /// Process user and kernel CPU time over the capture; 0 in older records.
+    #[serde(default)]
+    pub cpu_user_ms: u64,
+    #[serde(default)]
+    pub cpu_kernel_ms: u64,
     pub hash_files_total: u64,
     pub hash_parts_total: u64,
     /// Pending updates the check found (0 for downloads).
@@ -255,6 +260,8 @@ impl Default for BenchmarkMetrics {
             peak_download_bps: 0.0,
             peak_memory_bytes: 0,
             avg_cpu_percent: 0.0,
+            cpu_user_ms: 0,
+            cpu_kernel_ms: 0,
             hash_files_total: 0,
             hash_parts_total: 0,
             pending_updates: 0,
@@ -396,5 +403,15 @@ mod tests {
         assert_eq!(reduced.last().map(|s| s.t_ms), Some(999));
         assert_eq!(downsample_samples(&samples[..10], 100).len(), 10);
         assert!(downsample_samples(&samples, 0).len() == 1000);
+    }
+
+    #[test]
+    fn metrics_saved_before_cpu_time_existed_load_with_zero_cpu_time() {
+        let mut saved = serde_json::to_value(BenchmarkMetrics::default()).unwrap();
+        let fields = saved.as_object_mut().unwrap();
+        fields.remove("cpu_user_ms");
+        fields.remove("cpu_kernel_ms");
+        let metrics: BenchmarkMetrics = serde_json::from_value(saved).unwrap();
+        assert_eq!((metrics.cpu_user_ms, metrics.cpu_kernel_ms), (0, 0));
     }
 }

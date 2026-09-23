@@ -49,6 +49,8 @@ pub struct BenchmarkCapture {
     pub last_telemetry_memory: u64,
     /// Process CPU time at the previous sample, so every capture kind records CPU.
     pub last_cpu_time: Option<Duration>,
+    /// Process user and kernel CPU time when the capture started.
+    pub cpu_at_start: Option<(Duration, Duration)>,
 }
 
 /// A finished capture waiting for the user's decision in the save modal.
@@ -347,6 +349,7 @@ impl Foxy {
             last_disk_write_bps: 0.0,
             last_telemetry_memory: 0,
             last_cpu_time: crate::ui::memory::process_cpu_time(),
+            cpu_at_start: crate::ui::memory::process_cpu_times(),
         });
         info!(
             "Benchmark capture started: kind={:?}",
@@ -531,6 +534,12 @@ impl Foxy {
             .collect();
         if !cpu_samples.is_empty() {
             metrics.avg_cpu_percent = cpu_samples.iter().sum::<f64>() / cpu_samples.len() as f64;
+        }
+        if let (Some((user_start, kernel_start)), Some((user_end, kernel_end))) =
+            (capture.cpu_at_start, crate::ui::memory::process_cpu_times())
+        {
+            metrics.cpu_user_ms = user_end.saturating_sub(user_start).as_millis() as u64;
+            metrics.cpu_kernel_ms = kernel_end.saturating_sub(kernel_start).as_millis() as u64;
         }
         metrics.hash_files_total = capture
             .samples

@@ -133,23 +133,30 @@ pub fn sample_process_memory() -> ProcessMemoryStats {
     stats
 }
 
-/// User plus kernel CPU time this process has used so far.
+/// User and kernel CPU time this process has used so far, in that order.
 #[cfg(target_os = "windows")]
-pub fn process_cpu_time() -> Option<std::time::Duration> {
+pub fn process_cpu_times() -> Option<(std::time::Duration, std::time::Duration)> {
     use winapi::shared::minwindef::FILETIME;
     use winapi::um::processthreadsapi::{GetCurrentProcess, GetProcessTimes};
 
     let mut times: [FILETIME; 4] = unsafe { std::mem::zeroed() };
     let [created, exited, kernel, user] = &mut times;
     let ok = unsafe { GetProcessTimes(GetCurrentProcess(), created, exited, kernel, user) } != 0;
-    let ticks =
-        |time: &FILETIME| (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime);
-    ok.then(|| std::time::Duration::from_nanos((ticks(&times[2]) + ticks(&times[3])) * 100))
+    let duration = |time: &FILETIME| {
+        let ticks = (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime);
+        std::time::Duration::from_nanos(ticks * 100)
+    };
+    ok.then(|| (duration(&times[3]), duration(&times[2])))
 }
 
 #[cfg(not(target_os = "windows"))]
-pub fn process_cpu_time() -> Option<std::time::Duration> {
+pub fn process_cpu_times() -> Option<(std::time::Duration, std::time::Duration)> {
     None
+}
+
+/// User plus kernel CPU time this process has used so far.
+pub fn process_cpu_time() -> Option<std::time::Duration> {
+    process_cpu_times().map(|(user, kernel)| user + kernel)
 }
 
 /// CPU use between two [`process_cpu_time`] readings, in percent of one core.
