@@ -700,7 +700,7 @@ impl WholeFileHashIo {
 const ROTATIONAL_DIRECT_BLOCK: usize = 16 * 1024 * 1024;
 const ROTATIONAL_DIRECT_DEPTH: usize = 4;
 const SSD_DIRECT_BLOCK: usize = 4 * 1024 * 1024;
-const SSD_DIRECT_DEPTH: usize = 2;
+const SSD_DIRECT_DEPTH: usize = 1;
 /// Below this a file is one read either way, and a cached copy may still
 /// answer it from memory.
 const SSD_DIRECT_MIN_LEN: u64 = 1024 * 1024;
