@@ -57,7 +57,7 @@ pub(super) struct FileIdentity {
     modified: i64,
     changed: i64,
     /// The file's last change-journal record; `None` when the volume keeps
-    /// no journal.
+    /// no journal (the query then answers 0).
     usn: Option<i64>,
 }
 
@@ -434,7 +434,8 @@ pub(super) fn capture_identity(path: &Path) -> Option<FileIdentity> {
     };
     let usn = (usn_ok != 0)
         .then(|| usn_from_record(bytemuck_bytes(&usn_record), returned as usize))
-        .flatten();
+        .flatten()
+        .filter(|usn| *usn != 0);
     // SAFETY: LARGE_INTEGER is a union over the same 64 bits.
     let (modified, changed) = unsafe {
         (

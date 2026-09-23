@@ -130,7 +130,8 @@ read size and reader never change which bytes are hashed.
 Every hash run of a sync operation also refreshes a verified-hash record
 (`verified_hashes.json` beside `database.db`, `verified_record.rs`): for each
 file whose parts all matched the remote at the remote offsets, and whose NTFS
-identity (volume, file id, size, write and change time, change-journal USN)
+identity (volume, file id, size, write and change time, and the change-journal
+USN where the volume keeps a journal)
 was the same before and after the read, it stores that identity, a signature
 of the manifest's parts and the fingerprint. A whole-database wipe leaves the
 record in place. When the database holds no local state for a file, a sync
