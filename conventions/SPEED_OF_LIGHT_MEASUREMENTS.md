@@ -200,6 +200,36 @@ both gates.
 | 2026-09-23 | `perf-hdd-plan-main-recheck-hdd` | remote-refresh@evicted (O5 remote metadata refresh) | 132% (calibrated, hash B2+B6) | hdd evicted | 547.33 s | 650.98 s median of 7 [650.38-652.61] | 7 | 92.19 GB hashed | candidate-regression | 0cd18aa-dirty | `20260923T020005Z-389ba554` |
 | 2026-09-23 | `perf-hdd-plan-main-recheck-ssd` | remote-refresh@evicted (O5 remote metadata refresh) | 64% (calibrated, hash B2+B6) | ssd evicted | 29.74 s | 31.74 s median of 5 [29.95-32.28] | 5 | 92.19 GB hashed | ok | 0cd18aa | `20260923T015225Z-2912306c` |
 
+### September 23 non-cached reads and the verified-hash record (screens S7-S13)
+
+Same cases, baselines and method. Screens, each against the one before:
+128 MiB cached rotational reads (`9303058`, 539.95 s against 555.78 s at
+64 MiB); the non-cached reader with one HDD stream at a time (`c2bb96c`,
+525.71 s), which on SSD measured 19.52 s against 29.74 s; an adaptive SSD
+worker count (`25ebaa9`, 20.69 s, reverted: throughput stayed at 7.1 GB/s from
+4 to 16 workers); 32 MiB non-cached HDD blocks (`4af99ce`, 525.98 s,
+reverted); and one read per SSD worker (`746f682`, 20.48 s, reverted under the
+resource trade policy although it lowered peak private memory from 2.00 to
+1.60 GB).
+
+Final gates on `d7f3ac6` (the shipped reader settings; `40585aa` is the same
+code): HDD `20260923T072200Z-114a4118` 7/7 at 525.69-527.08 s, median 526.10 s
+(-19.2%); the row verdict is `candidate-regression` only from
+`quick_scan.sol_calibrated`, a 16 to 18 ms sub-step. SSD
+`20260923T083337Z-1a0451cc` median 19.72 s (-37.9%, `improvement`); hashing
+reads 87.4 GB in 12.3 s, 7.1 GB/s, above the 6.1 GB/s 32-reader disk
+reference. SSD peak private memory rose from 1.56 to 2.00 GB (advisory): the
+pooled non-cached buffers replace pages the cache manager held outside the
+process. The new `perf-hdd-plan-main-bootstrap-record-hdd` case wipes the
+repository's database but keeps the verified-hash record: every run restored
+all 3,738 files in 0.39 s and ended `early-exit-clean`.
+
+| Date | Case | Operation | SoL (kind) | Lane | Elapsed | Baseline | Samples | Work | Outcome | Build | Run |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 2026-09-23 | `perf-hdd-plan-main-recheck-hdd` | remote-refresh@evicted (O5 remote metadata refresh) | 137% (calibrated, hash B2+B6) | hdd evicted | 526.10 s | 650.98 s median of 7 [650.38-652.61] | 7 | 92.19 GB hashed | candidate-regression | d7f3ac6 | `20260923T072200Z-114a4118` |
+| 2026-09-23 | `perf-hdd-plan-main-recheck-ssd` | remote-refresh@evicted (O5 remote metadata refresh) | 114% (calibrated, hash B2+B6) | ssd evicted | 19.72 s | 31.74 s median of 5 [29.95-32.28] | 5 | 92.19 GB hashed | improvement | d7f3ac6 | `20260923T083337Z-1a0451cc` |
+| 2026-09-23 | `perf-hdd-plan-main-bootstrap-record-hdd` | remote-refresh@evicted (O5 remote metadata refresh) | 1% (calibrated, no-change B4) | hdd evicted | 10.81 s | none | 3 | n/a | ok | d7f3ac6 | `20260923T083643Z-1a968f4c` |
+
 ## 1a. Current accepted baselines
 
 The earlier rows were regenerated with `foxy-testkit measurements` from the
