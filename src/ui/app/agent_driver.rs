@@ -81,7 +81,16 @@ pub struct AgentGuiRuntime {
     /// When true, animation time is frozen and blink/hover/spinner animations
     /// are disabled so screenshots are byte-stable (`stable-render`).
     pub stable_render: bool,
+    /// The UI repaints every frame until then, so `fps` reads a live frame
+    /// rate; outside the window the agent costs no frames of its own.
+    pub fps_probe_until: Option<Instant>,
+    /// The next frame interval spans the idle gap before the probe began and
+    /// is not a frame time.
+    pub fps_probe_warming: bool,
 }
+
+/// How long one `fps` read keeps the UI repainting every frame.
+pub(crate) const FPS_PROBE_WINDOW: Duration = Duration::from_secs(3);
 
 /// Maximum stored observations for `diff` and maximum buffered `events`.
 const DIFF_BASELINE_CAP: usize = 32;
@@ -772,6 +781,17 @@ pub struct AgentGuiSnapshot {
 }
 
 impl AgentGuiRuntime {
+    /// Whether an `fps` read asked for live frames recently.
+    pub(crate) fn fps_probe_active(&self, now: Instant) -> bool {
+        self.fps_probe_until.is_some_and(|until| now < until)
+    }
+
+    /// Keep frames live for [`FPS_PROBE_WINDOW`] from `now`.
+    pub(crate) fn open_fps_probe(&mut self, now: Instant) {
+        self.fps_probe_warming |= !self.fps_probe_active(now);
+        self.fps_probe_until = Some(now + FPS_PROBE_WINDOW);
+    }
+
     fn new(rx: Receiver<AgentGuiUiRequest>, session: AgentGuiSession) -> Self {
         Self {
             rx,
@@ -794,6 +814,8 @@ impl AgentGuiRuntime {
             prev_download_finished: false,
             active_renderer: None,
             stable_render: false,
+            fps_probe_until: None,
+            fps_probe_warming: false,
         }
     }
 
@@ -1510,29 +1532,36 @@ impl Foxy {
                 ctx.request_repaint();
                 return;
             }
-            AgentGuiCommand::Fps => AgentGuiResponse::ok(
-                &command,
-                &view,
-                started_at,
-                json!({
-                    "fps": self.fps_ema,
-                    "fps_counter_visible": self.settings_view_state.show_fps_counter,
-                    // Recent frame intervals: a stall shows up in p95/max long
-                    // after the smoothed fps has recovered.
-                    "frame_ms": crate::ui::app::runtime::update_loop::frame_interval_stats(&self.frame_intervals_ms)
-                        .map(|(p50, p95, max)| json!({"p50": p50, "p95": p95, "max": max, "samples": self.frame_intervals_ms.len()})),
-                    // Diff these across two reads to detect multi-pass: if
-                    // (pass_delta - frame_delta) > 0 between two scroll samples,
-                    // egui is running extra layout passes (the cost behind the
-                    // "changed id between passes" warning / scroll FPS drop).
-                    "cumulative_frame_nr": ctx.cumulative_frame_nr(),
-                    "cumulative_pass_nr": ctx.cumulative_pass_nr(),
-                }),
-            ),
+            AgentGuiCommand::Fps => {
+                runtime.open_fps_probe(started_at);
+                ctx.request_repaint();
+                AgentGuiResponse::ok(
+                    &command,
+                    &view,
+                    started_at,
+                    json!({
+                        "fps": self.fps_ema,
+                        "fps_counter_visible": self.settings_view_state.show_fps_counter,
+                        // Recent frame intervals: a stall shows up in p95/max long
+                        // after the smoothed fps has recovered.
+                        "frame_ms": crate::ui::app::runtime::update_loop::frame_interval_stats(&self.frame_intervals_ms)
+                            .map(|(p50, p95, max)| json!({"p50": p50, "p95": p95, "max": max, "samples": self.frame_intervals_ms.len()})),
+                        // Diff these across two reads to detect multi-pass: if
+                        // (pass_delta - frame_delta) > 0 between two scroll samples,
+                        // egui is running extra layout passes (the cost behind the
+                        // "changed id between passes" warning / scroll FPS drop).
+                        "cumulative_frame_nr": ctx.cumulative_frame_nr(),
+                        "cumulative_pass_nr": ctx.cumulative_pass_nr(),
+                    }),
+                )
+            }
             AgentGuiCommand::Wait {
                 condition,
                 timeout_ms,
             } => {
+                if matches!(condition, AgentGuiWaitCondition::FpsAbove { .. }) {
+                    runtime.open_fps_probe(started_at);
+                }
                 if self.agent_gui_wait_satisfied(ctx, condition) {
                     AgentGuiResponse::ok(
                         &command,
@@ -2271,6 +2300,13 @@ impl Foxy {
 
     fn agent_gui_complete_waits(&mut self, ctx: &egui::Context, runtime: &mut AgentGuiRuntime) {
         let now = Instant::now();
+        if runtime
+            .pending_waits
+            .iter()
+            .any(|wait| matches!(wait.condition, AgentGuiWaitCondition::FpsAbove { .. }))
+        {
+            runtime.open_fps_probe(now);
+        }
         let mut index = 0;
         while index < runtime.pending_waits.len() {
             let satisfied =
@@ -6757,6 +6793,27 @@ mod tests {
             Some(100)
         );
         assert!(agent_gui_resolve_baseline(&runtime, "bogus").is_none());
+    }
+
+    #[test]
+    fn an_fps_probe_keeps_frames_live_only_for_its_window() {
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let mut runtime = AgentGuiRuntime::new(
+            rx,
+            AgentGuiSession {
+                pid: 1,
+                host: "127.0.0.1".to_string(),
+                port: 0,
+                token: "t".to_string(),
+                session_file: PathBuf::from("session.json"),
+            },
+        );
+        let now = Instant::now();
+        assert!(!runtime.fps_probe_active(now));
+        runtime.fps_probe_until = Some(now + FPS_PROBE_WINDOW);
+        assert!(runtime.fps_probe_active(now));
+        assert!(runtime.fps_probe_active(now + FPS_PROBE_WINDOW / 2));
+        assert!(!runtime.fps_probe_active(now + FPS_PROBE_WINDOW));
     }
 
     #[test]

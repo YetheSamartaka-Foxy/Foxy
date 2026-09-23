@@ -87,14 +87,25 @@ impl Foxy {
     }
 
     /// Update the smoothed frames-per-second estimate that backs the optional
-    /// on-screen FPS counter and the non-visual agent GUI probe. While either
-    /// probe is enabled the UI is kept repainting continuously so the readout
-    /// stays live; otherwise this resets the running average.
+    /// on-screen FPS counter and the agent GUI `fps` probe. While the counter
+    /// is shown, or for a short window after each `fps` read, the UI is kept
+    /// repainting continuously so the readout stays live; otherwise this
+    /// resets the running average and the UI repaints only when it needs to.
     fn update_fps_estimate(&mut self, ctx: &egui::Context) {
-        let agent_gui_probe = self.agent_gui.is_some();
+        let now = Instant::now();
+        let agent_gui_probe = self
+            .agent_gui
+            .as_ref()
+            .is_some_and(|runtime| runtime.fps_probe_active(now));
         if !self.settings_view_state.show_fps_counter && !agent_gui_probe {
             self.fps_ema = 0.0;
             self.frame_intervals_ms.clear();
+            return;
+        }
+        if let Some(runtime) = self.agent_gui.as_mut()
+            && std::mem::take(&mut runtime.fps_probe_warming)
+        {
+            ctx.request_repaint();
             return;
         }
 
