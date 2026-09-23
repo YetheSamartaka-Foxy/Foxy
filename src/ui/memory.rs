@@ -133,6 +133,37 @@ pub fn sample_process_memory() -> ProcessMemoryStats {
     stats
 }
 
+/// User plus kernel CPU time this process has used so far.
+#[cfg(target_os = "windows")]
+pub fn process_cpu_time() -> Option<std::time::Duration> {
+    use winapi::shared::minwindef::FILETIME;
+    use winapi::um::processthreadsapi::{GetCurrentProcess, GetProcessTimes};
+
+    let mut times: [FILETIME; 4] = unsafe { std::mem::zeroed() };
+    let [created, exited, kernel, user] = &mut times;
+    let ok = unsafe { GetProcessTimes(GetCurrentProcess(), created, exited, kernel, user) } != 0;
+    let ticks =
+        |time: &FILETIME| (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime);
+    ok.then(|| std::time::Duration::from_nanos((ticks(&times[2]) + ticks(&times[3])) * 100))
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn process_cpu_time() -> Option<std::time::Duration> {
+    None
+}
+
+/// CPU use between two [`process_cpu_time`] readings, in percent of one core.
+pub fn cpu_percent_between(
+    cpu_before: std::time::Duration,
+    cpu_after: std::time::Duration,
+    wall: std::time::Duration,
+) -> f64 {
+    if wall.is_zero() {
+        return 0.0;
+    }
+    cpu_after.saturating_sub(cpu_before).as_secs_f64() / wall.as_secs_f64() * 100.0
+}
+
 #[cfg(target_os = "windows")]
 pub fn sample_process_virtual_memory_map() -> Option<ProcessVirtualMemoryMap> {
     use std::mem::{size_of, zeroed};
@@ -504,4 +535,25 @@ fn parse_proc_kib_line(line: &str, prefix: &str) -> Option<u64> {
     let value = line.strip_prefix(prefix)?.trim();
     let kib = value.strip_suffix("kB").unwrap_or(value).trim();
     kib.parse::<u64>().ok().map(|parsed| parsed * 1024)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn cpu_percent_is_relative_to_one_core() {
+        let second = Duration::from_secs(1);
+        assert_eq!(cpu_percent_between(second, second * 3, second), 200.0);
+        assert_eq!(cpu_percent_between(second, second, second), 0.0);
+        assert_eq!(cpu_percent_between(second * 2, second, second), 0.0);
+        assert_eq!(cpu_percent_between(second, second * 2, Duration::ZERO), 0.0);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn process_cpu_time_is_read() {
+        assert!(process_cpu_time().is_some());
+    }
 }
