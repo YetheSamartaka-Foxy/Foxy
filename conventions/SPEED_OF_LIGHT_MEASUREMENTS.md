@@ -160,6 +160,46 @@ comparison reads such a lane as `no-baseline`, and `foxy-testkit accept
 candidate `wipe-db` rows were recorded with `rebaseline-required` before
 the comparison fix; the measured lane was never affected.
 
+### September 22-23 HDD read path (rounds 1-2, screens S1-S6)
+
+Measured against the accepted `38e52f6` baselines (HDD 650.985 s, SSD
+31.735 s; WAL, gate 4, `evict-cache` before every refresh), 92,193,872,029
+hashed bytes, 3,738 files and 433,063 parts on every row, every outcome
+`early-exit-clean`/`completed`.
+
+Round 1 (`fc1ccc8`: fingerprint through the raw handle, byte-weighted
+progress, layout parsed through the hash reader, small-file tail in path
+order): HDD `20260922T184818Z-11fe557c` median 639.39 s (-1.8%), SSD
+`20260922T184354Z-268cff48` median 30.03 s (-5.4%). Process reads fell from
+1.200x of the hashed bytes (notebook, old build) to 1.004x, and the
+byte-weighted progress bar tracked elapsed time within 1.6 points.
+
+Three-run HDD screens (`perf-hdd-plan-main-recheck-hdd-screen`) then added
+one change each: the post-hash fingerprint taken from the streamed bytes plus
+the sequential-scan hint (`841f33e`, 633.02 s), 16 MiB rotational reads
+(`16036d3`, 614.45 s), on-disk (first cluster) job order (`92e1758`,
+603.25 s), 32 MiB (`079ad76`, 573.22 s) and 64 MiB (`e0e4d4c`, 555.78 s).
+One HDD worker with 64 MiB reads (`1776555`) took 586.14 s and was reverted.
+
+Final gates: HDD clean `e2f4178` `20260923T003704Z-26c8d478`, 7/7 at
+547.12-548.01 s, median 547.26 s (-15.9%, `candidate-improvement`), and the
+confirming run on `0cd18aa` `20260923T020005Z-389ba554`, median 547.33 s
+(-15.9%, now `improvement`). Its row verdict is `candidate-regression` only
+from `remote_refresh.actual_s` (4.6 to 5.3 s), the metadata fetch from the
+public origin before hashing, which these changes do not touch. On SSD the
+sequential-scan hint cost time (`e2f4178` `20260923T003241Z-06912638`, median
+32.77 s), so `0cd18aa` applies it to rotational storage only:
+`20260923T015225Z-2912306c`, median 29.74 s (-6.3%), verdict `ok`. The 92 GB
+HDD hash now runs at 132% of the calibrated B2+B6 reference, about 168 MB/s.
+Peak private memory rose about 0.1-0.15 GB with the two 64 MiB readers
+(advisory). The HDD `wipe-db` stage also measured 0.45 s against 2.04 s in
+both gates.
+
+| Date | Case | Operation | SoL (kind) | Lane | Elapsed | Baseline | Samples | Work | Outcome | Build | Run |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 2026-09-23 | `perf-hdd-plan-main-recheck-hdd` | remote-refresh@evicted (O5 remote metadata refresh) | 132% (calibrated, hash B2+B6) | hdd evicted | 547.33 s | 650.98 s median of 7 [650.38-652.61] | 7 | 92.19 GB hashed | candidate-regression | 0cd18aa-dirty | `20260923T020005Z-389ba554` |
+| 2026-09-23 | `perf-hdd-plan-main-recheck-ssd` | remote-refresh@evicted (O5 remote metadata refresh) | 64% (calibrated, hash B2+B6) | ssd evicted | 29.74 s | 31.74 s median of 5 [29.95-32.28] | 5 | 92.19 GB hashed | ok | 0cd18aa | `20260923T015225Z-2912306c` |
+
 ## 1a. Current accepted baselines
 
 The earlier rows were regenerated with `foxy-testkit measurements` from the
