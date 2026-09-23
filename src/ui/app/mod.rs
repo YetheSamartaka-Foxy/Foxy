@@ -138,6 +138,9 @@ pub struct Foxy {
     /// ships and the user must be prompted to wipe-and-continue (or dismiss and
     /// keep the old data at their own risk). Driven by `db_schema_version`.
     pub pending_db_schema_wipe: Option<crate::core::tasks::db_schema_version::DbSchemaWipePrompt>,
+    /// Opt-out on the schema wipe prompt: recheck every repository once the wipe lands.
+    pub db_schema_wipe_recheck_all: bool,
+    pub recheck_all_after_database_wipe: bool,
     /// Set when another Foxy process already owns this game space's database.
     /// Turso has no multi-process access, so this window must not touch the data
     /// at all: the prompt it raises only offers closing Foxy. Carries the owning

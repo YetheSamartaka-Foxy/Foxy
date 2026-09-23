@@ -171,9 +171,13 @@ impl Foxy {
             match self.database_wipe_rx.try_recv() {
                 Ok(Ok(())) => {
                     self.show_success_toast(self.t("Database wiped successfully"));
+                    if std::mem::take(&mut self.recheck_all_after_database_wipe) {
+                        self.queue_recheck_all_repositories();
+                    }
                     self.needs_repaint = true;
                 }
                 Ok(Err(err)) => {
+                    self.recheck_all_after_database_wipe = false;
                     self.show_error_toast(self.t("Failed to wipe database") + &format!(": {err}"));
                     self.needs_repaint = true;
                 }

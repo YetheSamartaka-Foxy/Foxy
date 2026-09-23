@@ -220,6 +220,32 @@ impl Foxy {
         self.note_startup_rechecks_queued(queued);
     }
 
+    /// Queue a remote data recheck of every configured repository, drained one
+    /// at a time by `process_startup_rechecks`.
+    pub(in crate::ui::app) fn queue_recheck_all_repositories(&mut self) {
+        let mut queued = 0usize;
+        for repo in &self.repository_view_state.repositories {
+            if repo.address.trim().is_empty() || repo.path.trim().is_empty() {
+                continue;
+            }
+            let path = sanitize_user_path(&repo.path);
+            let already_queued = self
+                .startup_recheck_queue
+                .iter()
+                .any(|(address, queued_path, _)| *address == repo.address && *queued_path == path);
+            if already_queued {
+                continue;
+            }
+            self.startup_recheck_queue.push_back((
+                repo.address.clone(),
+                path,
+                SyncMode::RemoteRefreshOnly,
+            ));
+            queued += 1;
+        }
+        info!("Recheck of all repositories queued: {}", queued);
+    }
+
     /// Start the startup eligibility plan before the first frame.
     ///
     /// The plan is a database preflight plus one `repo.json` probe per

@@ -300,6 +300,8 @@ impl Foxy {
         self.show_force_redownload_confirmation = false;
         self.show_wipe_db_confirmation = false;
         self.wipe_db_include_benchmarks = false;
+        self.db_schema_wipe_recheck_all = true;
+        self.recheck_all_after_database_wipe = false;
         self.benchmark_armed = None;
         self.benchmark_capture = None;
         self.benchmark_prompt = None;

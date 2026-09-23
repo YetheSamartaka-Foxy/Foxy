@@ -664,51 +664,128 @@ impl Foxy {
         let sync_active = self.repository_sync_active();
         let mut wipe_clicked = false;
         let mut dismiss_clicked = false;
+        let mut recheck_all = self.db_schema_wipe_recheck_all;
 
-        egui::Window::new(self.t("Database update required"))
-            .frame(self.modal_window_chrome(ctx))
-            .title_frame(self.modal_window_chrome(ctx))
+        let danger = self.color_error();
+        let danger_fill = self.color_action_destructive();
+        let window_frame = self
+            .modal_window_chrome(ctx)
+            .stroke(egui::Stroke::new(2.0, danger));
+        let title = egui::RichText::new(self.t("Database update required"))
+            .color(danger)
+            .strong();
+
+        egui::Window::new(title)
+            .frame(window_frame)
+            .title_frame(window_frame)
             .title_bar(true)
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .default_width(540.0)
             .show(ctx, |ui| {
-                if prompt.blocking {
-                    ui.label(self.t(
+                let body_size = egui::TextStyle::Body.resolve(ui.style()).size;
+                let message = if prompt.blocking {
+                    self.t(
                         "The database stored on this computer was built by an older version of Foxy and this version cannot read it. Until it is rebuilt, Foxy cannot detect or download mod updates - repositories will keep showing as up to date even when they are not.",
-                    ));
+                    )
                 } else {
-                    ui.label(self.t(
+                    self.t(
                         "This version of Foxy uses a newer database format than the data stored on this computer. The local database must be wiped and rebuilt before it can be used reliably.",
-                    ));
+                    )
+                };
+                egui::Frame::new()
+                    .fill(Self::blend_color(self.color_card_bg(), danger, 0.14))
+                    .stroke(egui::Stroke::new(1.0, danger))
+                    .corner_radius(egui::CornerRadius::same(8))
+                    .inner_margin(egui::Margin::same(12))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        let row_layout = if crate::ui::i18n::is_rtl() {
+                            egui::Layout::right_to_left(egui::Align::TOP)
+                        } else {
+                            egui::Layout::left_to_right(egui::Align::TOP)
+                        };
+                        ui.with_layout(row_layout, |ui| {
+                            Self::paint_danger_glyph(ui, body_size * 2.4, danger);
+                            ui.add_space(10.0);
+                            ui.vertical(|ui| {
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(message)
+                                            .color(self.color_text_normal())
+                                            .strong(),
+                                    )
+                                    .wrap(),
+                                );
+                            });
+                        });
+                    });
+                ui.add_space(10.0);
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(self.t(
+                            "Wiping clears cached repository data only - your downloaded mods and files on disk are not touched. Foxy rebuilds the cache automatically the next time it checks each repository.",
+                        ))
+                        .color(self.color_text_gray()),
+                    )
+                    .wrap(),
+                );
+                ui.add_space(12.0);
+                Self::ui_state_checkbox(ui, &mut recheck_all, self.t("Recheck all repositories"));
+                ui.add_space(12.0);
+
+                let wipe_label = egui::RichText::new(self.t("Wipe database and continue"))
+                    .strong()
+                    .color(crate::ui::palette::ON_DESTRUCTIVE);
+                let wipe_btn = ui
+                    .vertical_centered_justified(|ui| {
+                        ui.add_enabled(
+                            !sync_active,
+                            egui::Button::new(wipe_label)
+                                .fill(danger_fill)
+                                .stroke(egui::Stroke::new(1.0, danger))
+                                .corner_radius(egui::CornerRadius::same(6))
+                                .min_size(egui::vec2(
+                                    0.0,
+                                    Self::adaptive_button_height(body_size, 40.0),
+                                )),
+                        )
+                    })
+                    .inner;
+                // Land keyboard focus on the recommended action so Enter confirms it.
+                if !sync_active && ui.ctx().memory(|memory| memory.focused().is_none()) {
+                    wipe_btn.request_focus();
                 }
-                ui.add_space(8.0);
-                ui.label(self.t(
-                    "Wiping clears cached repository data only - your downloaded mods and files on disk are not touched. Foxy rebuilds the cache automatically the next time it checks each repository.",
-                ));
-                ui.add_space(16.0);
+                if wipe_btn.hovered() && !sync_active {
+                    ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                }
+                if wipe_btn.clicked() {
+                    wipe_clicked = true;
+                }
 
                 ui.vertical_centered(|ui| {
-                    let wipe_btn = ui.add_enabled(
-                        !sync_active,
-                        egui::Button::new(self.t("Wipe database and continue")),
-                    );
-                    if wipe_btn.hovered() && !sync_active {
-                        ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
-                    }
-                    if wipe_btn.clicked() {
-                        wipe_clicked = true;
-                    }
                     if sync_active {
-                        ui.add_space(4.0);
-                        ui.label(self.t("Finish the current sync before wiping the database."));
+                        ui.add_space(6.0);
+                        ui.label(
+                            egui::RichText::new(
+                                self.t("Finish the current sync before wiping the database."),
+                            )
+                            .color(self.color_warn()),
+                        );
                     }
 
                     if !prompt.blocking {
                         ui.add_space(10.0);
-                        let dismiss_btn =
-                            ui.button(self.t("Continue without wiping (at my own risk)"));
+                        let dismiss_btn = ui.add(
+                            egui::Button::new(
+                                egui::RichText::new(
+                                    self.t("Continue without wiping (at my own risk)"),
+                                )
+                                .color(self.color_text_dim()),
+                            )
+                            .frame(false),
+                        );
                         if dismiss_btn.hovered() {
                             ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                         }
@@ -718,6 +795,7 @@ impl Foxy {
                     }
                 });
             });
+        self.db_schema_wipe_recheck_all = recheck_all;
 
         if preview {
             if wipe_clicked || dismiss_clicked {
@@ -729,23 +807,34 @@ impl Foxy {
 
         if wipe_clicked {
             warn!(
-                "Database schema wipe confirmed (stored={} target={})",
-                prompt.stored_version, prompt.target_version
+                "Database schema wipe confirmed (stored={} target={} recheck_all={})",
+                prompt.stored_version, prompt.target_version, self.db_schema_wipe_recheck_all
             );
             self.pending_db_schema_wipe = None;
+            self.recheck_all_after_database_wipe = self.db_schema_wipe_recheck_all;
             // Wipe on a background thread so the UI draw loop is never blocked.
-            std::thread::spawn(|| match tokio::runtime::Runtime::new() {
-                Ok(rt) => {
-                    if let Err(e) =
-                        rt.block_on(crate::core::tasks::init_database::wipe_database_live())
-                    {
-                        error!("Failed to wipe database for schema upgrade: {}", e);
-                    } else {
-                        crate::core::tasks::db_schema_version::mark_wiped();
-                        info!("Database schema wipe completed");
+            let database_wipe_tx = self.database_wipe_tx.clone();
+            std::thread::spawn(move || {
+                let result = match tokio::runtime::Runtime::new() {
+                    Ok(rt) => {
+                        match rt.block_on(crate::core::tasks::init_database::wipe_database_live()) {
+                            Ok(()) => {
+                                crate::core::tasks::db_schema_version::mark_wiped();
+                                info!("Database schema wipe completed");
+                                Ok(())
+                            }
+                            Err(e) => {
+                                error!("Failed to wipe database for schema upgrade: {}", e);
+                                Err(e)
+                            }
+                        }
                     }
-                }
-                Err(e) => error!("Failed to create runtime for schema wipe: {}", e),
+                    Err(e) => {
+                        error!("Failed to create runtime for schema wipe: {}", e);
+                        Err(e.to_string())
+                    }
+                };
+                let _ = database_wipe_tx.send(result);
             });
             // Clear in-memory caches that mirror the now-empty database.
             self.clear_mod_diff_cache();
@@ -758,6 +847,23 @@ impl Foxy {
             );
             self.pending_db_schema_wipe = None;
         }
+    }
+
+    fn paint_danger_glyph(ui: &mut Ui, size: f32, color: egui::Color32) {
+        let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+        let painter = ui.painter();
+        painter.add(egui::Shape::convex_polygon(
+            vec![rect.center_top(), rect.right_bottom(), rect.left_bottom()],
+            color,
+            egui::Stroke::NONE,
+        ));
+        painter.text(
+            rect.center_bottom() - egui::vec2(0.0, size * 0.08),
+            egui::Align2::CENTER_BOTTOM,
+            "!",
+            egui::FontId::proportional(size * 0.62),
+            crate::ui::palette::ON_DESTRUCTIVE,
+        );
     }
 
     /// Startup prompt shown when the launch update check found a newer Foxy

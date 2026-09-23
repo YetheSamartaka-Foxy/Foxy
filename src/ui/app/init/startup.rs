@@ -207,6 +207,8 @@ impl Foxy {
             benchmark_channels: Default::default(),
             pending_renderer_fallback_notice: false,
             pending_db_schema_wipe: None,
+            db_schema_wipe_recheck_all: true,
+            recheck_all_after_database_wipe: false,
             db_lock_conflict: None,
             pending_low_space_notice: false,
             storage_compat_notice: None,
