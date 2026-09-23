@@ -24,7 +24,7 @@
       "cpu": "AMD Ryzen 9 9950X3D 16-Core Processor",
       "os": "Windows 11",
       "memory_gb": 96,
-      "origin": "a3.tfrod.cz:8080"
+      "origin": "repo.example.invalid:8080"
     }
   },
   "operations": {
