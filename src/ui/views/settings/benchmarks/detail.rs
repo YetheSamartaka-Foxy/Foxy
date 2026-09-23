@@ -386,6 +386,38 @@ impl Foxy {
             + charts_for(record, "", &palette::BENCHMARK_SERIES).len()
     }
 
+    /// Power source, battery, plan and power mode, or `None` for a record
+    /// saved before they were stored.
+    fn benchmark_power_text(
+        &self,
+        power: &crate::core::utils::power::PowerStatus,
+    ) -> Option<String> {
+        if *power == Default::default() {
+            return None;
+        }
+        let mut parts = Vec::new();
+        match (power.source.as_str(), power.battery_percent) {
+            ("ac", _) => parts.push(self.t("Mains power")),
+            ("battery", Some(percent)) => parts.push(format!("{} {percent}%", self.t("Battery"))),
+            ("battery", None) => parts.push(self.t("Battery")),
+            _ => {}
+        }
+        if power.battery_saver {
+            parts.push(self.t("Battery saver"));
+        }
+        if !power.plan.is_empty() {
+            parts.push(power.plan.clone());
+        }
+        match power.mode.as_str() {
+            "best-efficiency" => parts.push(self.t("Best power efficiency")),
+            "better-battery" => parts.push(self.t("Better battery")),
+            "balanced" => parts.push(self.t("Balanced")),
+            "best-performance" => parts.push(self.t("Best performance")),
+            _ => {}
+        }
+        Some(parts.join(", "))
+    }
+
     fn render_benchmark_info_grid(
         &self,
         ui: &mut Ui,
@@ -781,7 +813,7 @@ impl Foxy {
         if let Some(op) = &record.operation_id {
             run_rows.push((self.t("Operation"), op.clone()));
         }
-        let machine_rows = vec![
+        let mut machine_rows = vec![
             (
                 self.t("Build"),
                 format!(
@@ -816,6 +848,9 @@ impl Foxy {
                 yes_no(record.machine.extended_diagnostics),
             ),
         ];
+        if let Some(power) = self.benchmark_power_text(&record.machine.power) {
+            machine_rows.push((self.t("Power"), power));
+        }
         let metric_pairs: Vec<(String, String)> = metric_rows(&record)
             .into_iter()
             .filter(|metric| metric.value > 0.0 || metric.label == "Elapsed")
