@@ -503,6 +503,14 @@ impl ContextRun<'_> {
         let name = operation["op"].as_str().context("Missing operation name")?;
         let repository = self.operation_repository(operation)?;
         let args = match name {
+            "wipe-db" if operation["keep_hash_record"].as_bool() == Some(true) => vec![
+                "repo",
+                "wipe-db",
+                "--repo-name",
+                repository,
+                "--yes",
+                "--keep-hash-record",
+            ],
             "wipe-db" => vec!["repo", "wipe-db", "--repo-name", repository, "--yes"],
             "force-redownload" => vec![
                 "repo",
@@ -591,13 +599,17 @@ impl ContextRun<'_> {
             .progress_probe
             .map(|interval| ProgressProbe::start(self.exe, self.config, self.env, interval));
         let started = Instant::now();
-        self.data(&[
+        let mut invoke = vec![
             "invoke",
             action,
             "--repo-index",
             &repo_index,
             "--allow-destructive",
-        ])?;
+        ];
+        if name == "wipe-db" && operation["keep_hash_record"].as_bool() == Some(true) {
+            invoke.extend(["--params", r#"{"keep-hash-record":true}"#]);
+        }
+        self.data(&invoke)?;
         let busy_deadline = Instant::now() + Duration::from_secs(30);
         let mut observed_busy = false;
         let mut finished_between_polls = false;

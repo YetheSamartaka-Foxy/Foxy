@@ -123,7 +123,11 @@ toolbar recheck, which also prepares the download queue so the following
 `download` reuses it (`run_metrics.prepared_queue_reuses`), while the CLI
 `remote-refresh` is `repo sync --mode remote-refresh` and prepares nothing. The
 GUI `quick-check` is the toolbar quick check and `wipe-db` is the repository's
-"wipe database entries" action (busy reason `repository-db-wipe`).
+"wipe database entries" action (busy reason `repository-db-wipe`). Both
+harnesses also drop the folder's verified-hash record, as the user action
+does, so the next check reads every file; `"keep_hash_record": true` keeps
+it, which measures a bootstrap that restores unchanged files instead (the
+state a whole-database schema wipe leaves).
 
 `download-full-files` is GUI-only and exists for the O2 control lane. It builds
 the ordinary mismatch-scoped queue but suppresses delta plans, so only the
