@@ -656,17 +656,27 @@ impl Foxy {
         )
     }
 
-    /// The check banner's bar: the hash fraction while hashing, else the stage
-    /// percent, never below the highest hash fraction already shown.
+    pub(crate) fn floored_recheck_hash_fraction(&self) -> Option<f32> {
+        self.recheck_hash_progress_fraction()
+            .map(|fraction| above_floor(self.recheck_progress_floor, fraction))
+    }
+
+    /// The check banner's bar: the hash pass over what the stages before it
+    /// left, else the stage percent, never below the highest value already shown.
     pub(crate) fn recheck_progress_fraction(&self) -> Option<f32> {
         held_progress(
-            self.recheck_hash_progress_fraction().or_else(|| {
+            self.floored_recheck_hash_fraction().or_else(|| {
                 self.recheck_stage_percent
                     .map(|percent| percent.clamp(0.0, 1.0))
             }),
             self.recheck_progress_peak,
         )
     }
+}
+
+fn above_floor(floor: Option<f32>, fraction: f32) -> f32 {
+    let floor = floor.unwrap_or(0.0).clamp(0.0, 1.0);
+    floor + (1.0 - floor) * fraction.clamp(0.0, 1.0)
 }
 
 fn held_progress(current: Option<f32>, peak: Option<f32>) -> Option<f32> {
@@ -700,6 +710,15 @@ mod hash_eta_tests {
         assert_eq!(Foxy::format_hash_eta(86_700_000_000, 107_000_000), "14 min");
         assert_eq!(Foxy::format_hash_eta(50_000_000, 100_000_000), "1 s");
         assert_eq!(Foxy::format_hash_eta(1_000, 0), "17 min");
+    }
+
+    #[test]
+    fn the_hash_pass_fills_the_bar_from_where_the_stages_left_it() {
+        use super::above_floor;
+        assert_eq!(above_floor(Some(0.2), 0.0), 0.2);
+        assert_eq!(above_floor(Some(0.2), 0.5), 0.6);
+        assert_eq!(above_floor(Some(0.2), 1.0), 1.0);
+        assert_eq!(above_floor(None, 0.25), 0.25);
     }
 
     #[test]

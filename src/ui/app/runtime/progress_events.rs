@@ -661,11 +661,15 @@ impl Foxy {
                     )
                 ) =>
                 {
+                    if self.recheck_progress_floor.is_none() {
+                        self.recheck_progress_floor =
+                            Some(self.recheck_progress_fraction().unwrap_or(0.0));
+                    }
                     self.recheck_hash_counter = Some((*checked_files, *total_files));
                     self.recheck_hash_part_counter = Some((*checked_parts, *total_parts));
                     self.recheck_hash_byte_counter =
                         (*total_bytes > 0).then_some((*checked_bytes, *total_bytes));
-                    if let Some(fraction) = self.recheck_hash_progress_fraction() {
+                    if let Some(fraction) = self.floored_recheck_hash_fraction() {
                         self.recheck_progress_peak =
                             Some(self.recheck_progress_peak.unwrap_or(0.0).max(fraction));
                     }
@@ -1109,6 +1113,7 @@ impl Foxy {
                     self.recheck_hash_part_counter = None;
                     self.recheck_hash_byte_counter = None;
                     self.recheck_progress_peak = None;
+                    self.recheck_progress_floor = None;
                     self.recheck_hash_estimate = None;
                     self.memory_diagnostics_last_logged_stage_key = None;
                     if self.syncing_repository.is_none() && !self.deferred_fs_scan.is_empty() {

@@ -51,6 +51,26 @@ pub struct BenchmarkCapture {
     pub last_cpu_time: Option<Duration>,
     /// Process user and kernel CPU time when the capture started.
     pub cpu_at_start: Option<(Duration, Duration)>,
+    /// Highest hash counters reported, for the closing sample: the last files
+    /// of a pass can finish between two once-a-second samples.
+    pub hash_high: HashCounters,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HashCounters {
+    pub files_done: u64,
+    pub files_total: u64,
+    pub parts_done: u64,
+    pub parts_total: u64,
+}
+
+impl HashCounters {
+    fn raise(&mut self, other: HashCounters) {
+        self.files_done = self.files_done.max(other.files_done);
+        self.files_total = self.files_total.max(other.files_total);
+        self.parts_done = self.parts_done.max(other.parts_done);
+        self.parts_total = self.parts_total.max(other.parts_total);
+    }
 }
 
 /// A finished capture waiting for the user's decision in the save modal.
@@ -350,6 +370,7 @@ impl Foxy {
             last_telemetry_memory: 0,
             last_cpu_time: crate::ui::memory::process_cpu_time(),
             cpu_at_start: crate::ui::memory::process_cpu_times(),
+            hash_high: HashCounters::default(),
         });
         info!(
             "Benchmark capture started: kind={:?}",
@@ -386,6 +407,18 @@ impl Foxy {
                 capture.last_disk_write_bps = *disk_write_bps;
                 capture.last_telemetry_memory = *memory_bytes;
             }
+            ProgressEvent::RecheckHashProgress {
+                checked_files,
+                total_files,
+                checked_parts,
+                total_parts,
+                ..
+            } => capture.hash_high.raise(HashCounters {
+                files_done: *checked_files as u64,
+                files_total: *total_files as u64,
+                parts_done: *checked_parts as u64,
+                parts_total: *total_parts as u64,
+            }),
             _ => {}
         }
     }
@@ -478,6 +511,15 @@ impl Foxy {
         let memory_bytes = crate::ui::memory::sample_process_memory()
             .baseline_bytes()
             .unwrap_or(0);
+        let mut hash = capture.hash_high;
+        if let Some(last) = capture.samples.last() {
+            hash.raise(HashCounters {
+                files_done: last.hash_files_done,
+                files_total: last.hash_files_total,
+                parts_done: last.hash_parts_done,
+                parts_total: last.hash_parts_total,
+            });
+        }
         capture.samples.push(BenchmarkSample {
             t_ms: elapsed.as_millis() as u64,
             downloaded_bytes: self.total_downloaded_bytes,
@@ -485,10 +527,10 @@ impl Foxy {
             disk_write_bps: 0.0,
             cpu_percent: capture.last_cpu_percent,
             memory_bytes,
-            hash_files_done: capture.samples.last().map_or(0, |s| s.hash_files_done),
-            hash_files_total: capture.samples.last().map_or(0, |s| s.hash_files_total),
-            hash_parts_done: capture.samples.last().map_or(0, |s| s.hash_parts_done),
-            hash_parts_total: capture.samples.last().map_or(0, |s| s.hash_parts_total),
+            hash_files_done: hash.files_done,
+            hash_files_total: hash.files_total,
+            hash_parts_done: hash.parts_done,
+            hash_parts_total: hash.parts_total,
             progress_percent: 100.0,
         });
 
@@ -662,7 +704,26 @@ impl Foxy {
 
 #[cfg(test)]
 mod tests {
-    use super::compare_order;
+    use super::{HashCounters, compare_order};
+
+    #[test]
+    fn hash_counters_keep_the_highest_value_of_each_field() {
+        let mut high = HashCounters {
+            files_done: 3738,
+            files_total: 3738,
+            parts_done: 433_063,
+            parts_total: 433_063,
+        };
+        high.raise(HashCounters {
+            files_done: 3035,
+            files_total: 3738,
+            parts_done: 433_063,
+            parts_total: 433_063,
+        });
+        high.raise(HashCounters::default());
+        assert_eq!(high.files_done, 3738);
+        assert_eq!(high.parts_done, 433_063);
+    }
 
     #[test]
     fn compare_order_puts_older_first_by_date_and_keeps_pick_order_otherwise() {

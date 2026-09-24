@@ -440,6 +440,9 @@ pub struct Foxy {
     /// Highest hash fraction shown in this check, so the post-hash stages,
     /// which carry their own lower percents, never move the bar backward.
     pub recheck_progress_peak: Option<f32>,
+    /// Where the bar stood when the hash pass began; the pass fills the rest,
+    /// so the bar does not fall from the remote stages' percent back to zero.
+    pub recheck_progress_floor: Option<f32>,
     /// `(remaining_bytes, bytes_per_sec)` from the hash benchmark sample, shown
     /// as size and ETA next to the hash counter while a baseline runs.
     pub recheck_hash_estimate: Option<(u64, u64)>,
