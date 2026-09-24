@@ -116,9 +116,9 @@ fn save(path: &Path, record: &RecordFile) -> std::io::Result<()> {
 /// What the record binds a verification to: the manifest's parts for the
 /// file (order, path, remote span and checksum) and its whole-file checksum,
 /// so a new version of the file never matches an old entry.
-pub(super) fn parts_signature(
+pub(super) fn parts_signature<'a>(
     file_remote_checksum: &str,
-    parts: &[(usize, FoxyModFilePart)],
+    parts: impl IntoIterator<Item = &'a FoxyModFilePart>,
 ) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"FOXY_VERIFIED_PARTS_V1");
@@ -127,7 +127,7 @@ pub(super) fn parts_signature(
         hasher.update(bytes);
     };
     field(file_remote_checksum.to_ascii_uppercase().as_bytes());
-    for (_, part) in parts {
+    for part in parts {
         field(&part.data_order.to_le_bytes());
         field(part.path.as_bytes());
         field(&part.remote_start.to_le_bytes());
@@ -186,7 +186,7 @@ pub(super) async fn restore(
         })
         .filter_map(|(index, job)| {
             let entry = stored.entries.get(&path_key(&job.file_path))?;
-            let signature = parts_signature(&job.file_remote_checksum, &job.indexed_parts);
+            let signature = parts_signature(&job.file_remote_checksum, job.indexed_parts.parts());
             (entry.signature == signature).then_some((index, signature))
         })
         .collect();
@@ -250,8 +250,9 @@ fn restored_result(job: FileHashJob, entry: &Entry, signature: String) -> FileHa
         .then(|| job.file_remote_checksum.clone());
     let updated_parts = job
         .indexed_parts
-        .into_iter()
-        .map(|(part_idx, mut part)| {
+        .iter()
+        .map(|(part_idx, part)| {
+            let mut part = part.clone();
             part.local_checksum = part.remote_checksum.clone();
             part.local_start = part.remote_start;
             part.local_length = part.remote_length;
@@ -479,6 +480,7 @@ pub(super) fn capture_identity(_path: &Path) -> Option<FileIdentity> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::tasks::calculate_hashes::scheduling::JobParts;
 
     fn part(order: i64, start: u64, len: u64, checksum: &str) -> (usize, FoxyModFilePart) {
         (
@@ -500,16 +502,19 @@ mod tests {
     #[test]
     fn signature_changes_with_any_part_field_or_the_file_checksum() {
         let parts = vec![part(0, 0, 10, "AA"), part(1, 10, 5, "BB")];
-        let base = parts_signature("FF", &parts);
-        assert_eq!(base, parts_signature("ff", &parts));
-        assert_ne!(base, parts_signature("FE", &parts));
+        let signature = |parts: &[(usize, FoxyModFilePart)], checksum: &str| {
+            parts_signature(checksum, parts.iter().map(|(_, part)| part))
+        };
+        let base = signature(&parts, "FF");
+        assert_eq!(base, signature(&parts, "ff"));
+        assert_ne!(base, signature(&parts, "FE"));
         let mut moved = parts.clone();
         moved[1].1.remote_start = 11;
-        assert_ne!(base, parts_signature("FF", &moved));
+        assert_ne!(base, signature(&moved, "FF"));
         let mut rehashed = parts.clone();
         rehashed[0].1.remote_checksum = "AB".into();
-        assert_ne!(base, parts_signature("FF", &rehashed));
-        assert_ne!(base, parts_signature("FF", &parts[..1]));
+        assert_ne!(base, signature(&rehashed, "FF"));
+        assert_ne!(base, signature(&parts[..1], "FF"));
     }
 
     #[test]
@@ -636,16 +641,16 @@ mod tests {
             file_path: file_path.to_str().unwrap().to_owned(),
             file_length: bytes.len() as u64,
             file_remote_checksum: "WHOLE".into(),
-            indexed_parts: vec![(3, {
+            indexed_parts: JobParts::owned(vec![(3, {
                 let mut part = part(0, 0, bytes.len() as u64, &checksum).1;
                 part.local_checksum.clear();
                 part
-            })],
+            })]),
             span_source: PartSpanSource::DetectLocalLayout,
             has_local_baseline: false,
             capture_identity: true,
         };
-        let signature = parts_signature(&job.file_remote_checksum, &job.indexed_parts);
+        let signature = parts_signature(&job.file_remote_checksum, job.indexed_parts.parts());
         let hashed = FileHashResult {
             file_idx: job.file_idx,
             updated_parts: Vec::new(),
@@ -682,8 +687,12 @@ mod tests {
             ..job.clone()
         };
         assert!(restore(&trusted, vec![known]).await.0.is_empty());
-        let mut new_version = job.clone();
-        new_version.indexed_parts[0].1.remote_checksum = "OTHER".into();
+        let mut changed_part = job.indexed_parts.iter().next().unwrap().1.clone();
+        changed_part.remote_checksum = "OTHER".into();
+        let new_version = FileHashJob {
+            indexed_parts: JobParts::owned(vec![(3, changed_part)]),
+            ..job.clone()
+        };
         assert!(restore(&trusted, vec![new_version]).await.0.is_empty());
         let fresh_download = FileHashJob {
             span_source: PartSpanSource::RemoteLayout,

@@ -6,8 +6,9 @@ use super::persistence::{
 };
 use super::propagation::{update_mod_hashes_for_mods, update_repository_hashes_from_mods};
 use super::scheduling::{
-    build_file_hash_jobs, hash_cpu_budget, hash_scheduler_limits, log_addon_hash_metrics,
-    missing_local_hash_pass_is_noop, recalculate_parts_for_jobs_with_profile,
+    build_file_hash_jobs, hash_cpu_budget, hash_scheduler_limits, lend_tree_parts,
+    log_addon_hash_metrics, missing_local_hash_pass_is_noop,
+    recalculate_parts_for_jobs_with_profile, return_tree_parts,
 };
 use super::*;
 use crate::core::tasks::remote_file_parts::{
@@ -243,8 +244,10 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
     } else {
         None
     };
+    let lent_parts = lend_tree_parts(&mut data_tree);
     let hash_jobs = build_file_hash_jobs(
         &data_tree,
+        &lent_parts,
         &all_file_indices,
         PartSpanSource::DetectLocalLayout,
     );
@@ -308,6 +311,7 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
         cancel_rx,
     )
     .await;
+    return_tree_parts(&mut data_tree, lent_parts);
     if cancelled || cancel_rx.as_ref().is_some_and(|rx| *rx.borrow()) {
         info!(
             "Hash calculation cancelled during part hashing for repo {}",

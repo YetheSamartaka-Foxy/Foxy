@@ -15,13 +15,78 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 use sysinfo::Disks;
 
+/// A hash job's parts: indices into the tree's part list, which every job of
+/// a pass shares instead of each holding a copy of its file's parts.
+#[derive(Clone)]
+pub(super) struct JobParts {
+    all: Arc<Vec<FoxyModFilePart>>,
+    indices: Vec<usize>,
+    /// `all[n]` is the part at `indices[n]` rather than at `indices[n]` itself.
+    positional: bool,
+}
+
+impl JobParts {
+    /// Parts owned by this job alone, keyed by their tree index.
+    #[cfg(test)]
+    pub(super) fn owned(parts: Vec<(usize, FoxyModFilePart)>) -> Self {
+        let (indices, parts): (Vec<usize>, Vec<FoxyModFilePart>) = parts.into_iter().unzip();
+        Self {
+            all: Arc::new(parts),
+            indices,
+            positional: true,
+        }
+    }
+
+    fn shared(all: &Arc<Vec<FoxyModFilePart>>, indices: Vec<usize>) -> Self {
+        Self {
+            all: all.clone(),
+            indices,
+            positional: false,
+        }
+    }
+
+    pub(super) fn len(&self) -> usize {
+        self.indices.len()
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.indices.is_empty()
+    }
+
+    /// Each part with its tree index, in the job's order.
+    pub(super) fn iter(&self) -> impl Iterator<Item = (usize, &FoxyModFilePart)> + '_ {
+        self.indices.iter().enumerate().map(|(position, &index)| {
+            let slot = if self.positional { position } else { index };
+            (index, &self.all[slot])
+        })
+    }
+
+    pub(super) fn parts(&self) -> impl Iterator<Item = &FoxyModFilePart> + '_ {
+        self.iter().map(|(_, part)| part)
+    }
+
+    pub(super) fn indices(&self) -> &[usize] {
+        &self.indices
+    }
+}
+
+/// Move the tree's parts behind one `Arc` for the jobs of a hash pass; hand
+/// them back with [`return_tree_parts`] before anything reads the tree's parts.
+pub(super) fn lend_tree_parts(data_tree: &mut Tree) -> Arc<Vec<FoxyModFilePart>> {
+    Arc::new(std::mem::take(&mut data_tree.parts))
+}
+
+pub(super) fn return_tree_parts(data_tree: &mut Tree, parts: Arc<Vec<FoxyModFilePart>>) {
+    data_tree.parts = Arc::try_unwrap(parts).unwrap_or_else(|shared| (*shared).clone());
+}
+
 #[derive(Clone)]
 pub(super) struct FileHashJob {
     pub(super) file_idx: usize,
     pub(super) file_path: String,
     pub(super) file_length: u64,
     pub(super) file_remote_checksum: String,
-    pub(super) indexed_parts: Vec<(usize, FoxyModFilePart)>,
+    pub(super) indexed_parts: JobParts,
     pub(super) span_source: PartSpanSource,
     /// The database already holds a local checksum for the file or a part.
     pub(super) has_local_baseline: bool,
@@ -595,8 +660,10 @@ fn log_hash_scheduler_selection(
     );
 }
 
+/// `parts` is the tree's part list, lent by [`lend_tree_parts`].
 pub(super) fn build_file_hash_jobs(
     data_tree: &Tree,
+    parts: &Arc<Vec<FoxyModFilePart>>,
     file_indices: &[usize],
     span_source: PartSpanSource,
 ) -> Vec<FileHashJob> {
@@ -608,28 +675,23 @@ pub(super) fn build_file_hash_jobs(
         let Some(file) = data_tree.files.get(file_idx) else {
             continue;
         };
-        let mut indexed_parts: Vec<(usize, FoxyModFilePart)> = file_node
+        let mut part_indices: Vec<usize> = file_node
             .parts
             .iter()
-            .filter_map(|&part_idx| {
-                data_tree
-                    .parts
-                    .get(part_idx)
-                    .cloned()
-                    .map(|p| (part_idx, p))
-            })
+            .copied()
+            .filter(|&part_idx| part_idx < parts.len())
             .collect();
         let has_local_baseline = !file.local_checksum.is_empty()
-            || indexed_parts
+            || part_indices
                 .iter()
-                .any(|(_, part)| !part.local_checksum.is_empty());
-        indexed_parts.sort_by_key(|(_, part)| part.data_order);
+                .any(|&part_idx| !parts[part_idx].local_checksum.is_empty());
+        part_indices.sort_by_key(|&part_idx| parts[part_idx].data_order);
         jobs.push(FileHashJob {
             file_idx,
             file_path: file.local_path.clone(),
             file_length: file.length,
             file_remote_checksum: file.remote_checksum.clone(),
-            indexed_parts,
+            indexed_parts: JobParts::shared(parts, part_indices),
             span_source,
             has_local_baseline,
             capture_identity: false,
@@ -913,7 +975,7 @@ pub(super) async fn recalculate_parts_for_jobs(
                             identity,
                             super::verified_record::parts_signature(
                                 &file_remote_checksum,
-                                &indexed_parts,
+                                indexed_parts.parts(),
                             ),
                             file_remote_checksum.clone(),
                         )
@@ -973,9 +1035,10 @@ pub(super) async fn recalculate_parts_for_jobs(
                 Vec::new()
             } else {
                 indexed_parts
-                    .into_iter()
+                    .indices()
+                    .iter()
+                    .copied()
                     .zip(part_calculation.parts)
-                    .map(|((part_idx, _), updated_part)| (part_idx, updated_part))
                     .collect()
             };
             let verified = match record_check {
@@ -2245,14 +2308,14 @@ mod tests {
             FileHashJob {
                 file_path: path.to_str().unwrap().to_owned(),
                 file_length: content.len() as u64,
-                indexed_parts: vec![(
+                indexed_parts: JobParts::owned(vec![(
                     0,
                     FoxyModFilePart {
                         remote_length: remote.len() as u64,
                         remote_checksum: blake3::hash(remote).to_hex().to_uppercase(),
                         ..Default::default()
                     },
-                )],
+                )]),
                 capture_identity: true,
                 ..test_job(0, 0)
             }
@@ -2284,23 +2347,78 @@ mod tests {
         assert!(!verified("stale.pbo"));
     }
 
+    #[test]
+    fn jobs_share_the_tree_parts_and_hand_them_back_whole() {
+        use crate::core::models::model_tree::FileNode;
+        let part = |file_id: u64, order: i64| FoxyModFilePart {
+            file_id,
+            data_order: order,
+            path: format!("p{order}"),
+            ..Default::default()
+        };
+        let mut tree = Tree {
+            files: vec![
+                FoxyModFile {
+                    id: 1,
+                    local_checksum: "LOCAL".into(),
+                    ..Default::default()
+                },
+                FoxyModFile {
+                    id: 2,
+                    ..Default::default()
+                },
+            ],
+            parts: vec![part(1, 1), part(2, 0), part(1, 0)],
+            file_nodes: vec![
+                FileNode {
+                    file_idx: 0,
+                    parts: vec![0, 2],
+                },
+                FileNode {
+                    file_idx: 1,
+                    parts: vec![1, 9],
+                },
+            ],
+            ..Default::default()
+        };
+        let lent = lend_tree_parts(&mut tree);
+        assert!(tree.parts.is_empty());
+        let jobs = build_file_hash_jobs(&tree, &lent, &[0, 1], PartSpanSource::DetectLocalLayout);
+        let listed = |job: &FileHashJob| -> Vec<(usize, String)> {
+            job.indexed_parts
+                .iter()
+                .map(|(index, part)| (index, part.path.clone()))
+                .collect()
+        };
+        assert_eq!(listed(&jobs[0]), vec![(2, "p0".into()), (0, "p1".into())]);
+        assert!(jobs[0].has_local_baseline);
+        assert_eq!(listed(&jobs[1]), vec![(1, "p0".into())]);
+        assert!(!jobs[1].has_local_baseline);
+        drop(jobs);
+        return_tree_parts(&mut tree, lent);
+        assert_eq!(tree.parts.len(), 3);
+        assert_eq!(tree.parts[2].path, "p0");
+    }
+
     fn test_job(parts: usize, bytes_per_part: u64) -> FileHashJob {
         FileHashJob {
             file_idx: 0,
             file_path: String::new(),
             file_length: (parts as u64).saturating_mul(bytes_per_part),
             file_remote_checksum: String::new(),
-            indexed_parts: (0..parts)
-                .map(|idx| {
-                    (
-                        idx,
-                        FoxyModFilePart {
-                            remote_length: bytes_per_part,
-                            ..Default::default()
-                        },
-                    )
-                })
-                .collect(),
+            indexed_parts: JobParts::owned(
+                (0..parts)
+                    .map(|idx| {
+                        (
+                            idx,
+                            FoxyModFilePart {
+                                remote_length: bytes_per_part,
+                                ..Default::default()
+                            },
+                        )
+                    })
+                    .collect(),
+            ),
             span_source: PartSpanSource::DetectLocalLayout,
             has_local_baseline: false,
             capture_identity: false,

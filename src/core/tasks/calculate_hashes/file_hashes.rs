@@ -9,8 +9,8 @@ use super::propagation::{
 };
 use super::scheduling::{
     AddonHashMetrics, build_file_hash_jobs, collect_addon_hash_metrics, hash_cpu_budget,
-    hash_scheduler_limits, missing_local_hash_pass_is_noop,
-    recalculate_parts_for_jobs_with_profile,
+    hash_scheduler_limits, lend_tree_parts, missing_local_hash_pass_is_noop,
+    recalculate_parts_for_jobs_with_profile, return_tree_parts,
 };
 use super::*;
 use crate::core::tasks::remote_file_parts::flush_deferred_part_inserts_with_local_state;
@@ -304,8 +304,10 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
     let repo_indices = collect_repo_indices_for_mods(data_tree, &mod_indices);
 
     let mut updated_part_indices: HashSet<usize> = HashSet::new();
+    let lent_parts = lend_tree_parts(data_tree);
     let hash_jobs = build_file_hash_jobs(
         data_tree,
+        &lent_parts,
         &file_indices,
         if freshly_downloaded_files {
             PartSpanSource::RemoteLayout
@@ -373,6 +375,7 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
         None,
     )
     .await;
+    return_tree_parts(data_tree, lent_parts);
     phase_timings.hash_wall += hash_started.elapsed();
     info!(
         "Hash profile decision: requested={} selected={} reason={} benchmark_files={} benchmark_bytes={} benchmark_elapsed={:.2}s",
