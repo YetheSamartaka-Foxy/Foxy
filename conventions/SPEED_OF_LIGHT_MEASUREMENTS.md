@@ -280,6 +280,31 @@ Balanced plan and the best-performance mode. The bar tracked bytes to within
 about 6 points, then stepped back from 99.98% to 86% as the post-hash stages
 reported their own percents; `dc09a72` holds the highest hash fraction shown.
 
+### September 24 notebook export (`3874539`, laptop HDD)
+
+Same notebook, payload and procedure as the September 23 export, now with CPU
+per thread and the UI frame line.
+
+| Metric | Sept 23 (`b1c4684`) | Sept 24 (`3874539`) |
+| --- | ---: | ---: |
+| Full recheck elapsed | 613.75 s | 614.67 s |
+| Hashing, whole payload | 606.79 s | 608.24 s |
+| Auto sample / held-out rate | 164.4 / 151.3 MB/s | 161.6 / 151.1 MB/s |
+| Remote phase | | 4.38 s, `cached_manifests=0` (first run with the cache) |
+| Process CPU (user + kernel) | not recorded | 67.97 + 35.92 s |
+| UI frames | not recorded | 20,361 at 33.1 fps, 1.85 ms UI-thread CPU each |
+
+Elapsed is unchanged, as expected for a disk-bound pass. The UI thread used
+37.7 of the 103.9 CPU s (19.3 user, 18.4 kernel, the kernel half being the
+presents); the hash workers about 30 s. Two defects showed in the export and
+are fixed after it: the bar fell from the remote stages' 21% to 0% when the
+hash pass began (the pass now fills the bar from where the stages left it),
+and the closing sample copied the last once-a-second sample, so the files
+chart ended at 3,035 of 3,738 (the capture now keeps the highest hash counters
+it saw). The last 1,755 files are small single-part files that physical order
+puts at the end; they hash in the final 4 s, which is why the files counter
+lags the parts-weighted bar for most of the run.
+
 ### September 24 CPU and memory round (`9de721a` to `486ab32`)
 
 The testkit memory lane now reports process CPU seconds per operation
