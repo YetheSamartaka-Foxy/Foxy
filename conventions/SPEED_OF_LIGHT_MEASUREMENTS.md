@@ -316,6 +316,30 @@ The HDD check's CPU (178.5 s for the same 92 GB the SSD check reads for about
 likely this UI cadence rather than hashing; the HDD screen predates the
 per-thread line, so the next HDD run confirms it.
 
+### September 24 part insert round
+
+The record restore's critical path was the deferred 433,063-row `subfiles`
+insert (5.9 s) after a 4.4-4.7 s manifest fetch. Two benches split its cost:
+`bench_subfiles_checksum_encoding` (raw engine, real row shape, live unique
+index) takes 3.91-4.28 s with 64-char hex checksums, 3.88-4.05 s with 32-byte
+blobs and 3.57-3.75 s with foreign keys off; `bench_deferred_flush_seam` (the
+app's flush) takes 4.49-5.53 s, of which building the statements' values is
+0.04 s. The rest of the in-app 5.9 s is contention with the restore and the
+UI. Blobs were not worth a schema bump.
+
+| Change | Record restore (7 runs) | SSD recheck (5 runs) |
+| --- | --- | --- |
+| before (`486ab32`) | 11.36 s, 13.7 CPU s | 19.45 s, 35.8 CPU s |
+| part rows streamed with their links while manifests download | 9.96 s, 12.6 CPU s | not streamed |
+| plus foreign keys off in the streamed groups, shared hash-job parts | 9.61 s, 12.1 CPU s, peak 1.11 GB | 19.29 s, 34.8 CPU s, peak 2.12 GB |
+
+The stream runs only on a fresh load the verified-hash record holds entries
+for: a first screen that gated on the record file existing also streamed the
+SSD case (whose wipe forgets the entries but keeps the file) and held hashing
+back by 3 s (22.47 s). In the record case the first manifest arrives about
+2 s into the fetch and the writer then runs back to back in three groups
+(123, 122,855 and 310,085 rows), so the insert is still the tail.
+
 ## 1a. Current accepted baselines
 
 The earlier rows were regenerated with `foxy-testkit measurements` from the
