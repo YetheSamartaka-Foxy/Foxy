@@ -867,6 +867,7 @@ pub(crate) async fn persist_streamed_part_group(context: &Arc<FoxyContext>, firs
     if !context.should_stream_part_inserts() {
         return;
     }
+    let prepare_started = Instant::now();
     let mut links = context.take_pending_addon_file_links();
     if context.deferred_parts_persisted() != first_row {
         warn!(
@@ -902,14 +903,22 @@ pub(crate) async fn persist_streamed_part_group(context: &Arc<FoxyContext>, firs
     let parents = Arc::new((file_ids, addon_ids));
     let rows = Arc::new(rows);
     let shared_links = Arc::new(links);
+    let prepare = prepare_started.elapsed();
+    let insert_nanos = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let result = context
         .db()
         .bulk_insert_transaction("streamed file parts insert", |txn| {
             let rows = rows.clone();
             let links = shared_links.clone();
             let parents = parents.clone();
+            let insert_nanos = insert_nanos.clone();
             Box::pin(async move {
+                let insert_started = Instant::now();
                 insert_fresh_part_rows(txn, &rows, chunk_size).await?;
+                insert_nanos.store(
+                    insert_started.elapsed().as_nanos() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 for chunk in links.chunks(link_chunk_size) {
                     let placeholders = vec!["(?, ?)"; chunk.len()].join(", ");
                     let sql = format!(
@@ -933,11 +942,13 @@ pub(crate) async fn persist_streamed_part_group(context: &Arc<FoxyContext>, firs
         Ok(()) => {
             context.set_deferred_parts_persisted(first_row + group_rows);
             info!(
-                "Streamed part group committed: rows={} links={} total_rows={} elapsed={:.3}s",
+                "Streamed part group committed: rows={} links={} total_rows={} elapsed={:.3}s prepare={:.3}s insert={:.3}s",
                 group_rows,
                 shared_links.len(),
                 first_row + group_rows,
-                started.elapsed().as_secs_f64()
+                started.elapsed().as_secs_f64(),
+                prepare.as_secs_f64(),
+                insert_nanos.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e9
             );
         }
         Err(err) => {
@@ -1351,6 +1362,119 @@ mod tests {
         assert!(!should_prepare_download_work(false, false));
         assert!(should_prepare_download_work(true, false));
         assert!(should_prepare_download_work(false, true));
+    }
+
+    /// Benchmark (`FOXY_BENCH_MANIFEST_DIR=<manifest_cache dir> cargo test --release
+    /// bench_streamed_groups_real_manifests -- --ignored --nocapture`). The record
+    /// case's two streamed groups on real cached manifests, against one flush.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "perf benchmark; run manually with --ignored --nocapture"]
+    async fn bench_streamed_groups_real_manifests() {
+        let Ok(dir) = std::env::var("FOXY_BENCH_MANIFEST_DIR") else {
+            println!("[bench streamed-groups] FOXY_BENCH_MANIFEST_DIR is not set");
+            return;
+        };
+        let mut rows = Vec::new();
+        let mut file_id = 0i64;
+        let mut bodies: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().is_some_and(|ext| ext == "body"))
+            .collect();
+        bodies.sort();
+        for body in bodies {
+            let manifest: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(body).unwrap()).unwrap();
+            for file in manifest["files"].as_array().into_iter().flatten() {
+                file_id += 1;
+                for (order, part) in file["parts"].as_array().into_iter().flatten().enumerate() {
+                    rows.push(DeferredPartInsert {
+                        file_id,
+                        path: crate::core::models::modification_file_part::part_storage_path(
+                            part["path"].as_str().unwrap_or_default(),
+                            order as i64,
+                        ),
+                        remote_length: part["length"].as_i64().unwrap_or_default(),
+                        remote_start: part["start"].as_i64().unwrap_or_default(),
+                        remote_checksum: part["checksum"].as_str().unwrap_or_default().to_owned(),
+                        data_order: order as i64,
+                    });
+                }
+            }
+        }
+        let split = rows.len() * 55 / 100;
+        for round in 0..2 {
+            for (streamed, after_drop) in [(true, false), (true, true), (false, true)] {
+                let handle = crate::core::tasks::db_turso::build_test_database().await;
+                let db = FoxyDb::from_handle(handle.clone());
+                db.execute(
+                    "INSERT INTO addons (id, name, remote_path, local_path, required) \
+                     VALUES (1, 'a', 'rp', 'lp', 1)",
+                    Vec::new(),
+                )
+                .await
+                .unwrap();
+                for id in 1..=file_id {
+                    db.execute(
+                        "INSERT INTO files (id, name, remote_path, local_path) VALUES (?, ?, ?, ?)",
+                        vec![
+                            id.into(),
+                            format!("f{id}").into(),
+                            format!("rp{id}").into(),
+                            format!("lp{id}").into(),
+                        ],
+                    )
+                    .await
+                    .unwrap();
+                }
+                let context = Arc::new(FoxyContext::new(handle, reqwest::Client::new()));
+                context.set_fresh_subfiles_load(true);
+                context.set_defer_part_inserts(true);
+                context.set_stream_part_inserts(streamed);
+                if after_drop {
+                    context.buffer_deferred_parts(rows.clone());
+                    assert!(flush_deferred_part_inserts(context.clone()).await);
+                    db.execute("DROP TABLE IF EXISTS subfiles", Vec::new())
+                        .await
+                        .unwrap();
+                    db.execute(
+                        crate::core::tasks::db_turso::SUBFILES_CREATE_TABLE,
+                        Vec::new(),
+                    )
+                    .await
+                    .unwrap();
+                    for sql in SUBFILES_INDEX_CREATE_SQL {
+                        db.execute(sql, Vec::new()).await.unwrap();
+                    }
+                }
+                let started = Instant::now();
+                if streamed {
+                    context.buffer_deferred_parts(rows[..split].to_vec());
+                    context.buffer_addon_file_links(
+                        (1..=rows[split - 1].file_id).map(|file| (1, file)),
+                    );
+                    persist_streamed_part_group(&context, 0).await;
+                    let first = started.elapsed().as_secs_f64();
+                    context.buffer_deferred_parts(rows[split..].to_vec());
+                    context.buffer_addon_file_links(
+                        (rows[split].file_id..=file_id).map(|file| (1, file)),
+                    );
+                    persist_streamed_part_group(&context, split).await;
+                    assert_eq!(context.deferred_parts_persisted(), rows.len());
+                    println!(
+                        "[bench streamed-groups] streamed after_drop={after_drop} round={round} first={first:.3}s total={:.3}s",
+                        started.elapsed().as_secs_f64()
+                    );
+                } else {
+                    context.buffer_deferred_parts(rows.clone());
+                    assert!(flush_deferred_part_inserts(context).await);
+                    println!(
+                        "[bench streamed-groups] flush after_drop={after_drop} round={round} total={:.3}s",
+                        started.elapsed().as_secs_f64()
+                    );
+                }
+            }
+        }
     }
 
     /// Benchmark (`cargo test --release bench_deferred_flush_seam -- --ignored --nocapture`).

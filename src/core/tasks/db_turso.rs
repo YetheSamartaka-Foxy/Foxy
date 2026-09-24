@@ -3658,6 +3658,100 @@ mod tests {
         }
     }
 
+    /// Benchmark (`FOXY_BENCH_MANIFEST_DIR=<manifest_cache dir> cargo test --release
+    /// bench_subfiles_real_manifest_order -- --ignored --nocapture`). Inserts the part
+    /// rows of real cached manifests sorted by `data_order` (the file's entry order)
+    /// against sorted by `path` (the unique index's key order).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "perf benchmark; run manually with --ignored --nocapture"]
+    async fn bench_subfiles_real_manifest_order() {
+        let Ok(dir) = std::env::var("FOXY_BENCH_MANIFEST_DIR") else {
+            println!("[bench subfiles-real-order] FOXY_BENCH_MANIFEST_DIR is not set");
+            return;
+        };
+        let mut rows: Vec<(i64, String, i64, i64, String, i64)> = Vec::new();
+        let mut file_id = 0i64;
+        let mut bodies: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().is_some_and(|ext| ext == "body"))
+            .collect();
+        bodies.sort();
+        for body in bodies {
+            let manifest: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(body).unwrap()).unwrap();
+            for file in manifest["files"].as_array().into_iter().flatten() {
+                file_id += 1;
+                for (order, part) in file["parts"].as_array().into_iter().flatten().enumerate() {
+                    rows.push((
+                        file_id,
+                        crate::core::models::modification_file_part::part_storage_path(
+                            part["path"].as_str().unwrap_or_default(),
+                            order as i64,
+                        ),
+                        part["length"].as_i64().unwrap_or_default(),
+                        part["start"].as_i64().unwrap_or_default(),
+                        part["checksum"].as_str().unwrap_or_default().to_owned(),
+                        order as i64,
+                    ));
+                }
+            }
+        }
+        let in_path_order = rows
+            .windows(2)
+            .filter(|pair| pair[0].0 == pair[1].0 && pair[0].1 <= pair[1].1)
+            .count();
+        println!(
+            "[bench subfiles-real-order] files={file_id} rows={} adjacent_in_path_order={in_path_order}",
+            rows.len()
+        );
+        for round in 0..2 {
+            for label in ["data_order", "path"] {
+                let mut sorted = rows.clone();
+                if label == "path" {
+                    sorted.sort_unstable_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+                }
+                let (_dir, db) = temp_db().await;
+                let conn = connect_tuned(&db).await.unwrap();
+                conn.pragma_update("foreign_keys", "OFF").await.unwrap();
+                conn.pragma_update("cache_size", "-262144").await.unwrap();
+                for id in 1..=file_id {
+                    conn.execute(
+                        "INSERT INTO files (id, name, remote_path, local_path) VALUES (?, ?, ?, ?)",
+                        (id, format!("f{id}"), "rp", "lp"),
+                    )
+                    .await
+                    .unwrap();
+                }
+                let started = Instant::now();
+                conn.execute("BEGIN", ()).await.unwrap();
+                for chunk in sorted.chunks(256) {
+                    let ph = vec!["(?, ?, 0, 0, ?, ?, '', ?, ?)"; chunk.len()].join(", ");
+                    let sql = format!(
+                        "INSERT INTO subfiles (file_id, path, local_length, local_start, \
+                         remote_length, remote_start, local_checksum, remote_checksum, \
+                         data_order) VALUES {ph}"
+                    );
+                    let mut binds = Vec::with_capacity(chunk.len() * 6);
+                    for (file_id, path, length, start, checksum, order) in chunk {
+                        binds.push(turso::Value::Integer(*file_id));
+                        binds.push(turso::Value::Text(path.clone()));
+                        binds.push(turso::Value::Integer(*length));
+                        binds.push(turso::Value::Integer(*start));
+                        binds.push(turso::Value::Text(checksum.clone()));
+                        binds.push(turso::Value::Integer(*order));
+                    }
+                    conn.execute(&sql, binds).await.unwrap();
+                }
+                conn.execute("COMMIT", ()).await.unwrap();
+                println!(
+                    "[bench subfiles-real-order] sorted_by={label:<10} round={round} total={:.3}s",
+                    started.elapsed().as_secs_f64()
+                );
+            }
+        }
+    }
+
     /// Benchmark (`cargo test --release bench_addon_files_insert -- --ignored --nocapture`).
     /// `addon_files insert` costs ~190 µs/row on the metadata rebuild, more than
     /// twice the eight-column `files` upsert it accompanies, which points at its
