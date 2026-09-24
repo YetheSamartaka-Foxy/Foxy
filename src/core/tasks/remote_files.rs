@@ -533,7 +533,7 @@ pub(crate) async fn fetch_mod_file_manifest(
     };
     debug!("Loading mod files metadata from: {}", files_metadata_url);
 
-    let (files_data, http_timing) =
+    let (manifest, http_timing): (ModManifest, FetchJsonTiming) =
         match fetch_manifest_json_timed(context.clone(), &files_metadata_url).await {
             Ok(r) => r,
             Err(e) if is_foxy_mode => {
@@ -571,21 +571,6 @@ pub(crate) async fn fetch_mod_file_manifest(
             }
         };
 
-    let manifest_parse_start = Instant::now();
-    let manifest: ModManifest = match serde_json::from_value(files_data) {
-        Ok(m) => m,
-        Err(e) => {
-            warn!("Failed to deserialize mod manifest: {}", e);
-            return Err(empty_recheck_stats(
-                &mod_parent,
-                http_timing,
-                mod_start.elapsed(),
-            ));
-        }
-    };
-    // Total parse = JSON-to-Value (in fetch_json) + Value-to-ModManifest
-    let total_parse_duration = http_timing.parse + manifest_parse_start.elapsed();
-
     let file_keys: Vec<StagedFileKey> = manifest
         .files
         .into_iter()
@@ -611,7 +596,7 @@ pub(crate) async fn fetch_mod_file_manifest(
         file_keys,
         http_download_duration: http_timing.download,
         http_response_bytes: http_timing.response_bytes,
-        http_parse_duration: total_parse_duration,
+        http_parse_duration: http_timing.parse,
         manifest_cached: http_timing.cached,
         mod_start,
     })
