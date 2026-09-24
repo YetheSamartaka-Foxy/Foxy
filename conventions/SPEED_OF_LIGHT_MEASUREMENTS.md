@@ -348,6 +348,26 @@ Under the testkit the UI repaints at 20 fps while the driver waits, so a frame
 during a check costs about 8.7 ms of UI-thread CPU; that per-frame cost, not
 hashing, is the next CPU lever.
 
+### September 24 speed-first round
+
+Goal restated: elapsed first; CPU and memory may be spent for time and are cut
+only where time does not move. Every check now logs `UI frame cost during
+sync` (frames, fps, UI-thread CPU per frame, `update()` sections and the top
+repaint request sites).
+
+| Build | SSD recheck (5 runs) | Record restore (7 runs) | What changed |
+| --- | --- | --- | --- |
+| round 2 end (`4c7a47d`) | 19.29 s, 34.8 CPU s, 223 fps | 9.61 s, 12.1 CPU s | |
+| spinner paced, manifest fetch 64 wide, folder check last | 19.28 s | 7.87 s | the record case's first part group lands at once instead of 2.5 s in |
+| same without the wider fetch | 19.39 s | 9.26 s | the wider fetch is worth 1.4 s on the record path |
+| plus the manifest cache | 15.50 s, "Remote data recheck" 0.85-0.89 s | 7.13 s, 9.8 CPU s | all 96 manifests answered 304 |
+| plus repaint pacing through `request_frame_after` | 15.57 s, 31.3 CPU s, 50 fps | 7.03 s, 9.4 CPU s, 31.6 fps | UI thread 1.8 against 4.8 CPU s per SSD check |
+
+A UI frame costs about 1.0-1.5 ms of UI-thread CPU (0.4-0.6 ms of it in
+`update()`, mostly the repository view); the cost was the frame count. The
+remaining record-path time is the streamed part insert (about 5.5 s of writer
+time for 433k rows), which starts as soon as the cached manifests are parsed.
+
 ## 1a. Current accepted baselines
 
 The earlier rows were regenerated with `foxy-testkit measurements` from the
