@@ -403,6 +403,9 @@ app against 9-10 in `bench_streamed_groups_real_manifests` on the real cached
 manifests after a table drop. Committing the last group in the background broke
 the restore (the tree reads addons through `addon_files`), so it stays inline.
 
+The HDD screen on this build (`2e81348`) measured 521.62 s (521.26-531.02)
+against 521.71 s, with 59.6 CPU s against 62.3, and no flags.
+
 ## 1a. Current accepted baselines
 
 The earlier rows were regenerated with `foxy-testkit measurements` from the
