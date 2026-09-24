@@ -815,6 +815,15 @@ Deferred part rows:
   complete, no hashable file on disk, first refresh before any download) must
   still flush them before the pipeline ends, and the flush must not depend on
   local files existing.
+- When the verified-hash record may restore the files (trusted, on disk) and
+  the repository has no `addon_files` links yet, the rebuild streams instead:
+  each group of manifests fetched so far is upserted, applied, and its part
+  rows committed together with its addon links while later manifests still
+  download. Links must never land before their parts, because the
+  completeness checks count files through `addon_files` and only probe for
+  one part row. The rows stay in the deferred buffer, marked as committed, so
+  the tree still takes them from memory and every flush skips them. Other
+  checks hash long enough to hide the insert and keep the single flush.
 
 Scope rule:
 

@@ -9,12 +9,14 @@ use crate::core::models::recheck_level::RecheckLevel;
 use crate::core::models::repository::FoxyRepository;
 use crate::core::tasks::init_database::{SQLITE_MAX_VARIABLES, read_chunk_ids};
 use crate::core::tasks::remote_file_parts::{
-    flush_pending_download_targets, flush_pending_patch_clears,
+    flush_pending_download_targets, flush_pending_patch_clears, persist_streamed_part_group,
 };
 use crate::core::tasks::remote_files::{
-    ModRecheckStats, apply_mod_file_rows, fetch_mod_file_manifest, flush_pending_addon_file_links,
-    upsert_file_rows_batch,
+    FileUpsertResult, ModRecheckStats, StagedModFiles, apply_mod_file_rows,
+    fetch_mod_file_manifest, flush_pending_addon_file_links, upsert_file_rows_batch,
 };
+use futures::FutureExt;
+use futures::stream::{FuturesUnordered, StreamExt};
 use log::{debug, info, warn};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -493,31 +495,86 @@ pub(super) async fn process_mods_upsert(
         }))
     }
 
-    let mut staged = Vec::new();
     let mut collected = Vec::new();
-    for task in tasks {
-        match task.await {
+    let db = context.db();
+    let mut staged_mods = 0usize;
+    let mut groups = 0usize;
+    let mut file_upsert_duration = std::time::Duration::ZERO;
+    let mut applied = Vec::new();
+    let stream = context.should_stream_part_inserts();
+    let mut ordered = Some(tasks);
+    let mut pending: FuturesUnordered<_> = FuturesUnordered::new();
+    if stream {
+        pending.extend(ordered.take().into_iter().flatten());
+    }
+    while ordered.is_some() || !pending.is_empty() {
+        let mut staged = Vec::new();
+        let mut take = |result: Result<_, tokio::task::JoinError>| match result {
             Ok(Some(Ok(files))) => staged.push(files),
             Ok(Some(Err(stats))) => collected.push(stats),
             Ok(None) => {}
-            Err(err) => {
-                warn!("Mod file processing task failed: {}", err);
+            Err(err) => warn!("Mod file processing task failed: {}", err),
+        };
+        if let Some(tasks) = ordered.take() {
+            for task in tasks {
+                take(task.await);
+            }
+        } else {
+            // Every manifest fetched so far forms the group; the rest keep
+            // downloading while it is written.
+            if let Some(result) = pending.next().await {
+                take(result);
+            }
+            while let Some(Some(result)) = pending.next().now_or_never() {
+                take(result);
             }
         }
+        if staged.is_empty() {
+            continue;
+        }
+        staged_mods += staged.len();
+        groups += 1;
+        let upsert_started = Instant::now();
+        let upsert = Arc::new(upsert_file_rows_batch(&db, &staged).await);
+        file_upsert_duration += upsert_started.elapsed();
+        if stream {
+            let _stream = context.lock_part_stream().await;
+            let first_row = context.deferred_part_count();
+            applied.extend(
+                apply_staged_mods(&context, staged, &upsert, &mod_semaphore, mod_limit).await,
+            );
+            persist_streamed_part_group(&context, first_row).await;
+        } else {
+            applied.extend(
+                apply_staged_mods(&context, staged, &upsert, &mod_semaphore, mod_limit).await,
+            );
+        }
     }
-
-    let upsert_started = Instant::now();
-    let db = context.db();
-    let upsert = Arc::new(upsert_file_rows_batch(&db, &staged).await);
-    let file_upsert_duration = upsert_started.elapsed();
-    if !staged.is_empty() {
+    if staged_mods > 0 {
         info!(
-            "Batched file upsert for {} mods in {:.2?}",
-            staged.len(),
-            file_upsert_duration
+            "Batched file upsert for {} mods in {:.2?} ({} group(s))",
+            staged_mods, file_upsert_duration, groups
         );
     }
+    if let Some(first) = applied.first_mut() {
+        first.file_upsert_duration = file_upsert_duration;
+    }
+    collected.extend(applied);
 
+    flush_pending_addon_file_links(context.clone()).await;
+    flush_pending_download_targets(context.clone()).await;
+    flush_pending_patch_clears(context).await;
+
+    (collected, resolved_mod_ids)
+}
+
+async fn apply_staged_mods(
+    context: &Arc<FoxyContext>,
+    staged: Vec<StagedModFiles>,
+    upsert: &Arc<FileUpsertResult>,
+    mod_semaphore: &Arc<Semaphore>,
+    mod_limit: usize,
+) -> Vec<ModRecheckStats> {
     let mut apply_tasks = Vec::with_capacity(staged.len());
     for staged_mod in staged {
         let context_clone = context.clone();
@@ -530,28 +587,14 @@ pub(super) async fn process_mods_upsert(
             stats
         }));
     }
-
-    let mut assigned_upsert_duration = false;
+    let mut applied = Vec::with_capacity(apply_tasks.len());
     for task in apply_tasks {
         match task.await {
-            Ok(mut stats) => {
-                if !assigned_upsert_duration {
-                    stats.file_upsert_duration = file_upsert_duration;
-                    assigned_upsert_duration = true;
-                }
-                collected.push(stats);
-            }
-            Err(err) => {
-                warn!("Mod file apply task failed: {}", err);
-            }
+            Ok(stats) => applied.push(stats),
+            Err(err) => warn!("Mod file apply task failed: {}", err),
         }
     }
-
-    flush_pending_addon_file_links(context.clone()).await;
-    flush_pending_download_targets(context.clone()).await;
-    flush_pending_patch_clears(context).await;
-
-    (collected, resolved_mod_ids)
+    applied
 }
 
 #[cfg(test)]

@@ -3481,6 +3481,97 @@ mod tests {
         }
     }
 
+    /// Benchmark (`cargo test --release bench_subfiles_checksum_encoding -- --ignored --nocapture`).
+    /// The deferred flush writes each part's remote checksum as 64 hex characters.
+    /// Compares that against a 32-byte blob, in key order against the live unique
+    /// index, with part paths shaped like the real manifest's.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "perf benchmark; run manually with --ignored --nocapture"]
+    async fn bench_subfiles_checksum_encoding() {
+        const ROWS: usize = 433_248;
+        const FILES: usize = 3_738;
+        const CHUNK: usize = 256;
+
+        fn plain_sql(n: usize) -> String {
+            let ph = vec!["(?, ?, 0, 0, ?, ?, '', ?, ?)"; n].join(", ");
+            format!(
+                "INSERT INTO subfiles (file_id, path, local_length, local_start, remote_length, \
+                 remote_start, local_checksum, remote_checksum, data_order) VALUES {ph}"
+            )
+        }
+
+        fn checksum(file_id: i64, order: i64) -> [u8; 32] {
+            let mut out = [0u8; 32];
+            let mut state = (file_id as u64) << 32 ^ order as u64 ^ 0x9e37_79b9_7f4a_7c15;
+            for byte in &mut out {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                *byte = state as u8;
+            }
+            out
+        }
+
+        for (label, blob, foreign_keys) in [
+            ("hex_text", false, "ON"),
+            ("blob_32", true, "ON"),
+            ("hex_fk_off", false, "OFF"),
+        ] {
+            for round in 0..2 {
+                let (_dir, db) = temp_db().await;
+                let conn = connect_tuned(&db).await.unwrap();
+                conn.pragma_update("foreign_keys", foreign_keys)
+                    .await
+                    .unwrap();
+                for file in 1..=FILES {
+                    conn.execute(
+                        "INSERT INTO files (id, name, remote_path, local_path) VALUES (?, ?, ?, ?)",
+                        (file as i64, format!("f{file}"), "rp", "lp"),
+                    )
+                    .await
+                    .unwrap();
+                }
+                let per_file = (ROWS / FILES) as i64;
+                let rows: Vec<(i64, i64)> = (1..=FILES as i64)
+                    .flat_map(|file| (0..per_file).map(move |order| (file, order)))
+                    .collect();
+                let mut statements = Vec::new();
+                for chunk in rows.chunks(CHUNK) {
+                    let mut binds = Vec::with_capacity(chunk.len() * 6);
+                    for (file_id, order) in chunk {
+                        binds.push(turso::Value::Integer(*file_id));
+                        binds.push(turso::Value::Text(format!(
+                            "a3/data_f/lod/texture_{order:05}_co.paa\u{1F}{order}"
+                        )));
+                        binds.push(turso::Value::Integer(65_536));
+                        binds.push(turso::Value::Integer(order * 65_536));
+                        let sum = checksum(*file_id, *order);
+                        binds.push(if blob {
+                            turso::Value::Blob(sum.to_vec())
+                        } else {
+                            turso::Value::Text(
+                                sum.iter().map(|byte| format!("{byte:02X}")).collect(),
+                            )
+                        });
+                        binds.push(turso::Value::Integer(*order));
+                    }
+                    statements.push((plain_sql(chunk.len()), binds));
+                }
+                let started = Instant::now();
+                conn.execute("BEGIN", ()).await.unwrap();
+                for (sql, binds) in statements {
+                    conn.execute(&sql, binds).await.unwrap();
+                }
+                conn.execute("COMMIT", ()).await.unwrap();
+                let total = started.elapsed().as_secs_f64();
+                println!(
+                    "[bench subfiles-checksum] {label:<9} round={round} total={total:.3}s per_row_us={:.2}",
+                    total * 1_000_000.0 / rows.len() as f64
+                );
+            }
+        }
+    }
+
     /// Benchmark (`cargo test --release bench_addon_files_insert -- --ignored --nocapture`).
     /// `addon_files insert` costs ~190 µs/row on the metadata rebuild, more than
     /// twice the eight-column `files` upsert it accompanies, which points at its

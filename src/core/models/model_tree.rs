@@ -176,6 +176,12 @@ impl Tree {
         let remote_repository_url = remote_repository_url.to_string();
         let mod_name_filter = mod_name_filter.cloned();
         let file_id_filter = file_id_filter.cloned();
+        // Files with deferred rows take their parts from memory; the part
+        // stream may already have committed them, and reading them back costs
+        // more than attaching them.
+        let deferred_parts = context.deferred_parts_snapshot();
+        let deferred_file_ids: HashSet<i64> =
+            deferred_parts.iter().map(|row| row.file_id).collect();
 
         // Snapshot read: load every table in one consistent transaction (no write
         // permit, no retry) before assembling the tree in memory.
@@ -329,8 +335,12 @@ impl Tree {
                     // Load parts directly by file_id. ORDER BY is applied in process:
                     // the matching index does not pay for a ten-column ordered scan.
                     let mut parts: Vec<FoxyModFilePart> = Vec::new();
-                    if !files.is_empty() {
-                        let mut ids: Vec<i64> = files.iter().map(|f| f.id as i64).collect();
+                    let mut ids: Vec<i64> = files
+                        .iter()
+                        .map(|f| f.id as i64)
+                        .filter(|id| !deferred_file_ids.contains(id))
+                        .collect();
+                    if !ids.is_empty() {
                         ids.sort_unstable();
                         parts = map_id_chunks(
                             tx,
@@ -372,7 +382,6 @@ impl Tree {
             mut addon_files,
         } = raw;
 
-        let deferred_parts = context.deferred_parts_snapshot();
         if !deferred_parts.is_empty() {
             let file_ids: HashSet<i64> = files.iter().map(|file| file.id as i64).collect();
             let mut attached = 0usize;
@@ -516,6 +525,40 @@ impl Tree {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn streamed_rows_load_once_from_memory() {
+        use crate::core::db::FoxyDb;
+        use crate::core::models::context::DeferredPartInsert;
+
+        let handle = crate::core::tasks::db_turso::build_test_database().await;
+        let db = FoxyDb::from_handle(handle.clone());
+        for sql in [
+            "INSERT INTO repositories (id, name, remote_url, local_path) VALUES (1, 'r', 'u/', 'p')",
+            "INSERT INTO addons (id, name, remote_path, local_path, enabled, required, data_order) VALUES (10, 'a', 'rp', 'lp', 1, 1, 0)",
+            "INSERT INTO repository_addons (repository_id, addon_id) VALUES (1, 10)",
+            "INSERT INTO files (id, name, remote_path, local_path, length, data_order) VALUES (100, 'f', 'frp', 'flp', 1, 0)",
+            "INSERT INTO addon_files (addon_id, file_id) VALUES (10, 100)",
+            "INSERT INTO subfiles (file_id, path, remote_length, remote_start, remote_checksum, data_order) \
+             VALUES (100, 'p0', 1, 0, 'c0', 0)",
+        ] {
+            db.execute(sql, Vec::new()).await.unwrap();
+        }
+        let context = Arc::new(FoxyContext::new(handle, reqwest::Client::new()));
+        context.buffer_deferred_parts(vec![DeferredPartInsert {
+            file_id: 100,
+            path: "p0".to_owned(),
+            remote_length: 1,
+            remote_start: 0,
+            remote_checksum: "c0".to_owned(),
+            data_order: 0,
+        }]);
+        context.set_deferred_parts_persisted(1);
+
+        let tree = Tree::load(context, "u/").await.unwrap();
+        assert_eq!(tree.parts.len(), 1);
+        assert!(!FoxyModFilePart::id_is_persisted_rowid(tree.parts[0].id));
+    }
 
     #[test]
     fn clean_file_projects_part_local_state_from_remote() {

@@ -34,6 +34,28 @@ async fn repository_subfiles_empty(db: &FoxyDb, repository_id: i64) -> bool {
     }
 }
 
+/// Whether any addon of this repository instance already links a file.
+/// On query error we return true (no part stream).
+async fn repository_has_file_links(db: &FoxyDb, repository_id: i64) -> bool {
+    match db
+        .query_all(
+            "SELECT 1 \
+             FROM addon_files af \
+             JOIN repository_addons ra ON ra.addon_id = af.addon_id \
+             WHERE ra.repository_id = ? \
+             LIMIT 1",
+            params![repository_id],
+        )
+        .await
+    {
+        Ok(rows) => !rows.is_empty(),
+        Err(e) => {
+            warn!("Could not check repository file links for the part stream: {e}");
+            true
+        }
+    }
+}
+
 /// Work the metadata rebuild did, summed over every manifest task, for the
 /// `SOL op=remote_refresh` record (conventions/SPEED_OF_LIGHT.md, O5).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -72,6 +94,31 @@ pub(crate) async fn remote_mods_with_data(
         );
         context.set_fresh_subfiles_load(true);
     }
+    let record_may_restore = match context.verified_hash_record.as_ref() {
+        Some(record) if fresh_bulk_load && context.should_defer_part_inserts() => {
+            let folder = context
+                .repository_space_shared_path
+                .as_deref()
+                .unwrap_or(&repository.local_path);
+            record.may_restore_under(folder).await
+        }
+        _ => false,
+    };
+    // Stream only when the part insert would otherwise be the critical path: a
+    // fresh deferred load that the verified-hash record may restore without
+    // hashing. Existing links would let a partly streamed graph pass the
+    // completeness probe after a crash.
+    let stream_parts = fresh_bulk_load
+        && context.should_defer_part_inserts()
+        && record_may_restore
+        && !repository_has_file_links(&context.db(), repository.id as i64).await;
+    if stream_parts {
+        info!(
+            "Metadata rebuild: streaming part rows as manifests arrive (repo {})",
+            repository.remote_url
+        );
+    }
+    context.set_stream_part_inserts(stream_parts);
 
     let mut tasks = Vec::new();
     let enabled_overrides = enabled_overrides.map(Arc::new);
@@ -160,6 +207,7 @@ pub(crate) async fn remote_mods_with_data(
     if fresh_bulk_load {
         context.set_fresh_subfiles_load(false);
     }
+    context.set_stream_part_inserts(false);
 
     reconcile_repository_addon_links(
         context.clone(),
@@ -288,5 +336,24 @@ mod tests {
             repository_subfiles_empty(&db, 2).await,
             "repo2 must stay fresh even though repo1 already has subfiles"
         );
+    }
+
+    #[tokio::test]
+    async fn repository_file_links_are_scoped_to_repository_instance() {
+        let db = test_db().await;
+        for sql in [
+            "INSERT INTO repositories (id, name, remote_url, local_path) VALUES \
+             (1, 'repo1', 'u1', 'p'), (2, 'repo2', 'u2', 'p')",
+            "INSERT INTO addons (id, name, remote_path, local_path, required) VALUES \
+             (10, 'a1', 'rp1', 'lp1', 1), (20, 'a2', 'rp2', 'lp2', 1)",
+            "INSERT INTO files (id, name, remote_path, local_path) VALUES (100, 'f1', 'frp1', 'flp1')",
+            "INSERT INTO repository_addons (repository_id, addon_id) VALUES (1, 10), (2, 20)",
+            "INSERT INTO addon_files (addon_id, file_id) VALUES (10, 100)",
+        ] {
+            db.execute(sql, Vec::new()).await.unwrap();
+        }
+
+        assert!(repository_has_file_links(&db, 1).await);
+        assert!(!repository_has_file_links(&db, 2).await);
     }
 }

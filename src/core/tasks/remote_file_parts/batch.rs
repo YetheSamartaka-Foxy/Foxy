@@ -1,6 +1,6 @@
 use super::types::{FilePartsPayload, PartRow};
 use super::validation::{local_file_matches_part_layout, log_suspicious_manifest_paths};
-use crate::core::db::{DbErr, DbValue, FoxyDb};
+use crate::core::db::{DbErr, DbTxn, DbValue, FoxyDb};
 use crate::core::models::context::{DeferredPartInsert, FoxyContext};
 use crate::core::models::download_patch_file::delete_download_patch_files_by_file_ids;
 use crate::core::models::download_patch_op::delete_download_patch_ops_for_files;
@@ -797,9 +797,14 @@ pub(crate) async fn remote_file_parts_batch(
 /// globally-empty `subfiles` table - same `fresh=true` SQL as the inline fast path).
 /// No-op when nothing was deferred.
 pub(crate) async fn flush_deferred_part_inserts(context: Arc<FoxyContext>) -> bool {
-    let mut rows = context.take_deferred_parts();
+    let (mut rows, streamed) = context.take_unpersisted_deferred_parts();
     context.set_deferred_part_inserts_fresh_load(false);
     if rows.is_empty() {
+        if streamed > 0 {
+            info!(
+                "Deferred file part insert skipped: all {streamed} rows were streamed during the fetch"
+            );
+        }
         return true;
     }
     // Both subfiles indexes lead with file_id, and the buffer arrives in mod
@@ -850,8 +855,9 @@ pub(crate) async fn flush_deferred_part_inserts(context: Arc<FoxyContext>) -> bo
         started.elapsed()
     );
     info!(
-        "Deferred file part insert metrics: strategy=fresh_remote_metadata_live_indexes rows={} insert_batch_size={} insert_batches={} insert_rows_affected={} sqlite_retries={} sqlite_backoff_ms={} sqlite_write_time_ms={:.1} total={:.3}s",
+        "Deferred file part insert metrics: strategy=fresh_remote_metadata_live_indexes rows={} streamed_rows={} insert_batch_size={} insert_batches={} insert_rows_affected={} sqlite_retries={} sqlite_backoff_ms={} sqlite_write_time_ms={:.1} total={:.3}s",
         total,
+        streamed,
         chunk_size,
         insert_batches,
         insert_rows_affected,
@@ -861,6 +867,136 @@ pub(crate) async fn flush_deferred_part_inserts(context: Arc<FoxyContext>) -> bo
         started.elapsed().as_secs_f64()
     );
     true
+}
+
+/// Commit the part rows one group of manifests appended to the deferred buffer
+/// from `first_row` on, with that group's addon file links, under the part
+/// stream lock. Links land only with their parts because the completeness
+/// checks count files through `addon_files` and probe for just one part row.
+/// A failed group turns the stream off; the regular flushes take over.
+pub(crate) async fn persist_streamed_part_group(context: &Arc<FoxyContext>, first_row: usize) {
+    if !context.should_stream_part_inserts() {
+        return;
+    }
+    let mut links = context.take_pending_addon_file_links();
+    if context.deferred_parts_persisted() != first_row {
+        warn!(
+            "Streamed part insert stopped: {} rows committed but the group starts at row {}",
+            context.deferred_parts_persisted(),
+            first_row
+        );
+        context.set_stream_part_inserts(false);
+        context.buffer_addon_file_links(links);
+        return;
+    }
+    let mut rows = context.deferred_parts_from(first_row);
+    if rows.is_empty() && links.is_empty() {
+        return;
+    }
+    let group_rows = rows.len();
+    rows.sort_unstable_by_key(|row| (row.file_id, row.data_order));
+    links.sort_unstable();
+    links.dedup();
+    let started = Instant::now();
+    let chunk_size = file_part_upsert_chunk_size();
+    let link_chunk_size = crate::core::tasks::init_database::bulk_write_rows_for(2);
+    let mut file_ids: Vec<i64> = rows
+        .iter()
+        .map(|row| row.file_id)
+        .chain(links.iter().map(|(_, file_id)| *file_id))
+        .collect();
+    file_ids.sort_unstable();
+    file_ids.dedup();
+    let mut addon_ids: Vec<i64> = links.iter().map(|(addon_id, _)| *addon_id).collect();
+    addon_ids.sort_unstable();
+    addon_ids.dedup();
+    let parents = Arc::new((file_ids, addon_ids));
+    let rows = Arc::new(rows);
+    let shared_links = Arc::new(links);
+    // Foreign keys cost about a tenth of this insert; the parent check before
+    // the commit keeps a purge that ran since the file upsert from leaving
+    // orphans.
+    let result = context
+        .db()
+        .transaction_without_foreign_keys("streamed file parts insert", |txn| {
+            let rows = rows.clone();
+            let links = shared_links.clone();
+            let parents = parents.clone();
+            Box::pin(async move {
+                for chunk in rows.chunks(chunk_size) {
+                    let sql = file_part_upsert_sql(chunk.len(), true);
+                    let mut values: Vec<DbValue> =
+                        Vec::with_capacity(chunk.len() * FILE_PART_UPSERT_PARAMS_PER_ROW);
+                    for row in chunk {
+                        values.push(row.file_id.into());
+                        values.push(row.path.clone().into());
+                        values.push(row.remote_length.into());
+                        values.push(row.remote_start.into());
+                        values.push(row.remote_checksum.clone().into());
+                        values.push(row.data_order.into());
+                    }
+                    txn.execute(&sql, values).await?;
+                }
+                for chunk in links.chunks(link_chunk_size) {
+                    let placeholders = vec!["(?, ?)"; chunk.len()].join(", ");
+                    let sql = format!(
+                        "INSERT INTO addon_files (addon_id, file_id) VALUES {placeholders} \
+                         ON CONFLICT(addon_id, file_id) DO NOTHING"
+                    );
+                    let mut values: Vec<DbValue> = Vec::with_capacity(chunk.len() * 2);
+                    for (addon_id, file_id) in chunk {
+                        values.push((*addon_id).into());
+                        values.push((*file_id).into());
+                    }
+                    txn.execute(&sql, values).await?;
+                }
+                let (file_ids, addon_ids) = parents.as_ref();
+                for (table, ids) in [("files", file_ids), ("addons", addon_ids)] {
+                    let found = count_existing_ids(txn, table, ids).await?;
+                    if found != ids.len() {
+                        return Err(DbErr::Custom(format!(
+                            "{} of {} {table} rows referenced by the group are gone",
+                            ids.len() - found,
+                            ids.len()
+                        )));
+                    }
+                }
+                Ok(())
+            })
+        })
+        .await;
+    match result {
+        Ok(()) => {
+            context.set_deferred_parts_persisted(first_row + group_rows);
+            info!(
+                "Streamed part group committed: rows={} links={} total_rows={} elapsed={:.3}s",
+                group_rows,
+                shared_links.len(),
+                first_row + group_rows,
+                started.elapsed().as_secs_f64()
+            );
+        }
+        Err(err) => {
+            warn!("Streamed part insert failed, falling back to the deferred insert: {err}");
+            context.set_stream_part_inserts(false);
+            context.buffer_addon_file_links(shared_links.iter().copied());
+        }
+    }
+}
+
+async fn count_existing_ids(txn: &DbTxn<'_>, table: &str, ids: &[i64]) -> Result<usize, DbErr> {
+    let mut found = 0usize;
+    for chunk in ids.chunks(crate::core::tasks::init_database::read_chunk_ids()) {
+        let placeholders = vec!["?"; chunk.len()].join(", ");
+        let row = txn
+            .query_one(
+                &format!("SELECT COUNT(*) AS c FROM {table} WHERE id IN ({placeholders})"),
+                chunk.iter().map(|id| DbValue::from(*id)).collect(),
+            )
+            .await?;
+        found += row.map(|row| row.get_i64("c")).transpose()?.unwrap_or(0) as usize;
+    }
+    Ok(found)
 }
 
 pub(crate) async fn persist_part_local_state_by_file_path<F>(
@@ -1208,6 +1344,174 @@ mod tests {
         assert!(!should_prepare_download_work(false, false));
         assert!(should_prepare_download_work(true, false));
         assert!(should_prepare_download_work(false, true));
+    }
+
+    /// Benchmark (`cargo test --release bench_deferred_flush_seam -- --ignored --nocapture`).
+    /// The deferred flush through the app's seam, with the record case's row
+    /// count and shape, to compare against the raw engine insert in
+    /// `bench_subfiles_checksum_encoding`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "perf benchmark; run manually with --ignored --nocapture"]
+    async fn bench_deferred_flush_seam() {
+        const ROWS: usize = 433_248;
+        const FILES: usize = 3_738;
+        let per_file = (ROWS / FILES) as i64;
+        for round in 0..2 {
+            let handle = crate::core::tasks::db_turso::build_test_database().await;
+            let db = FoxyDb::from_handle(handle.clone());
+            for file in 1..=FILES as i64 {
+                db.execute(
+                    "INSERT INTO files (id, name, remote_path, local_path) VALUES (?, ?, ?, ?)",
+                    vec![
+                        file.into(),
+                        format!("f{file}").into(),
+                        format!("rp{file}").into(),
+                        format!("lp{file}").into(),
+                    ],
+                )
+                .await
+                .unwrap();
+            }
+            let context = Arc::new(FoxyContext::new(handle, reqwest::Client::new()));
+            context.buffer_deferred_parts(
+                (1..=FILES as i64)
+                    .flat_map(|file| {
+                        (0..per_file).map(move |order| DeferredPartInsert {
+                            file_id: file,
+                            path: format!("a3/data_f/lod/texture_{order:05}_co.paa\u{1F}{order}"),
+                            remote_length: 65_536,
+                            remote_start: order * 65_536,
+                            remote_checksum: format!(
+                                "{:064X}",
+                                (file as u128) << 64 | order as u128
+                            ),
+                            data_order: order,
+                        })
+                    })
+                    .collect(),
+            );
+            let build_started = Instant::now();
+            let snapshot = context.deferred_parts_snapshot();
+            let mut built = 0usize;
+            for chunk in snapshot.chunks(file_part_upsert_chunk_size()) {
+                let sql = file_part_upsert_sql(chunk.len(), true);
+                let mut values: Vec<DbValue> = Vec::with_capacity(chunk.len() * 6);
+                for row in chunk {
+                    values.push(row.file_id.into());
+                    values.push(row.path.clone().into());
+                    values.push(row.remote_length.into());
+                    values.push(row.remote_start.into());
+                    values.push(row.remote_checksum.clone().into());
+                    values.push(row.data_order.into());
+                }
+                let turso_values: Vec<turso::Value> =
+                    values.into_iter().map(DbValue::into_turso_value).collect();
+                built += sql.len() + turso_values.len();
+            }
+            println!(
+                "[bench deferred-flush-seam] build_only={:.3}s ({built})",
+                build_started.elapsed().as_secs_f64()
+            );
+            drop(snapshot);
+            let started = Instant::now();
+            assert!(flush_deferred_part_inserts(context).await);
+            println!(
+                "[bench deferred-flush-seam] round={round} total={:.3}s",
+                started.elapsed().as_secs_f64()
+            );
+        }
+    }
+
+    fn deferred_row(file_id: i64, order: i64) -> DeferredPartInsert {
+        DeferredPartInsert {
+            file_id,
+            path: format!("p{order}"),
+            remote_length: 1,
+            remote_start: order,
+            remote_checksum: format!("r{file_id}_{order}"),
+            data_order: order,
+        }
+    }
+
+    async fn count(db: &FoxyDb, table: &str) -> i64 {
+        db.query_one(&format!("SELECT COUNT(*) AS c FROM {table}"), Vec::new())
+            .await
+            .unwrap()
+            .unwrap()
+            .get_i64("c")
+            .unwrap()
+    }
+
+    async fn streamed_context() -> (FoxyDb, Arc<FoxyContext>) {
+        let handle = crate::core::tasks::db_turso::build_test_database().await;
+        let db = FoxyDb::from_handle(handle.clone());
+        db.execute(
+            "INSERT INTO addons (id, name, remote_path, local_path, required) \
+             VALUES (10, 'a', 'rp', 'lp', 1)",
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO files (id, name, remote_path, local_path) VALUES \
+             (1, 'f1', 'rp1', 'lp1'), (2, 'f2', 'rp2', 'lp2')",
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let context = Arc::new(FoxyContext::new(handle, reqwest::Client::new()));
+        context.set_fresh_subfiles_load(true);
+        context.set_defer_part_inserts(true);
+        context.set_stream_part_inserts(true);
+        (db, context)
+    }
+
+    #[tokio::test]
+    async fn a_streamed_group_commits_its_parts_with_its_links_and_the_flush_skips_them() {
+        let (db, context) = streamed_context().await;
+        context.buffer_deferred_parts(vec![deferred_row(1, 1), deferred_row(1, 0)]);
+        context.buffer_addon_file_links([(10, 1)]);
+        persist_streamed_part_group(&context, 0).await;
+        assert_eq!(context.deferred_parts_persisted(), 2);
+        assert_eq!(count(&db, "subfiles").await, 2);
+        assert_eq!(count(&db, "addon_files").await, 1);
+        assert!(context.take_pending_addon_file_links().is_empty());
+
+        context.buffer_deferred_parts(vec![deferred_row(2, 0)]);
+        context.set_stream_part_inserts(false);
+        persist_streamed_part_group(&context, 2).await;
+        assert_eq!(count(&db, "subfiles").await, 2);
+
+        assert!(flush_deferred_part_inserts(context.clone()).await);
+        assert_eq!(count(&db, "subfiles").await, 3);
+        assert_eq!(context.deferred_part_count(), 0);
+        assert_eq!(context.deferred_parts_persisted(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_group_whose_file_was_purged_rolls_back_instead_of_leaving_orphans() {
+        let (db, context) = streamed_context().await;
+        context.buffer_deferred_parts(vec![deferred_row(1, 0), deferred_row(3, 0)]);
+        context.buffer_addon_file_links([(10, 1), (10, 3)]);
+        persist_streamed_part_group(&context, 0).await;
+        assert!(!context.should_stream_part_inserts());
+        assert_eq!(context.deferred_parts_persisted(), 0);
+        assert_eq!(count(&db, "subfiles").await, 0);
+        assert_eq!(count(&db, "addon_files").await, 0);
+        assert_eq!(context.take_pending_addon_file_links().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_group_that_does_not_follow_the_committed_rows_stops_the_stream() {
+        let (db, context) = streamed_context().await;
+        context.buffer_deferred_parts(vec![deferred_row(1, 0), deferred_row(2, 0)]);
+        context.buffer_addon_file_links([(10, 2)]);
+        persist_streamed_part_group(&context, 1).await;
+        assert!(!context.should_stream_part_inserts());
+        assert_eq!(context.deferred_parts_persisted(), 0);
+        assert_eq!(count(&db, "subfiles").await, 0);
+        assert_eq!(count(&db, "addon_files").await, 0);
+        assert_eq!(context.take_pending_addon_file_links(), vec![(10, 2)]);
     }
 
     #[tokio::test]

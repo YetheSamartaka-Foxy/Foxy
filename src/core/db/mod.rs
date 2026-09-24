@@ -251,6 +251,23 @@ impl FoxyDb {
         turso_transaction(&self.db, label, false, false, work).await
     }
 
+    /// Like [`FoxyDb::transaction`] but with `foreign_keys=OFF` on its own
+    /// connection, for bulk inserts whose parents the caller verifies inside
+    /// the transaction before it commits.
+    pub(crate) async fn transaction_without_foreign_keys<F>(
+        &self,
+        label: &str,
+        work: F,
+    ) -> Result<(), DbErr>
+    where
+        F: for<'a> Fn(
+            &'a DbTxn<'a>,
+        ) -> Pin<Box<dyn Future<Output = Result<(), DbErr>> + Send + 'a>>,
+    {
+        let _shared = crate::core::tasks::init_database::acquire_db_shared().await;
+        turso_transaction(&self.db, label, true, false, work).await
+    }
+
     /// Like [`FoxyDb::transaction`] but for the repository purge: runs with
     /// `foreign_keys=OFF` (the purge's real hang - see `turso_transaction`) AND
     /// with **exclusive** DB access (no other seam read/write proceeds until it

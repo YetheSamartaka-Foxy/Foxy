@@ -2,7 +2,7 @@ use crate::core::db::{DbHandle, FoxyDb};
 use crate::core::models::recheck_level::RecheckLevel;
 use reqwest::Client;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// A brand-new `subfiles` row staged for the deferred background insert on the
@@ -55,6 +55,17 @@ pub(crate) struct FoxyContext {
     /// was true. The metadata fan-out clears `fresh_subfiles_load` before the hash
     /// bootstrap flushes local state, so the buffer needs its own durable marker.
     pub(crate) deferred_part_inserts_fresh_load: Arc<AtomicBool>,
+    /// How many leading rows of `deferred_part_inserts` are already committed to
+    /// `subfiles`. The buffer keeps them for the in-memory tree; every flush
+    /// skips them.
+    deferred_parts_persisted: Arc<AtomicUsize>,
+    /// Set by the metadata rebuild when it writes each group of fetched
+    /// manifests' part rows and addon links as the manifests arrive, instead of
+    /// leaving every part row to the flush after the fetch.
+    stream_part_inserts: Arc<AtomicBool>,
+    /// Held while one group is applied and written, so the rows it appends to
+    /// the deferred buffer form one contiguous range.
+    part_stream_lock: Arc<tokio::sync::Mutex<()>>,
     pending_addon_file_links: Arc<Mutex<Vec<(i64, i64)>>>,
     pending_download_targets: Arc<Mutex<Vec<PendingDownloadTarget>>>,
     pending_patch_clear_ids: Arc<Mutex<Vec<i64>>>,
@@ -95,6 +106,9 @@ impl FoxyContext {
             defer_part_inserts: Arc::new(AtomicBool::new(false)),
             deferred_part_inserts: Arc::new(Mutex::new(Vec::new())),
             deferred_part_inserts_fresh_load: Arc::new(AtomicBool::new(false)),
+            deferred_parts_persisted: Arc::new(AtomicUsize::new(0)),
+            stream_part_inserts: Arc::new(AtomicBool::new(false)),
+            part_stream_lock: Arc::new(tokio::sync::Mutex::new(())),
             pending_addon_file_links: Arc::new(Mutex::new(Vec::new())),
             pending_download_targets: Arc::new(Mutex::new(Vec::new())),
             pending_patch_clear_ids: Arc::new(Mutex::new(Vec::new())),
@@ -148,13 +162,54 @@ impl FoxyContext {
         }
     }
 
-    /// Drain every staged part row (clears the buffer). Returns them for the
-    /// background flush; empty when nothing was deferred.
+    /// Drain every staged part row (clears the buffer), including rows already
+    /// committed by the part stream.
     pub(crate) fn take_deferred_parts(&self) -> Vec<DeferredPartInsert> {
-        self.deferred_part_inserts
+        let rows = self
+            .deferred_part_inserts
             .lock()
             .map(|mut buffer| std::mem::take(&mut *buffer))
+            .unwrap_or_default();
+        self.deferred_parts_persisted.store(0, Ordering::Relaxed);
+        rows
+    }
+
+    /// Drain the buffer and return only the rows no stream has committed yet,
+    /// with how many were already committed.
+    pub(crate) fn take_unpersisted_deferred_parts(&self) -> (Vec<DeferredPartInsert>, usize) {
+        let persisted = self.deferred_parts_persisted.load(Ordering::Relaxed);
+        let mut rows = self.take_deferred_parts();
+        let persisted = persisted.min(rows.len());
+        rows.drain(..persisted);
+        (rows, persisted)
+    }
+
+    pub(crate) fn deferred_parts_persisted(&self) -> usize {
+        self.deferred_parts_persisted.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn set_deferred_parts_persisted(&self, rows: usize) {
+        self.deferred_parts_persisted.store(rows, Ordering::Relaxed);
+    }
+
+    /// Copies of the staged rows from `start` on.
+    pub(crate) fn deferred_parts_from(&self, start: usize) -> Vec<DeferredPartInsert> {
+        self.deferred_part_inserts
+            .lock()
+            .map(|buffer| buffer.get(start..).map(<[_]>::to_vec).unwrap_or_default())
             .unwrap_or_default()
+    }
+
+    pub(crate) fn set_stream_part_inserts(&self, value: bool) {
+        self.stream_part_inserts.store(value, Ordering::Relaxed);
+    }
+
+    pub(crate) fn should_stream_part_inserts(&self) -> bool {
+        self.stream_part_inserts.load(Ordering::Relaxed)
+    }
+
+    pub(crate) async fn lock_part_stream(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.part_stream_lock.lock().await
     }
 
     pub(crate) fn deferred_part_count(&self) -> usize {

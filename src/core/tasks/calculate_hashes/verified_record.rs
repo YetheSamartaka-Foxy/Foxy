@@ -41,6 +41,25 @@ impl VerifiedHashRecordUse {
     pub(crate) fn at(path: PathBuf, trust: bool) -> Self {
         Self { path, trust }
     }
+
+    /// Whether this operation may restore any file under `folder`: a wipe
+    /// forgets a repository's entries but keeps the record file.
+    pub(crate) async fn may_restore_under(&self, folder: &str) -> bool {
+        if !self.trust {
+            return false;
+        }
+        let path = self.path.clone();
+        let prefix = format!("{}/", path_key(folder));
+        tokio::task::spawn_blocking(move || {
+            path.is_file()
+                && load(&path)
+                    .entries
+                    .keys()
+                    .any(|key| key.starts_with(&prefix))
+        })
+        .await
+        .unwrap_or(false)
+    }
 }
 
 pub(crate) fn record_path(space_dir: &Path) -> PathBuf {
@@ -592,6 +611,42 @@ mod tests {
         let (_, _, total) =
             update_blocking(&path, vec![("k".into(), None)], now + STALE_AFTER_SECS).unwrap();
         assert_eq!(total, 0);
+    }
+
+    #[tokio::test]
+    async fn a_record_may_restore_only_a_folder_it_holds_entries_under() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(RECORD_FILE);
+        let trusted = VerifiedHashRecordUse::at(path.clone(), true);
+        assert!(!trusted.may_restore_under("C:/Repo").await);
+        let entry = Entry {
+            identity: FileIdentity {
+                volume: 1,
+                file_id: 2,
+                size: 3,
+                modified: 4,
+                changed: 5,
+                usn: None,
+            },
+            signature: "s".into(),
+            fingerprint: None,
+            seen: 0,
+        };
+        update_blocking(
+            &path,
+            vec![(path_key("C:/Repo/@a/x.pbo"), Some(entry))],
+            1_000_000_000,
+        )
+        .unwrap();
+        assert!(trusted.may_restore_under("C:\\Repo").await);
+        assert!(!trusted.may_restore_under("C:/Other").await);
+        assert!(
+            !VerifiedHashRecordUse::at(path.clone(), false)
+                .may_restore_under("C:/Repo")
+                .await
+        );
+        forget_under(&path, "C:/Repo").unwrap();
+        assert!(!trusted.may_restore_under("C:/Repo").await);
     }
 
     #[test]
