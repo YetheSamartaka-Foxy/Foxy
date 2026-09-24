@@ -406,6 +406,28 @@ the restore (the tree reads addons through `addon_files`), so it stays inline.
 The HDD screen on this build (`2e81348`) measured 521.62 s (521.26-531.02)
 against 521.71 s, with 59.6 CPU s against 62.3, and no flags.
 
+### September 24 wrap-up: accepted baselines against 1.1.0
+
+The four cases were re-accepted from clean `d1a8c18` runs (section 1a). For a
+release-to-release view, the `1.1.0` tag (`c79e2c7`) was built in release and
+timed through its own CLI on the same payloads and origin: a fresh database
+then `repo sync --mode remote-refresh` for the TFR Main checks, and `repo
+force-redownload` for the synthetic part-heavy origin. Its CLI drops the sync
+cancel sender at once, so every CLI sync cancels; the timed build kept that
+sender alive and changed nothing else. There is no cache eviction outside the
+testkit, so the 1.1.0 SSD runs may be slightly warmer than the testkit's; the
+HDD run followed a 92 GB pass over the other volume, which leaves the HDD cold.
+
+| Check | 1.1.0 (`c79e2c7`) | Sept 23 accepted (`94a73d0`) | Sept 24 accepted (`d1a8c18`) | 1.1.0 to now |
+| --- | --- | --- | --- | --- |
+| SSD recheck after a wipe (92 GB hashed) | 27.0-28.3 s (hash 21.7-22.5 s, part insert 10.0-10.4 s) | 19.67 s | 15.53 s | -12.5 s, -45% |
+| HDD recheck after a wipe (92 GB hashed) | 652.3 s (hash 642.3 s, Conservative) | 525.44 s | 521.30 s | -131 s, -20% |
+| Recheck after a wipe with the hash record | no record: the full HDD rehash, 652.3 s | 11.80 s | 7.08 s | -645 s, -99% |
+| Bulk force-redownload (433k part rows) | 12.43-12.55 s | 9.73 s (Sept 24 morning, `486ab32`) | 7.48 s (6.50-6.62 s earlier the same day) | -5.0 s, -40% |
+
+The `38e52f6` baselines of Sept 20 (650.98 s HDD, 31.74 s SSD) sit where 1.1.0
+does, so the gains above were made between Sept 21 and Sept 24.
+
 ## 1a. Current accepted baselines
 
 The earlier rows were regenerated with `foxy-testkit measurements` from the
@@ -413,7 +435,9 @@ compatible accepted baseline set at checkout `956de9e`. The Sept 19 HDD row
 comes from the accepted baseline at checkout `11924bd`, and the full TFR Main
 rows are the clean `94a73d0` gates, accepted as the new baselines on
 2026-09-23 (they replace the `38e52f6` baselines of 650.98 s and 31.74 s), plus
-the verified-hash record case from `dc09a72`. Rows that name an
+the verified-hash record case from `dc09a72`. The TFR Main recheck, record and
+bulk part-insert rows were re-accepted on 2026-09-24 from clean `d1a8c18` runs
+(they replace 525.44 s, 19.67 s and 11.80 s). Rows that name an
 app-owned action instead of the outer driver bracket cite the same accepted
 run artifact.
 
@@ -432,9 +456,10 @@ run artifact.
 | 2026-09-18 | `perf-tfr-scifi-delta-patch-ssd` | db-persist (O7 gated write windows) | 62% median (calibrated, per-kind DB) | ssd warm, gate 1 | 11.3-21.1 ms | 10.613 ms per-kind estimate | 5 | 240 inserts, 232 updates, 205 deletes | early_exit | 571efc1 | `20260918T110808Z-0934e668` |
 | 2026-09-18 | `perf-startup-arma3-live` | startup (O8 startup) | 77% (calibrated, probe B4) | ssd warm | 3.05 s | 3.05 s median of 5 [3.02-3.06] | 5 | 11 repos | ok | 02c935e | `20260918T151335Z-18cda6f0` |
 | 2026-09-18 | `perf-tfr-scifi-delta-patch-ssd` | download (O2 delta patch) | 3% (calibrated, network B1) | ssd warm | 2.13 s | 2.13 s median of 5 [2.13-2.16] | 5 | 4 files, 0.01 GB, 0.21 GB hashed | completed,completed,completed,completed,completed | 571efc1 | `20260918T110808Z-0934e668` |
-| 2026-09-23 | `perf-hdd-plan-main-recheck-hdd` | remote-refresh@evicted (O5 remote metadata refresh) | 137% (calibrated, hash B2+B6) | hdd evicted | 525.44 s | 525.44 s median of 7 [525.13-527.29] | 7 | 92.19 GB hashed | improvement | 94a73d0 | `20260923T131916Z-1e8ab768` |
-| 2026-09-23 | `perf-hdd-plan-main-recheck-ssd` | remote-refresh@evicted (O5 remote metadata refresh) | 114% (calibrated, hash B2+B6) | ssd evicted | 19.67 s | 19.67 s median of 5 [19.38-19.87] | 5 | 92.19 GB hashed | candidate-improvement | 94a73d0 | `20260923T143143Z-1a09d584` |
-| 2026-09-23 | `perf-hdd-plan-main-bootstrap-record-hdd` | remote-refresh@evicted (O5 remote metadata refresh) | 1% (calibrated, no-change B4) | hdd evicted | 11.80 s | 11.80 s median of 7 [11.54-12.44] | 7 | n/a | ok | dc09a72 | `20260923T181710Z-162175d0` |
+| 2026-09-24 | `perf-hdd-plan-main-recheck-hdd` | remote-refresh@evicted (O5 remote metadata refresh) | 137% (calibrated, hash B2+B6) | hdd evicted | 521.30 s | 521.30 s median of 7 [521.16-521.89] | 7 | 92.19 GB hashed | candidate-regression | d1a8c18 | `20260924T164758Z-07584bdc` |
+| 2026-09-24 | `perf-hdd-plan-main-recheck-ssd` | remote-refresh@evicted (O5 remote metadata refresh) | 114% (calibrated, hash B2+B6) | ssd evicted | 15.53 s | 15.53 s median of 5 [15.36-15.62] | 5 | 92.19 GB hashed | improvement | d1a8c18 | `20260924T163452Z-12c9c464` |
+| 2026-09-24 | `perf-hdd-plan-main-bootstrap-record-hdd` | remote-refresh@evicted (O5 remote metadata refresh) | 2% (calibrated, no-change B4) | hdd evicted | 7.08 s | 7.08 s median of 7 [6.79-7.32] | 7 | n/a | regression | d1a8c18 | `20260924T163707Z-1a0b03dc` |
+| 2026-09-24 | `perf-db-parts-bulk` | force-redownload (O1 full-file download) | n/a | ssd warm | 7.48 s | 7.48 s median of 5 [7.30-7.51] | 5 | 864 files, 0.04 GB, 0.04 GB hashed | completed,completed,completed,completed,completed | d1a8c18 | `20260924T182154Z-1fe1f8d8` |
 
 ## 1b. Shared-aggregation and patch-timeline candidate
 
