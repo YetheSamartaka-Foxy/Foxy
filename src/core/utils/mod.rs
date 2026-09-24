@@ -8,6 +8,7 @@ pub mod file_io;
 pub mod format;
 pub mod fs_safety;
 pub mod http_range;
+pub(crate) mod manifest_cache;
 pub mod platform;
 pub mod power;
 pub mod profiling;

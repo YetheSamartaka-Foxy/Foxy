@@ -10,7 +10,7 @@ use crate::core::tasks::init_database::{
 use crate::core::tasks::remote_file_parts::{
     FilePartData, FilePartsPayload, remote_file_parts_batch,
 };
-use crate::core::utils::fetch_json::{FetchJsonTiming, fetch_json_timed};
+use crate::core::utils::fetch_json::{FetchJsonTiming, fetch_manifest_json_timed};
 use log::{debug, error, info, warn};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -135,6 +135,7 @@ pub(crate) struct StagedModFiles {
     http_download_duration: std::time::Duration,
     http_response_bytes: usize,
     http_parse_duration: std::time::Duration,
+    manifest_cached: bool,
     mod_start: Instant,
 }
 
@@ -479,6 +480,8 @@ pub(crate) struct ModRecheckStats {
     pub http_response_bytes: usize,
     /// Time spent parsing the manifest JSON (BOM strip + serde_json)
     pub http_parse_duration: std::time::Duration,
+    /// The server confirmed the cached manifest; nothing was downloaded.
+    pub manifest_cached: bool,
     /// Time spent upserting file records for this mod
     pub file_upsert_duration: std::time::Duration,
     /// Time spent in remote_file_parts_batch (parts upsert + reconcile + download targets)
@@ -500,6 +503,7 @@ fn empty_recheck_stats(
         http_download_duration: http_timing.download,
         http_response_bytes: http_timing.response_bytes,
         http_parse_duration: http_timing.parse,
+        manifest_cached: http_timing.cached,
         file_upsert_duration: std::time::Duration::ZERO,
         parts_persist_duration: std::time::Duration::ZERO,
     }
@@ -510,6 +514,7 @@ fn zero_fetch_timing() -> FetchJsonTiming {
         download: std::time::Duration::ZERO,
         parse: std::time::Duration::ZERO,
         response_bytes: 0,
+        cached: false,
     }
 }
 
@@ -529,7 +534,7 @@ pub(crate) async fn fetch_mod_file_manifest(
     debug!("Loading mod files metadata from: {}", files_metadata_url);
 
     let (files_data, http_timing) =
-        match fetch_json_timed(context.clone(), &files_metadata_url).await {
+        match fetch_manifest_json_timed(context.clone(), &files_metadata_url).await {
             Ok(r) => r,
             Err(e) if is_foxy_mode => {
                 // FoxyMode failed - try falling back to mod.srf (HybridMode safety net)
@@ -538,7 +543,7 @@ pub(crate) async fn fetch_mod_file_manifest(
                     "foxy_addon.json fetch failed for {}, trying mod.srf fallback: {}",
                     mod_parent.remote_path, e
                 );
-                match fetch_json_timed(context.clone(), &fallback_url).await {
+                match fetch_manifest_json_timed(context.clone(), &fallback_url).await {
                     Ok(r) => r,
                     Err(e2) => {
                         error!(
@@ -607,6 +612,7 @@ pub(crate) async fn fetch_mod_file_manifest(
         http_download_duration: http_timing.download,
         http_response_bytes: http_timing.response_bytes,
         http_parse_duration: total_parse_duration,
+        manifest_cached: http_timing.cached,
         mod_start,
     })
 }
@@ -622,6 +628,7 @@ pub(crate) async fn apply_mod_file_rows(
         http_download_duration,
         http_response_bytes,
         http_parse_duration,
+        manifest_cached,
         mod_start,
     } = staged;
     let mut all_rows_with_json = Vec::new();
@@ -770,6 +777,7 @@ pub(crate) async fn apply_mod_file_rows(
         http_download_duration,
         http_response_bytes,
         http_parse_duration,
+        manifest_cached,
         file_upsert_duration: std::time::Duration::ZERO,
         parts_persist_duration,
     }
@@ -1070,6 +1078,7 @@ mod tests {
             http_download_duration: std::time::Duration::ZERO,
             http_response_bytes: 0,
             http_parse_duration: std::time::Duration::ZERO,
+            manifest_cached: false,
             mod_start: Instant::now(),
         }
     }

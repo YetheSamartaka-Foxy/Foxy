@@ -41,6 +41,7 @@ file is the working contract.
     repository_visual_folders.json           extra_files.json
     workshop.json        reforger_addons.json
     database.db (+ sidecars, db_meta.json)   images\  extra_files\  workshop\
+    verified_hashes.json   manifest_cache\
 ```
 
 Rules:

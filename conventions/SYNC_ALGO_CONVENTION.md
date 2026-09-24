@@ -779,7 +779,15 @@ Addon stage:
 File stage:
 
 1. Fetch `mod.srf` or `foxy_addon.json` only for addons that passed the addon
-   stage as needing refresh.
+   stage as needing refresh. Manifest downloads have their own concurrency
+   (`MANIFEST_FETCH_CONCURRENCY`), not the SQLite-sized mod task limit: the
+   fetch writes nothing, and with few slots the small manifests queue behind
+   the large ones. A sync keeps each manifest in the game space's
+   `manifest_cache\` with the server's `ETag` / `Last-Modified` and sends
+   them back; a `304` reuses the body from disk, so a check after a database
+   wipe re-downloads nothing that did not change. A cached body that fails to
+   parse is dropped and fetched in full; entries unused for 180 days are
+   pruned.
 2. Upsert file rows.
 3. Preserve file local tree and content hashes only when local path identity is
    unchanged.

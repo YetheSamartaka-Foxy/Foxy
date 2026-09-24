@@ -4,6 +4,11 @@ use log::warn;
 use std::collections::HashSet;
 use std::path::Path;
 
+/// Manifest downloads in flight at once. The fetch writes nothing, so it is
+/// not bound by [`mod_task_limit`]; with few slots the small manifests queue
+/// behind the large ones and the streamed part insert starts late.
+pub(super) const MANIFEST_FETCH_CONCURRENCY: usize = 64;
+
 pub(super) fn mod_task_limit() -> usize {
     let cpu = std::thread::available_parallelism()
         .map(|n| n.get())

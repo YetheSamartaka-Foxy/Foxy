@@ -236,11 +236,12 @@ pub(crate) async fn remote_mods_with_data(
         let total_bytes: u64 = all_stats.iter().map(|s| s.bytes).sum();
         let sum_mod_durations: std::time::Duration = all_stats.iter().map(|s| s.duration).sum();
         info!(
-            "Mod recheck summary: {} mods, {} files, {} parts, {}B total, sum_of_mod_durations={:.2?}, wall_clock={:.2?}",
+            "Mod recheck summary: {} mods, {} files, {} parts, {}B total, cached_manifests={}, sum_of_mod_durations={:.2?}, wall_clock={:.2?}",
             all_stats.len(),
             total_files,
             total_parts,
             total_bytes,
+            all_stats.iter().filter(|s| s.manifest_cached).count(),
             sum_mod_durations,
             parallel_elapsed
         );

@@ -45,6 +45,7 @@ use crate::core::tasks::truncate_download_targets::{
 };
 use crate::core::utils::app_paths;
 use crate::core::utils::format::{sanitize_log_path_str, sanitize_log_url};
+use crate::core::utils::manifest_cache::ManifestCache;
 use crate::ui::types::HashIoProfilePreference;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -907,6 +908,9 @@ async fn run_repository_pipeline(
             .with_operation_id(operation_id.as_str())
             .with_verified_hash_record(VerifiedHashRecordUse::for_active_space(
                 trust_verified_hashes && mode != SyncMode::RecheckIntegrity && !force_redownload,
+            ))
+            .with_manifest_cache(ManifestCache::in_space(
+                &crate::core::game::spaces::active_game_space_dir(),
             )),
     );
     summary.push(StageEntry::new("create_context", stage.elapsed()));
@@ -969,6 +973,9 @@ async fn run_repository_pipeline(
                     .with_repository_space_shared_path(repository_space_shared_path.clone())
                     .with_verified_hash_record(VerifiedHashRecordUse::for_active_space(
                         trust_verified_hashes,
+                    ))
+                    .with_manifest_cache(ManifestCache::in_space(
+                        &crate::core::game::spaces::active_game_space_dir(),
                     )),
             );
             summary.push(

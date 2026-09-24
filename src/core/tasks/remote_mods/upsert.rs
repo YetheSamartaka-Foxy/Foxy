@@ -1,4 +1,6 @@
-use super::helpers::{join_path, mod_task_limit, resolve_mod_local_path};
+use super::helpers::{
+    MANIFEST_FETCH_CONCURRENCY, join_path, mod_task_limit, resolve_mod_local_path,
+};
 use crate::core::addon_metadata::{
     extract_addon_display_name, regenerate_addon_display_names_for_ids,
 };
@@ -419,6 +421,7 @@ pub(super) async fn process_mods_upsert(
     // Process mods
     let mod_limit = mod_task_limit();
     let mod_semaphore = Arc::new(Semaphore::new(mod_limit));
+    let fetch_semaphore = Arc::new(Semaphore::new(MANIFEST_FETCH_CONCURRENCY));
     let mut tasks = Vec::new();
 
     for mod_entry in all_mods {
@@ -431,7 +434,7 @@ pub(super) async fn process_mods_upsert(
         }
         let repository_parent_clone = repository_parent.clone();
         let context_clone = context.clone();
-        let mod_semaphore_clone = mod_semaphore.clone();
+        let fetch_semaphore = fetch_semaphore.clone();
         let previous_key = format!("{}|{}", mod_entry.remote_path, mod_entry.local_path);
         let previous_mod = previous_mods_by_key.get(&previous_key).cloned();
         let graph_state = graph_states
@@ -439,9 +442,15 @@ pub(super) async fn process_mods_upsert(
             .cloned()
             .unwrap_or_default();
         tasks.push(tokio::spawn(async move {
-            let _permit = mod_semaphore_clone.acquire_owned().await.ok();
-            let local_mod_exists =
-                crate::core::utils::profiling::fs::exists(mod_entry.local_path.trim());
+            let _permit = fetch_semaphore.acquire_owned().await.ok();
+            // Last in each condition: a cold lookup on a hard disk costs a seek, and
+            // a fresh rebuild fails the cheaper terms first.
+            let mut exists = None;
+            let mut local_mod_exists = || {
+                *exists.get_or_insert_with(|| {
+                    crate::core::utils::profiling::fs::exists(mod_entry.local_path.trim())
+                })
+            };
             let has_content_hash = !mod_entry.local_content_hash.trim().is_empty();
             let force_mod_refresh = context_clone
                 .forced_mod_refreshes
@@ -456,9 +465,9 @@ pub(super) async fn process_mods_upsert(
             });
             if remote_graph_unchanged
                 && graph_state.complete()
-                && local_mod_exists
                 && has_content_hash
                 && context_clone.recheck_level < RecheckLevel::MOD
+                && local_mod_exists()
             {
                 debug!(
                     "Up-to-date remote graph: Mod: {} (files={} parts={} local_checksum_match={} pending_forced={}).",
@@ -471,10 +480,10 @@ pub(super) async fn process_mods_upsert(
                 return None;
             }
             if mod_entry.remote_checksum == mod_entry.local_checksum
-                && local_mod_exists
                 && has_content_hash
                 && !force_mod_refresh
                 && context_clone.recheck_level < RecheckLevel::MOD
+                && local_mod_exists()
             {
                 debug!("Up-to-date: Mod: {}.", mod_entry.remote_path.clone());
                 return None;

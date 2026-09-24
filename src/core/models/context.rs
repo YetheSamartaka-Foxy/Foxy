@@ -77,6 +77,8 @@ pub(crate) struct FoxyContext {
     /// The verified-hash record this operation refreshes, and may restore from.
     pub(crate) verified_hash_record:
         Option<crate::core::tasks::calculate_hashes::VerifiedHashRecordUse>,
+    /// Where mod manifests are kept for revalidation, when this operation keeps them.
+    pub(crate) manifest_cache: Option<Arc<crate::core::utils::manifest_cache::ManifestCache>>,
 }
 
 #[derive(Clone)]
@@ -114,6 +116,7 @@ impl FoxyContext {
             pending_patch_clear_ids: Arc::new(Mutex::new(Vec::new())),
             fresh_file_content_hashes: Arc::new(Mutex::new(HashMap::new())),
             verified_hash_record: None,
+            manifest_cache: None,
         }
     }
 
@@ -345,6 +348,14 @@ impl FoxyContext {
         record: crate::core::tasks::calculate_hashes::VerifiedHashRecordUse,
     ) -> Self {
         self.verified_hash_record = Some(record);
+        self
+    }
+
+    pub(crate) fn with_manifest_cache(
+        mut self,
+        cache: crate::core::utils::manifest_cache::ManifestCache,
+    ) -> Self {
+        self.manifest_cache = Some(Arc::new(cache));
         self
     }
 
