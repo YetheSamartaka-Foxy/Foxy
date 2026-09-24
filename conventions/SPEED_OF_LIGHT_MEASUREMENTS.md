@@ -368,6 +368,11 @@ A UI frame costs about 1.0-1.5 ms of UI-thread CPU (0.4-0.6 ms of it in
 remaining record-path time is the streamed part insert (about 5.5 s of writer
 time for 433k rows), which starts as soon as the cached manifests are parsed.
 
+The HDD screen on the final build (`d8c8862`) measured 521.71 s (521.42-521.79)
+against 525.50 s, with 62.3 CPU s against 175.8 (-65%): the UI drew 33 fps,
+its thread used about 22 s instead of 91 s and the renderer about 14.5 s
+instead of 59 s; the remote phase took 0.95-1.20 s from the manifest cache.
+
 ## 1a. Current accepted baselines
 
 The earlier rows were regenerated with `foxy-testkit measurements` from the
