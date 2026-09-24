@@ -385,6 +385,24 @@ The page cache is the whole flush win; foreign keys off alone do not move it in
 the app. The streamed record-path groups insert at about 11 us a row with or
 without it, so that path stays bound by the work running beside it.
 
+### September 24 tail round
+
+| Build | Bulk force-redownload (3 runs) | Record restore (7 runs) | SSD recheck (5 runs) |
+| --- | --- | --- | --- |
+| insert and parse round end (`4672900`) | 8.96 s, sync 8.47 s | 7.31 s | 15.58 s |
+| power sample reused for 30 s, first one taken at sync start | 6.59 s, sync 6.10 s, 15.8 CPU s | 7.13 s, 8.5 CPU s | 15.38 s, 28.2 CPU s |
+
+The force-redownload tail was 27 per-mod hash batches that each hashed in 7-12 ms
+and then spent about 90 ms reading the power plan for their log line. Its 3.2 s
+`final_progress_flush` is the progress update waiting on the single writer
+behind the 3.7 s part insert, not work of its own. What is left of that tail is
+the 1.1 s tree reload after the insert and about 28 ms a batch.
+
+The streamed record-path insert is at the engine's floor: 9.4-11 us a row in the
+app against 9-10 in `bench_streamed_groups_real_manifests` on the real cached
+manifests after a table drop. Committing the last group in the background broke
+the restore (the tree reads addons through `addon_files`), so it stays inline.
+
 ## 1a. Current accepted baselines
 
 The earlier rows were regenerated with `foxy-testkit measurements` from the
