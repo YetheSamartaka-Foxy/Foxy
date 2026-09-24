@@ -340,6 +340,14 @@ back by 3 s (22.47 s). In the record case the first manifest arrives about
 2 s into the fetch and the writer then runs back to back in three groups
 (123, 122,855 and 310,085 rows), so the insert is still the tail.
 
+The HDD screen on this build measured 525.50 s (525.15-525.62, 175.8 CPU s),
+the same as the 525.44 s gate. Its per-thread line settles where the steady
+0.28 cores go: the UI thread used 91 s (65.6 user, 25.2 kernel) and the
+renderer threads 59 s, against about 20 s for the hash and runtime workers.
+Under the testkit the UI repaints at 20 fps while the driver waits, so a frame
+during a check costs about 8.7 ms of UI-thread CPU; that per-frame cost, not
+hashing, is the next CPU lever.
+
 ## 1a. Current accepted baselines
 
 The earlier rows were regenerated with `foxy-testkit measurements` from the
