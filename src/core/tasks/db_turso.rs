@@ -3572,6 +3572,92 @@ mod tests {
         }
     }
 
+    /// Benchmark (`cargo test --release bench_subfiles_bulk_knobs -- --ignored --nocapture`).
+    /// The streamed part insert with foreign keys off, in key order against the
+    /// live unique index: page cache size and rows per statement, with the
+    /// insert, commit and a following checkpoint timed apart.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "perf benchmark; run manually with --ignored --nocapture"]
+    async fn bench_subfiles_bulk_knobs() {
+        const ROWS: usize = 433_248;
+        const FILES: usize = 3_738;
+
+        fn plain_sql(n: usize) -> String {
+            let ph = vec!["(?, ?, 0, 0, ?, ?, '', ?, ?)"; n].join(", ");
+            format!(
+                "INSERT INTO subfiles (file_id, path, local_length, local_start, remote_length, \
+                 remote_start, local_checksum, remote_checksum, data_order) VALUES {ph}"
+            )
+        }
+
+        let arms: [(&str, &str, usize); 6] = [
+            ("cache16m_chunk256", "-16384", 256),
+            ("cache256m_chunk256", "-262144", 256),
+            ("cache1g_chunk256", "-1048576", 256),
+            ("cache16m_chunk64", "-16384", 64),
+            ("cache16m_chunk1024", "-16384", 1024),
+            ("cache256m_chunk1024", "-262144", 1024),
+        ];
+        for round in 0..2 {
+            for (label, cache, chunk_rows) in arms {
+                let (_dir, db) = temp_db().await;
+                let conn = connect_tuned(&db).await.unwrap();
+                conn.pragma_update("foreign_keys", "OFF").await.unwrap();
+                conn.pragma_update("cache_size", cache).await.unwrap();
+                for file in 1..=FILES {
+                    conn.execute(
+                        "INSERT INTO files (id, name, remote_path, local_path) VALUES (?, ?, ?, ?)",
+                        (file as i64, format!("f{file}"), "rp", "lp"),
+                    )
+                    .await
+                    .unwrap();
+                }
+                let per_file = (ROWS / FILES) as i64;
+                let rows: Vec<(i64, i64)> = (1..=FILES as i64)
+                    .flat_map(|file| (0..per_file).map(move |order| (file, order)))
+                    .collect();
+                let mut statements = Vec::new();
+                for chunk in rows.chunks(chunk_rows) {
+                    let mut binds = Vec::with_capacity(chunk.len() * 6);
+                    for (file_id, order) in chunk {
+                        binds.push(turso::Value::Integer(*file_id));
+                        binds.push(turso::Value::Text(format!(
+                            "a3/data_f/lod/texture_{order:05}_co.paa\u{1F}{order}"
+                        )));
+                        binds.push(turso::Value::Integer(65_536));
+                        binds.push(turso::Value::Integer(order * 65_536));
+                        binds.push(turso::Value::Text(format!(
+                            "{:064X}",
+                            (*file_id as u128) << 64 | *order as u128
+                        )));
+                        binds.push(turso::Value::Integer(*order));
+                    }
+                    statements.push((plain_sql(chunk.len()), binds));
+                }
+                let started = Instant::now();
+                conn.execute("BEGIN", ()).await.unwrap();
+                for (sql, binds) in statements {
+                    conn.execute(&sql, binds).await.unwrap();
+                }
+                let insert_s = started.elapsed().as_secs_f64();
+                let commit_started = Instant::now();
+                conn.execute("COMMIT", ()).await.unwrap();
+                let commit_s = commit_started.elapsed().as_secs_f64();
+                let checkpoint_started = Instant::now();
+                let mut checkpoint = conn
+                    .query("PRAGMA wal_checkpoint(TRUNCATE)", ())
+                    .await
+                    .unwrap();
+                while checkpoint.next().await.unwrap().is_some() {}
+                let checkpoint_s = checkpoint_started.elapsed().as_secs_f64();
+                println!(
+                    "[bench subfiles-knobs] {label:<20} round={round} insert={insert_s:.3}s \
+                     commit={commit_s:.3}s checkpoint={checkpoint_s:.3}s"
+                );
+            }
+        }
+    }
+
     /// Benchmark (`cargo test --release bench_addon_files_insert -- --ignored --nocapture`).
     /// `addon_files insert` costs ~190 µs/row on the metadata rebuild, more than
     /// twice the eight-column `files` upsert it accompanies, which points at its

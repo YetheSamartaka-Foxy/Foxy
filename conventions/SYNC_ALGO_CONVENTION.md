@@ -832,6 +832,10 @@ Deferred part rows:
   one part row. The rows stay in the deferred buffer, marked as committed, so
   the tree still takes them from memory and every flush skips them. Other
   checks hash long enough to hide the insert and keep the single flush.
+- Both insert through `FoxyDb::bulk_insert_transaction`: its own retired
+  connection with a 256 MiB page cache (the flush's whole speed-up: a 433k-row
+  transaction spills at the pooled 16 MiB) and foreign keys off, so the caller
+  checks inside the transaction that every referenced parent still exists.
 
 Scope rule:
 

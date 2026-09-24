@@ -248,24 +248,20 @@ impl FoxyDb {
     {
         // Shared barrier: coexists with other readers/writers, yields to a purge.
         let _shared = crate::core::tasks::init_database::acquire_db_shared().await;
-        turso_transaction(&self.db, label, false, false, work).await
+        turso_transaction(&self.db, label, false, false, false, work).await
     }
 
-    /// Like [`FoxyDb::transaction`] but with `foreign_keys=OFF` on its own
-    /// connection, for bulk inserts whose parents the caller verifies inside
-    /// the transaction before it commits.
-    pub(crate) async fn transaction_without_foreign_keys<F>(
-        &self,
-        label: &str,
-        work: F,
-    ) -> Result<(), DbErr>
+    /// Like [`FoxyDb::transaction`] but on its own connection with
+    /// `foreign_keys=OFF` and a large page cache, for bulk inserts whose parents
+    /// the caller verifies inside the transaction before it commits.
+    pub(crate) async fn bulk_insert_transaction<F>(&self, label: &str, work: F) -> Result<(), DbErr>
     where
         F: for<'a> Fn(
             &'a DbTxn<'a>,
         ) -> Pin<Box<dyn Future<Output = Result<(), DbErr>> + Send + 'a>>,
     {
         let _shared = crate::core::tasks::init_database::acquire_db_shared().await;
-        turso_transaction(&self.db, label, true, false, work).await
+        turso_transaction(&self.db, label, true, false, true, work).await
     }
 
     /// Like [`FoxyDb::transaction`] but for the repository purge: runs with
@@ -283,7 +279,7 @@ impl FoxyDb {
         // FK enforcement OFF: the purge deletes children before parents, so it is
         // redundant, and ON it makes Turso scan surviving sibling child tables per
         // deleted parent row (the force-redownload wedge). See `turso_transaction`.
-        turso_transaction(&self.db, label, true, true, work).await
+        turso_transaction(&self.db, label, true, true, false, work).await
     }
 }
 
@@ -496,11 +492,16 @@ fn dberr_is_retryable(e: &DbErr) -> bool {
     crate::core::tasks::db_turso::db_error_message_is_retryable(&e.to_string())
 }
 
+/// A 433k-row part insert spends about a tenth less time at 256 MiB than at
+/// the pooled 16 MiB (`bench_subfiles_bulk_knobs`); the connection is retired.
+const BULK_INSERT_PAGE_CACHE_KIB: u32 = 262_144;
+
 async fn turso_transaction<F>(
     db: &Arc<turso::Database>,
     label: &str,
     disable_foreign_keys: bool,
     exclusive: bool,
+    bulk_page_cache: bool,
     work: F,
 ) -> Result<(), DbErr>
 where
@@ -522,6 +523,15 @@ where
         // the pool with enforcement still off.
         conn.retire();
         turso_execute(&conn, "PRAGMA foreign_keys = OFF", Vec::new()).await?;
+    }
+    if bulk_page_cache {
+        conn.retire();
+        turso_execute(
+            &conn,
+            &format!("PRAGMA cache_size = -{BULK_INSERT_PAGE_CACHE_KIB}"),
+            Vec::new(),
+        )
+        .await?;
     }
     // Stage B (plan.md §5.2): under MVCC, independent write transactions run
     // concurrently via `BEGIN CONCURRENT` - write–write conflicts abort at COMMIT
