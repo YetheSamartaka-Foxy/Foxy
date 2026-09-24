@@ -351,7 +351,7 @@ impl Foxy {
             if self.ts3_plugin_scanning {
                 ui.horizontal(|ui| {
                     ui.add_space(horizontal_padding);
-                    ui.add(egui::Spinner::new().size(12.0));
+                    ui.add(crate::ui::app::PacedSpinner::new().size(12.0));
                     ui.label(
                         RichText::new(tr("Checking TS3 plugins in the background..."))
                             .italics()

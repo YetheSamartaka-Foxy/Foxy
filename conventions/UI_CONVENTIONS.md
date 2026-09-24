@@ -27,6 +27,8 @@
 
 \- For long operations, show status: progress bar, label, or spinner.
 
+\- Spinners are `crate::ui::app::PacedSpinner`, never `egui::Spinner` or `ui.spinner()`: egui's spinner requests a repaint on every paint and keeps the whole UI drawing at the display rate (223 fps measured through a repository check). A repaint that only needs to come soon goes through `crate::ui::app::request_frame_after`, because egui starts a delayed frame one predicted frame early and a short `request\_repaint\_after` otherwise fires at once. The `UI frame cost during sync` log line reports frames, UI-thread CPU and the top repaint causes for every check.
+
 \- Any clickable card/row/surface (not just buttons) must set pointer cursor on hover (`CursorIcon::PointingHand`) so interactivity is obvious.
 
 \- Context menus should use separators between logical actions.

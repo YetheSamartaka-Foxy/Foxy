@@ -590,7 +590,7 @@ impl Foxy {
                             atom_response.response.id.with("operation_status"),
                             Sense::hover(),
                         );
-                        egui::Spinner::new()
+                        crate::ui::app::PacedSpinner::new()
                             .size(status_rect.width().min(status_rect.height()))
                             .paint_at(ui, status_rect);
                         let _ = status_response.on_hover_text(tooltip);

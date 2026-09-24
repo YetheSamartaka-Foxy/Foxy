@@ -25,7 +25,7 @@ impl Foxy {
                     }
                     UpdateCheckStatus::Checking => {
                         ui.label(self.t("Checking for updates..."));
-                        ui.spinner();
+                        ui.add(crate::ui::app::PacedSpinner::new());
                     }
                     UpdateCheckStatus::Available(_) | UpdateCheckStatus::UpToDate(_) => {
                         let info_opt = match &self.app_update_status {
@@ -155,7 +155,7 @@ impl Foxy {
                                     ver_str,
                                 );
                                 ui.label(self.t("Loading..."));
-                                ui.spinner();
+                                ui.add(crate::ui::app::PacedSpinner::new());
                             }
                         });
 

@@ -133,7 +133,7 @@ impl Foxy {
                 if self.is_backup_manager_inventory_refresh_pending() {
                     ui.horizontal(|ui| {
                         ui.add_space(horizontal_padding);
-                        ui.spinner();
+                        ui.add(crate::ui::app::PacedSpinner::new());
                         ui.add_space(8.0);
                         ui.label(
                             RichText::new(self.t("Refreshing addon backup inventory..."))

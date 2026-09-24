@@ -524,7 +524,7 @@ impl Foxy {
                             .inner_margin(Margin::same(12))
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
-                                    ui.add(egui::Spinner::new().size(detail_font_size.max(16.0)));
+                                    ui.add(crate::ui::app::PacedSpinner::new().size(detail_font_size.max(16.0)));
                                     ui.add_space(8.0);
                                     ui.label(
                                         RichText::new(title.as_str())

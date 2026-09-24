@@ -245,7 +245,7 @@ impl Foxy {
                         );
                         if let Some(spinner_rect) = spinner_rect {
                             ui.ctx().request_repaint_after(Duration::from_millis(16));
-                            egui::Spinner::new().size(16.0).paint_at(ui, spinner_rect);
+                            crate::ui::app::PacedSpinner::new().size(16.0).paint_at(ui, spinner_rect);
                         }
                     }
 

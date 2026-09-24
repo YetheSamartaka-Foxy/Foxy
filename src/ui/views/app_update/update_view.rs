@@ -18,7 +18,7 @@ impl Foxy {
             }
             UpdateCheckStatus::Verifying => {
                 ui.label(self.t("Verifying installer integrity..."));
-                ui.spinner();
+                ui.add(crate::ui::app::PacedSpinner::new());
             }
             UpdateCheckStatus::ReadyToInstall { installer_path } => {
                 let path = installer_path.clone();
@@ -110,7 +110,7 @@ impl Foxy {
                 match &self.app_update_status {
                     UpdateCheckStatus::Idle | UpdateCheckStatus::Checking => {
                         ui.label(self.t("Checking for updates..."));
-                        ui.spinner();
+                        ui.add(crate::ui::app::PacedSpinner::new());
                     }
                     UpdateCheckStatus::UpToDate(_) => {
                         ui.label(
@@ -162,12 +162,12 @@ impl Foxy {
                 if self.app_update_changelogs.is_empty() && !self.app_update_changelogs_requested {
                     self.request_changelogs(&info.source_base_url, &info.manifest.versions);
                     ui.label(self.t("Loading changelog..."));
-                    ui.spinner();
+                    ui.add(crate::ui::app::PacedSpinner::new());
                 } else if self.app_update_changelogs.is_empty()
                     && !self.app_update_changelog_loading.is_empty()
                 {
                     ui.label(self.t("Loading changelog..."));
-                    ui.spinner();
+                    ui.add(crate::ui::app::PacedSpinner::new());
                 } else if self.app_update_changelogs.is_empty() {
                     ui.label(self.t("Changelog not available."));
                 } else {

@@ -1327,7 +1327,7 @@ impl Foxy {
                     // The address is checked against the server off the UI
                     // thread; show progress so the dialog doesn't look frozen.
                     if importing {
-                        ui.add(egui::Spinner::new());
+                        ui.add(crate::ui::app::PacedSpinner::new());
                     }
                 });
             });

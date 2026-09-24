@@ -161,7 +161,7 @@ impl Foxy {
             match &self.app_update_status {
                 crate::core::tasks::app_update::UpdateCheckStatus::Checking => {
                     ui.label(tr("Checking..."));
-                    ui.spinner();
+                    ui.add(crate::ui::app::PacedSpinner::new());
                 }
                 crate::core::tasks::app_update::UpdateCheckStatus::UpToDate(_) => {
                     ui.label(RichText::new(tr("Up to date")).color(self.color_success()));

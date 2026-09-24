@@ -3537,7 +3537,8 @@ pub fn spawn_repository_sync(
     if let Some(repaint_ctx) = repaint_ctx {
         let mut repaint_rx = progress_tx.subscribe();
         std::thread::spawn(move || {
-            const REPAINT_THROTTLE: Duration = Duration::from_millis(16);
+            // The progress banner redraws at the spinner's pace; faster only costs frames.
+            const REPAINT_THROTTLE: Duration = crate::ui::app::PROGRESS_FRAME_INTERVAL;
             let mut last_repaint = Instant::now() - REPAINT_THROTTLE;
 
             loop {
@@ -3545,11 +3546,12 @@ pub fn spawn_repository_sync(
                     Ok(_) => {
                         let now = Instant::now();
                         let elapsed = now.duration_since(last_repaint);
-                        if elapsed >= REPAINT_THROTTLE {
-                            repaint_ctx.request_repaint();
+                        // Through the pacing helper even when due: a plain immediate
+                        // request makes egui draw two frames.
+                        let wait = REPAINT_THROTTLE.saturating_sub(elapsed);
+                        crate::ui::app::request_frame_after(&repaint_ctx, wait);
+                        if wait.is_zero() {
                             last_repaint = now;
-                        } else {
-                            repaint_ctx.request_repaint_after(REPAINT_THROTTLE - elapsed);
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,

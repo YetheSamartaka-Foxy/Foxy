@@ -420,6 +420,8 @@ impl Foxy {
             startup_pending_restore_worker: None,
             startup_repository_layout_logged: false,
             sync_started_at: None,
+            frame_cost: Default::default(),
+            frame_cost_at_sync_start: None,
             startup_recheck_queue: VecDeque::new(),
             repository_space_sync_queue: VecDeque::new(),
             repository_visual_folder_sync_queue: VecDeque::new(),

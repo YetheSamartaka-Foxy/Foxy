@@ -168,6 +168,27 @@ pub(crate) fn snapshot() -> ThreadCpuSnapshot {
     ThreadCpuSnapshot::default()
 }
 
+/// User plus kernel CPU the calling thread has used.
+#[cfg(windows)]
+pub(crate) fn current_thread_cpu() -> Option<Duration> {
+    use winapi::shared::minwindef::FILETIME;
+    use winapi::um::processthreadsapi::{GetCurrentThread, GetThreadTimes};
+
+    let ticks =
+        |time: &FILETIME| (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime);
+    unsafe {
+        let mut times: [FILETIME; 4] = std::mem::zeroed();
+        let [created, exited, kernel, user] = &mut times;
+        (GetThreadTimes(GetCurrentThread(), created, exited, kernel, user) != 0)
+            .then(|| Duration::from_nanos((ticks(&times[2]) + ticks(&times[3])) * 100))
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn current_thread_cpu() -> Option<Duration> {
+    None
+}
+
 /// The thread's description, looked up at runtime because it only exists on
 /// Windows 10 1607 and later.
 #[cfg(windows)]
@@ -276,6 +297,17 @@ mod tests {
         let (groups, _) = breakdown(&before, &after);
         assert_eq!(groups[0].name, "new");
         assert_eq!(groups[0].cpu, cpu(40, 0));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_current_thread_cpu_grows_with_work() {
+        let before = current_thread_cpu().unwrap();
+        let started = std::time::Instant::now();
+        while started.elapsed() < Duration::from_millis(40) {
+            std::hint::black_box(0u64);
+        }
+        assert!(current_thread_cpu().unwrap() > before);
     }
 
     #[cfg(windows)]

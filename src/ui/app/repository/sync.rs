@@ -286,6 +286,7 @@ impl Foxy {
             }
             self.memory_diagnostics_last_logged_stage_key = None;
             self.sync_started_at = Some(Instant::now());
+            self.frame_cost_at_sync_start = Some(self.frame_cost.clone());
             self.capture_memory_diagnostics_snapshot(
                 format!("sync-start {:?} {}", mode, repo.name),
                 true,

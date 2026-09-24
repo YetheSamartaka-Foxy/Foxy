@@ -12,6 +12,7 @@ mod runtime;
 mod scheduling;
 mod state;
 mod ui_helpers;
+pub(crate) use ui_helpers::spinner::{PROGRESS_FRAME_INTERVAL, PacedSpinner, request_frame_after};
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -344,6 +345,8 @@ pub struct Foxy {
     pub backup_manager_notice: Option<BackupManagerNotice>,
     pub backup_manager_confirm_action: Option<BackupManagerConfirmAction>,
     pub sync_started_at: Option<Instant>,
+    pub frame_cost: crate::ui::app::runtime::frame_cost::FrameCostTotals,
+    pub frame_cost_at_sync_start: Option<crate::ui::app::runtime::frame_cost::FrameCostTotals>,
     pub new_profile_name: String,
     pub show_add_profile_window: bool,
     pub show_rename_profile_window: bool,

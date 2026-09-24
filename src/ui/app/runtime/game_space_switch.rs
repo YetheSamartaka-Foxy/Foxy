@@ -446,6 +446,7 @@ impl Foxy {
         self.backend_progress_rx = None;
         self.backend_worker = None;
         self.sync_started_at = None;
+        self.frame_cost_at_sync_start = None;
         self.syncing_repository = None;
         self.scheduler_active_run = None;
         self.scheduler_pending_post_action = None;
@@ -567,6 +568,7 @@ const APP_GLOBAL_FOXY_FIELDS: &[&str] = &[
     "current_about_tab",
     "fps_ema",
     "frame_intervals_ms",
+    "frame_cost",
     "last_applied_palette",
     "cached_color32",
     "last_font_image_size",

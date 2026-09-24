@@ -1045,6 +1045,17 @@ impl Foxy {
                                 "Total repository sync duration: {:.2}s",
                                 start_time.elapsed().as_secs_f64()
                             );
+                            if let Some(frames_at_start) = self.frame_cost_at_sync_start.take() {
+                                info!(
+                                    "UI frame cost during sync: mode={:?} {}",
+                                    last_mode,
+                                    super::frame_cost::describe(
+                                        &frames_at_start,
+                                        &self.frame_cost,
+                                        start_time.elapsed()
+                                    )
+                                );
+                            }
                             self.sync_started_at = None;
                         }
                         self.capture_memory_diagnostics_snapshot(

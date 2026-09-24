@@ -1,4 +1,5 @@
 mod background_tasks;
+pub(crate) mod frame_cost;
 mod game_space_switch;
 mod keyboard_focus;
 mod progress_events;

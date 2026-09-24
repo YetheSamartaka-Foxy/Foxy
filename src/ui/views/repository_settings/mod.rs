@@ -477,7 +477,7 @@ impl Foxy {
                         .filter(|status| status.repo_index == repo_index)
                     {
                         ui.horizontal(|ui| {
-                            ui.spinner();
+                            ui.add(crate::ui::app::PacedSpinner::new());
                             ui.label(status.status_text.clone());
                         });
                         ui.separator();
@@ -501,7 +501,7 @@ impl Foxy {
                         let repo = &self.repository_view_state.repositories[repo_index];
                         if self.is_repository_db_wipe_pending(&repo.address) {
                             ui.horizontal(|ui| {
-                                ui.spinner();
+                                ui.add(crate::ui::app::PacedSpinner::new());
                                 if self.is_repository_force_redownload_pending(&repo.address) {
                                     ui.label(tr("Force redownload repository"));
                                 } else {
@@ -511,7 +511,7 @@ impl Foxy {
                             ui.separator();
                         } else if self.is_addon_force_redownload_pending_for_repo(&repo.path) {
                             ui.horizontal(|ui| {
-                                ui.spinner();
+                                ui.add(crate::ui::app::PacedSpinner::new());
                                 ui.label(tr(
                                     "Checking repository connection before force redownload",
                                 ));

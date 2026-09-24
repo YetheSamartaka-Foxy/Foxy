@@ -9,12 +9,16 @@ use log::{error, info, warn};
 
 use crate::core::api::SyncMode;
 use crate::ui::app::debug_modals::DebugModal;
+use crate::ui::app::runtime::frame_cost::{FrameSection, SectionTimer};
 use crate::ui::app::{Foxy, FoxyView};
 use crate::ui::tray::{TrayEvent, TrayManager};
 
 /// Frames kept for the stall percentiles: a few seconds at a probe-driven
 /// repaint rate.
 const FRAME_INTERVAL_WINDOW: usize = 240;
+
+/// How soon a frame follows a state change the UI flagged with `needs_repaint`.
+const STATE_CHANGE_REPAINT_DELAY: Duration = Duration::from_millis(16);
 
 /// `(p50, p95, max)` of the recent frame intervals in milliseconds.
 pub(crate) fn frame_interval_stats(intervals: &VecDeque<f32>) -> Option<(f32, f32, f32)> {
@@ -215,6 +219,12 @@ impl Foxy {
 
     pub fn update(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
         const CLOSE_FORCE_EXIT_TIMEOUT: Duration = Duration::from_secs(2);
+        let repaint_causes = ui.ctx().repaint_causes();
+        self.frame_cost.begin_frame(
+            crate::core::utils::thread_cpu::current_thread_cpu(),
+            repaint_causes.iter().map(|cause| (cause.file, cause.line)),
+        );
+        let polls = SectionTimer::start(FrameSection::Polls);
         let ctx = ui.ctx().clone();
         self.repaint_ctx = Some(ctx.clone());
 
@@ -361,7 +371,9 @@ impl Foxy {
         self.poll_pending_join_status(&ctx);
 
         if self.needs_repaint {
-            ctx.request_repaint();
+            // One 60 Hz frame later, not at once: while progress events keep
+            // arriving, an immediate repaint chains frames at the display rate.
+            crate::ui::app::request_frame_after(&ctx, STATE_CHANGE_REPAINT_DELAY);
             self.needs_repaint = false;
         } else if let Some(repaint_interval) = self.next_visible_repaint_interval() {
             ctx.request_repaint_after(repaint_interval);
@@ -403,12 +415,16 @@ impl Foxy {
             self.render_memory_diagnostics_window(&ctx);
         }
 
+        polls.stop(&mut self.frame_cost);
         let panel_frame = Frame {
             fill: ctx.global_style().visuals.window_fill(),
             ..Default::default()
         };
         CentralPanel::default().frame(panel_frame).show(ui, |ui| {
+            let main_view = SectionTimer::start(FrameSection::MainView);
             self.render_main_view(ui, frame);
+            main_view.stop(&mut self.frame_cost);
+            let content = SectionTimer::start(FrameSection::Content);
             ui.push_id(
                 (
                     "main_content_area",
@@ -460,6 +476,7 @@ impl Foxy {
                     }
                 },
             );
+            content.stop(&mut self.frame_cost);
             let can_use_custom_resize = !self.main_view_state.use_window_decorations
                 && ctx.input(|i| {
                     let viewport = i.viewport();
@@ -479,6 +496,7 @@ impl Foxy {
             ));
         }
 
+        let overlays = SectionTimer::start(FrameSection::Overlays);
         self.render_ui_toast(&ctx);
         self.render_renderer_fallback_notice(&ctx);
         self.render_storage_compat_notice(&ctx);
@@ -487,6 +505,7 @@ impl Foxy {
         self.render_app_update_prompt(&ctx);
         self.render_benchmark_save_prompt(&ctx);
         self.render_scheduled_post_action_overlay(&ctx);
+        overlays.stop(&mut self.frame_cost);
 
         if !self.startup_frame_rendered {
             self.startup_frame_rendered = true;

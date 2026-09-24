@@ -194,7 +194,7 @@ impl Foxy {
 
     fn render_workshop_state_badge(&mut self, ui: &mut Ui) {
         if let Some(busy) = self.workshop_view_state.busy_label {
-            ui.spinner();
+            ui.add(crate::ui::app::PacedSpinner::new());
             ui.label(RichText::new(tr(busy)).color(self.color_text_dim()));
             return;
         }
