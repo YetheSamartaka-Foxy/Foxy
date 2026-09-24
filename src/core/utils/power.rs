@@ -71,6 +71,34 @@ pub fn sample() -> PowerStatus {
     PowerStatus::default()
 }
 
+/// A [`sample`] at most 30 s old. Reading the power plan takes about 0.1 s on
+/// Windows, which callers that run once per hash batch cannot pay.
+pub fn recent_sample() -> PowerStatus {
+    const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30);
+    static RECENT: std::sync::Mutex<Option<(std::time::Instant, PowerStatus)>> =
+        std::sync::Mutex::new(None);
+    reuse_or_sample(&RECENT, MAX_AGE, std::time::Instant::now(), sample)
+}
+
+fn reuse_or_sample(
+    cache: &std::sync::Mutex<Option<(std::time::Instant, PowerStatus)>>,
+    max_age: std::time::Duration,
+    now: std::time::Instant,
+    sample: impl FnOnce() -> PowerStatus,
+) -> PowerStatus {
+    let mut cached = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some((taken, status)) = cached.as_ref()
+        && now.saturating_duration_since(*taken) <= max_age
+    {
+        return status.clone();
+    }
+    let status = sample();
+    *cached = Some((now, status.clone()));
+    status
+}
+
 #[cfg(windows)]
 fn active_plan_name() -> Option<String> {
     use winapi::shared::guiddef::GUID;
@@ -183,6 +211,30 @@ mod tests {
         assert_eq!(
             status.summary(),
             "source=battery battery=41% battery_saver=on plan=\"Balanced\" mode=best-efficiency"
+        );
+    }
+
+    #[test]
+    fn a_recent_sample_is_reused_until_it_is_too_old() {
+        let cache = std::sync::Mutex::new(None);
+        let max_age = std::time::Duration::from_secs(30);
+        let start = std::time::Instant::now();
+        let mut samples = 0;
+        let mut take = |now| {
+            reuse_or_sample(&cache, max_age, now, || {
+                samples += 1;
+                PowerStatus {
+                    source: format!("s{samples}"),
+                    ..Default::default()
+                }
+            })
+            .source
+        };
+        assert_eq!(take(start), "s1");
+        assert_eq!(take(start + max_age), "s1");
+        assert_eq!(
+            take(start + max_age + std::time::Duration::from_millis(1)),
+            "s2"
         );
     }
 

@@ -1673,7 +1673,7 @@ async fn hash_jobs_with_profile(
     let storage_class = detect_hash_storage_class(&jobs);
     info!(
         "Hash run power: {}",
-        crate::core::utils::power::sample().summary()
+        crate::core::utils::power::recent_sample().summary()
     );
     super::storage_probe::log_storage_read_measurement(
         context,

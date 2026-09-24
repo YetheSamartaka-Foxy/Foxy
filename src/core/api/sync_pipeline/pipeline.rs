@@ -836,6 +836,8 @@ async fn run_repository_pipeline(
     let overall_start = std::time::Instant::now();
     crate::core::utils::profiling::phase("pre-download");
     ensure_logger();
+    // The hash pass logs the power state; take the slow first sample off its path.
+    tokio::task::spawn_blocking(crate::core::utils::power::recent_sample);
     info!(
         "Starting sync: op={} mode={:?} repo={} path={}",
         operation_id,
