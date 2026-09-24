@@ -373,6 +373,18 @@ against 525.50 s, with 62.3 CPU s against 175.8 (-65%): the UI drew 33 fps,
 its thread used about 22 s instead of 91 s and the renderer about 14.5 s
 instead of 59 s; the remote phase took 0.95-1.20 s from the manifest cache.
 
+### September 24 insert and parse round
+
+| Build | Bulk force-redownload (3 runs) | Record restore (7 runs) | SSD recheck (5 runs) |
+| --- | --- | --- | --- |
+| speed-first round end (`4896e3f`) | 9.73 s, flush 4.35-4.53 s, 19.2 CPU s | 7.03 s, 9.4 CPU s | 15.57 s, 31.3 CPU s |
+| typed manifest parse, bulk insert on its own connection with a 256 MiB page cache and foreign keys off | 8.96 s, flush 3.66-3.72 s, 16.7 CPU s | 7.31 s (6.66-7.52), 8.5 CPU s | 15.58 s, 28.6 CPU s |
+| same, page cache left at 16 MiB | 10.02 s, flush 4.34-4.64 s | 7.09 s (6.87-7.38), 8.8 CPU s | |
+
+The page cache is the whole flush win; foreign keys off alone do not move it in
+the app. The streamed record-path groups insert at about 11 us a row with or
+without it, so that path stays bound by the work running beside it.
+
 ## 1a. Current accepted baselines
 
 The earlier rows were regenerated with `foxy-testkit measurements` from the
