@@ -242,6 +242,33 @@ impl Foxy {
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let toggle_button_size = self.activity_log_toggle_button_size();
+                        if let Some(tfr_logo) = &self.tfr_logo {
+                            let logo_size = Vec2::splat(toggle_button_size.y);
+                            let tfr_logo_button = ui.add(
+                                egui::Image::new(tfr_logo)
+                                    .fit_to_exact_size(logo_size)
+                                    .sense(Sense::click()),
+                            );
+                            let tfr_thanks =
+                                self.t("Special thanks to the Task Force Roddenberry community");
+                            tfr_logo_button.widget_info(|| {
+                                egui::WidgetInfo::labeled(
+                                    egui::WidgetType::Link,
+                                    true,
+                                    tfr_thanks.clone(),
+                                )
+                            });
+                            if tfr_logo_button.hovered() {
+                                ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                            }
+                            if tfr_logo_button.on_hover_text(tfr_thanks).clicked() {
+                                info!("Opening TFR website from footer logo");
+                                ui.ctx()
+                                    .open_url(egui::OpenUrl::new_tab("https://www.tfrod.cz/"));
+                            }
+                            ui.separator();
+                        }
+
                         let toggle_log_button = ui.add_sized(
                             toggle_button_size,
                             Button::new(

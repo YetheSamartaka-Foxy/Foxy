@@ -67,6 +67,7 @@ impl QuickScanProgressState {
 
 pub struct Foxy {
     pub app_icon: Option<egui::TextureHandle>,
+    pub tfr_logo: Option<egui::TextureHandle>,
     pub default_repo_image: Option<egui::TextureHandle>,
     pub game_logo_textures: crate::ui::game_logos::GameLogoTextures,
     pub(crate) repaint_ctx: Option<egui::Context>,
@@ -510,6 +511,7 @@ pub struct Foxy {
     pub tracked_icon_texture_bytes: HashMap<String, usize>,
     pub tracked_repo_image_texture_bytes: HashMap<String, usize>,
     pub app_icon_texture_bytes: usize,
+    pub tfr_logo_texture_bytes: usize,
     pub default_repo_image_texture_bytes: usize,
     pub last_applied_palette: Option<palette::PaletteColors>,
     pub cached_color32: Option<CachedPaletteColor32>,

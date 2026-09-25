@@ -550,6 +550,8 @@ const APP_GLOBAL_FOXY_FIELDS: &[&str] = &[
     // Window, rendering, and view chrome.
     "app_icon",
     "app_icon_texture_bytes",
+    "tfr_logo",
+    "tfr_logo_texture_bytes",
     "default_repo_image",
     "default_repo_image_texture_bytes",
     "game_logo_textures",

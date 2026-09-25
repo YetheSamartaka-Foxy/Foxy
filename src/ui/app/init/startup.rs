@@ -189,6 +189,7 @@ impl Foxy {
         });
         let mut app = Self {
             app_icon: None,
+            tfr_logo: None,
             default_repo_image: None,
             game_logo_textures: Default::default(),
             repaint_ctx: Some(cc.egui_ctx.clone()),
@@ -518,6 +519,7 @@ impl Foxy {
             tracked_icon_texture_bytes: HashMap::new(),
             tracked_repo_image_texture_bytes: HashMap::new(),
             app_icon_texture_bytes: 0,
+            tfr_logo_texture_bytes: 0,
             default_repo_image_texture_bytes: 0,
             last_applied_palette: None,
             cached_color32: None,
@@ -663,6 +665,24 @@ impl Foxy {
             app.app_icon = Some(texture);
         } else {
             log::error!("Failed to load embedded icon.");
+        }
+        let tfr_logo_bytes = include_bytes!("../../icons/tfr_logo.png");
+        if let Ok(image) = image::load_from_memory(tfr_logo_bytes).map(|img| img.to_rgba8()) {
+            let (logo_width, logo_height) = image.dimensions();
+            app.tfr_logo_texture_bytes = (logo_width as usize)
+                .saturating_mul(logo_height as usize)
+                .saturating_mul(4);
+            let texture = cc.egui_ctx.load_texture(
+                "tfr_logo",
+                egui::ColorImage::from_rgba_unmultiplied(
+                    [logo_width as usize, logo_height as usize],
+                    &image,
+                ),
+                egui::TextureOptions::LINEAR,
+            );
+            app.tfr_logo = Some(texture);
+        } else {
+            log::error!("Failed to load embedded TFR logo.");
         }
         let repo_placeholder_bytes = include_bytes!("../../repo-image-placeholder.png");
         if let Ok(image) = image::load_from_memory(repo_placeholder_bytes).map(|img| img.to_rgba8())
