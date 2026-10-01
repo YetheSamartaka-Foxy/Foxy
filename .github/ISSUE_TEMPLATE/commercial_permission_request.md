@@ -1,6 +1,6 @@
 ---
 name: Commercial Permission Request
-about: Request commercial permission under the Foxy Community Source License 1.0.0
+about: Request commercial permission under the Foxy Community Source License 1.1.0
 title: "[Commercial Permission Request]"
 labels: licensing, commercial
 assignees: ""

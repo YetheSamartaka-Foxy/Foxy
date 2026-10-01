@@ -466,6 +466,6 @@ Bohemia Interactive, ARMA, and all associated logos and designs are trademarks o
 
 ## License
 
-Foxy is public source-available software under the [Foxy Community Source License 1.0.0](LICENSE). It is not an OSI open-source license. You may read the source, run Foxy for noncommercial purposes, make private noncommercial changes, and create contribution-focused forks, but commercial use and independent public distributions require separate permission while the official project is actively maintained.
+Foxy is public source-available software under the [Foxy Community Source License 1.1.0](LICENSE). It is not an OSI open-source license. You may read the source, run Foxy for noncommercial purposes, make private noncommercial changes, and create contribution-focused forks, but commercial use and independent public distributions require separate permission while the official project is actively maintained.
 
 For a practical summary of what is allowed, see [LICENSING.md](LICENSING.md).

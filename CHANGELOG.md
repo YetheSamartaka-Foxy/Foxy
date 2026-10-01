@@ -13,6 +13,7 @@
 - Application settings are now split into app-global settings and per-game-space settings, and repositories, spaces, caches, and the database moved under `games/<game space>/`. Existing configuration is migrated automatically on first launch, and the previous files are kept as `.pre-gamespaces.bak` copies so the change can be rolled back.
 - Scheduled jobs, cleanup folders, additional search folders, and pending update state now belong to the game space they were created in rather than being shared by every game.
 - PBO parsing is now shared between the app and the repository generator, and `.pak` (PAC1) archives are parsed for per-entry delta sync and verification.
+- Contributing is simpler: the contribution terms are now part of the Foxy Community Source License 1.1.0, and opening a pull request or committing to Foxy accepts them. The separate CLA, the pull request checkboxes, and the commit sign-off requirement and check are gone.
 
 ## Fixed
 - On Windows, text fields sometimes hid the blinking text cursor and every keystroke played the Windows error sound until you switched to another window and back. Foxy now takes back keyboard focus on its own.

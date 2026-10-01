@@ -1,6 +1,6 @@
 # Contributing to Foxy
 
-Foxy is source-available under the Foxy Community Source License 1.0.0.
+Foxy is source-available under the Foxy Community Source License 1.1.0.
 
 The project is designed to be contribution-friendly while actively maintained, and community-continuable if it becomes inactive.
 
@@ -29,24 +29,13 @@ Commercial use requires separate written permission from the Project Steward.
 
 ## Contribution terms
 
-By submitting a pull request, patch, issue text intended for inclusion, documentation, test, asset, design, or other contribution to Foxy, you agree to `CLA.md`.
+The contribution terms are part of the license: see `LICENSE` Section 8. Opening a pull request, pushing commits to a pull request, or committing to the official repository accepts them for that contribution. There is nothing to sign, no checkbox to tick, and nothing to add to your commits. If you do not agree, do not submit.
 
-Do not submit a contribution if you cannot grant the rights in `CLA.md`.
+In short, you keep ownership of your contribution, and you give the project the rights it needs to maintain it, relicense it, and keep it available through community continuation and maintainer succession.
 
 If your employer, client, school, or another organization may own your work, get permission before submitting it.
 
 If your contribution includes third-party material, clearly identify the source and license.
-
-### Accepting the CLA (required)
-
-Acceptance of `CLA.md` is required before a pull request can be merged. You accept it by doing both of the following:
-
-1. checking the Contributor License Agreement checkbox in the pull request template; and
-2. signing off every commit under the Developer Certificate of Origin with `git commit -s`, which adds a `Signed-off-by` line.
-
-If you forget the sign-off, you can add it to the latest commit with `git commit --amend -s` and force-push your branch, or sign off a range of commits with `git rebase --signoff`.
-
-The sign-off is enforced automatically: the **DCO** status check runs on every pull request and verifies that each commit has a `Signed-off-by` line matching its author. A pull request cannot be merged until that check passes, so expect a failing check if any commit is unsigned, and use the commands above to fix it.
 
 ## Pull requests
 
@@ -64,7 +53,7 @@ If there has been no Meaningful Update for 24 consecutive months, anyone may ope
 
 The maintainer then has 90 days to provide a Valid Maintainer Response as defined in `LICENSE`.
 
-If no Valid Maintainer Response is completed in time, the community may continue Foxy under the same Foxy Community Source License 1.0.0. The project does not convert to Apache-2.0, MIT, or another license.
+If no Valid Maintainer Response is completed in time, the community may continue Foxy under the same Foxy Community Source License 1.1.0. The project does not convert to Apache-2.0, MIT, or another license.
 
 ## Maintainer return
 

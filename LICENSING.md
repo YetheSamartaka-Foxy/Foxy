@@ -1,6 +1,6 @@
 # Licensing and Redistribution - Foxy
 
-Foxy is licensed under the Foxy Community Source License 1.0.0.
+Foxy is licensed under the Foxy Community Source License 1.1.0.
 
 Copyright (c) 2026 Yethe Samartaka
 
@@ -12,7 +12,7 @@ Foxy is not all-rights-reserved source code. People may read it, run it for nonc
 
 Foxy is also not an open-fork project while it is actively maintained. Independent public distributions, package feeds, installers, rebrands, hosted services, and separately maintained public branches are not allowed while the official project is active, unless an official maintainer permits them through GitHub Issues.
 
-If the official project becomes inactive, the community can continue Foxy under the same Foxy Community Source License 1.0.0. Foxy does not convert to Apache-2.0, MIT, or another license.
+If the official project becomes inactive, the community can continue Foxy under the same Foxy Community Source License 1.1.0. Foxy does not convert to Apache-2.0, MIT, or another license.
 
 ## 2. Why this license exists
 
@@ -65,7 +65,7 @@ A vague roadmap or promise is not enough.
 
 If no Valid Maintainer Response is completed within 90 days, a Community Continuation Event occurs.
 
-After that event, the community may continue Foxy under the Foxy Community Source License 1.0.0. The license does not change to Apache-2.0, MIT, or another license.
+After that event, the community may continue Foxy under the Foxy Community Source License 1.1.0. The license does not change to Apache-2.0, MIT, or another license.
 
 ## 5. Maintainer return and succession
 
@@ -87,13 +87,13 @@ A returning maintainer cannot revoke rights that already became available under 
 
 Contributors retain copyright in their contributions, but accepted contributions require rights broad enough for Foxy to be maintained, commercially licensed, continued by the community, and transferred through maintainer succession.
 
-For that reason, contributions are accepted under `CLA.md`.
+For that reason, the contribution terms are part of the license itself (`LICENSE` Section 8). Opening a pull request or committing to the official repository accepts them; nothing needs to be signed.
 
 A departing contributor should not be able to shut down the project by revoking rights to already accepted contributions.
 
 ## 7. Commercial permission
 
-Commercial use is not granted by the Foxy Community Source License 1.0.0.
+Commercial use is not granted by the Foxy Community Source License 1.1.0.
 
 Commercial permission requests must begin as public GitHub issues titled:
 
@@ -105,7 +105,7 @@ The Project Steward may then decline, discuss publicly, or designate another cha
 
 ## 8. Governing law
 
-The Foxy Community Source License 1.0.0 and the Foxy Contributor License Agreement 1.0.0 are governed by the laws of the Czech Republic, consistent with Regulation (EC) No 593/2008 (Rome I), with the courts of the Czech Republic having jurisdiction subject to mandatory rules. This choice does not remove mandatory consumer or other non-derogable protections under European Union law or a person's country of habitual residence. See `LICENSE` Section 15 and `CLA.md` Section 10.
+The Foxy Community Source License 1.1.0, including its contribution terms, is governed by the laws of the Czech Republic, consistent with Regulation (EC) No 593/2008 (Rome I), with the courts of the Czech Republic having jurisdiction subject to mandatory rules. This choice does not remove mandatory consumer or other non-derogable protections under European Union law or a person's country of habitual residence. See `LICENSE` Section 15.
 
 ## 9. Third-party licenses
 
@@ -137,7 +137,6 @@ Recommended root files:
 
 ```text
 LICENSE
-CLA.md
 CONTRIBUTING.md
 LICENSING.md
 THIRD-PARTY-LICENSES.txt
