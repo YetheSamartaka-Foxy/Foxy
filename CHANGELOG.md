@@ -1,22 +1,82 @@
 ﻿# 1.2.0
 ## Added
-- Game spaces: Foxy now manages more than one game. Each game space is a separate workspace with its own settings, repositories, repository spaces, mod stores, and database, switchable from the sidebar without restarting the app and reopened automatically on the next launch.
-- Total War: WARHAMMER III support, including install detection, Steam Workshop pack discovery, the `used_mods.txt` mods manifest, and campaign-save launch options.
-- Arma Reforger support, including install detection, managed Workshop addon folders by GUID, addon freezing, and `-addons`/`-addonsDir` launch generation.
-- Steam Workshop management for Steam-based games: add, import by id, URL or collection, enable/disable, remove with optional data cleanup, and version freezing that pins an item against Steam updates.
-- Managed extra files per game space, so config folders and other non-mod files can be stored in Foxy and applied to the game directory before launch.
-- Portable `.foxypack` config packs that export a game space's repositories, Workshop ids, profiles, and extra files, and import them on another machine. Packs reference mods by id and never carry mod payloads.
-- New CLI commands for the above: `foxy game list|use|create|remove|launch`, `foxy workshop ...`, `foxy config export|import`, and `foxy config extra-file ...`, all with the usual `--json`, `--dry-run`, and `--yes` support.
-- A per-game-space settings screen, reachable from the sidebar, that can also edit a game space that is not currently open.
+- Game spaces: Foxy can now manage more than one game. Each game gets its own space with separate settings, repositories, and mods.
+- Switch between game spaces from the sidebar without restarting Foxy. The last one you used opens on the next launch.
+- A game space overview shows your repositories, mods on disk, last launch and update times, and recent benchmarks.
+- Each game space has its own settings screen, and you can edit a game space even when it is not open.
+- Total War: WARHAMMER III support: Foxy finds the game, syncs repositories of `.pack` mods, picks up Steam Workshop mods, and launches with your mod list.
+- Arma Reforger support: Foxy finds the game, syncs repositories, launches with your enabled addons, and can join a server directly.
+- A Generic game option for other Steam games, where you set the game executable, launch options, and mod list file yourself.
+- A Steam Workshop tab in the game space settings to add, enable, disable, reorder, and remove Workshop mods.
+- Freeze a Workshop mod to keep it at its current version, even when the author updates it on Steam.
+- Share your Workshop setup with friends using a share code that other mod managers also understand.
+- Compare a friend's share code with your setup and download only the mods you are missing.
+- A setup checksum lets you and your friends quickly confirm you are running the same mods in the same order.
+- Send and receive `.foxyshare` bundles that include the mod list and frozen mod copies.
+- Extra files: keep config folders and other non-mod files in Foxy and copy them into the game folder before each launch.
+- Config packs (`.foxypack`) move a game space's repositories, Workshop mods, profiles, and extra files to another computer. They never include the mod files themselves.
+- Benchmarks: save how long a recheck, update, or redownload took, with charts for CPU, memory, disk, and download speed.
+- Search, filter, add notes to, favourite, hide, and compare benchmarks side by side, or export one as a ZIP to share with support.
+- When joining an Arma 3 server, Foxy offers to turn on the Creator DLCs the server needs and turn off the ones it does not use.
+- Foxy warns at startup when a folder it uses is on a drive that can cause problems, such as FAT32 or exFAT drives, network shares, RAM disks, or read-only drives.
+- Foxy stops an update before it starts when the drive does not have enough free space, and tells you how much space is missing.
+- After a database reset, Foxy skips reading files it already checked and that have not changed since. You can turn this off in the settings.
+- A new Extended diagnostics logging setting writes more detail to the log files, which helps when reporting performance problems.
+- Foxy now shows a prompt at startup when a new version is available, with a more visible update badge and download button.
+- `foxy version` now shows the exact build commit.
+- New command-line commands for game spaces, Steam Workshop mods, Arma Reforger addons, extra files, and config packs.
+- Server tool: `create-space` builds every repository of a repository space and its `repository_space.json` in one go.
+- Server tool: mods shared by several repositories in a space can be stored only once on disk.
+- Server tool: repositories can list the Creator DLCs they use and mark mods that only players need.
+- Server tool: the server `-mod=` line is printed after each build and saved to `server_mod_line.txt`.
+- Server tool: `modLineFiles` updates your server start scripts with the new mod line automatically.
+- Server tool: collect all `.bikey` keys into one folder, or one keys folder per repository.
+- Server tool: optional `optionals` folders can be left out of published mods.
+- Server tool: Arma Reforger repositories and an export of the mod list for a Reforger dedicated server.
+- Server tool: new `validate`, `verify`, `diff`, and `audit-keys` commands to check repositories before and after publishing.
+- Server tool: preview a build with `--dry-run`, rebuild only changed mods with `--incremental`, and publish safely with `--atomic`.
 
 ## Changed
-- Application settings are now split into app-global settings and per-game-space settings, and repositories, spaces, caches, and the database moved under `games/<game space>/`. Existing configuration is migrated automatically on first launch, and the previous files are kept as `.pre-gamespaces.bak` copies so the change can be rolled back.
-- Scheduled jobs, cleanup folders, additional search folders, and pending update state now belong to the game space they were created in rather than being shared by every game.
-- PBO parsing is now shared between the app and the repository generator, and `.pak` (PAC1) archives are parsed for per-entry delta sync and verification.
+- Your existing setup moves into an Arma 3 game space automatically on first launch. Backup copies of the old files are kept, ending in `.pre-gamespaces.bak`.
+- Settings are now split into app-wide settings (like language and backups) and per-game settings (like the game folder and launch options).
+- Scheduled jobs, cleanup folders, extra search folders, and pending updates now belong to one game space instead of being shared by all games.
+- Arma Reforger `.pak` files can now be updated in small parts instead of being downloaded whole.
+- Foxy no longer needs administrator rights, and the Windows installer now installs for your user account only by default.
+- Games, the Eden Editor, and Steam always start without administrator rights, so Discord, TeamSpeak hotkeys, and OBS keep working in the game.
+- Only one Foxy window or command can use a game space at a time, which keeps the database safe. The command line reports this with exit code `6`.
+- Foxy checks on every start that its database works with the installed version.
+- The database rebuild prompt is easier to notice and rechecks all repositories after the rebuild.
+- Force redownload first checks that the server can be reached, so your files are never deleted when the server is offline.
+- Foxy checks that it can write to the repository folder before downloading.
+- Foxy starts about twice as fast and uses noticeably less memory while idle.
+- Checking repositories on hard drives is much faster.
+- Checking repositories on SSDs adjusts itself to the drive's speed when the Auto hashing profile is used.
+- Large updates finish faster, especially near the end of the download.
+- Saving repository data during checks and downloads is faster.
+- The window uses less CPU while a check is running.
+- The recheck progress bar moves more smoothly and no longer jumps back at the end.
+- Repository Settings opens faster for repositories with many addons.
+- Launch parameter fields are locked while the repository is set to apply its own launch parameters.
+- The Help page has been updated for game spaces, Steam Workshop, benchmarks, and the command line, and is translated into every language.
 - Contributing is simpler: the contribution terms are now part of the Foxy Community Source License 1.1.0, and opening a pull request or committing to Foxy accepts them. The separate CLA, the pull request checkboxes, and the commit sign-off requirement and check are gone.
 
 ## Fixed
-- On Windows, text fields sometimes hid the blinking text cursor and every keystroke played the Windows error sound until you switched to another window and back. Foxy now takes back keyboard focus on its own.
+- On Windows, text fields could hide the text cursor and play the error sound on every key press until you switched windows. Foxy now fixes its keyboard focus by itself.
+- Foxy no longer fails to start over and over after a graphics driver crash. It now tries safer graphics settings on the next start.
+- Adding a repository space now fills in its shared folder.
+- A required repository added with a repository space now notices changes to its files on disk.
+- Swifty migration now brings over your Creator DLC choices.
+- Repositories no longer show a false update right after a Swifty migration.
+- Optional addons are now handled correctly when checking out a repository.
+- Repository addresses typed in slightly different ways are now recognized as the same repository.
+- Repository data containing non-English characters is now read correctly.
+- Text no longer spills out of its box in several screens.
+
+## Removed
+- No user-facing removals in this release.
+
+## Reverted
+- No reverted changes in this release.
 
 # 1.1.0
 ## Added

@@ -11,7 +11,7 @@
   - `examples/json/server_backend/` (`space.json`, the `foxy-server-backend-cli create-space` input; `reforger_config.json`, a `create` config with `"game": "reforger"`; `reforger_server_mods.json`, an exported `game.mods` fragment)
   - `examples/json/foxyshare_manifest.json` (the `share.json` inside a `.foxyshare` bundle)
 - Runtime reads/writes app-global files (`app_settings.json`, `games.json`, `window_state.json`) in the Foxy config dir (default `%APPDATA%\\Foxy` on Windows) and per-game-space files (`game_settings.json`, `repositories.json`, `repository_spaces.json`, `repository_visual_folders.json`, `extra_files.json`, `workshop.json`, `reforger_addons.json`, `database.db`) in `games/<space_id>/` under it; keep those examples schema-accurate.
-- A legacy flat `settings.json`/`repositories.json` layout is migrated on startup into the split layout above (see `plan-progress/phase-1.md`).
+- A legacy flat `settings.json`/`repositories.json` layout is migrated on startup into the split layout above (`src/core/game/spaces/migration.rs`, rules in `conventions/GAME_SPACES_CONVENTIONS.md`). `agent-gui fixture` files keep the flat layout on purpose and rely on that migration.
 - Keep `examples/` aligned with real runtime formats used by `%APPDATA%\\Foxy` files and remote `repository_space.json` / `repo.json` manifests.
 - When adding or changing config schemas, manifest schemas, or generated repository JSON, update relevant files in `examples/` in the same change.
 - The settings examples must match the partition in `GAME_SPACE_SETTINGS_KEYS` (`src/core/game/spaces/settings_split.rs`): a key listed there belongs in a space's `game_settings.json`, never in `app_settings.json`. Moving a key between halves means moving it in the examples too.

@@ -13,13 +13,16 @@ It ships as a single binary with both a full desktop UI and a scriptable CLI, ru
 
 ## Why Foxy
 
-- **Fast, reliable synchronization** - Foxy keeps Arma 3 repositories up to date with remote refresh, quick checks, rechecks, filesystem drift detection, and tree-hash verification. FoxyMode uses BLAKE3 for fast local hashing while preserving MD5 compatibility for legacy Swifty repositories.
+- **Fast, reliable synchronization** - Foxy keeps mod repositories up to date with remote refresh, quick checks, rechecks, filesystem drift detection, and tree-hash verification. FoxyMode uses BLAKE3 for fast local hashing while preserving MD5 compatibility for legacy Swifty repositories. Hashing adapts to SSDs and HDDs, and after a database rebuild, files Foxy already verified and that have not changed are restored from a verified-hash record instead of being read again.
+- **Safe storage handling** - Foxy checks the drives behind its paths (FAT32/exFAT limits, network shares, RAM disks, read-only volumes, Windows path length) and free space before writing, probes a repository before a force redownload deletes anything, and lets only one process own a game space's database at a time.
 - **Bandwidth-saving updates** - Delta patching downloads only changed file parts, validates the result, and automatically falls back to a full-file download if patching cannot be completed safely.
 - **Repository and profile management** - Manage multiple repositories, repository spaces, visual folders for grouping/coloring/collapsing repositories, launch profiles, optional addons, external addons, backups, drag-and-drop ordering, and bulk sync operations with selective include/exclude filtering.
-- **Arma 3 integrations** - Detect Steam and the Arma 3 installation automatically, manage Arma 3 profiles (detect, rename, clone, delete), recognize Steam Workshop addons, validate TeamSpeak 3 and Steam before launch, and support server quick-join flows with repo-provided launch parameters and DLC metadata.
+- **Arma 3 integrations** - Detect Steam and the Arma 3 installation automatically, manage Arma 3 profiles (detect, rename, clone, delete), recognize Steam Workshop addons, validate TeamSpeak 3 and Steam before launch, and support server quick-join flows with repo-provided launch parameters, DLC metadata, and an offer to match the Creator DLCs the server runs.
 - **Daily workflow tools** - Repository filtering, addon file search, editor mission scanning, mission open/duplicate/delete actions, dependency cleanup, scheduled rechecks, automatic downloads, and optional post-job close or shutdown actions are available from the app.
 - **Clear update visibility** - Download screens show per-addon progress, update summaries, toast notifications, transfer history graphs, adaptive speed limits, and grouped download/disk/hash performance metrics.
-- **Game spaces** - Each supported game gets its own workspace with separate settings, repositories, stores, and database, switchable at runtime and remembered across launches. Arma 3 is the reference module; Total War: WARHAMMER III and Arma Reforger modules ship alongside it, with their mod management and launch currently driven from the CLI.
+- **Game spaces** - Each supported game gets its own workspace with separate settings, repositories, stores, benchmarks, and database, switchable at runtime and remembered across launches. Arma 3 is the reference module; Total War: WARHAMMER III (`.pack` repositories and the `used_mods.txt` manifest) and Arma Reforger (`-addons`/`-addonsDir` launch and server join) ship alongside it, and a Generic game module covers other Steam games with a user-supplied executable, arguments, and mods manifest.
+- **Steam Workshop management** - Import Workshop items by id, URL, collection, or share code, set the load order, freeze mods against Steam updates, compare setups with a state checksum, and exchange `.foxyshare` bundles, from the game space settings or the CLI.
+- **Benchmarks** - Save a recheck, update, or redownload as a benchmark with stage timings, transfer and disk charts, CPU and memory use, power source, and speed-of-light ratios, then compare two runs side by side or export one as a ZIP for support.
 - **Migration and direct-download workflows** - Guided Swifty migration preserves repositories and spaces, while direct-download mode can fetch repository, addon, or file URLs without a full database sync.
 - **One binary, two interfaces** - The same `Foxy` executable provides the desktop UI and a scriptable CLI with `--json`, `--dry-run`, `--yes`, `--quiet`, and `--no-progress` support for automation and accessible output.
 - **Cross-platform app delivery** - Native Windows and Linux builds include platform-appropriate installers plus decentralized in-app updates from self-hosted manifests or GitHub Releases, with early experimental macOS builds.
@@ -32,11 +35,17 @@ Current workspace status:
 - UI stack: `egui` / `eframe`
 - Core/data stack: `Turso` (pure-Rust, async, SQLite-compatible engine)
 
+## Documentation
+
+- [User Guide](wiki/User-Guide.md) - game spaces, repositories, syncing, launching, Steam Workshop, benchmarks, settings, troubleshooting, and the CLI.
+- [Server Admin Guide](wiki/Server-Admin-Guide.md) - generating and hosting Arma 3 and Arma Reforger repositories and repository spaces with `foxy-server-backend-cli`, server launch lines and keys, and self-hosted app updates.
+- The in-app Help page (**F1**) covers the same ground in every bundled language.
+
 ## Future roadmap
 
 These are planned directions for Foxy. They are not listed in any particular order, and priorities may change.
 
-- Desktop UI for the Steam Workshop, Reforger addon, extra-file, and config-pack tools that are currently CLI-only
+- Desktop UI for the Reforger GUID addon store, extra-file, and config-pack tools that are currently CLI-only
 - Game-space-level profiles that carry a config folder and extra-file selection, for games that do not use repositories
 - Authentication support
 - Server mode - reuse Foxy's launch and addon management systems to set up, update, and manage dedicated servers
@@ -121,7 +130,8 @@ Behavior:
 - Terminal no-arg launch prints CLI help in release builds
 - Debug builds open UI on no-arg launch for faster iteration
 - `foxy ui` (or `foxy ui --debug-mode`) explicitly launches UI from terminal
-- `foxy ui --debug-modal <app-update|db-schema-wipe>` opens a startup modal with placeholder data for inspection (repeatable); the modal's real actions stay disabled
+- `foxy ui --debug-modal <app-update|db-schema-wipe|storage-check>` opens a startup modal with placeholder data for inspection (repeatable); the modal's real actions stay disabled
+- Commands work on the active game space; `foxy game use <id>` switches it for later CLI runs and the next UI start
 
 ### Global flags
 
@@ -146,8 +156,16 @@ Behavior:
 | `addon list\|set\|recalc-hashes\|force-redownload` | Addon operations |
 | `profile list\|select\|add\|delete` | Profile operations |
 | `space list\|sync` | Repository space operations |
+| `game list\|use\|create\|remove\|launch` | Game space operations; `game reforger ...` manages Arma Reforger addons by GUID |
+| `workshop list\|add\|import\|remove\|set\|order\|freeze\|unfreeze\|pins\|export\|share\|checksum\|bundle\|resolve` | Steam Workshop items of the active game space |
+| `config export\|import` | Export or import a `.foxypack` config pack |
+| `config extra-file list\|add\|remove\|set\|activate` | Managed extra files |
+| `server inspect-addons` | Inspect the addons an Arma 3 server reports |
 | `direct-download` | Download by URL without full sync |
-| `launch` | Build or execute Arma 3 launch command |
+| `launch` | Build or execute the game launch command for a repository and profile |
+| `agent-gui ...` | Drive a running UI started with `ui --agent-gui` (developer tooling) |
+
+Exit codes: `0` success, `2` validation error, `3` not found, `4` operation failed, `5` partial success, `6` database busy (another Foxy process owns the game space).
 
 Examples:
 ```bash
@@ -157,22 +175,31 @@ foxy repo sync --repo-url https://example/repo/ --mode quick-check
 foxy sync --repo-name "My Repo" --mode remote-refresh
 foxy direct-download --address https://example.com/file.zip --dest /tmp --limit-mbps 25
 foxy launch --repo-name "My Repo" --server "My Server" --execute
+foxy game create "Warhammer" --game twwh3
+foxy workshop share --json
+foxy config export ./my-setup.foxypack
 ```
 
 ## Configuration Data
 
-Foxy stores runtime/config data under the config root:
+Foxy stores app-global data at the config root and everything that belongs to one game under `games/<space_id>/`:
 
 | File/Dir | Purpose |
 |----------|---------|
-| `settings.json` | App settings |
-| `repositories.json` | Repository definitions |
-| `repository_spaces.json` | Repository space definitions |
+| `app_settings.json` | App-global settings (language, renderer, paths, backups, app updates) |
+| `games.json` | Game space registry and the active game space |
 | `window_state.json` | Window geometry/state |
-| `database.db` | Turso (SQLite-compatible) database state |
-| `images/` | Cached images |
 | `logs/` | Application logs |
 | `backups/` | Backup storage |
+| `games/<space_id>/game_settings.json` | Settings of that game space (game paths, launch checks, scheduled jobs) |
+| `games/<space_id>/repositories.json` | Repository definitions |
+| `games/<space_id>/repository_spaces.json` | Repository space definitions |
+| `games/<space_id>/repository_visual_folders.json` | Sidebar folders |
+| `games/<space_id>/workshop.json`, `extra_files.json`, `reforger_addons.json` | Steam Workshop, extra-file, and Reforger addon stores |
+| `games/<space_id>/database.db` | Turso (SQLite-compatible) database state |
+| `games/<space_id>/images/` | Cached images |
+
+A legacy flat layout from Foxy 1.1 or earlier is migrated into an Arma 3 game space on first start, and the previous files are kept as `.pre-gamespaces.bak` copies. See `examples/json/appdata/` for sample files.
 
 Default locations:
 - Windows: `%APPDATA%\Foxy`

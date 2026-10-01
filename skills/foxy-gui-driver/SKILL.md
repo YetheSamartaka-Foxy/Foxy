@@ -26,14 +26,20 @@ If `src/ui/app/agent_driver.rs` and `src/cli/commands/agent_gui.rs` are present,
 The driver runs the **real app**. Two things to get right: isolate data, and don't mutate the desktop.
 
 1. **Isolate config + DB + data** with `FOXY_CONFIG_DIR` (the `--config-dir` flag sets the same env). It redirects `app_paths::foxy_data_dir()`, so config, the SQLite DB, caches, and screenshots all live under the throwaway dir.
-2. **Real data without the 1.3 GB DB**: copy *only* the small JSON files into the isolated dir; the DB rebuilds fresh and addon lists repopulate from a filesystem inventory scan (not the DB). Repos/external-addons appear because `repositories.json` still points at the real on-disk addon paths (scanned read-only).
+2. **Real data without the 1.3 GB DB**: copy *only* the small JSON files into the isolated dir, keeping the game-space layout (`app_settings.json`, `games.json`, `window_state.json` at the root, and each space's config JSON under `games\<space_id>\`); the DB rebuilds fresh and addon lists repopulate from a filesystem inventory scan (not the DB). Repos/external-addons appear because `repositories.json` still points at the real on-disk addon paths (scanned read-only). Do not copy `db_meta.json` or `verified_hashes.json` without the database they describe.
 3. **Desktop integration is auto-skipped under agent GUI mode**: the app will *not* repoint the Start Menu shortcut / `.desktop` entry. No-arg debug/IDE launches enable agent GUI mode automatically; release UI launches still need `ui --agent-gui` or `ui --agents`.
 
 ```powershell
 $dir = "$PWD\temporary_files\agent-gui-run"
 New-Item -ItemType Directory -Force $dir | Out-Null
-foreach ($f in 'settings.json','repositories.json','repository_spaces.json','window_state.json') {
-  Copy-Item "$env:APPDATA\Foxy\$f" "$dir\$f" -Force   # real repos, NOT the 1.3 GB database.db
+foreach ($f in 'app_settings.json','games.json','window_state.json') {
+  if (Test-Path "$env:APPDATA\Foxy\$f") { Copy-Item "$env:APPDATA\Foxy\$f" "$dir\$f" -Force }
+}
+Get-ChildItem "$env:APPDATA\Foxy\games" -Directory | ForEach-Object {
+  $dst = "$dir\games\$($_.Name)"; New-Item -ItemType Directory -Force $dst | Out-Null
+  foreach ($f in 'game_settings.json','repositories.json','repository_spaces.json','repository_visual_folders.json') {
+    if (Test-Path "$($_.FullName)\$f") { Copy-Item "$($_.FullName)\$f" "$dst\$f" -Force }   # NOT database.db
+  }
 }
 $env:FOXY_CONFIG_DIR = $dir
 $env:RUST_LOG = "warn"                                  # egui warnings -> the redirected stdout file

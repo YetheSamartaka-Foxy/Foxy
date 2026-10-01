@@ -78,3 +78,17 @@ younger than 30 days; replacing the database file loses it.
 \- The rules run in three places and must stay consistent: the startup diagnostics thread (`api/startup_diagnostics.rs`, volume verdicts plus one aggregate query per repository via `models/repository_limits.rs` for largest file and longest path), the download orchestrator gate next to the disk-space check (`check_destination_filesystem`, refuses before any file is written), and the direct-download worker. Blocking findings refuse the write; warnings are logged and surfaced once at startup through the UI "Storage check" notice (`foxy ui --debug-modal storage-check` previews it).
 
 \- Keep the checks cheap: no tree load, no file reads, one probe per addon or path. The startup pass costs milliseconds and runs off the launch path; it must never gate the first frame.
+
+\- Writability is tested by writing, not by reading metadata: `fs_safety::directory_is_writable` creates and removes a probe file, and `destination_is_writable` tests the nearest existing ancestor of a folder that does not exist yet. Windows ACLs and read-only mounts are invisible to metadata. Sync checks the repository folder and extra-file activation checks its destination this way before any write, and each reports an unwritable path through a toast instead of failing deep in a copy.
+
+\- A force redownload (repository or addon, GUI and CLI) first probes the repository's `repo.json` with a bounded request and aborts with local files intact when it cannot be reached. Never purge or delete before that probe succeeds, and keep the addon probe off the UI thread.
+
+\### Process launching
+
+\- Foxy does not request administrator rights (the installer is a per-user install and removes the old "Run as administrator" AppCompat flag), but a user can still start it elevated. A game started from an elevated Foxy inherits the admin token, and Windows then blocks unelevated Discord, TeamSpeak, and OBS from sending it input or capturing its window.
+
+\- Start the game, Eden Editor, Steam, and any other user-facing child process through `utils::deelevate::spawn_unelevated`, which uses the shell's unelevated token when this process is elevated and falls back to a plain spawn (with a warning) when it cannot. It returns a raw pid. A bare `Command::spawn` for those processes is a bug.
+
+\- The app updater checks `is_process_elevated` and the install folder's writability, and when replacing the binary needs elevation it starts the installer through `ShellExecuteW` with `runas`, so a declined UAC prompt is a real error instead of a silent no-op.
+
+\- The global allocator is mimalloc (`src/main.rs`), committing pages on demand; it was chosen by measurement (`conventions/SPEED_OF_LIGHT.md`). Do not swap it without the same A/B.

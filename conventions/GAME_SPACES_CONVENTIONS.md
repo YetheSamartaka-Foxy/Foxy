@@ -85,15 +85,21 @@ write `module.id() == "arma3"`.
 - `repository_sync` gates the repository sidebar and repository management.
 - `repository_launch` gates launching a game from a repository's addon selection.
   It is separate from `repository_sync`: a game can sync repository file trees
-  without a launch plan being meaningful for it (Total War: WARHAMMER III syncs
-  but launches from its Workshop store). A module that sets it implements
+  without a launch plan being meaningful for it. A module that sets it implements
   `GameModule::build_repository_launch_plan`; both the GUI Launch button and
   `foxy launch` go through that method, so no caller builds an Arma-shaped plan
   for another game. Reforger sets it and turns each enabled repository folder
   into an `-addons` mod id plus an `-addonsDir` root, and a selected server into
   `-client <address>:<port>` (the game has no password parameter); its
   `reforger_addons.json` GUID store stays a separate launch path behind
-  `foxy game launch`.
+  `foxy game launch`. Total War: WARHAMMER III sets it too: the enabled `.pack`
+  files of a repository's addons, optional addons, and external addons become
+  the `used_mods.txt` manifest, the same manifest the Workshop store feeds.
+- `GameModule::content_formats` names the container formats a game's
+  repositories ship, as `foxy_formats` ids (Arma 3 PBO, Reforger PAC1). Hashing
+  trusts a single declared format without opening the archive head; an empty
+  list falls back to the manifest-marker and magic probe, so a new module must
+  declare its formats or pay that probe on every file.
 - `client_side_addons` gates the client-side addon marking (the row button, the
   Client-side only filter, the repository `clientSide` manifest flag, and the
   join-preflight exemption for addons the server did not report). Arma 3 servers

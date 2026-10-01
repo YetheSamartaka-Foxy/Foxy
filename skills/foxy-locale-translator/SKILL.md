@@ -14,7 +14,7 @@ target-language judgment for natural UI wording.
 2. Treat `src/ui/locales/en.json` as the only source of truth. For ordinary new or changed UI text, update English only; translate non-English locales only when the user explicitly requests localization work.
 3. Translate from English to each explicitly requested target locale, never from another translation.
 4. Preserve placeholders exactly, including braces and names such as `{name}`, `{path}`, `{count}`, and `{size}`.
-5. Keep product and technical names unchanged where appropriate: Arma 3, Steam, GitHub, BLAKE3, MD5, Foxy, Swifty, TeamSpeak 3, TS3.
+5. Keep product and technical names unchanged where appropriate: Arma 3, Arma Reforger, Total War: WARHAMMER III, Steam, Steam Workshop, GitHub, BLAKE3, MD5, Foxy, Swifty, TeamSpeak 3, TS3, WGPU, Glow.
 6. Decide whether the requested localization job is full key coverage or exact-English fallback cleanup:
    - For new/changed keys that must be translated in every locale, keep a changed-key file with the exact `en.json` keys, one key per line. Write `\n` in that file when the JSON key contains a newline escape.
    - For fallback cleanup where only some locales still equal English, validate changed locale/key pairs against the git baseline instead of requiring every locale for the key to differ from English.

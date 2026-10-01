@@ -93,7 +93,7 @@ Each batch prompt must include:
 - Exact key or line range from `en.json`.
 - Output as JSON shaped for the `locale-apply` binary: `{ "locale": { "English key": "translated value" } }`.
 - Instruction to preserve all `{placeholder}` tokens exactly.
-- Instruction to keep technical terms unchanged: Arma 3, Steam, GitHub, BLAKE3, MD5, Foxy, Swifty, TeamSpeak 3, TS3, WGPU, Glow.
+- Instruction to keep technical terms unchanged: Arma 3, Arma Reforger, Total War: WARHAMMER III, Steam, Steam Workshop, GitHub, BLAKE3, MD5, Foxy, Swifty, TeamSpeak 3, TS3, WGPU, Glow.
 - Instruction to keep command-line switches, filenames, units, protocol names, and code identifiers exact unless intentionally localized: `-profiles`, `mission.sqm`, `Mb/s`, `egui`.
 - Instruction to translate values only, not keys.
 

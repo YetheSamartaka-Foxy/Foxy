@@ -49,5 +49,15 @@
 
 \### Per-instance repository status
 
-\- Repository status/pending-update maps in the UI are keyed per *instance* via `repo\_instance\_key(url, local\_path)` (= `normalize\_repo\_url(url) + U+001F + content\_hash::normalize\_path(path)`), not by URL alone, so two installs of one URL in different folders show independent status. Use the `\*\_for\_address` helpers in `src/ui/app/repository/list\_cache.rs` and thread `local\_path` through results/events. `repo\_foxy\_modes` is the deliberate exception - foxy mode is a URL-level property. See the identity invariant in root `AGENTS.md` and `conventions/BACKEND\_CONVENTIONS.md`.
+\- Repository status/pending-update maps in the UI are keyed per *instance* via `repo\_instance\_key(url, local\_path)` (= `normalize\_repo\_url(url) + U+001F + content\_hash::normalize\_path(path)`), not by URL alone, so two installs of one URL in different folders show independent status. Use the `\*\_for\_address` helpers in `src/ui/app/repository/list\_cache.rs` and thread `local\_path` through results/events. `repo\_foxy\_modes` is the deliberate exception - foxy mode is a URL-level property. See the identity invariant in root `AGENTS.md` and `conventions/CORE\_CONVENTIONS.md`.
+
+\### Renderer startup
+
+\- `src/ui/launcher.rs` owns graphics startup. A crash inside a Vulkan ICD or an injected overlay layer kills the process before any panic hook runs, so the only evidence is the launch-attempt marker (`renderer_fallback::record_launch_attempt`) written before `eframe::run_native` and cleared in the app-creator closure. `next_launch_stage` moves a launch that finds the marker one rung down `GraphicsLaunchStage`: `Full` (every wgpu backend, or the one remembered in the graphics-backend record), `SafeBackend` (DX12 on Windows, GL on Linux), then `Glow`, which is persisted into the renderer setting and shows the existing fallback notice.
+
+\- Clear the marker only once the app is constructed, never earlier: an error returned by eframe is logged and is not a crash. A narrowed launch that fails before construction drops the remembered backend and retries on every backend, so a driver or GPU change never costs a working launch, and a retry never opens a second window over a session that already started.
+
+\- Keep `MemoryHints::MemoryUsage` for wgpu (`configure_graphics_memory_hints`): Foxy uploads a font atlas and a few images, and the default performance hints only reserve commit.
+
+\- `foxy ui --debug-modal <app-update|db-schema-wipe|storage-check>` previews a startup modal with placeholder data; register a new startup modal there and with the agent driver so it stays testable.
 

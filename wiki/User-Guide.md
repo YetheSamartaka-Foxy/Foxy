@@ -1,29 +1,38 @@
 # Foxy User Guide
 
-Welcome to Foxy, a modern Arma 3 mod updater built for speed and reliability. This guide walks you through every feature of the application so you can set up repositories, keep your mods up to date, and launch Arma 3 with confidence.
+Welcome to Foxy, a mod updater and launcher built for speed and reliability. Arma 3 is the reference game, and Foxy also supports Total War: WARHAMMER III, Arma Reforger, and other Steam games through a generic game module. This guide walks you through the application so you can set up repositories, keep your mods up to date, and launch your game with confidence.
+
+The same help is available inside the app: press **F1** or click the question mark in the footer.
 
 ---
 
 ## Table of Contents
 
 1. [Getting Started](#getting-started)
-2. [Adding Repositories](#adding-repositories)
-3. [Repository Spaces](#repository-spaces)
-4. [Syncing and Updating](#syncing-and-updating)
-5. [Repository Settings](#repository-settings)
-6. [Profiles](#profiles)
-7. [Managing Addons](#managing-addons)
-8. [Launching Arma 3](#launching-arma-3)
-9. [Application Settings](#application-settings)
-10. [Backup Manager](#backup-manager)
-11. [Direct Download](#direct-download)
-12. [Additional Search Folders and Cleanup](#additional-search-folders-and-cleanup)
-13. [Customization](#customization)
-14. [TS3 Plugins](#ts3-plugins)
-15. [Swifty Migration](#swifty-migration)
-16. [Keyboard Navigation](#keyboard-navigation)
-17. [Troubleshooting](#troubleshooting)
-18. [CLI Usage](#cli-usage)
+2. [Game Spaces](#game-spaces)
+3. [Adding Repositories](#adding-repositories)
+4. [Repository Spaces and Folders](#repository-spaces-and-folders)
+5. [Syncing and Updating](#syncing-and-updating)
+6. [Repository Settings](#repository-settings)
+7. [Profiles](#profiles)
+8. [Managing Addons](#managing-addons)
+9. [Launching the Game](#launching-the-game)
+10. [Steam Workshop](#steam-workshop)
+11. [Extra Files and Config Packs](#extra-files-and-config-packs)
+12. [Editor Missions](#editor-missions)
+13. [Application Settings](#application-settings)
+14. [Game Space Settings](#game-space-settings)
+15. [Scheduling](#scheduling)
+16. [Benchmarks](#benchmarks)
+17. [Backup Manager](#backup-manager)
+18. [Direct Download](#direct-download)
+19. [Cleanup](#cleanup)
+20. [Customization](#customization)
+21. [TS3 Plugins](#ts3-plugins)
+22. [Swifty Migration](#swifty-migration)
+23. [Keyboard Navigation](#keyboard-navigation)
+24. [Troubleshooting](#troubleshooting)
+25. [CLI Usage](#cli-usage)
 
 ---
 
@@ -31,26 +40,69 @@ Welcome to Foxy, a modern Arma 3 mod updater built for speed and reliability. Th
 
 ### First launch
 
-When you open Foxy for the first time, you will see the main repository list on the left side of the window and a detail panel on the right. The repository list will be empty until you add your first repository.
+When you open Foxy, you see the repository list on the left side of the window and a detail panel on the right. The panel at the top of the sidebar shows the open **game space** (see [Game Spaces](#game-spaces)). The repository list stays empty until you add your first repository.
 
-The bottom of the window contains a footer bar with:
-- An **activity log toggle** button (bottom right) that shows what Foxy is doing and recent core messages -- useful for troubleshooting.
+The footer at the bottom of the window contains:
+- An **activity log toggle** (bottom right) that shows what Foxy is doing and recent core messages, which is useful for troubleshooting.
 - An **info icon** that opens the About page.
 - A **question mark icon** that opens the in-app Help page.
 - The **version number**, which opens the changelog when clicked.
+- An **update badge** when a newer Foxy version is available.
 
 ### Initial setup
 
-Before adding repositories, it helps to set up a few paths in **Settings > Application**:
+1. **Check that the right game is open.** The top of the sidebar shows the active game space. Use **Switch** there to create or open a game space for another game. On a first start, or after upgrading from an older Foxy, an Arma 3 game space is ready for you.
+2. **Set the game directory.** Open **Game space settings** from the gear icon at the top of the sidebar and point the game directory (for example **Arma 3 Directory**) to your installation, or click **Auto-detect** to find it from your Steam library.
+3. **Optionally set app-wide paths** in **Settings > Application**:
+   - **Steam Directory** - your Steam installation folder, or click **Auto-detect**. This enables Steam Workshop discovery and the Steam check before launch.
+   - **Temporary Directory** - Foxy uses this for cache and intermediate files. If left empty, it defaults to the Foxy config directory (`%APPDATA%\Foxy` on Windows, `~/.config/Foxy` on Linux).
+   - **Addon Backup Directory** - where addon backups are stored. If left empty, Foxy uses a `backups` folder inside its config directory.
+4. If your Arma 3 profile files are stored in Documents or OneDrive, set **Arma 3 Profiles Directory** in Game space settings so Foxy launches with `-profiles=<path>` and avoids cloud-sync conflicts.
 
-1. **Arma 3 Directory** -- Point this to your Arma 3 installation folder. Foxy uses this to locate the game executable for launching.
-2. **Steam Directory** -- Set this to your Steam installation folder, or click **Auto-detect** to let Foxy find it automatically. This enables Steam Workshop addon discovery and ensures Steam is running before game launch.
-3. **Temporary Directory** -- Optional. Foxy uses this for cache and intermediate files. If left empty, it defaults to the Foxy config directory (e.g. `%APPDATA%\Foxy` on Windows).
-4. **Addon Backup Directory** -- Optional. If you want automatic backups of addons before updates, set a folder here. If left empty, Foxy uses a default `backups` folder inside its config directory.
+Foxy warns when a path you choose is inside a OneDrive folder, because cloud sync can lock or corrupt files Foxy and the game are writing.
 
 ### Swifty compatibility
 
-If you are coming from Swifty, Foxy is fully backwards compatible with Swifty repositories. No server changes are required -- Foxy detects the legacy MD5 protocol automatically and syncs accordingly. You can use Foxy right away with any existing Swifty repository.
+If you are coming from Swifty, Foxy is fully backwards compatible with Swifty repositories. No server changes are required: Foxy detects the legacy MD5 protocol automatically and syncs accordingly. The [Swifty Migration](#swifty-migration) wizard can import your existing setup.
+
+---
+
+## Game Spaces
+
+A **game space** is a separate workspace for one game, with its own repositories, repository spaces, game settings, mod stores, benchmarks, and database. Exactly one game space is open at a time, and Foxy reopens the last one on the next launch.
+
+### Supported games
+
+| Game | What Foxy does |
+|------|----------------|
+| **Arma 3** | Repositories, profiles, server join, Creator DLCs, Steam Workshop, TeamSpeak 3 plugins, editor missions. |
+| **Total War: WARHAMMER III** | Repositories of `.pack` mods, Steam Workshop management, and launch through the `used_mods.txt` mods manifest, including continuing a campaign save from the command line. |
+| **Arma Reforger** | Repositories, launch with `-addons`/`-addonsDir` built from the enabled addons, server join with `-client`, and Workshop addons managed by GUID from the command line. |
+| **Generic game** | Any other Steam game: you set the executable, launch arguments, mods manifest file, and optional Steam App ID yourself. |
+
+### The game space panel
+
+The panel at the top of the sidebar shows the open game space:
+- **Switch** opens the **Game spaces** list.
+- The **gear icon** opens **Game space settings**.
+- The **game logo** opens the **game space overview**, which shows repositories, repository spaces, unique addons, mods on disk, last launch and update times, TeamSpeak 3 status, and your recent benchmarks.
+
+### Creating, switching, and removing game spaces
+
+- In the Game spaces list, click **Create game space**, choose the game, and enter a name. You can create several game spaces for the same game to keep separate setups apart.
+- **Open game space** switches right away without restarting Foxy. Pending changes are saved first. Foxy does not switch while downloads or scans are running, so let them finish first.
+- **Remove game space** deletes only the Foxy workspace: its repository list, game settings, and local database. Game installs and downloaded mods stay on disk.
+- **Rename** in Game space settings changes only the name shown in Foxy. The game space folder and its data stay where they are.
+
+### What is shared and what is per game
+
+Language, renderer, backups, and the other **Application** settings are shared by all game spaces. Scheduled jobs, cleanup folders, additional search folders, and pending updates belong to the game space they were created in.
+
+Each game space stores its data under `games/<game space>` in the Foxy config directory. Only one Foxy window or command can use a game space at a time.
+
+### Upgrading from an older Foxy
+
+When you upgrade from a Foxy version without game spaces, your existing setup moves into an Arma 3 game space automatically. The previous files are kept as `.pre-gamespaces.bak` copies, so the change can be rolled back.
 
 ---
 
@@ -58,547 +110,633 @@ If you are coming from Swifty, Foxy is fully backwards compatible with Swifty re
 
 To add a repository:
 
-1. Click **+ Add repository** at the top of the sidebar on the left.
-2. In the dialog that appears, paste either:
+1. Click **+ Add repository** at the top of the sidebar.
+2. Paste either:
    - A **repository URL** (the direct address of the repository).
-   - A **repository space URL** (a manifest that contains multiple repositories -- see the next section).
-3. Choose the **local folder** where the repository files should be stored. This is where Foxy will download mods to and launch from.
-4. Click the confirmation button to add the repository.
+   - A **repository space URL** (a manifest that lists several repositories, see the next section).
+3. Choose the **local folder** where the repository files should be stored. This is where Foxy checks files, downloads updates, and launches from.
+4. Confirm to add the repository.
 
-The new repository will appear in the sidebar. If you pasted a repository space URL, Foxy will show you the available repositories within that space and let you choose which ones to add.
+If you pasted a repository space URL, Foxy shows the repositories in that space and lets you choose which ones to add and where they should be stored. A repository URL always ends in a trailing slash; Foxy adds it for you.
 
 ### Duplicate detection
 
-If you try to add a repository that already exists, Foxy will show a confirmation dialog asking whether you want to add it again. This helps prevent accidental duplicates.
+If you add a repository that already exists, Foxy asks whether you want to add it again. The same repository URL installed to two different folders is treated as two independent installs, each with its own state.
 
-### Filtering repositories
+### Filtering and ordering repositories
 
-When you have many repositories, use the **Filter repositories** text field below the add button to search by name. The sidebar shows how many repositories match the filter out of the total.
+- Use the **Filter repositories** field below the add button to search by name. The sidebar shows how many repositories match.
+- Drag and drop repository cards to reorder them, and keep the repositories you use most near the top.
 
 ---
 
-## Repository Spaces
+## Repository Spaces and Folders
 
-Repository spaces group multiple repositories under a single shared manifest. Communities often use spaces to publish several related repositories (for example, a main modset, a training modset, and an optional extras modset) under one URL.
+### Repository spaces
 
-### How spaces appear
+Repository spaces group several repositories under one shared manifest. Communities use them to publish related repositories (for example a main modset, a training modset, and an optional extras modset) under one URL.
 
-When you add a repository space, it appears as a collapsible section in the sidebar under **Spaces**. Click the space header to view its detail page, which shows:
+When you add a repository space, it appears as a collapsible section in the sidebar under **Spaces**. Click the space header to open its detail page, which shows:
 - The space name and shared path.
-- A list of **Available repositories** defined by the space.
-- A **Matching existing repositories** section that can scan your existing repositories and associate them with the space.
-
-### Adding repositories from a space
-
-Each entry in the space's available-repositories list has an **Add** button. Click it to add that repository, using the space's shared path as the base folder. You can also filter the entries by name or address using the filter field.
+- A list of **Available repositories** defined by the space, each with an **Add** button and a filter field.
+- A **Matching existing repositories** section that can associate repositories you added earlier with the space.
 
 ### Shared paths
 
-Repository spaces can define a common local path for all their repositories. When a repository belongs to a space, its local path is inherited from the space's shared path and cannot be changed individually. This keeps all space repositories organized under one root folder.
+A repository space can define a common local folder for all its repositories. When a repository belongs to a space, its local path is inherited from the space's shared path and cannot be changed individually. Required repositories of the space are added automatically and see the same shared folder.
 
 ### Bulk operations
 
-The repository space detail view has toolbar buttons for operating on all repositories in the space at once:
+The repository space toolbar operates on every repository in the space at once:
 
-- **Recheck all repositories** -- Runs a remote data refresh on every repository in the space. A confirmation dialog shows the list of repositories before starting.
-- **Quick local check** -- Runs a quick local content check on all repositories in the space.
-- **Update all repositories** -- Downloads pending updates for every repository in the space that has updates available.
+- **Recheck all repositories** - runs a remote data refresh on every repository in the space. A confirmation dialog lists the repositories first.
+- **Quick local check** - runs a quick local content check on all repositories in the space.
+- **Update all repositories** - downloads pending updates for every repository in the space that has updates.
 
-During bulk operations, a progress indicator in the space header shows how many repositories have been processed and which one is currently active.
+A progress indicator in the space header shows how many repositories are done and which one is active.
 
 ### Scanning and moving existing repositories
 
-If you added repositories individually before adding the space, click **Scan existing repositories** to find matches. Then select the ones you want and click **Move selected repositories** to associate them with the space.
+If you added repositories individually before adding the space, click **Scan existing repositories** to find matches, select the ones you want, and click **Move selected repositories**.
+
+### Visual folders
+
+Visual folders group repositories in the sidebar without changing where their files live. You can name, color, and collapse a folder, drag repositories into it, and run quick check, recheck, or update for everything inside it. When you delete a folder, you can choose whether to also remove the repositories it contains.
 
 ---
 
 ## Syncing and Updating
 
-After adding a repository, you need to check it against the remote server and download any updates. Foxy provides several check operations, accessible from the toolbar buttons in the repository detail view.
+After adding a repository, check it against the remote server and download any updates. The check actions are in the repository toolbar.
 
 ### Refresh (remote data recheck)
 
-Click the **refresh icon** in the repository toolbar to fetch the latest metadata from the remote server and build an update plan. This is the primary way to check whether your local files are up to date.
+Click the **refresh icon** to fetch the latest metadata from the remote server and build an update plan. This is the main way to see whether your local files are up to date.
 
 ### Quick local check
 
-Click the **book icon** in the repository toolbar to run a quick local content check. This compares local content hashes (BLAKE3 fingerprints) to detect whether any files have changed locally -- without contacting the remote server. It is fast and useful for detecting local drift (for example, if you manually edited a file).
+Click the **book icon** to run a quick local content check. It compares local content hashes (BLAKE3 fingerprints) to detect files that changed on disk, without contacting the server. It is fast and useful for catching local drift, for example after you edited a file by hand.
 
 ### Recheck repository integrity
 
-Available from Repository Settings > Configuration, the **Recheck repository integrity** button performs a full remote metadata fetch and rebuilds all stored checksums for the repository. Use this as a deeper maintenance step after major local changes or suspected corruption.
+Available from **Repository Settings > Configuration**, this performs a full remote metadata fetch and rebuilds all stored checksums by reading every file. Use it after major local changes or suspected corruption.
 
 ### Understanding the update flow
 
 1. Run **Refresh** to check the remote server.
-2. If updates are available, a banner appears on the repository detail view with an **Update ready** message.
-3. Click the banner to open the **update view**, which shows:
-   - Which mods have changes.
-   - How many files are affected per mod.
-   - The total download size.
-4. Start the download. A progress bar and status banner track the operation.
-5. When complete, the repository state updates to **Synced**.
+2. If updates are available, an **Update ready** banner appears on the repository.
+3. Click the banner to open the **update view**, which shows which mods changed, how many files are affected per mod, and the total download size.
+4. Start the download. A progress bar and status banner track the work, and the most active mods move to the top of the list.
+5. When the download completes, the repository shows **Synced**.
+
+Before downloading, Foxy checks that the destination has enough free space and is on a drive it can use safely. If space runs short, Foxy tells you how much is missing and on which drive, and does not start writing.
 
 ### Delta patching
 
-Foxy uses delta patching when available: instead of redownloading entire files, it downloads only the changed portions. If a delta patch fails validation, Foxy automatically falls back to downloading the full file. This happens transparently -- you do not need to do anything.
+When possible, Foxy downloads only the changed parts of a file instead of the whole file. If a patch fails validation, Foxy falls back to downloading the full file automatically.
+
+### Cancelling
+
+You can cancel an active sync while Foxy is hashing or downloading. Foxy stops pending work, cleans up temporary download parts, and returns to a clean idle state.
 
 ### Progress and status banners
 
-During any sync operation, the repository detail view shows a **status banner** with:
-- The operation name and current step.
-- A detail line describing what is happening.
-- An elapsed time counter.
-- A progress bar (when applicable).
-
-After an operation completes, a **completed banner** appears with the result. You can dismiss it by clicking **Dismiss**, or click the action button if further steps are available (such as reviewing an update).
+During any operation, the repository detail view shows a status banner with the operation name, the current step, a detail line, an elapsed time counter, and a progress bar when applicable. After the operation, a completed banner shows the result; dismiss it or use its action button (for example to review an update).
 
 ---
 
 ## Repository Settings
 
-Open repository settings by clicking the **gear icon** in the repository toolbar, or by pressing **Enter** when a repository is selected. The settings view has four tabs: **Configuration**, **Addons**, **Optional Addons**, and **External Addons**.
+Open repository settings with the **gear icon** in the repository toolbar, or press **Enter** when a repository is selected. The view has four tabs: **Configuration**, **Addons**, **Optional Addons**, and **External Addons**.
 
 ### Configuration tab
 
-The Configuration tab is divided into several sections:
-
 #### Identity
 
-- **Name** -- The display name for this repository. You can change it to anything you like.
-- **Address** -- The remote URL of the repository. Changing this will update the repository metadata.
-- **Local Path** -- The folder where this repository's files are stored. If the repository belongs to a space, this field is inherited from the space and cannot be edited here.
+- **Name** - the display name for this repository.
+- **Address** - the remote URL of the repository.
+- **Local Path** - the folder for this repository's files. If the repository belongs to a space, the path is inherited from the space and cannot be edited here.
 
-#### Sync settings
+#### Sync and display settings
 
-Each of these settings can be set to **Use global** (inherits from Application Settings), **On (override)**, or **Off (override)**:
+Each of these can be **Use global** (inherits from Application or Game space settings), **On (override)**, or **Off (override)**. Only the settings that apply to the open game appear:
 
-- **Auto recheck on launch** -- Whether to automatically refresh this repository's remote data when Foxy starts.
-- **Auto quick scan on launch** -- Whether to run a quick local check on this repository when Foxy starts.
-- **Auto backup addons before update** -- Whether to back up changed addons before downloading updates.
-- **Auto apply repo.json launch parameters** -- Whether to apply launch parameters defined in the remote `repo.json`.
-- **Auto apply repo.json DLC content** -- Whether to apply DLC content toggles defined in the remote `repo.json`.
+- **Auto recheck on launch** - refresh this repository's remote data when Foxy starts.
+- **Auto quick scan on launch** - run a quick local check on this repository when Foxy starts.
+- **Auto backup addons before update** - back up changed addons before downloading updates.
+- **Auto apply repo.json launch parameters** - apply launch parameters published by the repository.
+- **Auto apply repo.json DLC content** - apply the Creator DLC selection published by the repository (Arma 3).
+- Showing or hiding the repository image, the **Editor Missions** list, and the **Servers** list.
+
+While **Auto apply repo.json launch parameters** is on, the launch parameter fields are read-only and marked as managed by `repo.json`, because the repository overwrites them on every refresh. Turn the setting off, or select a launch profile, to edit them.
 
 #### Hashing algorithm
 
-- **Prefer Foxy (BLAKE3)** (default) -- Uses BLAKE3 hashing, which is much faster than MD5.
-- **Prefer Swifty (MD5)** -- Forces legacy MD5 hashing for compatibility with older server setups.
+- **Prefer Foxy (BLAKE3)** (default) - fast BLAKE3 hashing.
+- **Prefer Swifty (MD5)** - forces legacy MD5 hashing for older server setups.
 
-If a repository does not support FoxyMode, Foxy uses MD5 regardless of this setting and displays a **Legacy Protocol (MD5)** warning banner.
+If a repository does not support FoxyMode, Foxy uses MD5 regardless of this setting and shows a **Legacy Protocol (MD5)** warning banner.
 
 #### Maintenance actions
 
-- **Recheck repository integrity** -- Performs a full remote fetch and rebuilds stored checksums for all files in this repository.
-- **Force redownload repository** -- Removes local files and re-downloads everything. Use with caution.
-- **Wipe repository database entries** -- Clears cached metadata for this repository without deleting local files. Useful when metadata gets out of sync.
-- **Delete repository** -- Removes the repository from Foxy entirely (does not delete local files from disk).
+- **Recheck repository integrity** - full remote fetch and a rebuild of the stored checksums for every file.
+- **Force redownload repository** - removes local files and downloads everything again. Foxy first checks that the repository can be reached, so an offline server never leaves you with deleted files and nothing to download.
+- **Wipe repository database entries** - clears cached metadata for this repository without deleting local files.
+- **Delete repository** - removes the repository from Foxy (local files stay on disk).
 
 ---
 
 ## Profiles
 
-Profiles are presets that save your launch configuration for a specific repository. They store DLC toggles, basic launch parameters, addon enablement states, and additional CLI parameters. You can create multiple profiles per repository and switch between them quickly.
+There are two kinds of profiles in Foxy.
 
-### Switching profiles
+### Launch profiles (per repository)
 
-In the repository detail view, a **profile dropdown** appears next to the repository name (if profiles exist). Select a profile from the dropdown to switch to it. The **Default** option uses the repository's base settings without any profile.
+Launch profiles are presets for how the game starts with a specific repository. They store Creator DLC toggles, launch parameters, addon enablement, and extra command-line parameters, so you can switch between servers, unit setups, or optional addon combinations quickly.
 
-### Creating profiles
+- **Switching**: a profile dropdown appears next to the repository name when profiles exist. **Default** uses the repository's base settings.
+- **Creating**: in Repository Settings > Configuration, create a new profile. It starts from the current repository settings.
+- **Copy Profile** duplicates an existing profile.
+- **Export** copies the selected profile to the clipboard as JSON; **Import** adds a profile from the clipboard. A name clash gets a suffix.
 
-In Repository Settings > Configuration, you can create a new profile. The new profile starts with the current repository settings as a baseline.
+Each profile controls:
+- **Creator DLC toggles** (Arma 3) - CSLA, Expeditionary Forces, Global Mobilization, Reaction Forces, Spearhead 1944, S.O.G. Prairie Fire, Western Sahara.
+- **Basic launch parameters** - for Arma 3: `-skipIntro`, `-noSplash`, `-world=empty`, `-loadMissionToMemory`, `-enableHT`, `-hugePages`, `-noLogs`. Other games show their own set.
+- **Additional parameters** - free text for extra command-line arguments.
+- **Addon enablement** - which addons, optional addons, and external addons are enabled.
+- **Include Steam addons** - whether Steam Workshop addons appear in the external addons list.
 
-### Copying profiles
+Profile names support UTF-8 text, so non-English names display and launch correctly.
 
-Use **Copy Profile** to duplicate an existing profile. This is useful when you want to start from a known-good preset and make small adjustments.
+### Arma 3 player profiles
 
-### Importing and exporting profiles
-
-- **Export**: Copies the currently selected profile to the clipboard as JSON. You can share this with other players.
-- **Import**: Reads a profile from the clipboard and adds it to the current repository. If a profile with the same name already exists, Foxy appends a suffix to avoid conflicts.
-
-### What profiles store
-
-Each profile independently controls:
-- **Creator DLC toggles** -- CSLA, Expeditionary Forces, Global Mobilization, Reaction Forces, Spearhead 1944, S.O.G. PF, Western Sahara.
-- **Basic launch parameters** -- `-skipIntro`, `-noSplash`, `-world=empty`, `-loadMissionToMemory`, `-enableHT`, `-hugePages`, `-noLogs`.
-- **Additional parameters** -- A free-text field for extra CLI arguments.
-- **Addon enablement** -- Which addons, optional addons, and external addons are enabled or disabled.
-- **Include Steam addons** -- Whether Steam Workshop addons appear in the external addons list.
+The **Profiles** tab in Game space settings manages your Arma 3 player profiles: clone, rename, or delete them. Deleted profiles are moved to the Foxy backup directory, default profiles are protected, and changes are blocked while Arma 3 is running.
 
 ---
 
 ## Managing Addons
 
-Repository Settings has three addon-related tabs: **Addons**, **Optional Addons**, and **External Addons**.
+Repository Settings has three addon tabs: **Addons**, **Optional Addons**, and **External Addons**.
 
 ### Addons tab
 
-This lists the core addons provided by the repository. Each addon is shown as a card with its name and local file path. You can:
-- **Click a card** or use the **checkbox** to enable or disable the addon.
-- Use **Enable all** / **Disable all** buttons to toggle all addons at once.
-- **Filter** by name and **filter by state** (All, Enabled, Disabled).
-- **Right-click** an addon card for a context menu with additional actions:
-  - **Open addon directory** -- Opens the addon folder in your file manager.
-  - **Manual addon backup** -- Creates a backup of this addon (requires a backup directory to be configured).
-  - **Restore addon backup** -- Restores a previously saved backup for this addon.
-  - **Recheck addon integrity** -- Rechecks integrity for this specific addon.
-  - **Standalone download** -- Downloads this addon independently.
-  - **Force redownload addon** -- Removes and re-downloads this specific addon.
+Lists the addons provided by the repository. Each addon is a card with its name and local path. You can:
+- **Click a card** or its **checkbox** to enable or disable the addon.
+- Use **Enable all** / **Disable all**.
+- **Filter** by name, by state (All, Enabled, Disabled), or by favorites, and mark addons as favorites.
+- Turn on **Search addon files** to match the filter against files inside addon folders; matching addons expand automatically.
+- **Right-click** a card for more actions:
+  - **Open addon directory**
+  - **Manual addon backup** (requires a backup directory)
+  - **Restore addon backup**
+  - **Recheck addon integrity**
+  - **Standalone download**
+  - **Force redownload addon**
 
 ### Optional Addons tab
 
-This lists addons that the repository marks as optional. The interface works the same as the Addons tab. If the repository does not provide any optional addons, a message indicates this.
+Lists addons the repository marks as optional. It works like the Addons tab. Your optional addon choices persist across refreshes and restarts, so a disabled optional addon is never silently re-enabled or re-downloaded.
 
 ### External Addons tab
 
-External addons are mods found outside the repository itself -- from other repository spaces, additional search folders you configure in Settings, or your Steam Workshop content.
+External addons are mods found outside the repository: in repository-space shared paths, in additional search folders you register in Game space settings, or in your Steam Workshop content. The tab adds:
+- **Include Steam Addons** - toggles Steam Workshop addons in the list.
+- **Origin filter** and **Group by origin**.
+- **State filter** (All, Enabled, Disabled).
+- A **Refresh** button that rescans every addon source.
 
-Additional controls on this tab include:
-- **Include Steam Addons** checkbox -- Toggles whether Steam Workshop addons appear in the list.
-- **Origin filter** -- Filter by where the addon comes from (e.g., a specific search folder, Steam Workshop).
-- **Group by origin** -- Organizes addons by their source folder.
-- **State filter** -- Filter by Enabled / Disabled / All.
-- **Refresh button** -- Rescans all known addon sources.
+### Client-side addons
 
-Right-clicking an external addon card provides an **Open addon directory** action.
+For Arma 3, a repository can mark addons as client-side (for example UI mods the server does not run). Foxy uses that to explain what it is about to enable when you join a server.
 
 ---
 
-## Launching Arma 3
+## Launching the Game
 
 ### Server cards
 
-When a repository defines servers, the repository detail view shows **server cards** below the toolbar. Each card displays:
-- The server name.
-- The server address and port.
-- The current online/offline status (refreshed automatically or manually via the **satellite icon** button).
-- Player count when available.
-
-Use **Arrow Left** / **Arrow Right** keys to navigate between server cards.
+When a repository defines servers, the detail view shows **server cards** with each server's name, address, online status, and player count. Refresh the status with the **satellite icon**. Use **Arrow Left** / **Arrow Right** to move between cards.
 
 ### Launch and Join
 
-- **Launch** -- Starts Arma 3 with the addons and settings from the currently selected profile, without connecting to a specific server.
-- **Join** -- Starts Arma 3 and connects to the selected server. The Join button only works when the server is online.
+- **Launch** starts the game with the addons and settings of the selected profile.
+- **Join** starts the game and connects to the selected server. Offline servers have no Join action.
 
-### Steam auto-start
+When you join an Arma 3 server, Foxy reads what the server reports and can:
+- warn when the server needs addons that you have locally but disabled for this launch, and
+- offer to **match the server's Creator DLCs**: enable the Creator DLCs the server requires and disable enabled ones it does not use, for that launch only.
 
-If Steam is not running when you click Launch or Join, Foxy will automatically start Steam first and wait for it to be ready before launching Arma 3. This requires the **Steam Directory** path to be configured in Settings (or auto-detected).
+### How each game launches
 
-### Post-launch behavior
+- **Arma 3** - Foxy builds the `-mod=` line from the enabled addons and Creator DLCs and adds your launch parameters.
+- **Total War: WARHAMMER III** - Foxy writes the enabled mods to `used_mods.txt` in the game directory before launch.
+- **Arma Reforger** - Foxy builds the `-addons` and `-addonsDir` parameters from the enabled addons, and passes a selected server as `-client <address>:<port>`.
+- **Generic game** - Foxy uses the executable, argument template, and mods manifest you set in Game space settings.
 
-In Settings > Application, you can configure what happens after launching:
-- **Close after launch** -- Foxy closes entirely after starting Arma 3.
-- **Hide to tray after launch** -- Foxy minimizes to the system tray instead of closing. This option is only available when "Close after launch" is off.
+Enabled [extra files](#extra-files-and-config-packs) are copied into the game directory before each launch.
+
+### Steam and TeamSpeak checks
+
+With **Check Steam is running before launching** turned on in Game space settings, Foxy warns when Steam is not running and offers to start it. **Check TeamSpeak is running before joining** does the same for TeamSpeak 3 when the repository ships a TS3 plugin. Repositories can override both checks.
+
+Foxy never runs the game with administrator rights, even if Foxy itself was started as administrator, so Discord, TeamSpeak hotkeys, and OBS capture keep working in the game window.
+
+### After launch
+
+In **Settings > Application**:
+- **Close after launch** closes Foxy after the game starts.
+- **Hide to tray after launch** minimizes Foxy to the system tray instead. It is available only when Close after launch is off.
+
+---
+
+## Steam Workshop
+
+For Steam games, Foxy manages Steam Workshop mods next to repository content. Open **Game space settings** and choose the **Steam Workshop** tab while that game space is open. The game space needs a Steam App ID: built-in games have one already, and for a Generic game you set it in Game space settings.
+
+### Adding and sharing mods
+
+- **Import share code** accepts Workshop ids, Workshop links, collections, or a pipe-separated list from a friend. Keep **Subscribe and download through Steam** on to download the mods, and turn on **Freeze each mod after downloading** to pin them right away.
+- **Copy share code** copies your enabled mods as a pipe-separated list that other mod managers understand.
+- **Compare with** checks a friend's share code against your setup. Foxy shows whether your enabled mods match, whether the load order differs, and offers **Import missing** to download only the mods you do not have.
+- The **state checksum** covers your enabled mods, the game build, and load order. Click it to copy; a friend with the same checksum runs the same setup.
+
+### Managing the list
+
+- Enable or disable each mod, and use **Load earlier** / **Load later** to change the load order.
+- **Freeze** keeps a private copy of a mod at its current version so a Workshop update cannot change your setup. **Unfreeze** follows Steam updates again, and **Freeze all** freezes every mod at once.
+- **Export bundle** writes a `.foxyshare` file with the mod list and every frozen copy. **Import bundle** reads one a friend sent you.
+- **Refresh** fetches titles, sizes, and update times from Steam; **Open** shows a mod's Workshop page.
+- **Remove** takes a mod out of this game space. Turn on **Also delete the downloaded files and frozen copies** to free the disk space too.
+
+Arma Reforger Workshop addons are managed by GUID on the command line with `foxy game reforger`, including addon freezing.
+
+---
+
+## Extra Files and Config Packs
+
+- **Managed extra files** store config folders and other files that are not mods inside Foxy, and copy the enabled ones into the game directory before each launch. Manage them with `foxy config extra-file list|add|remove|set|activate`.
+- A **`.foxypack` config pack** exports a game space's repositories, Workshop ids, profiles, and extra files so you can import them on another machine. Packs reference mods by id and never carry mod files. Use `foxy config export <file>` and `foxy config import <file>`.
+
+Both are command-line features for now.
+
+---
+
+## Editor Missions
+
+For Arma 3, editor missions are shown inside the repository view, close to the addons, profiles, and servers they depend on.
+
+- Open, duplicate, or delete detected singleplayer and multiplayer mission folders, or launch Eden Editor for them. Mission subfolders are scanned recursively.
+- Use the terrain filter next to **Show folders** to narrow the list to one map.
+- Use the mission context menu to remove addon dependencies from `mission.sqm`.
+- If additional or external addons are enabled, Foxy warns before launching Eden Editor, because saving can write those dependencies into `mission.sqm`. You can launch with addons, launch without additional/external addons, or cancel.
+
+Game space settings can hide the Editor Missions list, and Repository Settings can override that per repository.
 
 ---
 
 ## Application Settings
 
-Open Settings by clicking the gear icon in the footer or header area. The Settings view has six tabs.
+Open Settings with the gear icon or **F2**. The Settings view has these tabs: **Application**, **Benchmarks**, **Cleanup**, **Direct download**, **Backup Manager**, **Scheduling**, and **Customization**. Everything that belongs to one game lives in [Game Space Settings](#game-space-settings) instead.
 
 ### Application tab
 
 #### General options
 
-- **Language** -- Choose between System (auto-detect), English, Czech, German, French, Spanish, Portuguese, Brazilian Portuguese, Russian, Ukrainian, Polish, Japanese, or Chinese.
-- **Download Speed Limit** -- Set a maximum download speed in Mbps, or check **Unlimited** for no cap.
-- **Auto backup addons before update** -- Globally enable automatic addon backups before any download.
-- **Auto apply repo.json launch parameters** -- Let repositories set launch parameters via their metadata.
-- **Auto apply repo.json DLC content** -- Let repositories toggle DLC content via their metadata.
-- **Auto recheck repositories on launch** -- Automatically refresh all repository metadata when Foxy starts.
-- **Auto quick scan for changes on launch** -- Automatically run quick local checks on all repositories when Foxy starts.
+- **Language** - System (auto-detect) or one of more than 40 bundled languages, including right-to-left languages.
+- **Download Speed Limit** - a maximum download speed in Mbps, or **Unlimited**.
+- **Auto backup addons before update** - back up addons before any download.
+- **Auto recheck repositories on launch** - refresh all repository metadata when Foxy starts.
+- **Auto quick scan for changes on launch** - run quick local checks on all repositories when Foxy starts.
+- **Hide repository image** - hide the banner image at the top of repository and repository space views.
+- **Close after launch** / **Hide to tray after launch** - see [Launching the Game](#launching-the-game).
+
+#### Performance options
+
+- **Renderer** - **Auto (WGPU)** (recommended), **WGPU**, or **Glow**. Auto uses WGPU but lets Foxy switch to Glow (OpenGL) after a graphics crash. Changes take effect after a restart.
+- **Hashing profile** - **Auto** benchmarks the first hashing work and picks the fastest profile; **Conservative**, **Balanced**, and **Aggressive** set the concurrency yourself.
+- **Skip unchanged files after a database reset** - after a database reset, trust files Foxy already verified and that Windows shows as untouched since, instead of reading them again. An integrity recheck always reads every file.
+
+#### Diagnostics
+
+- **Extended diagnostics logging** - writes detailed hashing, download, database, disk, and memory diagnostics to the log files. Turn it on when you report a performance problem.
+- **Show FPS counter** and **Show memory diagnostics icon in footer** - help diagnose UI performance and memory use. **F4** opens memory diagnostics.
+- **Show Debug Windows** - developer debug panels.
 
 #### Utility buttons
 
-- **Open config directory** -- Opens the folder where Foxy stores its configuration files (`settings.json`, `repositories.json`, etc.).
-- **Open log folder** -- Opens the folder containing Foxy's log files, useful for troubleshooting.
-- **Reset** -- Resets all settings and repositories to their default values. Use with caution.
-
-#### Advanced options
-
-- **Show Debug Windows** -- Enables egui debug panels for development.
-- **Show memory diagnostics icon in footer** -- Adds a memory usage indicator to the footer.
-- **Close after launch** / **Hide to tray after launch** -- Controls post-launch behavior (see [Launching Arma 3](#launching-arma-3)).
-- **Wipe Database** -- Completely clears the internal database. This is a destructive development tool.
+- **Open config directory** - opens the folder with Foxy's configuration, settings, and database files.
+- **Open log folder** - opens the folder with Foxy's log files.
+- **Export logs to ZIP** - packages the log files into a timestamped ZIP archive for support.
+- **Migrate from Swifty** - opens the [Swifty Migration](#swifty-migration) wizard.
+- **Reset all settings** - resets all settings to their defaults. Repository data is cleared too.
+- **Wipe Database** - removes all cached repository data from the database, optionally also deleting saved benchmarks. Use it only as a last resort.
 
 #### Paths
 
-- **Arma 3 Directory** -- Path to your Arma 3 installation. Used to locate `arma3_x64.exe`.
-- **Steam Directory** -- Path to your Steam installation. Supports **Browse** and **Auto-detect**.
-- **Temporary Directory** -- Optional working directory for cache and intermediate files.
-- **Addon Backup Directory** -- Where addon backups are stored. If empty, defaults to a `backups` folder in the Foxy config directory.
+- **Steam Directory** - supports **Browse** and **Auto-detect**.
+- **Temporary Directory** - optional working directory for cache and intermediate files.
+- **Addon Backup Directory** - where addon backups go. If empty, a `backups` folder in the Foxy config directory.
 
 #### App Updates
 
 Foxy can check for updates to itself from two sources:
 
-- **Server** -- A self-hosted `foxy-app-updater.json` manifest. Enter the URL in the **Update source URL** field. If left empty, Foxy auto-detects the URL from repository-space or repository metadata.
-- **GitHub** -- Fetches updates from a public GitHub repository's releases page. Enter the repository in `owner/repo` format.
+- **Server** - a self-hosted `foxy-app-updater.json` manifest. Enter it in **Update source URL**. If the field is empty, Foxy fills it from repository-space metadata first and repository metadata second. A value you type yourself is treated as your override.
+- **GitHub** - the releases of a public GitHub repository, in `owner/repo` format.
 
 Options:
-- **Auto-check for updates on launch** -- Foxy checks for updates automatically when it starts.
-- **Check Now** -- Manually check for updates right now.
-- **Browse All Versions** -- Opens the Version Browser, which lists all available versions with changelogs and lets you upgrade, reinstall, or downgrade.
+- **Auto-check for updates on launch**.
+- **Check Now** - check right away.
+- **Browse All Versions** - opens the Version Browser to upgrade, reinstall, or downgrade to any published release.
 
-When an update is available, a badge appears in the footer linking to a changelog preview. Downloads are verified via BLAKE3 hash before installation.
+When an update is available, Foxy shows a prompt at startup (it asks again on every launch until the update is installed) and a red update badge in the footer. Downloads are verified with a BLAKE3 hash before installation.
+
+---
+
+## Game Space Settings
+
+Open Game space settings from the gear icon at the top of the sidebar. The tabs that appear depend on the game:
+
+- **Game tab** (named after the game) - the game space name, the game directory with **Auto-detect**, and the settings for that game. For Arma 3 these are **TeamSpeak 3 Directory**, **Arma 3 Profiles Directory**, **Auto apply repo.json launch parameters**, **Auto apply repo.json DLC content**, **Warn before launching editor with external addons**, **Show Editor Missions list**, **Show Servers list**, **Check server addons before joining**, **Check TeamSpeak is running before joining**, and **Check Steam is running before launching**. A Generic game adds the executable, launch arguments, mods manifest, and Steam App ID. Repositories inherit these toggles unless they override them.
+- **Profiles** - Arma 3 player profiles (see [Profiles](#profiles)).
+- **Steam Workshop** - see [Steam Workshop](#steam-workshop).
+- **Additional search folders** - folders where Foxy discovers external addons. Click **Add new folder**, give it an optional **Alias**, and use **X** to unregister it (the folder on disk is not deleted).
+- **TS3 Plugin** - see [TS3 Plugins](#ts3-plugins).
+
+You can open the settings of a game space that is not open. Changes are saved to that game space and take effect when you open it. Profiles, Steam Workshop, and TS3 Plugin need the game space to be open.
+
+---
+
+## Scheduling
+
+The **Scheduling** tab in Settings runs rechecks and update downloads at a chosen time.
+
+- Jobs can run once or on recurring weekdays, for a single repository, a repository space, or a custom selection of repositories.
+- Each job can be enabled, disabled, edited, deleted, or started right away with **Run now**.
+- A job can close Foxy or shut down the PC when it finishes, optionally only if everything succeeded. Shutdown starts a 60-second countdown that you can cancel.
+- Jobs only run while Foxy is open, and they belong to the game space they were created in.
+
+---
+
+## Benchmarks
+
+Benchmarks record how a recheck, update, or redownload performed on your computer, so you can compare runs over time or attach them when you report a performance problem. They are stored per game space, together with their metrics, charts, and the matching slice of the log.
+
+### Recording a benchmark
+
+1. Open **Settings > Benchmarks** and turn on **Enable benchmarks**. Extended diagnostics logging stays on while benchmarks are enabled, so the log files grow faster.
+2. Start a recheck, update, or redownload yourself.
+3. When it finishes, Foxy asks whether to save the run. Choose **Save benchmark** or **Discard**.
+
+### Reviewing benchmarks
+
+- The Benchmarks tab lists your saved runs. Use **Search benchmarks**, the action, outcome, and repository filters, and the sort order to find a run.
+- Open a benchmark to see stage durations, files checked, download sizes and speeds, patch savings, peak memory, average CPU, the power source and power plan, and charts for CPU, memory, disk writes, and transfer rates.
+- **Speed of light** shows how close each operation ran to its reference, such as a bound, the run's own peak, or a nominal device rate. Cancelled or failed runs are excluded from best-case comparison.
+- **Add notes about this run** and **Save notes** let you remember what was different, for example another disk, network, or hashing profile.
+- Mark runs as **Favourite**, hide them with **Hide benchmark**, or delete them with **Remove benchmark**. **Show hidden** brings hidden runs back.
+
+### Comparing and sharing
+
+- Select two benchmarks and choose **Compare selected** to see them side by side. The older run is A by default; **Oldest as A** controls that, and **Swap A and B** exchanges the sides.
+- **Export benchmark to ZIP** packages a benchmark with its charts and log slice for support. The file is named after the Foxy version, start time, and operation. **Open benchmarks folder** shows the stored files.
+- The game space overview lists your recent benchmarks; **Open benchmarks** jumps to the tab.
 
 ---
 
 ## Backup Manager
 
-The **Backup Manager** tab in Settings lets you manage stored addon backups. Backups are created automatically before updates (if enabled) or manually from the addon context menu in Repository Settings.
+The **Backup Manager** tab manages stored addon backups. Backups are created automatically before updates (if enabled) or manually from the addon context menu in Repository Settings.
 
 ### Viewing backups
 
-The Backup Manager shows:
-- Total number of backups, unique addons tracked, and total storage used.
-- The backup root directory path.
-- A **Filter** field to search backups by addon name, hash, or folder name.
-
-Backups are grouped by addon name. Each backup entry shows:
-- The folder name.
-- The creation date, content hash, and file size.
+The Backup Manager shows the total number of backups, unique addons tracked, total storage used, and the backup root directory. A **Filter** field searches by addon name, hash, or folder name. Backups are grouped by addon, and each entry shows its folder name, creation date, content hash, and size.
 
 ### Managing backups
 
-- **Refresh** -- Rescans the backup directory for changes.
-- **Open folder** -- Opens the backup root directory in your file manager.
-- **Run cleanup now** -- Applies the configured retention rules to delete old backups.
-- **Delete backup** -- Removes a specific backup.
-- **Delete all backups** -- Removes all backups for a specific addon.
+- **Refresh** rescans the backup directory.
+- **Open folder** opens the backup root directory.
+- **Run cleanup now** applies the retention rules.
+- **Delete backup** removes one backup; **Delete all backups** removes all backups for one addon.
 
 ### Retention rules
 
-- **Keep latest backups per addon** -- Set how many recent backups to keep per addon (0 = unlimited).
-- **Delete backups older than N days** -- Automatically remove backups older than the specified age.
+- **Keep latest backups per addon** - how many recent backups to keep per addon (0 = unlimited).
+- **Delete backups older than N days** - remove backups older than the given age.
 
-Both rules are applied when you click **Run cleanup now**. They do not run automatically.
+Both rules apply when you click **Run cleanup now**; they do not run on their own.
 
 ### Restoring backups
 
-To restore a backup, go to **Repository Settings > Addons** (or Optional Addons), right-click the addon you want to restore, and select **Restore addon backup**. Restoring is done from Repository Settings rather than the Backup Manager because Foxy needs to know the target addon path.
+Go to **Repository Settings > Addons** (or Optional Addons), right-click the addon, and choose **Restore addon backup**. Restoring happens there because Foxy needs to know the target addon path.
 
 ---
 
 ## Direct Download
 
-The **Direct download** tab in Settings lets you download repositories, addons, or individual files from a URL without syncing them into Foxy's database.
+The **Direct download** tab downloads repositories, addons, or individual files from a URL without syncing them into Foxy's database.
 
-### How to use it
+1. Go to **Settings > Direct download** and click **Direct download**.
+2. Enter the **Download URL**.
+3. Set the **Destination folder** (it defaults to the Temporary Directory, then the Foxy config directory).
+4. Keep **Use global speed limit**, or uncheck it to set a custom limit or **Unlimited**.
+5. Start the download.
 
-1. Go to **Settings > Direct download**.
-2. Click the **Direct download** button to open the download dialog.
-3. Enter the **Download URL** of the content you want to download.
-4. Set the **Destination folder** where files should be saved (or use the default, which falls back to your Temporary Directory, then the Foxy config directory).
-5. Configure the speed limit:
-   - **Use global speed limit** -- Inherits the limit from Application Settings.
-   - Uncheck it to set a custom limit or select **Unlimited**.
-6. Click **Direct download** to start.
-
-### Monitoring progress
-
-After starting a download, the Direct download tab shows the current status, source URL, destination path, and file progress. Click **Display update view** to see detailed per-file progress in the full update view.
+The tab then shows the status, source URL, destination, and file progress. **Display update view** opens the full per-file progress view. Direct downloads get the same free-space and drive checks as repository updates.
 
 ---
 
-## Additional Search Folders and Cleanup
+## Cleanup
 
-### Additional search folders
-
-The **Additional search folders** tab in Settings lets you register folders from which Foxy discovers external addons. These addons then appear in Repository Settings > External Addons.
-
-- Click **Add new folder** and select a directory.
-- Each folder can have an optional **Alias** to give it a friendly display name.
-- Click the **X** button to unregister a folder (this does not delete the actual folder from disk).
-- Use the **Filter** field to search your registered folders.
-
-### Cleanup
-
-The **Cleanup** tab shows addons that are not used by any repository and can be safely deleted. These are typically leftover folders from removed repositories or manually added content.
-
-- Use the **Filter** field to narrow the list.
-- Click the **X** button next to an addon to remove it.
+The **Cleanup** tab lists addons that no repository uses any more, such as leftovers from removed repositories. Filter the list and click **X** next to an addon to remove it.
 
 ---
 
 ## Customization
 
-The **Customization** tab in Settings lets you personalize the Foxy interface without affecting any repository data.
+The **Customization** tab personalizes the interface without touching repository data.
 
-### Font sizes
-
-Adjust font sizes for different parts of the UI:
-- **Main View** -- Window control icons, activity log toggle icon.
-- **Settings View** -- Page title, close icon.
-- **Repository View** -- Add repository button, toolbar icons, status banners, Launch/Join buttons.
-- **Update View** -- Title, close icon, section titles, mod names, progress text, and more.
-- **Repository Settings View** -- Page title, close icon, refresh icon, addon path text.
-
-Use the sliders to increase or decrease each size. Click **Reset font sizes** to restore defaults.
-
-### Palette colors
-
-Customize the color scheme by adjusting:
-- Primary Accent, Widget Background, Main Background, Card Background.
-- Server Offline Background.
-- Text Normal, Text Gray, Text Dim, Text Error.
-- Log Error, Log Warning, Log Debug.
-- Success, Success Muted, Action Info, Action Destructive.
-
-Click **Reset colors** to restore the default palette.
+- **Themes** - apply a built-in preset, save the current look as a named theme, load or delete saved themes, and **Import theme...** / **Export theme...** to share a theme file.
+- **UI scale** - make the whole interface larger or smaller.
+- **Font sizes** - adjust sizes per view (main, settings, repository, update, repository settings, help, about). **Reset font sizes** restores the defaults.
+- **Palette colors** - adjust accent, backgrounds, text, log, success, and action colors. **Reset colors** restores the defaults.
 
 ---
 
 ## TS3 Plugins
 
-The **TS3 Plugins** tab in Settings lets you manage TeamSpeak 3 plugin files found inside your repository addons.
+The **TS3 Plugin** tab in Game space settings (Arma 3) manages TeamSpeak 3 plugin files found in your repository addons.
 
-### How it works
-
-Foxy scans all your repository addon directories for TeamSpeak 3 plugin files (`.ts3_plugin`). Each discovered plugin is shown as a card with the addon it belongs to, its file path, and its current install status.
-
-### Plugin statuses
-
-- **Up to date** -- The plugin has been installed through Foxy and the file has not changed since.
-- **Update available** -- The plugin file has changed since you last installed it (e.g., after a repository update).
-- **Not installed** -- The plugin has not been installed through Foxy yet.
-
-### Installing plugins
-
-Click the **Install** (or **Reinstall**) button on a plugin card to open the plugin file with TeamSpeak 3. TeamSpeak must be closed before installing -- if TeamSpeak is running, a warning banner appears and install buttons are disabled.
-
-### Recheck
-
-Click **Recheck** to rescan all repositories for TS3 plugins and refresh the status of each one.
-
-### Update banners
-
-When a repository sync detects that a TS3 plugin file has changed, a banner appears on the repository detail view prompting you to install the updated plugin. You can install directly from the banner or dismiss it.
+- Foxy scans your repository addon folders for `.ts3_plugin` files. Each plugin card shows the addon it belongs to, its file path, and its status: **Up to date**, **Update available**, or **Not installed**.
+- **Install** (or **Reinstall**) opens the plugin with TeamSpeak 3. TeamSpeak must be closed first; while it runs, a warning appears and the install buttons are disabled.
+- **Recheck** rescans for plugins.
+- When a sync changes a plugin file, a banner on the repository offers to install the update.
 
 ---
 
 ## Swifty Migration
 
-If you are switching from Swifty to Foxy, the **Swifty Migration** wizard helps you import your existing repositories without losing your setup. Your Swifty data is never modified.
+If you are switching from Swifty, the **Swifty Migration** wizard imports your existing repositories without changing your Swifty data. It opens automatically on first launch when Swifty data is found, and from **Settings > Application > Migrate from Swifty**.
 
-### Opening the wizard
+The wizard:
+1. **Scans** your Swifty installation for repositories, their names, addresses, mod folders, launch parameters, and Creator DLC selections.
+2. **Detects server settings** - if your repositories point to a server that also hosts a Foxy update manifest or repository space, it fills in those URLs. You can edit them before importing.
+3. **Detects global settings** such as the Arma 3 and temporary directories, and offers to apply them when Foxy's are empty.
+4. **Lists** all detected repositories with checkboxes (**Select all** / **Deselect all**).
+5. **Imports** the selection, including launch parameters, autocheck settings, and repository space bindings.
 
-The migration wizard opens automatically on first launch if Swifty data is detected on your system. You can also access it from the main view.
-
-### What the wizard does
-
-1. **Scans** your Swifty installation for configured repositories, detecting names, addresses, mod folder paths, and launch parameters.
-2. **Detects server settings** -- If your Swifty repositories point to a server that also hosts a Foxy update manifest or repository space, the wizard auto-fills those URLs. You can edit them before importing.
-3. **Detects global settings** -- The wizard picks up your Swifty Arma 3 directory and temporary directory paths and offers to apply them to Foxy if Foxy's paths are empty.
-4. **Shows a list** of all detected repositories with checkboxes. Use **Select all** / **Deselect all** to quickly toggle.
-5. **Imports** the selected repositories into Foxy, including launch parameters, autocheck settings, and repository space bindings.
-
-### After importing
-
-Foxy fetches remote metadata (servers, addons) for each imported repository automatically. If a repository space was successfully imported, repositories are bound to it and share the space's local path.
+If a legacy setup has several entries from the same source, Foxy can migrate them as separate profile variants. After importing, Foxy fetches remote metadata for each repository automatically.
 
 ---
 
 ## Keyboard Navigation
 
-Foxy supports keyboard navigation throughout the repository list and detail views.
-
 | Key | Action |
 |-----|--------|
-| **Arrow Up** | Move selection up in the repository list |
-| **Arrow Down** | Move selection down in the repository list |
-| **Tab** | Move selection to the next item in the repository list |
-| **Shift+Tab** | Move selection to the previous item in the repository list |
-| **Arrow Left** | Select the previous server card |
-| **Arrow Right** | Select the next server card |
-| **Enter** | Open Repository Settings for the selected repository, or open the selected repository space |
+| **F1** | Open Help from any screen |
+| **F2** | Open or close Settings |
+| **F3** | Show or hide the activity log |
+| **F4** | Open memory diagnostics (when its footer icon is enabled) |
+| **Tab** / **Shift+Tab** | Move focus between controls |
+| **Enter** | Activate the focused control, open Repository Settings for the selected repository, or open the selected repository space |
+| **Arrow Up** / **Arrow Down** | Move through repository lists, addon lists, and other vertical lists |
+| **Arrow Left** / **Arrow Right** | Move between server cards |
+| **Escape** | Close dialogs, Help, Settings, and other overlay panels |
 
-Keyboard navigation is disabled when a modal dialog is open (such as the add-repository dialog or a confirmation prompt) or when the filter text field is focused.
+List navigation pauses while a dialog is open or a filter field has focus. When a startup prompt is open, **Enter** confirms its primary action. Repeated clicks on Launch, Update, and other long-running actions are ignored while the action is starting or running.
 
 ---
 
 ## Troubleshooting
 
+### My repositories are missing
+
+Check which game space is open at the top of the sidebar. Each game space has its own repository list.
+
+### Another Foxy is using this game space
+
+Only one Foxy window or command can use a game space at a time. If Foxy reports that another process is using the game space's database, close the other Foxy window or command first.
+
+### Foxy asks to wipe and rebuild the database
+
+After an update, the stored database may have been made by an incompatible version. Rebuilding keeps your downloaded mods on disk, and Foxy rechecks your repositories afterward. Files Foxy already verified and that have not changed are restored from its verified-hash record instead of being read again, unless you turned off **Skip unchanged files after a database reset**.
+
+### Storage check notice
+
+At startup Foxy checks the drives behind its paths and repositories. It warns about risky setups (a FAT32 or exFAT drive, a network share, a RAM disk, a read-only drive, or paths too long for Windows) and refuses to download where files cannot be stored safely, for example a file over 4 GiB on FAT32. Move the folder to a local NTFS drive, or follow the notes in the notice.
+
+### Not enough free space
+
+If an update does not fit on the drive, Foxy shows the update size, the free space, and how much is missing. Free up space or move the repository, then start the update again.
+
 ### Legacy Protocol (MD5) warning
 
-If you see a yellow **Legacy Protocol (MD5)** banner on a repository, it means the server is still using the older Swifty/MD5 protocol. Foxy works fine with it, but BLAKE3 (FoxyMode) is much faster. Contact your server administrator about migrating -- hybrid mode lets the server support both Foxy and Swifty clients simultaneously.
+A yellow **Legacy Protocol (MD5)** banner means the server still uses the older Swifty/MD5 protocol. Foxy works fine with it, but BLAKE3 (FoxyMode) is much faster. Ask your server administrator about migrating; hybrid mode lets a server support Foxy and Swifty clients at the same time.
 
 ### Interrupted or failed updates
 
-If an update was interrupted or something looks wrong:
-
 1. Run **Quick local check** (book icon) to detect local file drift.
-2. Run **Refresh** (refresh icon) to fetch fresh metadata from the server.
-3. If the problem persists, try **Recheck repository integrity** from Repository Settings > Configuration.
-4. As a last resort, use **Wipe repository database entries** to clear cached metadata, then refresh again.
+2. Run **Refresh** (refresh icon) to fetch fresh metadata.
+3. If the problem persists, use **Recheck repository integrity** in Repository Settings > Configuration.
+4. As a last resort, use **Wipe repository database entries**, then refresh again.
+
+If downloads fail repeatedly, check your connection, open the repository URL in a browser, and read the activity log for the specific error.
 
 ### Force redownload
 
-If a repository is in a bad state and normal checks do not help, use **Force redownload repository** from Repository Settings > Configuration. This removes local files and re-downloads everything. It is a destructive operation and will prompt for confirmation.
+If a repository stays in a bad state, use **Force redownload repository** in Repository Settings > Configuration. It asks for confirmation, checks that the server can be reached, then removes local files and downloads everything again.
 
-### Activity log
+### Steam Workshop tab missing or empty
 
-Open the activity log from the **bottom-right footer button** to see what Foxy is doing. It shows current operations, recent core events, and error messages. This is the first place to check when something seems wrong.
+Open that game space first and make sure it has a Steam App ID in Game space settings.
 
-### Log files
+### External addons not detected
 
-For deeper troubleshooting, click **Open log folder** in Settings > Application to access Foxy's log files. These contain detailed timestamped entries that can help diagnose issues.
+Check the additional search folders in Game space settings, and turn on **Include Steam Addons** if you use Workshop content.
 
-### Wipe Database
+### Launch fails or the wrong addons load
 
-If the internal database becomes corrupted, use **Wipe Database** in Settings > Application. This clears all cached repository data from the SQLite database. Your repositories and settings are preserved, but you will need to refresh all repositories afterward.
+Check the selected profile in Repository Settings, the addon paths, and the Creator DLC toggles. If Foxy rejects a profile path, check whether it is inside OneDrive or contains characters that are unsafe for file handling.
+
+### Foxy does not start, or starts with Glow
+
+If Foxy crashes inside the graphics driver during startup, the next launch automatically tries a safer graphics setup, and if that also fails it switches the renderer to Glow and shows a notice explaining why. Keep the renderer on **Auto** unless you have a reason to force WGPU.
+
+Overlays such as NVIDIA GeForce Experience or NVIDIA App, Discord, Steam, Bandicam, OBS, and Xbox Game Bar can attach to Foxy and cause pop-ups or rendering problems. Foxy is a desktop app, not a game, so you can exclude it from these overlays without losing anything. If the logs mention Vulkan layers such as `VK_LAYER_bandicam_helper`, update or disable that tool and restart Foxy. The in-app Help has per-tool steps under **Third-party overlays**.
+
+### Slow checks or updates
+
+Turn on **Enable benchmarks** in Settings > Benchmarks, repeat the action, save the benchmark, and share it with **Export benchmark to ZIP**.
+
+### Activity log and log files
+
+Open the activity log from the bottom-right footer button to see current work, recent core events, and errors. For deeper troubleshooting, use **Open log folder** or **Export logs to ZIP** in Settings > Application. Log files older than 90 days are removed automatically, and Foxy keeps up to 16 recent log files.
 
 ---
 
 ## CLI Usage
 
-Foxy includes a full command-line interface in the same binary. When launched from a terminal, it provides automation-friendly commands with `--json`, `--quiet`, `--dry-run`, and `--yes` flags.
+Foxy includes a full command-line interface in the same binary (`Foxy.exe` on Windows, `foxy` below). It uses the same config directory and game spaces as the desktop app, and works on the active game space.
 
 ### Common commands
 
 | Command | Description |
 |---------|-------------|
-| `Foxy.exe version` | Print the current Foxy version |
-| `Foxy.exe settings show` | Display current settings |
-| `Foxy.exe settings set <key> <value>` | Change a setting |
-| `Foxy.exe repo list` | List all repositories |
-| `Foxy.exe repo add --url <url> --path <path>` | Add a repository |
-| `Foxy.exe repo sync --repo-name "Name" --mode remote-refresh` | Refresh a repository |
-| `Foxy.exe sync --repo-name "Name" --mode download` | Download pending updates |
-| `Foxy.exe addon list --repo-name "Name"` | List addons for a repository |
-| `Foxy.exe profile list --repo-name "Name"` | List profiles |
-| `Foxy.exe profile select --repo-name "Name" --profile "Profile"` | Switch active profile |
-| `Foxy.exe space list` | List repository spaces |
-| `Foxy.exe space sync --recheck-all` | Recheck all repositories in all spaces |
-| `Foxy.exe direct-download --address <url>` | Download content directly from a URL |
-| `Foxy.exe launch --repo-name "Name" --execute` | Launch Arma 3 |
-| `Foxy.exe ui` | Open the desktop UI from terminal |
+| `foxy version` | Print the Foxy version, build kind, and source commit |
+| `foxy settings show` / `set` / `reset` | Inspect or change settings |
+| `foxy repo list` | List repositories |
+| `foxy repo add --address <url> --path <path>` | Add a repository |
+| `foxy repo sync --repo-name "Name" --mode remote-refresh` | Refresh a repository |
+| `foxy sync --repo-name "Name" --mode download` | Download pending updates (`sync` is short for `repo sync`) |
+| `foxy repo force-redownload --repo-name "Name" --yes` | Remove local files and download everything again |
+| `foxy addon list --repo-name "Name"` | List addons for a repository |
+| `foxy profile list --repo-name "Name"` | List launch profiles |
+| `foxy profile select --repo-name "Name" --profile "Profile"` | Switch the active profile |
+| `foxy space list` | List repository spaces |
+| `foxy space sync --space-id <id> --recheck-all` | Recheck every repository in a repository space |
+| `foxy game list` / `use <id>` / `create <name> --game <game>` / `remove <id>` | Manage game spaces |
+| `foxy game launch --execute` | Launch a game space that has no repositories (Total War: WARHAMMER III, Generic game) |
+| `foxy game reforger ...` | Manage Arma Reforger Workshop addons by GUID |
+| `foxy workshop ...` | Add, import, enable, order, freeze, share, and remove Steam Workshop items |
+| `foxy config export <file>` / `import <file>` | Export or import a `.foxypack` config pack |
+| `foxy config extra-file ...` | Manage extra files |
+| `foxy direct-download --address <url>` | Download content by URL without a database sync |
+| `foxy launch --repo-name "Name" --execute` | Launch the game with a repository and profile |
+| `foxy ui` | Start the desktop app from a terminal |
+
+Run `foxy --help` to list every command, and add `--help` after any command to see its options.
 
 ### Global flags
 
 | Flag | Description |
 |------|-------------|
-| `--config-dir <path>` | Override the config root directory |
-| `--json` | Emit machine-readable JSON output |
-| `--quiet` | Reduce progress and informational output |
-| `--no-progress` | Disable live progress updates (screen-reader friendly) |
-| `--yes` | Confirm destructive operations automatically |
-| `--dry-run` | Preview command behavior without applying changes |
+| `--config-dir <path>` | Use a different config directory (also `FOXY_CONFIG_DIR`) |
+| `--json` | Machine-readable JSON output |
+| `--quiet` | Less progress and informational output |
+| `--no-progress` | No live progress updates (screen-reader friendly) |
+| `--yes` | Confirm destructive operations |
+| `--dry-run` | Preview a change without writing it |
 
 ### Repository selectors
 
-Most repository-scoped commands accept either:
-- `--repo-name <name>` -- Select by name (case-insensitive).
-- `--repo-url <url>` -- Select by URL (normalized with trailing slash).
+Most repository commands accept either `--repo-name <name>` (case-insensitive) or `--repo-url <url>` (normalized with a trailing slash).
 
 ### Sync modes
 
-The `repo sync` and top-level `sync` commands support these modes:
-- `remote-refresh` -- Fetch latest remote metadata.
-- `quick-check` -- Fast local content check.
-- `recheck` -- Full recheck against remote data.
-- `recheck-integrity` -- Full remote fetch and local hash recalculation.
-- `download` -- Download pending updates.
+`repo sync` and `sync` support:
+- `remote-refresh` - fetch the latest remote metadata.
+- `quick-check` - fast local content check.
+- `recheck` - full recheck against remote data.
+- `recheck-integrity` - full remote fetch and local hash recalculation.
+- `download` - download pending updates.
 
-For more details, run `Foxy.exe --help` or `Foxy.exe <command> --help` for any specific command.
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success |
+| `2` | Validation error |
+| `3` | Not found |
+| `4` | Operation failed |
+| `5` | Partial success |
+| `6` | Database busy: another Foxy window or command is using this game space |
