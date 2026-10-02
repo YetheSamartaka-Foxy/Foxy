@@ -15,6 +15,9 @@ pub enum RepositoryListContextAction {
     GoToRepositorySpace,
     RemoveFromVisualFolder,
     OpenLocalPath,
+    QuickLocalCheck,
+    RemoteRecheck,
+    OpenSettings,
     MoveUp,
     MoveDown,
 }

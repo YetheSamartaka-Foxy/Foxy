@@ -77,6 +77,9 @@ pub(super) enum RepositoryListSectionContextAction {
 pub(super) enum RepositorySpaceRowContextAction {
     ToggleCollapsed,
     CreateFolder,
+    QuickLocalCheck,
+    RemoteRecheck,
+    OpenSettings,
     Delete,
 }
 

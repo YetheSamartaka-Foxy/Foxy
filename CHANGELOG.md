@@ -22,6 +22,7 @@
 - Foxy stops an update before it starts when the drive does not have enough free space, and tells you how much space is missing.
 - After a database reset, Foxy skips reading files it already checked and that have not changed since. You can turn this off in the settings.
 - A new Extended diagnostics logging setting writes more detail to the log files, which helps when reporting performance problems.
+- Right-click a repository or repository space in the list to run a quick local check, a remote data recheck, or open its settings.
 - Foxy now shows a prompt at startup when a new version is available, with a more visible update badge and download button.
 - `foxy version` now shows the exact build commit.
 - New command-line commands for game spaces, Steam Workshop mods, Arma Reforger addons, extra files, and config packs.

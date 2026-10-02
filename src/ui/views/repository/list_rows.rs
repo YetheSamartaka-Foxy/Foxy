@@ -5,7 +5,7 @@ use super::{
 use crate::core::api::SyncMode;
 use crate::ui::app::{Foxy, RepositoryListContextAction, RepositoryListRow, RepositoryListSection};
 use crate::ui::context_menu::{ContextMenuItem, attach_context_menu};
-use crate::ui::types::Repository;
+use crate::ui::types::{FoxyView, Repository, RepositorySpaceBulkMode};
 use crate::ui::views::galley_cache;
 use eframe::egui::{
     self, Align, Atom, Button, CornerRadius, CursorIcon, Frame, Image, Label, Layout, Margin,
@@ -215,6 +215,12 @@ impl Foxy {
             info!("Selected repository space {}", space_name);
         }
 
+        let space_bulk_in_progress = self
+            .repository_space_bulk_progress
+            .as_ref()
+            .is_some_and(|p| p.space_id == space_id && p.completed_count < p.total_count);
+        let space_buttons_disabled = self.syncing_repository.is_some() || space_bulk_in_progress;
+        let quick_check_running = self.current_sync_mode == Some(SyncMode::QuickCheckOnly);
         let mut context_action = None;
         attach_context_menu(
             &resp,
@@ -233,6 +239,21 @@ impl Foxy {
                 )
                 .separator_before(),
                 ContextMenuItem::new(
+                    RepositorySpaceRowContextAction::QuickLocalCheck,
+                    self.t("Quick local check"),
+                )
+                .separator_before()
+                .disabled_if(space_buttons_disabled || quick_check_running),
+                ContextMenuItem::new(
+                    RepositorySpaceRowContextAction::RemoteRecheck,
+                    self.t("Recheck all repositories"),
+                )
+                .disabled_if(space_buttons_disabled),
+                ContextMenuItem::new(
+                    RepositorySpaceRowContextAction::OpenSettings,
+                    self.t("Repository space settings"),
+                ),
+                ContextMenuItem::new(
                     RepositorySpaceRowContextAction::Delete,
                     self.t("Delete repository space"),
                 )
@@ -247,6 +268,25 @@ impl Foxy {
             }
             Some(RepositorySpaceRowContextAction::CreateFolder) => {
                 self.open_create_repository_visual_folder(Some(space_id));
+            }
+            Some(RepositorySpaceRowContextAction::QuickLocalCheck) => {
+                let queued = self.queue_repository_space_sync(&space_id, SyncMode::QuickCheckOnly);
+                info!(
+                    "Queued quick local check for {} repositories in repository space {}",
+                    queued, space_name
+                );
+            }
+            Some(RepositorySpaceRowContextAction::RemoteRecheck) => {
+                self.pending_repository_space_bulk_action = self
+                    .build_repository_space_bulk_action(
+                        &space_id,
+                        RepositorySpaceBulkMode::RecheckAll,
+                    );
+            }
+            Some(RepositorySpaceRowContextAction::OpenSettings) => {
+                self.open_repository_space_settings(&space_id);
+                self.last_view = self.current_view;
+                self.current_view = FoxyView::RepositorySpaceSettings;
             }
             Some(RepositorySpaceRowContextAction::Delete) => {
                 self.pending_repository_space_delete_id = Some(space_id);
@@ -699,11 +739,26 @@ impl Foxy {
                 )
                 .disabled_if(!can_remove_from_folder),
                 ContextMenuItem::new(
+                    RepositoryListContextAction::QuickLocalCheck,
+                    self.t("Quick local check"),
+                )
+                .separator_before()
+                .disabled_if(self.current_sync_mode == Some(SyncMode::QuickCheckOnly)),
+                ContextMenuItem::new(
+                    RepositoryListContextAction::RemoteRecheck,
+                    self.t("Remote data recheck"),
+                )
+                .disabled_if(self.syncing_repository.is_some()),
+                ContextMenuItem::new(
                     RepositoryListContextAction::OpenLocalPath,
                     self.t("Open repository local path"),
                 )
                 .separator_before()
                 .disabled_if(!repo_has_local_path),
+                ContextMenuItem::new(
+                    RepositoryListContextAction::OpenSettings,
+                    self.t("Repository Settings"),
+                ),
                 ContextMenuItem::new(
                     RepositoryListContextAction::ForceRedownload,
                     self.t("Force redownload repository"),
