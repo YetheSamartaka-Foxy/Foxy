@@ -23,6 +23,7 @@
 use anyhow::{Context, Result, bail};
 use indicatif::ProgressBar;
 use serde::{Deserialize, Serialize};
+use sha1::{Digest, Sha1};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
@@ -470,6 +471,9 @@ struct RepositorySpaceJson<'a> {
     icon: &'a str,
     #[serde(rename = "iconChecksum")]
     icon_checksum: String,
+    /// Change marker for clients; older clients ignore unknown fields.
+    #[serde(rename = "spaceChecksum")]
+    space_checksum: String,
     #[serde(rename = "appUpdateUrl", skip_serializing_if = "Option::is_none")]
     app_update_url: Option<&'a str>,
     entries: Vec<RepositorySpaceEntryJson<'a>>,
@@ -487,6 +491,25 @@ struct RepositorySpaceEntryJson<'a> {
     required: bool,
 }
 
+/// SHA-1 (lowercase hex) of the compact JSON array
+/// `[name, imageChecksum, iconChecksum, [[Name, Address, Requiered], ...]]`,
+/// entries in published order. The desktop app computes the same value
+/// (`repository_space_manifest_checksum`) to tell whether a space changed, so
+/// both sides pin the same test vector.
+fn space_manifest_checksum(
+    name: &str,
+    image_checksum: &str,
+    icon_checksum: &str,
+    entries: &[RepositorySpaceEntryJson<'_>],
+) -> String {
+    let entries: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|entry| serde_json::json!([entry.name, entry.address, entry.required]))
+        .collect();
+    let canonical = serde_json::json!([name, image_checksum, icon_checksum, entries]).to_string();
+    hex::encode(Sha1::digest(canonical.as_bytes()))
+}
+
 fn write_space_manifest(
     space: &LoadedSpace,
     output_dir: &Path,
@@ -497,22 +520,26 @@ fn write_space_manifest(
     let icon_checksum =
         srf::copy_and_hash_image(&space.config.icon_image_path, &space.config_dir, output_dir)?;
 
+    let name = space.config.name.trim();
+    let entries: Vec<RepositorySpaceEntryJson<'_>> = space
+        .repos
+        .iter()
+        .map(|repo| RepositorySpaceEntryJson {
+            name: &repo.name,
+            address: &repo.address,
+            required: repo.required,
+        })
+        .collect();
+    let space_checksum = space_manifest_checksum(name, &image_checksum, &icon_checksum, &entries);
     let manifest = RepositorySpaceJson {
-        name: space.config.name.trim(),
+        name,
         image: &space.config.repo_image_path,
         image_checksum,
         icon: &space.config.icon_image_path,
         icon_checksum,
+        space_checksum,
         app_update_url,
-        entries: space
-            .repos
-            .iter()
-            .map(|repo| RepositorySpaceEntryJson {
-                name: &repo.name,
-                address: &repo.address,
-                required: repo.required,
-            })
-            .collect(),
+        entries,
     };
 
     let json = serde_json::to_string_pretty(&manifest)
@@ -1514,6 +1541,7 @@ mod tests {
             image_checksum: String::new(),
             icon: "",
             icon_checksum: String::new(),
+            space_checksum: "abc".to_string(),
             app_update_url: None,
             entries,
         };
@@ -1524,7 +1552,60 @@ mod tests {
             "https://example.com/repos/modern/"
         );
         assert_eq!(json["entries"][0]["Requiered"], true);
+        assert_eq!(json["spaceChecksum"], "abc");
         assert!(json.get("appUpdateUrl").is_none());
+    }
+
+    fn checksum_entries() -> Vec<RepositorySpaceEntryJson<'static>> {
+        vec![
+            RepositorySpaceEntryJson {
+                name: "RepoAlpha",
+                address: "http://repo.example.invalid:8080/space/RepoAlpha/",
+                required: true,
+            },
+            RepositorySpaceEntryJson {
+                name: "RepoBeta",
+                address: "http://repo.example.invalid:8080/space/RepoBeta/",
+                required: false,
+            },
+        ]
+    }
+
+    #[test]
+    fn space_checksum_matches_the_pinned_client_vector() {
+        assert_eq!(
+            space_manifest_checksum("MainSpace", "aa", "bb", &checksum_entries()),
+            "580e1de5482e306432a52e2850ba74eda311c69d"
+        );
+    }
+
+    #[test]
+    fn space_checksum_moves_with_every_covered_field() {
+        let base = space_manifest_checksum("MainSpace", "aa", "bb", &checksum_entries());
+        assert_ne!(
+            base,
+            space_manifest_checksum("Other", "aa", "bb", &checksum_entries())
+        );
+        assert_ne!(
+            base,
+            space_manifest_checksum("MainSpace", "ac", "bb", &checksum_entries())
+        );
+        assert_ne!(
+            base,
+            space_manifest_checksum("MainSpace", "aa", "bc", &checksum_entries())
+        );
+        let mut reflagged = checksum_entries();
+        reflagged[1].required = true;
+        assert_ne!(
+            base,
+            space_manifest_checksum("MainSpace", "aa", "bb", &reflagged)
+        );
+        let mut reordered = checksum_entries();
+        reordered.reverse();
+        assert_ne!(
+            base,
+            space_manifest_checksum("MainSpace", "aa", "bb", &reordered)
+        );
     }
 
     fn write_repo_config(dir: &Path, name: &str, mods: &[&str]) -> PathBuf {

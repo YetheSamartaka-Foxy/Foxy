@@ -326,6 +326,7 @@ impl Foxy {
             repository_space_import_result_tx,
             repository_space_import_in_flight: false,
             repository_space_freshness_rx: None,
+            repository_space_last_refresh: None,
             repository_space_remote_changes: Default::default(),
             addon_hash_recalc_result_rx,
             addon_hash_recalc_result_tx,

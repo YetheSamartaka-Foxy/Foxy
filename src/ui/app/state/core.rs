@@ -204,6 +204,9 @@ pub struct RepositorySpaceManifest {
     pub icon: String,
     #[serde(rename = "iconChecksum", alias = "iconImageChecksum", default)]
     pub icon_checksum: String,
+    /// Written by newer servers; absent from older and hand-written manifests.
+    #[serde(rename = "spaceChecksum", default)]
+    pub space_checksum: String,
     #[serde(rename = "appUpdateUrl", alias = "app_update_url", default)]
     pub app_update_url: String,
     #[serde(default)]
@@ -394,6 +397,8 @@ pub struct FetchedRepositorySpace {
     pub repo_image_path: String,
     pub repo_image_checksum: String,
     pub app_update_url: String,
+    /// Checksum of the published content, see `repository_space_manifest_checksum`.
+    pub manifest_checksum: String,
     pub entries: Vec<RepositorySpaceEntry>,
 }
 

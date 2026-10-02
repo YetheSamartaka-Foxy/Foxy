@@ -289,6 +289,7 @@ impl Foxy {
         self.repository_space_bulk_progress = None;
         self.repository_space_import_in_flight = false;
         self.repository_space_freshness_rx = None;
+        self.repository_space_last_refresh = None;
         self.repository_space_remote_changes.clear();
         self.repository_selection = None;
         self.selected_repository_for_settings = None;

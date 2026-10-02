@@ -583,12 +583,21 @@ unprobed rather than merely unknown.
 Repository **spaces** have their own remote freshness, and it is not any
 repository's. A server that adds, drops or re-flags an entry in
 `repository_space.json` changes what the user is supposed to have, and no
-`repo.json` reports that. Foxy probes each configured space's manifest once per
-launch, off the paint path, and reports how the published membership differs
-from the local copy (`ui/app/repository/space_freshness.rs`). The probe reports;
-it never applies. Adding or removing repositories on the user's disk from a
-manifest they have not looked at is a change to their installation, not a
-notification.
+`repo.json` reports that. Foxy fetches each configured space's manifest at
+launch, every 30 minutes while it runs, and on demand from the space's **Refresh
+from server** toolbar button and context menu item, always off the paint path
+(`ui/app/repository/space_freshness.rs`). The change signal is the space
+checksum: SHA-1 of the compact JSON `[name, imageChecksum, iconChecksum,
+[[Name, Address, Requiered], ...]]`, published by `create-space` as
+`spaceChecksum` and always recomputed by the client from the fetched content (a
+hand-edited manifest can carry a stale value; a mismatch is logged and the
+content wins). A refresh whose checksum equals the stored `manifest_checksum`
+touches nothing. Otherwise it replaces the stored manifest (entries, name,
+images, app update source) so the space offers what the server publishes, and
+reports how the membership moved.
+It never installs or removes a repository: adding or removing repositories on
+the user's disk from a manifest they have not looked at is a change to their
+installation, not a notification.
 
 The **app's own** update is remote freshness too. A launch-only check leaves a
 long-running session unaware of a release, so the check repeats while the

@@ -98,6 +98,7 @@ impl Foxy {
             (0..selector_state.candidates.len()).collect()
         };
         let mut open_settings = false;
+        let mut refresh_from_server = false;
         let mut add_entry_action: Option<(String, String)> = None;
         let mut jump_to_repository: Option<usize> = None;
         let mut detach_repo_idx: Option<usize> = None;
@@ -130,7 +131,7 @@ impl Foxy {
                             .toolbar_icons as f32;
                         let toolbar_btn_width =
                             Self::toolbar_icon_button_size(toolbar_icon_size).x;
-                        let toolbar_count = 4.0;
+                        let toolbar_count = 5.0;
                         let toolbar_total = toolbar_count * toolbar_btn_width
                             + (toolbar_count - 1.0) * ui.spacing().item_spacing.x;
                         let heading_max_width = (ui.available_width()
@@ -192,6 +193,22 @@ impl Foxy {
                             }
                             if settings_button.clicked() {
                                 open_settings = true;
+                            }
+                            let refresh_enabled = !space.source_address.trim().is_empty()
+                                && !self.repository_space_refresh_in_flight();
+                            let refresh_button = Self::repository_toolbar_icon_button(
+                                ui,
+                                "\u{1F310}",
+                                toolbar_icon_size,
+                                self.t("Refresh from server").as_str(),
+                                refresh_enabled,
+                                None,
+                            );
+                            if refresh_button.hovered() && refresh_enabled {
+                                ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                            }
+                            if refresh_button.clicked() {
+                                refresh_from_server = true;
                             }
                             let recheck_button = Self::repository_toolbar_icon_button(
                                 ui,
@@ -632,6 +649,13 @@ impl Foxy {
                 .build_repository_space_bulk_action(&space.id, RepositorySpaceBulkMode::UpdateAll);
         }
 
+        if refresh_from_server {
+            info!(
+                "Refreshing repository space {} from the server",
+                Self::repository_space_display_name(&space)
+            );
+            self.refresh_repository_space_from_server(&space.id);
+        }
         if open_settings {
             self.open_repository_space_settings(&space.id);
             self.last_view = self.current_view;

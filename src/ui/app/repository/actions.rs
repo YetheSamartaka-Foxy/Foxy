@@ -7,6 +7,7 @@ use reqwest::blocking::Client;
 use serde_json::Value;
 use sha1::{Digest, Sha1};
 
+use crate::ui::app::repository::space_freshness::repository_space_manifest_checksum;
 use crate::ui::app::{
     FetchedRepositorySpace, Foxy, PendingRepositoryDuplicateAddAction,
     PendingRepositoryDuplicateAddState, RepoMetadataFetchResult, RepoMetadataPayload,
@@ -411,6 +412,18 @@ impl Foxy {
                     let source_base_url = Self::repository_space_base_url(&source_address);
                     let space_id = Self::repository_space_id_from_source(&source_address);
                     let app_update_url = manifest.app_update_url.trim().to_string();
+                    // Recomputed rather than trusted: a hand-edited manifest can
+                    // keep a stale published checksum and would hide its changes.
+                    let manifest_checksum = repository_space_manifest_checksum(&manifest);
+                    let published_checksum = manifest.space_checksum.trim();
+                    if !published_checksum.is_empty()
+                        && !published_checksum.eq_ignore_ascii_case(&manifest_checksum)
+                    {
+                        warn!(
+                            "Repository space manifest {} publishes spaceChecksum {} but its content hashes to {}; using the content",
+                            manifest_url, published_checksum, manifest_checksum
+                        );
+                    }
                     let entries: Vec<RepositorySpaceEntry> = manifest
                         .entries
                         .into_iter()
@@ -446,6 +459,7 @@ impl Foxy {
                         repo_image_path: manifest.image,
                         repo_image_checksum: manifest.image_checksum,
                         app_update_url,
+                        manifest_checksum,
                         entries,
                     }));
                 }
@@ -473,16 +487,49 @@ impl Foxy {
         preferred_shared_path: &str,
         ctx: &egui::Context,
     ) -> String {
+        let space_id = fetched.space_id.clone();
+        let existing = self
+            .repository_spaces
+            .iter()
+            .find(|space| space.id == space_id);
+        let space =
+            Self::merged_repository_space(existing, &space_id, fetched, preferred_shared_path);
+        self.store_repository_space(space.clone(), ctx);
+        let added_required = self.add_missing_required_repository_space_entries(&space_id, ctx);
+
+        info!("Imported repository space {}", space.name);
+        if added_required > 0 {
+            info!(
+                "Auto-added {} required repositories for repository space {}",
+                added_required, space.name
+            );
+        }
+        self.show_success_toast(self.t_fmt(
+            "Repository space imported: {name}",
+            &[("name", space.name.clone())],
+        ));
+        space_id
+    }
+
+    /// Build the space `space_id` from a fetched manifest, keeping the stored
+    /// space's download folder, local name override and collapsed state.
+    pub(in crate::ui::app) fn merged_repository_space(
+        existing_space: Option<&RepositorySpace>,
+        space_id: &str,
+        fetched: FetchedRepositorySpace,
+        preferred_shared_path: &str,
+    ) -> RepositorySpace {
         let FetchedRepositorySpace {
             source_address,
             source_base_url,
-            space_id,
+            space_id: _,
             manifest_name,
             icon_image_path,
             icon_image_checksum,
             repo_image_path,
             repo_image_checksum,
             app_update_url,
+            manifest_checksum,
             entries,
         } = fetched;
 
@@ -492,8 +539,6 @@ impl Foxy {
             manifest_name.clone()
         };
 
-        let existing_idx = self.repository_spaces.iter().position(|s| s.id == space_id);
-        let existing_space = existing_idx.and_then(|idx| self.repository_spaces.get(idx));
         let shared_path = existing_space
             .map(|s| s.shared_path.clone())
             .filter(|path| !path.trim().is_empty())
@@ -518,8 +563,8 @@ impl Foxy {
         });
         let collapsed = existing_space.map(|s| s.collapsed).unwrap_or(false);
 
-        let space = RepositorySpace {
-            id: space_id.clone(),
+        RepositorySpace {
+            id: space_id.to_string(),
             name: space_name,
             local_name_override,
             collapsed,
@@ -531,19 +576,26 @@ impl Foxy {
             repo_image_path,
             repo_image_checksum,
             app_update_url,
+            manifest_checksum,
             entries,
-        };
+        }
+    }
 
-        if let Some(idx) = existing_idx {
-            self.repository_spaces[idx] = space.clone();
-        } else {
-            self.repository_spaces.push(space.clone());
+    /// Insert or replace a space, persist it, and load its images. Never adds
+    /// or removes a repository.
+    pub(in crate::ui::app) fn store_repository_space(
+        &mut self,
+        space: RepositorySpace,
+        ctx: &egui::Context,
+    ) {
+        match self.repository_spaces.iter().position(|s| s.id == space.id) {
+            Some(idx) => self.repository_spaces[idx] = space.clone(),
+            None => self.repository_spaces.push(space.clone()),
         }
 
         self.save_repository_spaces();
         self.reconcile_repository_space_paths();
         self.maybe_auto_fill_app_update_url_from_metadata();
-        let added_required = self.add_missing_required_repository_space_entries(&space_id, ctx);
 
         if !space.icon_image_checksum.is_empty() {
             self.download_and_load_image(
@@ -563,19 +615,6 @@ impl Foxy {
                 false,
             );
         }
-
-        info!("Imported repository space {}", space.name);
-        if added_required > 0 {
-            info!(
-                "Auto-added {} required repositories for repository space {}",
-                added_required, space.name
-            );
-        }
-        self.show_success_toast(self.t_fmt(
-            "Repository space imported: {name}",
-            &[("name", space.name.clone())],
-        ));
-        space_id
     }
 
     fn add_missing_required_repository_space_entries(

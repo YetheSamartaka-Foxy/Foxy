@@ -12,6 +12,7 @@
     "repo_image_path": "repository_space_image.png",
     "repo_image_checksum": "73d3a5073862926f9b77c43456fe1e4d",
     "app_update_url": "https://updates.example.com/foxy/",
+    "manifest_checksum": "c66249077d7dfc0f88fff60d58b1d24140363d8f",
     "entries": [
       {
         "name": "Example Main",

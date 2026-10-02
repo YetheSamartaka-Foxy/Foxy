@@ -972,6 +972,7 @@ mod tests {
             repo_image_path: String::new(),
             repo_image_checksum: String::new(),
             app_update_url: String::new(),
+            manifest_checksum: String::new(),
             entries: Vec::new(),
         }];
         let active = ActiveGameSpace {

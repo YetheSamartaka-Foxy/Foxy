@@ -451,6 +451,7 @@ A mod name that appears in several repositories must hash identically in all of 
   "imageChecksum": "<sha1>",
   "icon": "icon.png",
   "iconChecksum": "<sha1>",
+  "spaceChecksum": "<sha1>",
   "appUpdateUrl": "https://mods.example.com/foxy/",
   "entries": [
     { "Name": "Modern", "Address": "https://mods.example.com/repos/modern/", "Requiered": true },
@@ -465,16 +466,19 @@ A mod name that appears in several repositories must hash identically in all of 
 | `name` | Display name for the space in the Foxy client |
 | `image`, `imageChecksum` | Banner image path and checksum |
 | `icon`, `iconChecksum` | Icon image path and checksum |
+| `spaceChecksum` | SHA-1 of what clients show for the space, so they can tell when it changed (see below). Optional; older clients ignore it |
 | `appUpdateUrl` | URL of a `foxy-app-updater.json` manifest (fills the client's update source) |
 | `entries[].Name` | Display name for the repository |
 | `entries[].Address` | Full URL of the repository root (where `repo.json` lives) |
 | `entries[].Requiered` | `true` for required repositories, `false` for optional ones (the legacy spelling is intentional) |
 
-You can still write this file by hand if you generate repositories separately; keep the same shape.
+`spaceChecksum` is the lowercase hex SHA-1 of the compact JSON array `[name, imageChecksum, iconChecksum, [[Name, Address, Requiered], ...]]`, built from the values exactly as they appear in the file, with the entries in file order. For the example above with real checksums that is the SHA-1 of `["My Community","<sha1>","<sha1>",[["Modern","https://mods.example.com/repos/modern/",true],...]]`. Changing the name, either image, or any entry (including its order or required flag) changes it; `appUpdateUrl` and the image paths are not covered.
+
+You can still write this file by hand if you generate repositories separately; keep the same shape. When you edit it by hand, either regenerate `spaceChecksum` or delete the field. Foxy recomputes the checksum from the content anyway and logs a warning when the published value is stale, so a stale value never hides a change, but deleting it keeps the file honest.
 
 ### How spaces work with Foxy
 
-When a player adds the space URL, the client reads `repository_space.json` and adds the required repositories automatically; optional ones can be picked by the player. The space's `appUpdateUrl` has the **highest priority** for filling the client's app update source, ahead of any `repo.json` value.
+When a player adds the space URL, the client reads `repository_space.json` and adds the required repositories automatically; optional ones can be picked by the player. Clients reread the manifest at launch, every 30 minutes while Foxy runs, and on **Refresh from server** (the globe button on the space page, or the space's context menu). When the checksum matches what the client already has, nothing else is touched; when it changed, the client takes the new name, images, `appUpdateUrl`, and repository list, so a repository you add to the space later shows up for players without them re-adding the space. They still choose whether to install it, and nothing is removed from their disk. The space's `appUpdateUrl` has the **highest priority** for filling the client's app update source, ahead of any `repo.json` value.
 
 Serve the space folder with its images:
 

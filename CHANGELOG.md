@@ -23,10 +23,12 @@
 - After a database reset, Foxy skips reading files it already checked and that have not changed since. You can turn this off in the settings.
 - A new Extended diagnostics logging setting writes more detail to the log files, which helps when reporting performance problems.
 - Right-click a repository or repository space in the list to run a quick local check, a remote data recheck, or open its settings.
+- Repository spaces now pick up repositories the server adds, removes, or re-flags, at launch, every 30 minutes, and with a new Refresh from server button on the space page and in its right-click menu. New repositories appear in the space for you to add; Foxy never installs or removes one on its own.
 - Foxy now shows a prompt at startup when a new version is available, with a more visible update badge and download button.
 - `foxy version` now shows the exact build commit.
 - New command-line commands for game spaces, Steam Workshop mods, Arma Reforger addons, extra files, and config packs.
 - Server tool: `create-space` builds every repository of a repository space and its `repository_space.json` in one go.
+- Server tool: `create-space` writes a `spaceChecksum` into `repository_space.json` so Foxy can tell when a space changed. Older Foxy versions ignore it.
 - Server tool: mods shared by several repositories in a space can be stored only once on disk.
 - Server tool: repositories can list the Creator DLCs they use and mark mods that only players need.
 - Server tool: the server `-mod=` line is printed after each build and saved to `server_mod_line.txt`.

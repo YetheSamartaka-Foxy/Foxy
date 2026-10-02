@@ -107,13 +107,14 @@ impl Foxy {
     }
 
     fn render_repository_list_space_row(&mut self, ui: &mut Ui, row_slot: usize, space_idx: usize) {
-        let (space_id, icon_checksum, space_name, collapsed) = {
+        let (space_id, icon_checksum, space_name, collapsed, has_source) = {
             let space = &self.repository_spaces[space_idx];
             (
                 space.id.clone(),
                 space.icon_image_checksum.clone(),
                 Self::repository_space_display_name(space).to_string(),
                 space.collapsed,
+                !space.source_address.trim().is_empty(),
             )
         };
         let is_selected = self.selected_repository_space_id.as_deref() == Some(space_id.as_str());
@@ -250,6 +251,11 @@ impl Foxy {
                 )
                 .disabled_if(space_buttons_disabled),
                 ContextMenuItem::new(
+                    RepositorySpaceRowContextAction::RefreshFromServer,
+                    self.t("Refresh from server"),
+                )
+                .disabled_if(!has_source || self.repository_space_refresh_in_flight()),
+                ContextMenuItem::new(
                     RepositorySpaceRowContextAction::OpenSettings,
                     self.t("Repository space settings"),
                 ),
@@ -282,6 +288,10 @@ impl Foxy {
                         &space_id,
                         RepositorySpaceBulkMode::RecheckAll,
                     );
+            }
+            Some(RepositorySpaceRowContextAction::RefreshFromServer) => {
+                info!("Refreshing repository space {} from the server", space_name);
+                self.refresh_repository_space_from_server(&space_id);
             }
             Some(RepositorySpaceRowContextAction::OpenSettings) => {
                 self.open_repository_space_settings(&space_id);

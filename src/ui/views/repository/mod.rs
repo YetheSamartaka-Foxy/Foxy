@@ -79,6 +79,7 @@ pub(super) enum RepositorySpaceRowContextAction {
     CreateFolder,
     QuickLocalCheck,
     RemoteRecheck,
+    RefreshFromServer,
     OpenSettings,
     Delete,
 }

@@ -4,6 +4,7 @@
   "imageChecksum": "5d41402abc4b2a76b9719d911017c592",
   "icon": "icon.png",
   "iconChecksum": "7d793037a0760186574b0282f2f435e7",
+  "spaceChecksum": "c66249077d7dfc0f88fff60d58b1d24140363d8f",
   "appUpdateUrl": "http://myserver.com/foxy/",
   "entries": [
     {

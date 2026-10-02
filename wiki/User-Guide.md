@@ -141,6 +141,8 @@ When you add a repository space, it appears as a collapsible section in the side
 - A list of **Available repositories** defined by the space, each with an **Add** button and a filter field.
 - A **Matching existing repositories** section that can associate repositories you added earlier with the space.
 
+Foxy rereads each space's manifest from the server at launch and every 30 minutes while it runs, so repositories the community adds to the space appear in **Available repositories** without re-adding the space. To reread it right away, click the globe **Refresh from server** button on the space page, or right-click the space in the sidebar and choose **Refresh from server**. A refresh updates the list of repositories the space offers, its name, and its images; it never installs or removes a repository on your disk.
+
 ### Shared paths
 
 A repository space can define a common local folder for all its repositories. When a repository belongs to a space, its local path is inherited from the space's shared path and cannot be changed individually. Required repositories of the space are added automatically and see the same shared folder.

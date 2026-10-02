@@ -887,6 +887,7 @@ fn sanitize_repository_space_paths_trims_entry_addresses() {
         repo_image_path: String::new(),
         repo_image_checksum: String::new(),
         app_update_url: String::new(),
+        manifest_checksum: String::new(),
         entries: vec![RepositorySpaceEntry {
             name: "Entry".to_string(),
             address: "  http://example.invalid/mody/Entry  ".to_string(),

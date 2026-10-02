@@ -245,11 +245,12 @@ pub struct Foxy {
     /// duplicate dispatches (e.g. repeated dialog submits) while it runs.
     /// Read from view code to show progress; only mutated within app modules.
     pub(crate) repository_space_import_in_flight: bool,
-    /// Startup probe of each space's published manifest. Runtime only: it says
-    /// what the server publishes now, not what the user has agreed to.
+    /// In-flight refresh of space manifests (launch, periodic, or manual).
     pub(crate) repository_space_freshness_rx: Option<
         StdReceiver<crate::ui::app::repository::space_freshness::RepositorySpaceFreshnessResult>,
     >,
+    /// When the last refresh of every space started; drives the periodic recheck.
+    pub(crate) repository_space_last_refresh: Option<Instant>,
     pub(crate) repository_space_remote_changes:
         crate::ui::app::repository::space_freshness::RepositorySpaceRemoteChanges,
     /// Background addon hash recalculation (file hashing off the UI thread).

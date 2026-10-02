@@ -301,8 +301,9 @@ impl Foxy {
 
         if self.startup_tasks_started {
             self.maybe_recheck_app_update();
+            self.maybe_recheck_repository_spaces();
         }
-        self.poll_repository_space_freshness_results();
+        self.poll_repository_space_freshness_results(&ctx);
         self.poll_startup_diagnostics();
         self.poll_mission_scan();
         self.poll_restore_pending_updates();
