@@ -667,7 +667,7 @@
     "(managed by repo.json)": "(διαχείριση από repo.json)",
     "Auto apply repo.json launch parameters is on, so the repository overwrites these fields on every refresh. Turn that setting off, or select a launch profile, to edit them.": "Η αυτόματη εφαρμογή των παραμέτρων εκκίνησης repo.json είναι ενεργοποιημένη, επομένως το αποθετήριο αντικαθιστά αυτά τα πεδία σε κάθε ανανέωση. Απενεργοποιήστε αυτήν τη ρύθμιση ή επιλέξτε ένα προφίλ εκκίνησης για να το επεξεργαστείτε.",
     "Local Path": "Τοπική Διαδρομή",
-    "Creator DLCs": "Creator DLCs",
+    "Creator DLCs": "DLC δημιουργών",
     "Enable or disable external addons for this repository - mods found on disk that are not part of this repo's own addons.\nThey come from your other repositories, additional folders, and Steam Workshop. Steam Workshop mods appear only when \"Include Steam Addons\" is enabled.": "Ενεργοποιήστε ή απενεργοποιήστε τα εξωτερικά πρόσθετα για αυτό το αποθετήριο - mods που βρέθηκαν στον δίσκο και δεν αποτελούν μέρος των δικών πρόσθετων αυτού του αποθετηρίου.\nΠροέρχονται από τα άλλα αποθετήριά σας, πρόσθετους φακέλους και το Steam Workshop. Τα mods του Steam Workshop εμφανίζονται μόνο όταν είναι ενεργοποιημένη η ρύθμιση \"Συμπερίληψη addons Steam\".",
     "This repository does not provide any optional addons.": "Αυτό το αποθετήριο δεν παρέχει προαιρετικά addons.",
     "This repository does not provide any addons in this section.": "Αυτό το αποθετήριο δεν παρέχει addons σε αυτή την ενότητα.",

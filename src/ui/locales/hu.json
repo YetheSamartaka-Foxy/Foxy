@@ -1640,7 +1640,7 @@
     "Benchmark saved.": "Benchmark mentve.",
     "Benchmarks": "Benchmarkok",
     "Benchmarks are kept by default; the database only indexes them and the index is rebuilt afterwards.": "A referenciaértékek alapértelmezés szerint megmaradnak; az adatbázis csak indexeli őket, és utána újraépítik az indexet.",
-    "Build": "Build",
+    "Build": "Buildverzió",
     "CPU": "CPU",
     "Change": "Változás",
     "Clear selection": "Kiválasztás törlése",

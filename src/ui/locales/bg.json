@@ -667,7 +667,7 @@
     "(managed by repo.json)": "(управляван от repo.json)",
     "Auto apply repo.json launch parameters is on, so the repository overwrites these fields on every refresh. Turn that setting off, or select a launch profile, to edit them.": "Автоматично прилагане на параметрите за стартиране на repo.json е включено, така че хранилището презаписва тези полета при всяко опресняване. Изключете тази настройка или изберете профил за стартиране, за да ги редактирате.",
     "Local Path": "Локален път",
-    "Creator DLCs": "Creator DLCs",
+    "Creator DLCs": "DLC от създатели",
     "Enable or disable external addons for this repository - mods found on disk that are not part of this repo's own addons.\nThey come from your other repositories, additional folders, and Steam Workshop. Steam Workshop mods appear only when \"Include Steam Addons\" is enabled.": "Активиране или деактивиране на външните добавки за това хранилище - модове, намерени на диска, които не са част от собствените добавки на това хранилище.\nТе идват от другите ви хранилища, допълнителни папки и Steam Workshop. Модовете от Steam Workshop се показват само когато е включено \"Включване на Steam добавки\".",
     "This repository does not provide any optional addons.": "Това хранилище не предоставя незадължителни добавки.",
     "This repository does not provide any addons in this section.": "Това хранилище не предоставя добавки в този раздел.",

@@ -1638,7 +1638,7 @@
     "Also delete saved benchmarks": "Slett også lagrede benchmarks",
     "Back to list": "Tilbake til listen",
     "Benchmark saved.": "Benchmark lagret.",
-    "Benchmarks": "Benchmarks",
+    "Benchmarks": "Ytelsestester",
     "Benchmarks are kept by default; the database only indexes them and the index is rebuilt afterwards.": "Benchmarks beholdes som standard; databasen bare indekserer dem og indeksen bygges opp igjen etterpå.",
     "Build": "Bygg",
     "CPU": "CPU",

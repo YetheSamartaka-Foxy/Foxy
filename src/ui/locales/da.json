@@ -313,7 +313,7 @@
     "Kernel pool that must stay resident": "Kernepulje der skal forblive resident",
     "Lifetime fault count, useful as pressure context": "Antal fejl over levetid, nyttig som trykkontekst",
     "Working set": "Arbejdssæt",
-    "Private bytes": "Private bytes",
+    "Private bytes": "Private byte",
     "Peak working set": "Maksimalt arbejdssæt",
     "Virtual bytes": "Virtuelle bytes",
     "Tracked total": "Sporet i alt",
