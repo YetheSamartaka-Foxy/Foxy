@@ -291,11 +291,32 @@ rewrite runs only once the repository output is published (including with
 `--atomic`). In a space, two repositories may not list the same file.
 
 A config with `"game": "reforger"` (`new --game reforger` writes one) hashes the
-unpacked addon folders the same way, including the `.pak` entries inside them, and
+addon directories the same way, including the `.pak` entries inside them, and
 prints an Arma Reforger server line instead: `-addonsDir <prefix or .> -addons
 <id,...>`, where each id is the mod's `.gproj` GUID (project ID, `ServerData.json`
 id, then folder name as fallbacks). `dlcContent` and `clientSide` are warned about
 and ignored for Reforger; the generated `repo.json` carries `"game": "reforger"`.
+
+For local Reforger addons, keep each addon's `addon.gproj`, `.pak` files and
+resource database together; an Arma 3-style `addons/` subfolder is not required.
+Foxy loads enabled addons with `-addons` and `-addonsDir`. An addon can be loaded
+without appearing in Reforger's Workshop manager or its top-right counter;
+confirm loading in the game's `console.log` under `Loaded addons` and check its
+features in a scenario.
+
+A local-addon dedicated server uses a world `.ent` path:
+
+```text
+ArmaReforgerServer.exe -server "worlds/MP/Coop_CombatOps_Arland.ent" -addonsDir "R:\Mods\MainRepo" -addons ABCDEF1234567890 -profile "R:\Mods\ServerProfile" -maxFPS 60
+```
+
+Replace the sample addon GUID and paths, and confirm the world path in your
+installed game version. This local-server mode ignores JSON server config;
+`-config` cannot be combined with `-addons`. For a server using JSON settings
+and Workshop `game.mods`, launch with `-config` instead. Publishing addons through
+Foxy does not provide a documented way to combine these two server modes.
+See the [Reforger admin instructions](wiki/Server-Admin-Guide.md#arma-reforger-repositories)
+for generation, regeneration, launch parameters and troubleshooting.
 
 `--collect-keys` copies every `.bikey` found in the generated mods into a single
 flat folder (`<output>/keys` by default) so a wrapper script can push it to a

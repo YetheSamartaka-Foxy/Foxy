@@ -141,19 +141,26 @@ impl Foxy {
         let executable = command.get_program().to_os_string();
         let args: Vec<OsString> = command.get_args().map(|arg| arg.to_os_string()).collect();
         let cwd: Option<PathBuf> = command.get_current_dir().map(Path::to_path_buf);
+        let game_name = crate::core::game::registry()
+            .active()
+            .display_name()
+            .to_string();
         self.activate_extra_files_before_launch();
 
         if steam::is_steam_running() {
             return match spawn_launch_process(&executable, &args, cwd.as_deref()) {
                 Ok(pid) => {
-                    info!("Launched Arma 3 for repository {} (pid={})", repo_name, pid);
+                    info!(
+                        "Launched {} for repository {} (pid={})",
+                        game_name, repo_name, pid
+                    );
                     self.mark_repository_launched(&effective.address, &effective.path);
                     LaunchDispatchResult::Launched
                 }
                 Err(err) => {
                     warn!(
-                        "Failed to launch Arma 3 for repository {}: {}",
-                        repo_name, err
+                        "Failed to launch {} for repository {}: {}",
+                        game_name, repo_name, err
                     );
                     self.show_error_toast(self.t("Failed to launch Arma 3."));
                     LaunchDispatchResult::Failed
@@ -205,14 +212,14 @@ impl Foxy {
             ) {
                 Ok(pid) => {
                     info!(
-                        "Launched Arma 3 for repository {} (pid={})",
-                        repo_name_owned, pid
+                        "Launched {} for repository {} (pid={})",
+                        game_name, repo_name_owned, pid
                     );
                 }
                 Err(err) => {
                     warn!(
-                        "Failed to launch Arma 3 for repository {} after Steam preparation: {}",
-                        repo_name_owned, err
+                        "Failed to launch {} for repository {} after Steam preparation: {}",
+                        game_name, repo_name_owned, err
                     );
                 }
             }

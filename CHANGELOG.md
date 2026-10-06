@@ -5,7 +5,7 @@
 - A game space overview shows your repositories, mods on disk, last launch and update times, and recent benchmarks.
 - Each game space has its own settings screen, and you can edit a game space even when it is not open.
 - Total War: WARHAMMER III support: Foxy finds the game, syncs repositories of `.pack` mods, picks up Steam Workshop mods, and launches with your mod list.
-- Arma Reforger support: Foxy finds the game, syncs repositories, launches with your enabled addons, and can join a server directly.
+- Arma Reforger support: Foxy finds the game, syncs repositories including packed local addons, launches with your enabled addons, and can join a server directly.
 - A Generic game option for other Steam games, where you set the game executable, launch options, and mod list file yourself.
 - A Steam Workshop tab in the game space settings to add, enable, disable, reorder, and remove Workshop mods.
 - Freeze a Workshop mod to keep it at its current version, even when the author updates it on Steam.

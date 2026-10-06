@@ -286,6 +286,13 @@ impl Foxy {
     }
 
     pub fn repo_enable_editor_mission_list(&self, repo: &Repository) -> bool {
+        if !crate::core::game::registry()
+            .active()
+            .capabilities()
+            .profiles
+        {
+            return false;
+        }
         match repo.enable_editor_mission_list {
             Some(value) => value,
             None => self.settings_view_state.enable_editor_mission_list,

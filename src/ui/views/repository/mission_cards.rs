@@ -541,6 +541,13 @@ impl Foxy {
 
     /// Determine which Arma 3 profile to use for a given repository.
     pub(crate) fn resolve_arma3_profile_for_repo(&self, repo_idx: usize) -> Option<String> {
+        if !crate::core::game::registry()
+            .active()
+            .capabilities()
+            .profiles
+        {
+            return None;
+        }
         let repo = self.repository_view_state.repositories.get(repo_idx)?;
 
         // 1. Repository-specific override

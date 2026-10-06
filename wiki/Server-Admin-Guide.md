@@ -183,6 +183,7 @@ Key points:
 - **Nested mods** such as `@ace/optionals/@ace_noactionmenu` are published as a standalone `@ace_noactionmenu` mod.
 - **Mod names are lowercased** in the output. A source folder named `@ACE3` becomes `@ace3`.
 - **Images** (`iconImagePath`, `repoImagePath`) resolve relative to `basePath`. If found, they are copied to the output and their SHA-1 checksums are written into `repo.json`.
+- If the client still shows a placeholder, check that the generated `repo.json` has a non-empty `repoImagePath` and `repoImageChecksum` and that the published image is reachable. A source image is not published unless its path is configured. Add `"repoImagePath": "repo.png"` to the generator config with `repo.png` under `basePath`, regenerate, and refresh the repository in Foxy.
 - **`dlcContent`** lists the Arma 3 Creator DLCs the repository uses (see [DLC content](#dlc-content)).
 - **`modLineFiles`** lists server launch scripts to keep in step with the generated launch line (see [Server Launch Line and Keys](#server-launch-line-and-keys)).
 
@@ -270,23 +271,59 @@ Set `"game": "reforger"` in the config (`new config.json --game reforger` writes
 
 ```json
 {
-  "repoName": "Example Reforger Repository",
+  "repoName": "MainRepo",
   "game": "reforger",
-  "basePath": ".",
-  "requiredMods": [{ "modName": "MyReforgerMod", "enabled": true }],
-  "optionalMods": [{ "modName": "OptionalReforgerMod", "enabled": false }],
+  "basePath": "R:/Mods/MainRepo",
+  "requiredMods": [{ "modName": "@mod_01", "enabled": true }],
+  "optionalMods": [],
+  "iconImagePath": "icon.png",
+  "repoImagePath": "repo.png",
   "clientParameters": "-noSplash",
-  "modLineFiles": ["server/start-reforger.sh"],
-  "servers": [{ "name": "Main Server", "address": "203.0.113.10", "port": "2001" }]
+  "modLineFiles": [],
+  "servers": [{ "name": "Main Server", "address": "127.0.0.1", "port": "2001" }]
 }
 ```
 
-- Unpacked addon folders are hashed the same way as Arma 3 mods. `.pak` archives inside them are parsed so clients can update individual entries.
+- Addon folders are hashed the same way as Arma 3 mods. Keep each addon's `addon.gproj`, `.pak` files and `resourceDatabase.rdb` together in its own folder. Packed Reforger addons do not need an Arma 3-style `addons/` subfolder. `.pak` archives inside them are parsed so clients can update individual entries.
 - The printed launch line is `-addonsDir <prefix or .> -addons <id,...>`. Each id is the mod's `.gproj` GUID, with the project ID, the Workshop `ServerData.json` id, and finally the folder name as fallbacks.
 - `dlcContent` and `clientSide` mean nothing for Reforger; they are accepted with a warning and ignored.
 - The generated `repo.json` carries `"game": "reforger"`. Arma 3 output does not include the key.
 
-To configure a dedicated server, export the mod list as a `game.mods` fragment:
+### Generate and regenerate the repository
+
+The generator's `config.json` is the editable input. The generated `repo.json` is the client manifest; it is neither the generator config nor the Reforger dedicated-server config.
+
+```text
+foxy-server-backend-cli new "R:\Mods\MainRepo\config.json" --game reforger
+foxy-server-backend-cli create "R:\Mods\MainRepo\config.json" "R:\Mods\Published\MainRepo" --threads 16 --mode foxy --atomic --yes
+```
+
+Run `new` only once, edit the template, then use the same `create` command after changing addons or repository metadata. `--atomic --yes` builds beside the published output and replaces it after success, so a regeneration script does not need to delete the current repository first. Serve `R:\Mods\Published\MainRepo` over HTTP/HTTPS. Keep the source and output directories separate.
+
+The example explicitly selects `@mod_01`. To include every addon folder under `basePath`, use `"requiredMods": [{ "modName": "*", "enabled": true }]` and keep unrelated directories outside that folder. Image paths resolve from `basePath`; put `icon.png` and `repo.png` there or adjust their configured paths.
+
+The `servers` list supplies connection details to Foxy clients. It does not configure the dedicated server's bind address, public address, server name, password or game rules.
+
+### Dedicated-server launch modes
+
+Choose the server mode before preparing a launch script:
+
+| Mode | Launch parameters | Configuration |
+|------|-------------------|---------------|
+| JSON-configured server | `-config <server.json>` | Server settings and Workshop mods in `game.mods` |
+| Local-addon server | `-server <world.ent> -addonsDir <root> -addons <GUIDs>` | Loads local addons directly; JSON server config is ignored |
+
+Reforger rejects `-config` together with `-addons` with `-config cannot be used together with addons!`. Removing `-config` also removes its server settings; the local-addon command is not an equivalent way to launch a fully JSON-configured public server. Foxy distribution does not change this restriction. Bohemia documents the local-addon mode for addon testing; a production deployment that needs JSON settings requires a separately verified solution. See [Server Hosting](https://community.bistudio.com/wiki/Arma_Reforger%3AServer_Hosting) and [Startup Parameters](https://community.bistudio.com/wiki/Arma_Reforger%3AStartup_Parameters).
+
+Run the following commands from the folder containing `ArmaReforgerServer.exe`, or use an absolute executable path.
+
+For a JSON-configured server:
+
+```text
+ArmaReforgerServer.exe -config ".\configs\MainRepo.json" -profile "R:\Mods\ServerProfile" -maxFPS 60
+```
+
+To prepare that server's mod list, export a `game.mods` fragment:
 
 ```
 foxy-server-backend-cli export-reforger-config config.json reforger_mods.json
@@ -297,13 +334,40 @@ foxy-server-backend-cli export-reforger-config config.json reforger_mods.json --
 {
   "game": {
     "mods": [
-      { "modId": "ABCDEF1234567890", "name": "MyReforgerMod" }
+      { "modId": "ABCDEF1234567890", "name": "@mod_01" }
     ]
   }
 }
 ```
 
-Every exported mod needs a resolvable mod id.
+Every exported mod needs a resolvable mod id. Merge the fragment's `game.mods` into your full server JSON; the fragment is not a complete server config. Exporting IDs does not publish private local addons to Workshop or make `-config` accept `-addons`.
+
+For a local-addon server running Combat Ops on Arland:
+
+```text
+ArmaReforgerServer.exe -server "worlds/MP/Coop_CombatOps_Arland.ent" -addonsDir "R:\Mods\MainRepo" -addons ABCDEF1234567890 -profile "R:\Mods\ServerProfile" -maxFPS 60
+```
+
+The Arland world path is identified in the [Scenario Framework guide](https://jacobmeister.github.io/ScenarioFrameworkExplained/); confirm it exists in your installed game version. A JSON `scenarioId` uses a mission `.conf` resource, while `-server` expects the world `.ent`. They are not interchangeable.
+
+| Parameter | Meaning |
+|-----------|---------|
+| `-server` | World `.ent` to host locally; ignores JSON server config |
+| `-addonsDir` | Parent directory containing addon folders, not the individual `.pak` file; multiple roots are comma-separated |
+| `-addons` | Comma-separated addon GUIDs from `.gproj`, without braces; replace the synthetic example ID |
+| `-profile` | Profile parent directory; Reforger uses a `profile` subfolder for settings |
+| `-maxFPS 60` | Caps server frame rate |
+| `-addonDownloadDir` | Workshop download parent directory; downloads go into its `addons` subfolder |
+
+Ensure dependencies are available in the game's addon search roots. `-addonsDir` searches local content; `-addonDownloadDir` changes Workshop storage and is not a verified fix for missing Workshop UI entries. When using the generator's `server_mod_line.txt` or `modLineFiles`, use the local-addon mode and a prefix pointing to the addon folders on the server. The generated addon parameters do not supply a world path or JSON server settings.
+
+### Verify loading and repository metadata
+
+- Check both server and client `console.log` files. An entry under `Available addons` only proves discovery; look under `Loaded addons` for the selected GUID and check for package, resource or script errors. Verify the addon's features in an actual scenario.
+- Local addons launched with `-addons`/`-addonsDir` can be loaded while absent from the Workshop manager, as described in this [firsthand community report](https://steamcommunity.com/app/1874880/discussions/0/604147119540950733/). The top-right counter alone is not proof of failed loading. Reforger's [addon-manager API](https://community.bistudio.com/wikidata/external-data/arma-reforger/ArmaReforgerScriptAPIPublic/interfaceSCR__AddonManager.html) manages Workshop-item records separately. The exact reason for a missing UI entry or zero counter is not established by a successful engine load log.
+- Copied Workshop `meta` files can retain paths from the original machine. Treat those as a diagnostic clue, not a confirmed cause or a reason to rewrite synced files automatically.
+- A repository image must be configured, published and reachable. Check the generated `repoImagePath` and `repoImageChecksum` and request the image from the hosted output. Merely placing an image in the source folder does not publish it.
+- Metadata-only changes, such as images or server details, can leave the addon checksum unchanged. If startup reports no content changes but still shows old metadata, run a remote repository recheck to fetch its metadata explicitly; regenerating identical addon content does not guarantee an update prompt.
 
 ---
 

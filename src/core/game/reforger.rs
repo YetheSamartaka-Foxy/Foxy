@@ -90,6 +90,10 @@ impl GameModule for ReforgerModule {
         is_valid_reforger_dir(path)
     }
 
+    fn is_addon_directory(&self, path: &Path) -> bool {
+        find_gproj_file(path).is_some()
+    }
+
     fn build_launch(
         &self,
         plan: &LaunchPlan,

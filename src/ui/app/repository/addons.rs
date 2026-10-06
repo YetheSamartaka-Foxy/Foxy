@@ -5,6 +5,8 @@ use std::time::{Duration, Instant};
 
 use log::{info, warn};
 
+use crate::core::game::GameModule;
+
 use crate::ui::app::{
     AddonInventoryEntry, AddonInventoryViewCache, Foxy, RepositoryAddonListCache,
     RepositoryExternalAddonsListCache, RepositorySettingsAddonPreloadResult,
@@ -63,21 +65,6 @@ impl Foxy {
         repo.external_addon_favorites = profile.external_addon_favorites.clone();
         repo.external_addon_client_side = profile.external_addon_client_side.clone();
         repo.additional_params = profile.additional_params.clone();
-    }
-
-    pub fn contains_addons_subfolder(folder: &Path) -> bool {
-        let entries = match std::fs::read_dir(folder) {
-            Ok(entries) => entries,
-            Err(_) => return false,
-        };
-
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if entry.path().is_dir() && name.eq_ignore_ascii_case("addons") {
-                return true;
-            }
-        }
-        false
     }
 
     pub(crate) fn normalize_origin_lookup_path(path: &str) -> String {
@@ -306,7 +293,10 @@ impl Foxy {
         }
     }
 
-    pub fn discover_addons_in_path<P: AsRef<Path>>(root_path: P) -> Vec<(String, String)> {
+    pub fn discover_addons_in_path<P: AsRef<Path>>(
+        root_path: P,
+        module: &dyn GameModule,
+    ) -> Vec<(String, String)> {
         let mut results = Vec::new();
         let path = root_path.as_ref();
         if !path.is_dir() {
@@ -330,7 +320,7 @@ impl Foxy {
                 None => continue,
             };
 
-            if !Foxy::contains_addons_subfolder(&subfolder_path) {
+            if !module.is_addon_directory(&subfolder_path) {
                 continue;
             }
 
@@ -382,6 +372,7 @@ impl Foxy {
         additional_folder_aliases: &HashMap<String, String>,
         arma3_directory: &str,
         steam_directory: &str,
+        module: &dyn GameModule,
     ) -> Vec<AddonInventoryEntry> {
         let mut discovered: Vec<(String, String, String)> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
@@ -400,7 +391,7 @@ impl Foxy {
             }
             let scanned = scanned_by_path
                 .entry(Self::normalize_origin_lookup_path(repo_path))
-                .or_insert_with(|| Foxy::discover_addons_in_path(repo_path))
+                .or_insert_with(|| Foxy::discover_addons_in_path(repo_path, module))
                 .clone();
             for (addon_name, absolute_path) in scanned {
                 let repo_origins = origins_by_addon_path
@@ -422,8 +413,13 @@ impl Foxy {
             }
         }
 
-        let workshop_root =
-            Self::normalized_steam_workshop_root_path_for(arma3_directory, steam_directory);
+        let workshop_root = module
+            .capabilities()
+            .steam_workshop
+            .then(|| {
+                Self::normalized_steam_workshop_root_path_for(arma3_directory, steam_directory)
+            })
+            .flatten();
         for folder in additional_folders {
             let folder = folder.trim();
             if folder.is_empty() {
@@ -436,7 +432,7 @@ impl Foxy {
                 .unwrap_or_else(|| "Additional folders".to_string());
             let scanned = scanned_by_path
                 .entry(folder_key)
-                .or_insert_with(|| Foxy::discover_addons_in_path(folder))
+                .or_insert_with(|| Foxy::discover_addons_in_path(folder, module))
                 .clone();
             for (addon_name, absolute_path) in scanned {
                 if seen.insert(absolute_path.clone()) {
@@ -453,8 +449,11 @@ impl Foxy {
             }
         }
 
-        let workshop_candidates =
-            Self::build_workshop_candidate_paths(arma3_directory.trim(), steam_directory.trim());
+        let workshop_candidates = if module.capabilities().steam_workshop {
+            Self::build_workshop_candidate_paths(arma3_directory.trim(), steam_directory.trim())
+        } else {
+            Vec::new()
+        };
 
         let mut scanned_roots: HashSet<PathBuf> = HashSet::new();
         for workshop_folder in &workshop_candidates {
@@ -468,7 +467,7 @@ impl Foxy {
                 .entry(Self::normalize_origin_lookup_path(
                     &workshop_folder.to_string_lossy(),
                 ))
-                .or_insert_with(|| Foxy::discover_addons_in_path(workshop_folder))
+                .or_insert_with(|| Foxy::discover_addons_in_path(workshop_folder, module))
                 .clone();
             for (addon_name, absolute_path) in scanned {
                 if seen.insert(absolute_path.clone()) {
@@ -511,6 +510,7 @@ impl Foxy {
             &self.settings_view_state.additional_folder_aliases,
             &self.settings_view_state.arma3_directory,
             &self.settings_view_state.steam_directory,
+            crate::core::game::registry().active(),
         )
     }
 
@@ -661,6 +661,7 @@ impl Foxy {
         let additional_folder_aliases = self.settings_view_state.additional_folder_aliases.clone();
         let arma3_directory = self.settings_view_state.arma3_directory.clone();
         let steam_directory = self.settings_view_state.steam_directory.clone();
+        let module = crate::core::game::registry().active();
         let inventory_generation = self.addon_inventory_generation;
         let result_tx = self.repository_settings_addon_preload_tx.clone();
         let repaint_ctx = self.repaint_ctx.clone();
@@ -675,6 +676,7 @@ impl Foxy {
                     &additional_folder_aliases,
                     &arma3_directory,
                     &steam_directory,
+                    module,
                 );
                 info!(
                     "Preloaded addon inventory for repository settings in {:.2?} ({} addons)",
@@ -1133,6 +1135,83 @@ mod tests {
     }
 
     #[test]
+    fn reforger_inventory_and_launch_resolve_packed_addons_without_an_addons_subfolder() {
+        let root = tempfile::tempdir().expect("repo root");
+        let addon = root.path().join("@mod_01");
+        std::fs::create_dir(&addon).expect("addon dir");
+        std::fs::write(
+            addon.join("addon.gproj"),
+            "GameProject {\n ID \"ModOne\"\n GUID \"ABCDEF0123456789\"\n}\n",
+        )
+        .expect("project file");
+        std::fs::write(addon.join("data.pak"), b"packed addon").expect("packed data");
+        write_addon(root.path(), "@mod_02", &[("data.pbo", 10)]);
+        std::fs::create_dir(root.path().join("other")).expect("non-addon dir");
+        let repo = repository_at("MainRepo", root.path(), &["@mod_01"]);
+        let module = crate::core::game::reforger::ReforgerModule;
+        let inventory = Foxy::gather_all_addon_origins_from(
+            std::slice::from_ref(&repo),
+            &[],
+            &HashMap::new(),
+            "",
+            "",
+            &module,
+        );
+
+        assert_eq!(inventory.len(), 1);
+        assert_eq!(inventory[0].0, "@mod_01");
+        assert_eq!(inventory[0].2, "MainRepo");
+        assert_eq!(
+            Path::new(&inventory[0].1)
+                .canonicalize()
+                .expect("inventory path"),
+            addon.canonicalize().expect("addon path")
+        );
+        let plan = module
+            .build_repository_launch_plan(
+                &crate::ui::types::SettingsViewState::default(),
+                &repo,
+                None,
+            )
+            .expect("launch plan");
+        assert_eq!(plan.mods.len(), 1);
+        assert_eq!(plan.mods[0].id, "ABCDEF0123456789");
+        assert_eq!(plan.mods[0].path.as_deref(), addon.to_str());
+        assert_eq!(
+            crate::core::game::reforger::launch_addons_dirs(&plan.mods),
+            vec![root.path().display().to_string()],
+        );
+    }
+
+    #[test]
+    fn addon_discovery_uses_the_game_directory_format() {
+        let root = tempfile::tempdir().expect("root");
+        write_addon(root.path(), "@mod_01", &[("data.pbo", 10)]);
+        let packed = root.path().join("@mod_02");
+        std::fs::create_dir(&packed).expect("packed dir");
+        std::fs::write(packed.join("custom.gproj"), "GameProject {}").expect("project");
+        std::fs::create_dir(root.path().join("plain")).expect("plain dir");
+
+        let arma3 =
+            Foxy::discover_addons_in_path(root.path(), &crate::core::game::arma3::Arma3Module);
+        let reforger = Foxy::discover_addons_in_path(
+            root.path(),
+            &crate::core::game::reforger::ReforgerModule,
+        );
+        assert_eq!(arma3.len(), 1);
+        assert_eq!(arma3[0].0, "@mod_01");
+        assert_eq!(reforger.len(), 1);
+        assert_eq!(reforger[0].0, "@mod_02");
+        assert!(
+            Foxy::discover_addons_in_path(
+                root.path().join("missing"),
+                &crate::core::game::reforger::ReforgerModule,
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
     fn addon_inventory_is_unchanged_when_repositories_share_a_folder() {
         let temp = tempfile::tempdir().expect("temp dir");
         let root = temp.path();
@@ -1146,14 +1225,22 @@ mod tests {
         let main = repository_at("Main", root, &["@shared", "@only_main"]);
         let ww2 = repository_at("WW2", root, &["@shared", "@only_ww2"]);
 
-        let one_repo =
-            Foxy::gather_all_addon_origins_from(std::slice::from_ref(&main), &[], &aliases, "", "");
+        let module = crate::core::game::arma3::Arma3Module;
+        let one_repo = Foxy::gather_all_addon_origins_from(
+            std::slice::from_ref(&main),
+            &[],
+            &aliases,
+            "",
+            "",
+            &module,
+        );
         let shared_folder = Foxy::gather_all_addon_origins_from(
             &[main.clone(), ww2.clone(), main.clone()],
             &[],
             &aliases,
             "",
             "",
+            &module,
         );
 
         let names: Vec<&str> = one_repo

@@ -150,6 +150,9 @@ pub trait GameModule: Send + Sync {
     fn capabilities(&self) -> GameCapabilities;
     fn detect_install_dir(&self, ctx: &GameDetectCtx) -> Option<PathBuf>;
     fn validate_install_dir(&self, path: &Path) -> bool;
+    fn is_addon_directory(&self, path: &Path) -> bool {
+        crate::core::utils::fs_safety::resolve_child_dir_case_insensitive(path, "addons").is_some()
+    }
     fn build_launch(
         &self,
         plan: &LaunchPlan,

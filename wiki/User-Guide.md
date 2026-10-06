@@ -332,7 +332,7 @@ When you join an Arma 3 server, Foxy reads what the server reports and can:
 
 - **Arma 3** - Foxy builds the `-mod=` line from the enabled addons and Creator DLCs and adds your launch parameters.
 - **Total War: WARHAMMER III** - Foxy writes the enabled mods to `used_mods.txt` in the game directory before launch.
-- **Arma Reforger** - Foxy builds the `-addons` and `-addonsDir` parameters from the enabled addons, and passes a selected server as `-client <address>:<port>`.
+- **Arma Reforger** - Foxy builds the `-addons` and `-addonsDir` parameters from the enabled addons, and passes a selected server as `-client <address>:<port>`. Packed addon folders containing a `.gproj` and root-level `.pak` files appear in the addon list without needing an `addons` subfolder. The Arma 3 editor mission list is hidden in this game space.
 - **Generic game** - Foxy uses the executable, argument template, and mods manifest you set in Game space settings.
 
 Enabled [extra files](#extra-files-and-config-packs) are copied into the game directory before each launch.

@@ -134,6 +134,13 @@ reach; a flag that describes an unbuilt feature is worse than a missing one.
 A game that lacks a feature renders no control for it, rather than a disabled or
 dead one (`conventions/ACCESSIBILITY_CONVENTIONS.md`).
 
+Addon inventory discovery calls `GameModule::is_addon_directory`: the default
+recognizes an `addons` subfolder, while Reforger recognizes a root `.gproj`,
+including packed addons with a root-level `.pak`. Inventory workers capture the
+module before spawning and skip Steam Workshop scanning when the game lacks that
+capability. Arma 3 editor mission visibility and profile resolution require the
+`profiles` capability.
+
 A module whose Steam app id is not known at compile time (the `generic` module)
 overrides `steam_app_id_from_settings` instead of `steam_app_id`. Anything that
 resolves a Workshop store must call the settings-aware method, or a
