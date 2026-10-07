@@ -10,13 +10,13 @@ pub fn command_in_path(command: &str) -> Option<PathBuf> {
 
     let command_path = Path::new(command);
     if command_path.components().count() > 1 {
-        return command_path.is_file().then(|| command_path.to_path_buf());
+        return is_executable_file(command_path).then(|| command_path.to_path_buf());
     }
 
     let path_var = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path_var) {
         let candidate = dir.join(command);
-        if candidate.is_file() {
+        if is_executable_file(&candidate) {
             return Some(candidate);
         }
 
@@ -46,6 +46,22 @@ pub fn command_in_path(command: &str) -> Option<PathBuf> {
 
 pub fn command_exists(command: &str) -> bool {
     command_in_path(command).is_some()
+}
+
+/// A regular file this process may execute. On Unix, spawning a directory or a
+/// file without an execute bit fails with `EACCES`, not `ENOENT`.
+pub fn is_executable_file(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+    }
+
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
 }
 
 pub fn open_with_default_app(path: &Path) -> Result<(), String> {
@@ -144,6 +160,28 @@ mod tests {
     fn command_in_path_rejects_empty_command() {
         assert!(command_in_path("").is_none());
         assert!(command_in_path("   ").is_none());
+    }
+
+    #[test]
+    fn directory_is_not_an_executable_file() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(!is_executable_file(temp.path()));
+        assert!(!is_executable_file(&temp.path().join("missing")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_file_requires_an_execute_bit() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let program = temp.path().join("steam");
+        std::fs::write(&program, "#!/bin/sh\n").unwrap();
+
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!is_executable_file(&program));
+
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(is_executable_file(&program));
     }
 
     #[test]
