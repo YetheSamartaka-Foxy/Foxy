@@ -125,17 +125,21 @@ pub fn resolve_steam_launch_command(steam_directory: &str) -> Option<SteamLaunch
 
 #[cfg(target_os = "linux")]
 fn linux_steam_launch_command(steam_directory: &str) -> Option<SteamLaunchCommand> {
+    use crate::core::utils::platform::is_executable_file;
+
     let configured = steam_directory.trim();
     if !configured.is_empty() {
         let configured_path = PathBuf::from(configured);
-        if configured_path.is_file() {
+        if is_executable_file(&configured_path) {
             return Some(SteamLaunchCommand {
                 program: configured_path,
                 args: Vec::new(),
             });
         }
+        // `~/.steam/steam` is Steam's own symlink to its data root, so a bare
+        // `exists()` would accept a directory and the spawn would fail with EACCES.
         let native = configured_path.join(STEAM_EXECUTABLE);
-        if native.exists() {
+        if is_executable_file(&native) {
             return Some(SteamLaunchCommand {
                 program: native,
                 args: Vec::new(),
@@ -158,7 +162,7 @@ fn linux_steam_launch_command(steam_directory: &str) -> Option<SteamLaunchComman
 
     detect_steam_install_directory()
         .map(|path| path.join(STEAM_EXECUTABLE))
-        .filter(|path| path.exists())
+        .filter(|path| is_executable_file(path))
         .map(|program| SteamLaunchCommand {
             program,
             args: Vec::new(),
@@ -751,6 +755,35 @@ mod tests {
         assert!(linux_process_name_is_steam("steamwebhelper"));
         assert!(linux_process_name_is_steam("/usr/bin/steam"));
         assert!(!linux_process_name_is_steam("notsteam"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_configured_steam_directory_never_resolves_to_a_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let steam_dir_link = temp.path().join(STEAM_EXECUTABLE);
+        fs::create_dir_all(&steam_dir_link).unwrap();
+
+        let resolved = linux_steam_launch_command(&temp.path().display().to_string());
+
+        assert!(resolved.is_none_or(|cmd| cmd.program != steam_dir_link));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_configured_steam_directory_skips_a_non_executable_launcher() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let program = temp.path().join(STEAM_EXECUTABLE);
+        fs::write(&program, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let resolved = linux_steam_launch_command(&temp.path().display().to_string());
+        assert!(resolved.is_none_or(|cmd| cmd.program != program));
+
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+        let resolved = linux_steam_launch_command(&temp.path().display().to_string());
+        assert_eq!(resolved.map(|cmd| cmd.program), Some(program));
     }
 
     #[test]

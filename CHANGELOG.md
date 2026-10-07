@@ -74,6 +74,7 @@
 - Repository addresses typed in slightly different ways are now recognized as the same repository.
 - Repository data containing non-English characters is now read correctly.
 - Text no longer spills out of its box in several screens.
+- On Linux, launching a game no longer fails with a "Permission denied" error for some Steam directory settings.
 
 ## Removed
 - No user-facing removals in this release.
