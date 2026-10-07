@@ -187,6 +187,7 @@ impl Foxy {
             || self.is_direct_download_running()
             || !self.pending_repository_db_wipes.is_empty()
             || self.pending_db_schema_wipe.is_some()
+            || self.db_lock_conflict.is_some()
     }
 
     fn find_due_scheduled_job(&self, now: DateTime<Local>) -> Option<(usize, DueState)> {
@@ -650,19 +651,13 @@ impl Foxy {
             PostAction::None => return,
         };
         let cancel_label = self.t("Cancel");
-        let card_bg = self.color_card_bg();
-        let text_normal = self.color_text_normal();
         let destructive = self.color_action_destructive();
 
         let mut cancel = false;
         let mut proceed = false;
         egui::Window::new(title)
-            .frame(
-                egui::Frame::window(&ctx.global_style())
-                    .fill(card_bg)
-                    .stroke(egui::Stroke::new(1.0, text_normal))
-                    .corner_radius(egui::CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ctx))
+            .title_frame(self.modal_window_chrome(ctx))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)

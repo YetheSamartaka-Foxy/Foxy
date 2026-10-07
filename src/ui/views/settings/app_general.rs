@@ -7,8 +7,9 @@ use log::{info, warn};
 use super::render_wrapped_info_row;
 
 impl Foxy {
-    fn render_wrapped_settings_checkbox(
+    pub(super) fn render_wrapped_settings_checkbox(
         ui: &mut Ui,
+        enabled: bool,
         checked: &mut bool,
         label: String,
         hover_text: Option<String>,
@@ -37,7 +38,8 @@ impl Foxy {
                     ui.set_width(slot_width);
                     ui.set_max_width(slot_width);
                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-                    Self::ui_state_checkbox(ui, checked, label)
+                    ui.add_enabled_ui(enabled, |ui| Self::ui_state_checkbox(ui, checked, label))
+                        .inner
                 },
             )
             .inner;
@@ -354,7 +356,7 @@ impl Foxy {
         // Repository and launch automation options
         ui.horizontal(|ui| {
             ui.add_space(horizontal_padding);
-            let row_width = (ui.available_width() - horizontal_padding).max(0.0);
+            let row_width = (ui.available_width() - 2.0 * horizontal_padding).max(0.0);
             ui.allocate_ui_with_layout(
                 Vec2::new(row_width, ui.spacing().interact_size.y),
                 egui::Layout::top_down(egui::Align::Min),
@@ -363,6 +365,7 @@ impl Foxy {
                     ui.horizontal_wrapped(|ui| {
                         Self::render_wrapped_settings_checkbox(
                             ui,
+                            true,
                             &mut self.settings_view_state.auto_backup_on_update,
                             tr("Auto backup addons before update"),
                             Some(tr("Automatically create a backup of each addon before downloading updates so you can restore the previous version if needed.")),
@@ -371,82 +374,7 @@ impl Foxy {
                         );
                         Self::render_wrapped_settings_checkbox(
                             ui,
-                            &mut self.settings_view_state.apply_repo_json_client_parameters,
-                            tr("Auto apply repo.json launch parameters"),
-                            Some(tr("Automatically apply launch parameters from the repository's repo.json when launching Arma 3.")),
-                            row_width,
-                            changed,
-                        );
-                        Self::render_wrapped_settings_checkbox(
-                            ui,
-                            &mut self.settings_view_state.apply_repo_json_dlc_content,
-                            tr("Auto apply repo.json DLC content"),
-                            Some(tr("Automatically enable DLC content specified by the repository's repo.json when launching Arma 3.")),
-                            row_width,
-                            changed,
-                        );
-                        Self::render_wrapped_settings_checkbox(
-                            ui,
-                            &mut self.settings_view_state.warn_editor_external_addons,
-                            tr("Warn before launching editor with external addons"),
-                            Some(tr(
-                                "Show a confirmation before opening Eden Editor when additional/external addons are enabled.",
-                            )),
-                            row_width,
-                            changed,
-                        );
-                        Self::render_wrapped_settings_checkbox(
-                            ui,
-                            &mut self.settings_view_state.enable_editor_mission_list,
-                            tr("Show Editor Missions list"),
-                            Some(tr(
-                                "Show the Editor Missions section in the repository view. Can be overridden per repository.",
-                            )),
-                            row_width,
-                            changed,
-                        );
-                        Self::render_wrapped_settings_checkbox(
-                            ui,
-                            &mut self.settings_view_state.enable_server_list,
-                            tr("Show Servers list"),
-                            Some(tr(
-                                "Show the Servers section in the repository view. Can be overridden per repository.",
-                            )),
-                            row_width,
-                            changed,
-                        );
-                        Self::render_wrapped_settings_checkbox(
-                            ui,
-                            &mut self.settings_view_state.check_server_addons_before_join,
-                            tr("Check server addons before joining"),
-                            Some(tr(
-                                "Before joining a server, query its addon list and offer to enable matching disabled local addons.",
-                            )),
-                            row_width,
-                            changed,
-                        );
-                        Self::render_wrapped_settings_checkbox(
-                            ui,
-                            &mut self.settings_view_state.check_ts3_running_before_join,
-                            tr("Check TeamSpeak is running before joining"),
-                            Some(tr(
-                                "Before joining a server with a repository that ships TeamSpeak plugins, warn if TeamSpeak 3 is not running and offer to launch it.",
-                            )),
-                            row_width,
-                            changed,
-                        );
-                        Self::render_wrapped_settings_checkbox(
-                            ui,
-                            &mut self.settings_view_state.check_steam_running_before_launch,
-                            tr("Check Steam is running before launching"),
-                            Some(tr(
-                                "Before launching or joining, warn if Steam is not running (Arma 3 needs Steam) and offer to launch it.",
-                            )),
-                            row_width,
-                            changed,
-                        );
-                        Self::render_wrapped_settings_checkbox(
-                            ui,
+                            true,
                             &mut self.settings_view_state.auto_recheck_on_launch,
                             tr("Auto recheck repositories on launch"),
                             Some(tr("Automatically run a remote data recheck for all repositories when the app starts.")),
@@ -455,9 +383,19 @@ impl Foxy {
                         );
                         Self::render_wrapped_settings_checkbox(
                             ui,
+                            true,
                             &mut self.settings_view_state.auto_quick_scan_on_launch,
                             tr("Auto quick scan for changes on launch"),
                             Some(tr("Automatically run a quick local file scan for all repositories when the app starts.")),
+                            row_width,
+                            changed,
+                        );
+                        Self::render_wrapped_settings_checkbox(
+                            ui,
+                            true,
+                            &mut self.settings_view_state.trust_verified_hashes,
+                            tr("Skip unchanged files after a database reset"),
+                            Some(tr("After a database reset, trust files Foxy already verified and that Windows shows as untouched since, instead of reading them again. An integrity recheck always reads every file.")),
                             row_width,
                             changed,
                         );
@@ -563,100 +501,111 @@ impl Foxy {
         // Show debug windows, memory diagnostics, close after launch, hide to tray
         ui.horizontal(|ui| {
             ui.add_space(horizontal_padding);
+            let row_width = (ui.available_width() - 2.0 * horizontal_padding).max(0.0);
+            ui.allocate_ui_with_layout(
+                Vec2::new(row_width, ui.spacing().interact_size.y),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_width(row_width);
+                    ui.horizontal_wrapped(|ui| {
+                        Self::render_wrapped_settings_checkbox(
+                            ui,
+                            true,
+                            &mut self.settings_view_state.show_debug_windows,
+                            tr("Show Debug Windows"),
+                            Some(tr("Show developer debug windows for advanced diagnostics.")),
+                            row_width,
+                            changed,
+                        );
 
-            let show_debug_windows_checkbox = Self::ui_state_checkbox(
-                ui,
-                &mut self.settings_view_state.show_debug_windows,
-                tr("Show Debug Windows"),
-            ).on_hover_text(tr("Show developer debug windows for advanced diagnostics."));
-            if show_debug_windows_checkbox.changed() {
-                *changed = true;
-            }
-            if show_debug_windows_checkbox.hovered() {
-                ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
-            }
+                        let memory_diagnostics_checkbox = Self::render_wrapped_settings_checkbox(
+                            ui,
+                            true,
+                            &mut self.settings_view_state.show_memory_diagnostics_icon,
+                            tr("Show memory diagnostics icon in footer"),
+                            Some(tr("Show or hide the memory diagnostics icon in the footer. Opens the memory diagnostics panel (F4).")),
+                            row_width,
+                            changed,
+                        );
+                        if memory_diagnostics_checkbox.changed()
+                            && !self.settings_view_state.show_memory_diagnostics_icon
+                        {
+                            self.show_memory_diagnostics_window = false;
+                        }
 
-            let show_memory_diagnostics_icon_checkbox = Self::ui_state_checkbox(
-                ui,
-                &mut self.settings_view_state.show_memory_diagnostics_icon,
-                tr("Show memory diagnostics icon in footer"),
-            ).on_hover_text(tr("Show or hide the memory diagnostics icon in the footer. Opens the memory diagnostics panel (F4)."));
-            if show_memory_diagnostics_icon_checkbox.changed() {
-                if !self.settings_view_state.show_memory_diagnostics_icon {
-                    self.show_memory_diagnostics_window = false;
-                }
-                *changed = true;
-            }
-            if show_memory_diagnostics_icon_checkbox.hovered() {
-                ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
-            }
+                        Self::render_wrapped_settings_checkbox(
+                            ui,
+                            true,
+                            &mut self.settings_view_state.show_fps_counter,
+                            tr("Show FPS counter"),
+                            Some(tr("Display a frames-per-second counter in the bottom-right corner. Keeps the UI repainting continuously while enabled.")),
+                            row_width,
+                            changed,
+                        );
 
-            let show_fps_counter_checkbox = Self::ui_state_checkbox(
-                ui,
-                &mut self.settings_view_state.show_fps_counter,
-                tr("Show FPS counter"),
-            )
-            .on_hover_text(tr(
-                "Display a frames-per-second counter in the bottom-right corner. Keeps the UI repainting continuously while enabled.",
-            ));
-            if show_fps_counter_checkbox.changed() {
-                *changed = true;
-            }
-            if show_fps_counter_checkbox.hovered() {
-                ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
-            }
+                        let mut extended_diagnostics =
+                            self.settings_view_state.extended_diagnostics_logging;
+                        let extended_diagnostics_checkbox = Self::render_wrapped_settings_checkbox(
+                            ui,
+                            !self.settings_view_state.benchmarks_enabled,
+                            &mut extended_diagnostics,
+                            tr("Extended diagnostics logging"),
+                            Some(tr("Write detailed hashing, checking, download, network, database, disk and memory diagnostics to the log files. Useful when reporting a performance problem; the logs grow faster while enabled. Always on while Benchmarks is enabled.")),
+                            row_width,
+                            changed,
+                        );
+                        if extended_diagnostics_checkbox.changed()
+                            && self
+                                .settings_view_state
+                                .set_extended_diagnostics_logging(extended_diagnostics)
+                        {
+                            crate::core::api::set_extended_diagnostics(extended_diagnostics);
+                        }
 
-            let hide_repository_image_checkbox = Self::ui_state_checkbox(
-                ui,
-                &mut self.settings_view_state.hide_repository_image,
-                tr("Hide repository image"),
-            )
-            .on_hover_text(tr(
-                "Hide the banner image shown at the top of the repository and repository space views. Individual repositories can override this in their settings.",
-            ));
-            if hide_repository_image_checkbox.changed() {
-                *changed = true;
-            }
-            if hide_repository_image_checkbox.hovered() {
-                ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
-            }
+                        Self::render_wrapped_settings_checkbox(
+                            ui,
+                            true,
+                            &mut self.settings_view_state.hide_repository_image,
+                            tr("Hide repository image"),
+                            Some(tr("Hide the banner image shown at the top of the repository and repository space views. Individual repositories can override this in their settings.")),
+                            row_width,
+                            changed,
+                        );
 
-            let close_after_launch_checkbox = Self::ui_state_checkbox(
-                ui,
-                &mut self.settings_view_state.close_after_launch,
-                tr("Close after launch"),
-            ).on_hover_text(tr("Automatically close Foxy after Arma 3 launches."));
-            if close_after_launch_checkbox.changed() {
-                if self.settings_view_state.close_after_launch {
-                    self.settings_view_state.hide_to_tray_after_launch = false;
-                }
-                *changed = true;
-            }
-            if close_after_launch_checkbox.hovered() {
-                ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
-            }
+                        let close_after_launch_checkbox = Self::render_wrapped_settings_checkbox(
+                            ui,
+                            true,
+                            &mut self.settings_view_state.close_after_launch,
+                            tr("Close after launch"),
+                            Some(tr("Automatically close Foxy after Arma 3 launches.")),
+                            row_width,
+                            changed,
+                        );
+                        if close_after_launch_checkbox.changed()
+                            && self.settings_view_state.close_after_launch
+                        {
+                            self.settings_view_state.hide_to_tray_after_launch = false;
+                        }
 
-            let tray_available = crate::ui::tray::TrayManager::is_available();
-            if !tray_available && self.settings_view_state.hide_to_tray_after_launch {
-                self.settings_view_state.hide_to_tray_after_launch = false;
-                *changed = true;
-            }
-            let hide_to_tray_checkbox = ui
-                .add_enabled_ui(!self.settings_view_state.close_after_launch && tray_available, |ui| {
-                    Self::ui_state_checkbox(
-                        ui,
-                        &mut self.settings_view_state.hide_to_tray_after_launch,
-                        tr("Hide to tray after launch"),
-                    ).on_hover_text(tr("Minimize Foxy to the system tray instead of closing after Arma 3 launches. Disabled when Close after launch is enabled."))
-                })
-                .inner;
-            if hide_to_tray_checkbox.changed() {
-                *changed = true;
-            }
-            if hide_to_tray_checkbox.hovered() {
-                ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
-            }
-
+                        let tray_available = crate::ui::tray::TrayManager::is_available();
+                        if !tray_available && self.settings_view_state.hide_to_tray_after_launch {
+                            self.settings_view_state.hide_to_tray_after_launch = false;
+                            *changed = true;
+                        }
+                        let hide_to_tray_enabled =
+                            !self.settings_view_state.close_after_launch && tray_available;
+                        Self::render_wrapped_settings_checkbox(
+                            ui,
+                            hide_to_tray_enabled,
+                            &mut self.settings_view_state.hide_to_tray_after_launch,
+                            tr("Hide to tray after launch"),
+                            Some(tr("Minimize Foxy to the system tray instead of closing after Arma 3 launches. Disabled when Close after launch is enabled.")),
+                            row_width,
+                            changed,
+                        );
+                    });
+                },
+            );
             ui.add_space(horizontal_padding);
         });
 
@@ -713,12 +662,8 @@ impl Foxy {
         }
 
         egui::Window::new(tr("Confirm Settings Reset"))
-            .frame(
-                egui::Frame::window(&ui.ctx().global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(eframe::egui::CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ui.ctx()))
+            .title_frame(self.modal_window_chrome(ui.ctx()))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)

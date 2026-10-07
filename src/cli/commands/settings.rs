@@ -61,6 +61,23 @@ fn cmd_settings_set(
         state.settings.show_memory_diagnostics_icon = v;
         changed = true;
     }
+    if let Some(v) = args.benchmarks_enabled {
+        state.settings.set_benchmarks_enabled(v);
+        changed = true;
+    }
+    if let Some(v) = args.extended_diagnostics_logging {
+        if !state.settings.set_extended_diagnostics_logging(v) {
+            return Err(CommandError::validation(
+                "settings.set",
+                "Extended diagnostics logging stays on while benchmarks are enabled; disable benchmarks first",
+            ));
+        }
+        changed = true;
+    }
+    if let Some(v) = args.trust_verified_hashes {
+        state.settings.trust_verified_hashes = v;
+        changed = true;
+    }
     if let Some(v) = args.close_after_launch {
         state.settings.close_after_launch = v;
         changed = true;
@@ -99,6 +116,34 @@ fn cmd_settings_set(
     }
     if let Some(v) = args.arma3_dir {
         state.settings.arma3_directory = sanitize_user_path(&v.display().to_string());
+        changed = true;
+    }
+    if let Some(v) = args.twwh3_dir {
+        state.settings.twwh3_directory = sanitize_user_path(&v.display().to_string());
+        changed = true;
+    }
+    if let Some(v) = args.reforger_dir {
+        state.settings.reforger_directory = sanitize_user_path(&v.display().to_string());
+        changed = true;
+    }
+    if let Some(v) = args.generic_dir {
+        state.settings.generic_directory = sanitize_user_path(&v.display().to_string());
+        changed = true;
+    }
+    if let Some(v) = args.generic_executable {
+        state.settings.generic_executable = v.trim().to_string();
+        changed = true;
+    }
+    if let Some(v) = args.generic_steam_app_id {
+        state.settings.generic_steam_app_id = if v == 0 { String::new() } else { v.to_string() };
+        changed = true;
+    }
+    if let Some(v) = args.generic_launch_args {
+        state.settings.generic_launch_template = v.trim().to_string();
+        changed = true;
+    }
+    if let Some(v) = args.generic_mods_manifest {
+        state.settings.generic_mods_manifest = v.trim().to_string();
         changed = true;
     }
     if let Some(v) = args.arma3_profiles_dir {

@@ -4,11 +4,12 @@ use anyhow::{Context, anyhow};
 use log::{info, warn};
 use rand::{RngExt, distr::Alphanumeric, rng};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 use tokio::sync::broadcast::Sender;
 
@@ -16,7 +17,8 @@ pub(crate) type SharedRollbackSession = Arc<Mutex<UpdateRollbackSession>>;
 
 const ROLLBACK_DIR_NAME: &str = "update-rollback";
 const MANIFEST_FILE_NAME: &str = "manifest.json";
-const BACKUPS_DIR_NAME: &str = "backups";
+const JOURNAL_FILE_NAME: &str = "journal.jsonl";
+const SIDECAR_BAK_SUFFIX: &str = ".foxy.bak";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct RollbackManifest {
@@ -36,11 +38,99 @@ struct RollbackEntry {
     restored: bool,
 }
 
+/// One appended line of the session journal. The manifest file is written
+/// once as the header; every later change is one line here, so a session of
+/// tens of thousands of files never rewrites its whole state per file.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum JournalEvent {
+    Register { entry: RollbackEntry },
+    Promoted { target_path: PathBuf },
+    Restored { target_path: PathBuf },
+    Committed,
+}
+
 pub(crate) struct UpdateRollbackSession {
     session_dir: PathBuf,
     manifest_path: PathBuf,
-    backups_dir: PathBuf,
     manifest: RollbackManifest,
+    /// Position of each target path in `manifest.entries`.
+    index: HashMap<PathBuf, usize>,
+    journal: Option<fs::File>,
+}
+
+fn apply_event(
+    manifest: &mut RollbackManifest,
+    index: &mut HashMap<PathBuf, usize>,
+    event: JournalEvent,
+) {
+    match event {
+        JournalEvent::Register { entry } => {
+            if !index.contains_key(&entry.target_path) {
+                index.insert(entry.target_path.clone(), manifest.entries.len());
+                manifest.entries.push(entry);
+            }
+        }
+        JournalEvent::Promoted { target_path } => {
+            if let Some(entry) = index
+                .get(&target_path)
+                .map(|&position| &mut manifest.entries[position])
+            {
+                entry.promoted = true;
+                entry.restored = false;
+            }
+        }
+        JournalEvent::Restored { target_path } => {
+            if let Some(entry) = index
+                .get(&target_path)
+                .map(|&position| &mut manifest.entries[position])
+            {
+                entry.restored = true;
+            }
+        }
+        JournalEvent::Committed => manifest.committed = true,
+    }
+}
+
+/// Read a session back: the manifest header, then every complete journal
+/// line (a torn last line from a crash is ignored).
+async fn load_session(session_dir: PathBuf) -> Option<UpdateRollbackSession> {
+    let manifest_path = session_dir.join(MANIFEST_FILE_NAME);
+    let manifest_bytes = fs::read(&manifest_path).await.ok()?;
+    let mut manifest = match serde_json::from_slice::<RollbackManifest>(&manifest_bytes) {
+        Ok(manifest) => manifest,
+        Err(_) => {
+            warn!(
+                "Leaving unreadable rollback manifest in place: {}",
+                sanitize_log_path(&manifest_path)
+            );
+            return None;
+        }
+    };
+    let mut index: HashMap<PathBuf, usize> = manifest
+        .entries
+        .iter()
+        .enumerate()
+        .map(|(position, entry)| (entry.target_path.clone(), position))
+        .collect();
+    if let Ok(journal) = fs::read(session_dir.join(JOURNAL_FILE_NAME)).await {
+        for line in journal.split(|byte| *byte == b'\n') {
+            if line.is_empty() {
+                continue;
+            }
+            match serde_json::from_slice::<JournalEvent>(line) {
+                Ok(event) => apply_event(&mut manifest, &mut index, event),
+                Err(_) => break,
+            }
+        }
+    }
+    Some(UpdateRollbackSession {
+        session_dir,
+        manifest_path,
+        manifest,
+        index,
+        journal: None,
+    })
 }
 
 impl UpdateRollbackSession {
@@ -58,11 +148,10 @@ impl UpdateRollbackSession {
 
         let session_id = unique_session_id();
         let session_dir = base_dir.join(session_id);
-        let backups_dir = session_dir.join(BACKUPS_DIR_NAME);
-        fs::create_dir_all(&backups_dir).await.with_context(|| {
+        fs::create_dir_all(&session_dir).await.with_context(|| {
             format!(
-                "failed to create rollback backup directory {}",
-                sanitize_log_path(&backups_dir)
+                "failed to create rollback session directory {}",
+                sanitize_log_path(&session_dir)
             )
         })?;
 
@@ -72,11 +161,23 @@ impl UpdateRollbackSession {
             committed: false,
             entries: Vec::new(),
         };
+        let journal = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(session_dir.join(JOURNAL_FILE_NAME))
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to create rollback journal in {}",
+                    sanitize_log_path(&session_dir)
+                )
+            })?;
         let session = Self {
             session_dir,
             manifest_path,
-            backups_dir,
             manifest,
+            index: HashMap::new(),
+            journal: Some(journal),
         };
         session.persist_manifest().await?;
         Ok(session)
@@ -92,36 +193,20 @@ impl UpdateRollbackSession {
         };
 
         while let Some(entry) = sessions.next_entry().await? {
-            let session_dir = entry.path();
-            let manifest_path = session_dir.join(MANIFEST_FILE_NAME);
-            let Ok(manifest_bytes) = fs::read(&manifest_path).await else {
+            let Some(session) = load_session(entry.path()).await else {
                 continue;
             };
-            let Ok(manifest) = serde_json::from_slice::<RollbackManifest>(&manifest_bytes) else {
-                warn!(
-                    "Leaving unreadable rollback manifest in place: {}",
-                    sanitize_log_path(&manifest_path)
-                );
-                continue;
-            };
-
+            let manifest = &session.manifest;
             if manifest.committed || manifest.entries.iter().all(|entry| entry.restored) {
-                remove_dir_if_exists(&session_dir).await?;
+                discard_sidecars(&manifest.entries).await?;
+                remove_dir_if_exists(&session.session_dir).await?;
                 continue;
             }
-
-            let backups_dir = session_dir.join(BACKUPS_DIR_NAME);
-            let session = Self {
-                session_dir,
-                manifest_path,
-                backups_dir,
-                manifest,
-            };
             warn!(
                 "Discarding stale rollback session for repository {} and preserving promoted files for resume",
                 session.manifest.repository_url
             );
-            if let Err(err) = remove_dir_if_exists(&session.session_dir).await {
+            if let Err(err) = discard_stale_session(&session).await {
                 warn!(
                     "Failed to discard stale rollback session for repository {}: {}",
                     session.manifest.repository_url, err
@@ -142,7 +227,8 @@ impl UpdateRollbackSession {
         self.prepare_replace(file_id, &target_path).await?;
 
         #[cfg(target_os = "windows")]
-        if entry_for_target(&self.manifest.entries, &target_path)
+        if self
+            .entry_for_target(&target_path)
             .map(|entry| entry.original_existed)
             .unwrap_or(false)
         {
@@ -172,12 +258,7 @@ impl UpdateRollbackSession {
             });
         }
 
-        if let Some(entry) = entry_for_target_mut(&mut self.manifest.entries, &target_path) {
-            entry.promoted = true;
-            entry.restored = false;
-        }
-        self.persist_manifest().await?;
-        Ok(())
+        self.record(JournalEvent::Promoted { target_path }).await
     }
 
     pub(crate) async fn restore_entry(
@@ -197,9 +278,10 @@ impl UpdateRollbackSession {
 
         let entry = self.manifest.entries[idx].clone();
         restore_entry_filesystem(&entry).await?;
-        self.manifest.entries[idx].restored = true;
-        self.persist_manifest().await?;
-        Ok(())
+        self.record(JournalEvent::Restored {
+            target_path: entry.target_path,
+        })
+        .await
     }
 
     pub(crate) async fn restore_all(
@@ -233,12 +315,12 @@ impl UpdateRollbackSession {
 
             match restore_entry_filesystem(&entry).await {
                 Ok(()) => {
-                    if let Some(current) =
-                        entry_for_target_mut(&mut self.manifest.entries, &entry.target_path)
+                    if let Err(err) = self
+                        .record(JournalEvent::Restored {
+                            target_path: entry.target_path,
+                        })
+                        .await
                     {
-                        current.restored = true;
-                    }
-                    if let Err(err) = self.persist_manifest().await {
                         restore_errors.push(err);
                     }
                 }
@@ -257,16 +339,15 @@ impl UpdateRollbackSession {
             Ok(())
         } else {
             Err(anyhow!(
-                "rollback failed for {} file(s); rollback backups were kept in {}",
+                "rollback failed for {} file(s); sidecars were left beside the target files",
                 restore_errors.len(),
-                sanitize_log_path(&self.session_dir)
             ))
         }
     }
 
     pub(crate) async fn commit(&mut self) -> anyhow::Result<()> {
-        self.manifest.committed = true;
-        self.persist_manifest().await?;
+        self.record(JournalEvent::Committed).await?;
+        discard_sidecars(&self.manifest.entries).await?;
         remove_dir_if_exists(&self.session_dir)
             .await
             .with_context(|| {
@@ -285,31 +366,64 @@ impl UpdateRollbackSession {
             .collect()
     }
 
+    fn entry_for_target(&self, target_path: &Path) -> Option<&RollbackEntry> {
+        self.index
+            .get(target_path)
+            .map(|&position| &self.manifest.entries[position])
+    }
+
+    /// Apply one change to the in-memory state and append it to the journal.
+    async fn record(&mut self, event: JournalEvent) -> anyhow::Result<()> {
+        let mut line = serde_json::to_vec(&event).context("failed to serialize journal event")?;
+        line.push(b'\n');
+        apply_event(&mut self.manifest, &mut self.index, event);
+        if let Some(journal) = self.journal.as_mut() {
+            journal.write_all(&line).await.with_context(|| {
+                format!(
+                    "failed to append the rollback journal in {}",
+                    sanitize_log_path(&self.session_dir)
+                )
+            })?;
+            journal.flush().await?;
+        }
+        Ok(())
+    }
+
     async fn prepare_replace(&mut self, file_id: u64, target_path: &Path) -> anyhow::Result<()> {
-        if entry_for_target(&self.manifest.entries, target_path).is_some() {
+        if self.entry_for_target(target_path).is_some() {
             return Ok(());
         }
 
         let metadata = fs::metadata(target_path).await;
         let (original_existed, original_size, backup_path) = match metadata {
             Ok(meta) => {
-                let backup_path = self.backup_path(file_id, target_path);
-                fs::copy(target_path, &backup_path).await.with_context(|| {
-                    format!(
-                        "failed to create rollback backup {} -> {}",
-                        sanitize_log_path(target_path),
-                        sanitize_log_path(&backup_path)
-                    )
-                })?;
+                let backup_path = sidecar_bak_path(target_path);
+                if fs::metadata(&backup_path).await.is_ok() {
+                    remove_file_if_exists(&backup_path).await.with_context(|| {
+                        format!(
+                            "failed to remove stale rollback sidecar {}",
+                            sanitize_log_path(&backup_path)
+                        )
+                    })?;
+                }
+                fs::rename(target_path, &backup_path)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to rename {} aside to {}",
+                            sanitize_log_path(target_path),
+                            sanitize_log_path(&backup_path)
+                        )
+                    })?;
                 let backup_meta = fs::metadata(&backup_path).await.with_context(|| {
                     format!(
-                        "failed to verify rollback backup {}",
+                        "failed to verify rollback sidecar {}",
                         sanitize_log_path(&backup_path)
                     )
                 })?;
                 if backup_meta.len() != meta.len() {
                     return Err(anyhow!(
-                        "rollback backup size mismatch for {}: expected {}, got {}",
+                        "rollback sidecar size mismatch for {}: expected {}, got {}",
                         sanitize_log_path(target_path),
                         meta.len(),
                         backup_meta.len()
@@ -328,37 +442,18 @@ impl UpdateRollbackSession {
             }
         };
 
-        self.manifest.entries.push(RollbackEntry {
-            file_id,
-            target_path: target_path.to_path_buf(),
-            backup_path,
-            original_existed,
-            original_size,
-            promoted: false,
-            restored: false,
-        });
-        self.persist_manifest().await
-    }
-
-    fn backup_path(&self, file_id: u64, target_path: &Path) -> PathBuf {
-        let mut sanitized = target_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("file")
-            .chars()
-            .map(|ch| {
-                if ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-' {
-                    ch
-                } else {
-                    '_'
-                }
-            })
-            .collect::<String>();
-        if sanitized.is_empty() {
-            sanitized = "file".to_string();
-        }
-        self.backups_dir
-            .join(format!("{}_{}.original", file_id, sanitized))
+        self.record(JournalEvent::Register {
+            entry: RollbackEntry {
+                file_id,
+                target_path: target_path.to_path_buf(),
+                backup_path,
+                original_existed,
+                original_size,
+                promoted: false,
+                restored: false,
+            },
+        })
+        .await
     }
 
     async fn persist_manifest(&self) -> anyhow::Result<()> {
@@ -373,6 +468,38 @@ impl UpdateRollbackSession {
     }
 }
 
+fn sidecar_bak_path(target: &Path) -> PathBuf {
+    let mut raw = target.as_os_str().to_os_string();
+    raw.push(SIDECAR_BAK_SUFFIX);
+    PathBuf::from(raw)
+}
+
+async fn discard_sidecars(entries: &[RollbackEntry]) -> anyhow::Result<()> {
+    for entry in entries {
+        if let Some(backup_path) = entry.backup_path.as_ref() {
+            remove_file_if_exists(backup_path).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn discard_stale_session(session: &UpdateRollbackSession) -> anyhow::Result<()> {
+    for entry in &session.manifest.entries {
+        if entry.promoted {
+            if let Some(backup_path) = entry.backup_path.as_ref() {
+                remove_file_if_exists(backup_path).await?;
+            }
+        } else if let Err(err) = restore_entry_filesystem(entry).await {
+            warn!(
+                "Failed to restore unpromoted rollback sidecar {}: {}",
+                sanitize_log_path(&entry.target_path),
+                err
+            );
+        }
+    }
+    remove_dir_if_exists(&session.session_dir).await
+}
+
 async fn restore_entry_filesystem(entry: &RollbackEntry) -> anyhow::Result<()> {
     if !entry.promoted && entry.target_path.exists() == entry.original_existed {
         return Ok(());
@@ -381,7 +508,7 @@ async fn restore_entry_filesystem(entry: &RollbackEntry) -> anyhow::Result<()> {
     if entry.original_existed {
         let Some(backup_path) = entry.backup_path.as_ref() else {
             return Err(anyhow!(
-                "rollback manifest is missing backup path for {}",
+                "rollback manifest is missing sidecar path for {}",
                 sanitize_log_path(&entry.target_path)
             ));
         };
@@ -394,11 +521,11 @@ async fn restore_entry_filesystem(entry: &RollbackEntry) -> anyhow::Result<()> {
                 )
             })?;
         }
-        fs::copy(backup_path, &entry.target_path)
+        fs::rename(backup_path, &entry.target_path)
             .await
             .with_context(|| {
                 format!(
-                    "failed to restore rollback backup {} -> {}",
+                    "failed to restore rollback sidecar {} -> {}",
                     sanitize_log_path(backup_path),
                     sanitize_log_path(&entry.target_path)
                 )
@@ -432,24 +559,6 @@ async fn remove_dir_if_exists(path: &Path) -> anyhow::Result<()> {
     }
 }
 
-fn entry_for_target<'a>(
-    entries: &'a [RollbackEntry],
-    target_path: &Path,
-) -> Option<&'a RollbackEntry> {
-    entries
-        .iter()
-        .find(|entry| entry.target_path == target_path)
-}
-
-fn entry_for_target_mut<'a>(
-    entries: &'a mut [RollbackEntry],
-    target_path: &Path,
-) -> Option<&'a mut RollbackEntry> {
-    entries
-        .iter_mut()
-        .find(|entry| entry.target_path == target_path)
-}
-
 fn normalize_path(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
@@ -474,6 +583,58 @@ mod tests {
     use tokio::fs;
 
     #[tokio::test]
+    async fn journal_replays_the_session_state_for_recovery() {
+        let dir = tempdir().unwrap();
+        let rollback_root = dir.path().join("tmp");
+        let replaced = dir.path().join("replaced.pbo");
+        let created = dir.path().join("created.pbo");
+        fs::write(&replaced, b"original").await.unwrap();
+        fs::write(dir.path().join("a.part"), b"updated")
+            .await
+            .unwrap();
+        fs::write(dir.path().join("b.part"), b"new").await.unwrap();
+
+        let mut session = UpdateRollbackSession::new(&rollback_root, "https://example.test/")
+            .await
+            .unwrap();
+        session
+            .promote_file(1, dir.path().join("a.part"), &replaced)
+            .await
+            .unwrap();
+        session
+            .promote_file(2, dir.path().join("b.part"), &created)
+            .await
+            .unwrap();
+        session.restore_all(None).await.unwrap();
+        let session_dir = session.session_dir.clone();
+        drop(session);
+
+        let loaded = load_session(session_dir).await.unwrap();
+        assert!(!loaded.manifest.committed);
+        assert_eq!(loaded.manifest.entries.len(), 2);
+        assert_eq!(loaded.index.len(), 2);
+        let by_id = |id: u64| {
+            loaded
+                .manifest
+                .entries
+                .iter()
+                .find(|entry| entry.file_id == id)
+                .unwrap()
+        };
+        let entry = by_id(1);
+        assert!(entry.promoted && entry.restored && entry.original_existed);
+        assert!(loaded.entry_for_target(&entry.target_path).is_some());
+        let entry = by_id(2);
+        assert!(entry.promoted && entry.restored && !entry.original_existed);
+        assert_eq!(fs::read(&replaced).await.unwrap(), b"original");
+        assert!(!created.exists());
+        assert_eq!(
+            loaded.touched_file_ids(),
+            [1, 2].into_iter().collect::<HashSet<u64>>()
+        );
+    }
+
+    #[tokio::test]
     async fn rollback_restores_replaced_file() {
         let dir = tempdir().unwrap();
         let rollback_root = dir.path().join("tmp");
@@ -490,6 +651,7 @@ mod tests {
 
         session.restore_all(None).await.unwrap();
         assert_eq!(fs::read(&target).await.unwrap(), b"original");
+        assert!(!sidecar_bak_path(&target).exists());
         assert!(session.touched_file_ids().contains(&7));
     }
 
@@ -509,6 +671,33 @@ mod tests {
 
         session.restore_all(None).await.unwrap();
         assert!(!target.exists());
+    }
+
+    #[tokio::test]
+    async fn promote_renames_original_aside_instead_of_copying() {
+        let dir = tempdir().unwrap();
+        let rollback_root = dir.path().join("tmp");
+        let target = dir.path().join("addon.pbo");
+        let staged = dir.path().join("addon.pbo.foxy.part");
+        fs::write(&target, b"original").await.unwrap();
+        fs::write(&staged, b"updated").await.unwrap();
+
+        let mut session = UpdateRollbackSession::new(&rollback_root, "https://example.test/")
+            .await
+            .unwrap();
+        session.promote_file(7, &staged, &target).await.unwrap();
+
+        let bak = sidecar_bak_path(&target);
+        assert_eq!(fs::read(&bak).await.unwrap(), b"original");
+        assert_eq!(fs::read(&target).await.unwrap(), b"updated");
+        assert_eq!(
+            dir_size(&rollback_root).await,
+            dir_size(&session.session_dir).await
+        );
+
+        session.commit().await.unwrap();
+        assert!(!bak.exists());
+        assert_eq!(fs::read(&target).await.unwrap(), b"updated");
     }
 
     #[tokio::test]
@@ -546,5 +735,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(fs::read(&target).await.unwrap(), b"updated");
+        assert!(!sidecar_bak_path(&target).exists());
+    }
+
+    async fn dir_size(path: &Path) -> u64 {
+        let mut total = 0;
+        let mut dirs = vec![path.to_path_buf()];
+        while let Some(dir) = dirs.pop() {
+            let mut entries = fs::read_dir(&dir).await.unwrap();
+            while let Some(entry) = entries.next_entry().await.unwrap() {
+                let meta = entry.metadata().await.unwrap();
+                if meta.is_dir() {
+                    dirs.push(entry.path());
+                } else {
+                    total += meta.len();
+                }
+            }
+        }
+        total
     }
 }

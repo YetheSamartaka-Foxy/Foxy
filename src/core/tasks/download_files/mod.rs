@@ -19,7 +19,7 @@ pub(super) const LARGE_FILE_THRESHOLD: usize = 10 * 1024 * 1024;
 pub(super) const ATTEMPT_DELAY_MS: u64 = 25;
 pub(super) const ATTEMPT_LIMIT: u8 = 50;
 pub(super) const BUFFERED_WRITE_CAPACITY: usize = 4 * 1024 * 1024;
-pub(super) const MAXIMUM_LARGE_FILES: usize = 24;
+pub(super) const MAXIMUM_LARGE_FILES: usize = 12;
 pub(super) const MAXIMUM_SMALL_FILES: usize = 48;
 pub(super) const MAX_FILE_RETRIES: usize = 3;
 pub(super) const BYTES_PER_MEGABIT: u64 = 125_000;
@@ -42,12 +42,23 @@ pub(super) const MAX_ACTIVE_RANGE_REQUESTS: usize = 96;
 pub(super) const MIN_RANGES_PER_FILE: usize = 8;
 /// Per-file range ceiling: parallel ranges a large file may use when it has
 /// the global range budget mostly to itself (tail of a run, single-file jobs).
-pub(super) const MAX_RANGES_PER_FILE: usize = 48;
-/// Target chunk size per range request. Small enough that the tail of a run
-/// and single-file downloads can spread one file across many connections.
-pub(super) const RANGE_CHUNK_TARGET: usize = 8 * 1024 * 1024;
+/// Matches the global budget so the last file in a run can use all of it.
+pub(super) const MAX_RANGES_PER_FILE: usize = MAX_ACTIVE_RANGE_REQUESTS;
+/// Largest chunk size per range request. This bounds the tail of a run: when
+/// the queue is empty the link is carried by whatever chunks are still in
+/// flight, and a lone chunk moves at one connection's ~1.6 MB/s.
+pub(super) const RANGE_CHUNK_TARGET: usize = 2 * 1024 * 1024;
+/// Smallest chunk size per range request. The grid shrinks towards this so a
+/// file still has one chunk per worker; measured against the reference origin,
+/// the extra round trips cost under 2% even at low concurrency.
+pub(super) const MIN_RANGE_CHUNK: usize = 1024 * 1024;
 
-#[derive(Clone, Copy, Debug)]
+/// Concurrent delta-patch applies on a rotational destination. Each apply is
+/// a sequential read of the old file interleaved with a sequential write of
+/// the new one; more than a couple at once turns both into seeks.
+pub(super) const ROTATIONAL_MAX_PATCH_APPLIES: usize = 2;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct DownloadResourceLimits {
     pub(super) max_large_files: usize,
     pub(super) max_small_files: usize,
@@ -55,6 +66,10 @@ pub(super) struct DownloadResourceLimits {
     pub(super) min_ranges_per_file: usize,
     pub(super) max_ranges_per_file: usize,
     pub(super) range_chunk_target: usize,
+    pub(super) min_range_chunk: usize,
+    /// Delta-patch applies allowed to run at once. Applies are disk-bound, so
+    /// the cap follows the destination's storage class rather than memory.
+    pub(super) max_patch_applies: usize,
 }
 
 impl DownloadResourceLimits {
@@ -66,7 +81,17 @@ impl DownloadResourceLimits {
             min_ranges_per_file: MIN_RANGES_PER_FILE,
             max_ranges_per_file: MAX_RANGES_PER_FILE,
             range_chunk_target: RANGE_CHUNK_TARGET,
+            min_range_chunk: MIN_RANGE_CHUNK,
+            max_patch_applies: MAXIMUM_LARGE_FILES + MAXIMUM_SMALL_FILES,
         }
+    }
+
+    /// Rotational destination: network limits stay as on SSD, because aggregate
+    /// throughput is bought with connections and fewer files in flight starves
+    /// the link long before range writes seek-bound the disk. Only the
+    /// seek-bound patch applies are capped.
+    pub(super) const fn rotational() -> Self {
+        Self::normal().with_rotational_destination()
     }
 
     pub(super) const fn constrained() -> Self {
@@ -77,6 +102,8 @@ impl DownloadResourceLimits {
             min_ranges_per_file: 4,
             max_ranges_per_file: 8,
             range_chunk_target: 16 * 1024 * 1024,
+            min_range_chunk: 4 * 1024 * 1024,
+            max_patch_applies: 16,
         }
     }
 
@@ -88,6 +115,17 @@ impl DownloadResourceLimits {
             min_ranges_per_file: 2,
             max_ranges_per_file: 4,
             range_chunk_target: 64 * 1024 * 1024,
+            min_range_chunk: 16 * 1024 * 1024,
+            max_patch_applies: 5,
         }
+    }
+
+    /// Memory pressure keeps its conservative profile on any disk; on a
+    /// rotational destination it only tightens the apply cap further.
+    pub(super) const fn with_rotational_destination(mut self) -> Self {
+        if self.max_patch_applies > ROTATIONAL_MAX_PATCH_APPLIES {
+            self.max_patch_applies = ROTATIONAL_MAX_PATCH_APPLIES;
+        }
+        self
     }
 }

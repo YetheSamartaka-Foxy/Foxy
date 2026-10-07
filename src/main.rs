@@ -12,6 +12,27 @@ use std::process::Command;
 use std::sync::Once;
 use std::{backtrace::Backtrace, fs};
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+/// `mi_option_page_commit_on_demand` in the bundled mimalloc 3.3 header.
+const MI_OPTION_PAGE_COMMIT_ON_DEMAND: std::ffi::c_int = 40;
+
+unsafe extern "C" {
+    fn mi_option_set(option: std::ffi::c_int, value: std::ffi::c_long);
+    #[cfg(test)]
+    fn mi_option_get(option: std::ffi::c_int) -> std::ffi::c_long;
+}
+
+/// Commit allocator pages as they are touched rather than whole, so the many
+/// hashing threads do not each hold committed memory they never use. A value
+/// set in the environment still wins.
+fn configure_allocator() {
+    if std::env::var_os("MIMALLOC_PAGE_COMMIT_ON_DEMAND").is_none() {
+        unsafe { mi_option_set(MI_OPTION_PAGE_COMMIT_ON_DEMAND, 1) };
+    }
+}
+
 // TODO: @YetheSamartaka Temporary fix for console not showing up on Windows.
 #[cfg(target_os = "windows")]
 fn attach_console() {
@@ -236,6 +257,73 @@ fn install_panic_hook() {
     });
 }
 
+/// Log native exceptions (access violations, illegal instructions) that no
+/// panic hook sees before Windows terminates the process.
+///
+/// The filter only reads the exception record and writes one log line, then
+/// returns `EXCEPTION_CONTINUE_SEARCH` so the default crash handling still
+/// runs. That single line is what tells a graphics-driver crash apart from
+/// "nothing happened".
+#[cfg(target_os = "windows")]
+fn install_native_crash_handler() {
+    use winapi::um::errhandlingapi::SetUnhandledExceptionFilter;
+    use winapi::um::winnt::EXCEPTION_POINTERS;
+
+    const EXCEPTION_CONTINUE_SEARCH: i32 = 0;
+
+    unsafe extern "system" fn filter(info: *mut EXCEPTION_POINTERS) -> i32 {
+        // SAFETY: Windows hands the filter a valid pointer whose record is
+        // valid for the call; both are only read.
+        let record = unsafe { info.as_ref().and_then(|info| info.ExceptionRecord.as_ref()) };
+        let Some(record) = record else {
+            return EXCEPTION_CONTINUE_SEARCH;
+        };
+        let module = native_crash_module_name(record.ExceptionAddress as usize)
+            .unwrap_or_else(|| "<unknown module>".to_string());
+        let message = format!(
+            "Foxy native crash: exception 0x{:08X} at address 0x{:X} in {}",
+            record.ExceptionCode, record.ExceptionAddress as usize, module
+        );
+        eprintln!("{message}");
+        log::error!("{message}");
+        EXCEPTION_CONTINUE_SEARCH
+    }
+
+    unsafe {
+        SetUnhandledExceptionFilter(Some(filter));
+    }
+}
+
+/// File name of the module containing `address`, without its directory so a
+/// user's install path never reaches the log.
+#[cfg(target_os = "windows")]
+fn native_crash_module_name(address: usize) -> Option<String> {
+    use winapi::shared::minwindef::HMODULE;
+    use winapi::um::libloaderapi::{
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        GetModuleFileNameW, GetModuleHandleExW,
+    };
+
+    let mut module: HMODULE = std::ptr::null_mut();
+    let mut buffer = [0u16; 1024];
+    let len = unsafe {
+        if GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            address as *const u16,
+            &mut module,
+        ) == 0
+        {
+            return None;
+        }
+        GetModuleFileNameW(module, buffer.as_mut_ptr(), buffer.len() as u32) as usize
+    };
+    if len == 0 || len >= buffer.len() {
+        return None;
+    }
+    let path = String::from_utf16_lossy(&buffer[..len]);
+    path.rsplit(['\\', '/']).next().map(str::to_string)
+}
+
 fn mark_wgpu_panic_for_next_launch(message: &str) {
     let marker_path = core::utils::renderer_fallback::wgpu_crash_marker_path();
     let contents = format!(
@@ -263,14 +351,17 @@ fn mark_wgpu_panic_for_next_launch(message: &str) {
 }
 
 fn main() {
+    configure_allocator();
     install_panic_hook();
+    #[cfg(target_os = "windows")]
+    install_native_crash_handler();
 
     let raw_args: Vec<String> = std::env::args().collect();
     let launched_from_terminal = is_terminal_invocation();
     let no_args = raw_args.len() <= 1;
 
     if no_args && (cfg!(debug_assertions) || !launched_from_terminal) {
-        launch_ui(false, default_no_arg_agent_gui_config());
+        launch_ui(false, default_no_arg_agent_gui_config(), Vec::new());
         return;
     }
 
@@ -290,8 +381,9 @@ fn main() {
         cli::CliExecution::RunUi {
             debug_mode,
             agent_gui,
+            debug_modals,
         } => {
-            launch_ui(debug_mode, agent_gui);
+            launch_ui(debug_mode, agent_gui, debug_modals);
         }
         cli::CliExecution::Exit(code) => {
             std::process::exit(code);
@@ -313,7 +405,11 @@ fn default_no_arg_agent_gui_config() -> AgentGuiLaunchConfig {
     }
 }
 
-fn launch_ui(debug_mode: bool, agent_gui: AgentGuiLaunchConfig) {
+fn launch_ui(
+    debug_mode: bool,
+    agent_gui: AgentGuiLaunchConfig,
+    debug_modals: Vec<ui::app::debug_modals::DebugModal>,
+) {
     core::api::ensure_logger_with_terminal();
 
     // Agent GUI (driver/test) sessions must not mutate the user's desktop
@@ -351,6 +447,21 @@ fn launch_ui(debug_mode: bool, agent_gui: AgentGuiLaunchConfig) {
         }
     }
 
+    core::game::spaces::ensure_game_spaces_layout();
     core::tasks::init_database::check_and_wipe_database();
-    ui::window::main(debug_mode, agent_gui);
+    ui::window::main(debug_mode, agent_gui, debug_modals);
+}
+
+#[cfg(test)]
+mod allocator_tests {
+    use super::*;
+
+    #[test]
+    fn page_commit_on_demand_is_set_on_the_bundled_mimalloc_3() {
+        // `mi_option_purge_delay` defaults to 1000 ms only in mimalloc 3, so
+        // this pins the option numbering the constant relies on.
+        assert_eq!(unsafe { mi_option_get(15) }, 1000);
+        configure_allocator();
+        assert_eq!(unsafe { mi_option_get(MI_OPTION_PAGE_COMMIT_ON_DEMAND) }, 1);
+    }
 }

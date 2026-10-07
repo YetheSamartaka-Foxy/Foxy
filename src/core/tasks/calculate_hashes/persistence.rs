@@ -1,5 +1,5 @@
 use super::*;
-use crate::core::db::{DbErr, DbValue, FoxyDb, params};
+use crate::core::db::{DbErr, DbValue, FoxyDb};
 use crate::core::tasks::init_database::bulk_write_rows_for;
 
 pub fn calculate_hash_from_items<T: HasLocalChecksum>(items: &mut [T]) -> String {
@@ -40,21 +40,6 @@ fn clean_part_mark_batch_size() -> usize {
     sqlite_variable_limit().saturating_sub(10).max(1)
 }
 
-/// Suppress WAL autocheckpoint to avoid mid-bulk-write fsyncs. Returns whether
-/// the PRAGMA was successfully set (so the caller can restore it).
-async fn suppress_wal_autocheckpoint(db: &FoxyDb) -> bool {
-    db.execute("PRAGMA wal_autocheckpoint = 0", params![])
-        .await
-        .is_ok()
-}
-
-/// Restore the default WAL autocheckpoint interval (256 pages).
-async fn restore_wal_autocheckpoint(db: &FoxyDb) {
-    let _ = db
-        .execute("PRAGMA wal_autocheckpoint = 256", params![])
-        .await;
-}
-
 pub(super) async fn persist_part_checksums<F>(
     db: &FoxyDb,
     part_updates: &[FoxyModFilePart],
@@ -65,6 +50,13 @@ pub(super) async fn persist_part_checksums<F>(
     if part_updates.is_empty() {
         return;
     }
+
+    debug_assert!(
+        part_updates
+            .iter()
+            .all(|part| FoxyModFilePart::id_is_persisted_rowid(part.id)),
+        "persist_part_checksums requires real subfiles rowids; synthetic buffer ids are not writable"
+    );
 
     // Use one chunked set-based update; callers pre-sort by PK for sequential B-tree walks.
     let params_per_row = 4usize;
@@ -379,7 +371,6 @@ pub(super) async fn persist_file_checksums<F>(
     let sqlite_baseline = sqlite_perf_snapshot();
     let mut chunks = 0usize;
     let batch_size = bulk_write_rows_for(9);
-    let suppressed = suppress_wal_autocheckpoint(db).await;
     for chunk in file_updates.chunks(PERSIST_LOG_INTERVAL) {
         chunks += 1;
         let chunk_rows = Arc::new(chunk.to_vec());
@@ -416,9 +407,6 @@ pub(super) async fn persist_file_checksums<F>(
         }
         on_chunk_persisted(chunk.len());
     }
-    if suppressed {
-        restore_wal_autocheckpoint(db).await;
-    }
     log_rollup_persistence_metrics(
         "files",
         file_updates.len(),
@@ -442,7 +430,6 @@ pub(super) async fn persist_mod_checksums<F>(
     let sqlite_baseline = sqlite_perf_snapshot();
     let mut chunks = 0usize;
     let batch_size = bulk_write_rows_for(12);
-    let suppressed = suppress_wal_autocheckpoint(db).await;
     for chunk in mod_updates.chunks(PERSIST_LOG_INTERVAL) {
         chunks += 1;
         let chunk_rows = Arc::new(chunk.to_vec());
@@ -481,9 +468,6 @@ pub(super) async fn persist_mod_checksums<F>(
             error!("Failed to persist mods chunk: {}", e);
         }
         on_chunk_persisted(chunk.len());
-    }
-    if suppressed {
-        restore_wal_autocheckpoint(db).await;
     }
     log_rollup_persistence_metrics(
         "addons",
@@ -588,6 +572,7 @@ pub(super) fn calculate_compound_content_hash(ordered_hashes: &[(i64, String)]) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::db::params;
 
     #[test]
     fn rollup_persists_use_tuned_write_knee() {
@@ -599,6 +584,12 @@ mod tests {
             );
             assert_eq!(batch_size, 256);
         }
+    }
+
+    #[test]
+    fn persist_part_checksums_rejects_synthetic_ids_as_non_rowids() {
+        assert!(!FoxyModFilePart::id_is_persisted_rowid(u64::MAX));
+        assert!(FoxyModFilePart::id_is_persisted_rowid(1));
     }
 
     #[test]

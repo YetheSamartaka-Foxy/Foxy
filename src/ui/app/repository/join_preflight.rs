@@ -2,14 +2,16 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::core::addon_metadata::AddonDisplayNameSnapshot;
-use crate::core::arma3_server_query::ServerAddonRequirement;
+use crate::core::arma3_server_query::{ARMA3_CREATOR_DLCS, ServerAddonRequirement};
 use crate::core::utils::fs_safety::resolve_child_dir_case_insensitive;
 use crate::ui::app::{
     Foxy, JoinPreflightAddonOrigin, JoinPreflightAddonSuggestion, JoinPreflightAmbiguousAddon,
-    JoinPreflightKnownRemoteAddon, JoinPreflightMatchConfidence, JoinPreflightUnavailableAddon,
-    PendingJoinPreflightState,
+    JoinPreflightDlcChange, JoinPreflightKnownRemoteAddon, JoinPreflightMatchConfidence,
+    JoinPreflightUnavailableAddon, PendingJoinPreflightState,
 };
-use crate::ui::types::{Repository, RepositoryServer};
+use crate::ui::types::{
+    Repository, RepositoryServer, selected_creator_dlc_codes, set_creator_dlc_enabled,
+};
 use log::info;
 
 struct KnownRemoteSearchContext<'a> {
@@ -131,6 +133,10 @@ impl Foxy {
             configured_repositories,
             &requirement_by_name,
             display_names,
+            crate::core::game::registry()
+                .active()
+                .capabilities()
+                .client_side_addons,
         );
         let unavailable_enabled = collect_unavailable_enabled_external_addons(
             effective,
@@ -166,6 +172,8 @@ impl Foxy {
             known_remote,
             extra_enabled,
             unavailable_enabled,
+            dlc_enable: Vec::new(),
+            dlc_disable: Vec::new(),
             // Filled in by `present_join_preflight` once the gate is evaluated.
             ts3_required: false,
             ts3_running: false,
@@ -197,6 +205,12 @@ impl Foxy {
                 "unavailable_enabled={}",
                 preflight.unavailable_enabled.len()
             ));
+        }
+        if !preflight.dlc_enable.is_empty() {
+            reasons.push(format!("dlc_enable={}", preflight.dlc_enable.len()));
+        }
+        if !preflight.dlc_disable.is_empty() {
+            reasons.push(format!("dlc_disable={}", preflight.dlc_disable.len()));
         }
 
         info!(
@@ -332,6 +346,20 @@ impl Foxy {
                 );
             }
         }
+
+        if preflight.has_dlc_changes() {
+            let codes = |changes: &[JoinPreflightDlcChange]| {
+                changes.iter().map(|dlc| dlc.code).collect::<Vec<_>>()
+            };
+            info!(
+                "Join preflight modal Creator DLC section for repository {} server {}:{}: enable={:?}, disable={:?}",
+                preflight.repo_name,
+                preflight.server.address,
+                preflight.server.port,
+                codes(&preflight.dlc_enable),
+                codes(&preflight.dlc_disable)
+            );
+        }
     }
 
     pub(crate) fn repository_with_join_preflight_selections(
@@ -357,7 +385,39 @@ impl Foxy {
                 enable_known_remote_addon(&mut repository, remote);
             }
         }
+        for dlc in pending.dlc_enable.iter().filter(|dlc| dlc.selected) {
+            set_creator_dlc_enabled(&mut repository, dlc.code, true);
+        }
+        for dlc in pending.dlc_disable.iter().filter(|dlc| dlc.selected) {
+            set_creator_dlc_enabled(&mut repository, dlc.code, false);
+        }
         repository
+    }
+
+    /// Creator DLCs to enable (the server runs them, the repository does not)
+    /// and to disable (enabled here, not run by the server). Both start ticked.
+    pub(crate) fn join_preflight_dlc_changes(
+        effective: &Repository,
+        server_app_ids: &[u32],
+    ) -> (Vec<JoinPreflightDlcChange>, Vec<JoinPreflightDlcChange>) {
+        let enabled_codes = selected_creator_dlc_codes(effective);
+        let mut to_enable = Vec::new();
+        let mut to_disable = Vec::new();
+        for dlc in &ARMA3_CREATOR_DLCS {
+            let server_runs = server_app_ids.contains(&dlc.app_id);
+            let enabled = enabled_codes.contains(&dlc.code);
+            let change = JoinPreflightDlcChange {
+                code: dlc.code,
+                name: dlc.name,
+                selected: true,
+            };
+            if server_runs && !enabled {
+                to_enable.push(change);
+            } else if !server_runs && enabled {
+                to_disable.push(change);
+            }
+        }
+        (to_enable, to_disable)
     }
 
     /// Builds the launch repository for the "launch without suggested addons" path.
@@ -745,19 +805,27 @@ fn collect_disabled_local_candidates(
     candidates
 }
 
+/// `client_side_addons` is the active game's capability: when a server activates
+/// exactly its own addon set on join, no local marking can excuse an addon the
+/// server did not report, so every such addon stays an extra.
 fn collect_extra_enabled_addons(
     effective: &Repository,
     configured_repositories: &[Repository],
     requirements: &HashMap<String, &ServerAddonRequirement>,
     display_names: &AddonDisplayNameSnapshot,
+    client_side_addons: bool,
 ) -> Vec<JoinPreflightAddonSuggestion> {
     let mut extras = Vec::new();
-    let optional_client_side = effective
-        .optional_addon_client_side
-        .iter()
-        .chain(effective.remote_client_side_addons.iter())
-        .map(|name| normalize_addon_name(name))
-        .collect::<HashSet<_>>();
+    let optional_client_side = if client_side_addons {
+        effective
+            .optional_addon_client_side
+            .iter()
+            .chain(effective.remote_client_side_addons.iter())
+            .map(|name| normalize_addon_name(name))
+            .collect::<HashSet<_>>()
+    } else {
+        HashSet::new()
+    };
     collect_extra_enabled_addon_candidates(
         &effective.optional_addons,
         addon_display_names_for_repo(display_names, effective),
@@ -766,20 +834,25 @@ fn collect_extra_enabled_addons(
         &optional_client_side,
         &mut extras,
     );
-    let external_client_side = effective
-        .external_addon_client_side
-        .iter()
-        .map(|path| normalize_client_side_path_key(path))
-        .collect::<HashSet<_>>();
+    let external_client_side = if client_side_addons {
+        effective
+            .external_addon_client_side
+            .iter()
+            .map(|path| normalize_client_side_path_key(path))
+            .collect::<HashSet<_>>()
+    } else {
+        HashSet::new()
+    };
     for (addon_name, enabled, path) in &effective.external_addons {
         if *enabled
             && external_addon_path_available(addon_name, path)
             && !external_client_side.contains(&normalize_client_side_path_key(path))
-            && !external_addon_is_repo_defined_client_side(
-                addon_name,
-                path,
-                configured_repositories,
-            )
+            && !(client_side_addons
+                && external_addon_is_repo_defined_client_side(
+                    addon_name,
+                    path,
+                    configured_repositories,
+                ))
             && !external_addon_matches_any_requirement(
                 addon_name,
                 path,
@@ -1544,6 +1617,8 @@ mod tests {
                 selected: keep_loaded,
             }],
             unavailable_enabled: Vec::new(),
+            dlc_enable: Vec::new(),
+            dlc_disable: Vec::new(),
             ts3_required: false,
             ts3_running: false,
             steam_required: false,
@@ -1577,6 +1652,78 @@ mod tests {
         let stripped = pending_with_single_extra_enabled(false);
         let stripped_launch = Foxy::repository_with_join_preflight_selections(&stripped);
         assert!(!stripped_launch.external_addons[0].1);
+    }
+
+    #[test]
+    fn dlc_changes_enable_server_dlcs_and_disable_unused_ones() {
+        let repository = Repository {
+            gm: true,
+            vn: true,
+            ..Repository::default()
+        };
+
+        let (to_enable, to_disable) =
+            Foxy::join_preflight_dlc_changes(&repository, &[1_681_170, 1_227_700, 99]);
+
+        let codes = |changes: &[JoinPreflightDlcChange]| {
+            changes.iter().map(|dlc| dlc.code).collect::<Vec<_>>()
+        };
+        assert_eq!(codes(&to_enable), vec!["ws"]);
+        assert_eq!(codes(&to_disable), vec!["gm"]);
+        assert!(to_enable.iter().chain(&to_disable).all(|dlc| dlc.selected));
+    }
+
+    #[test]
+    fn dlc_changes_are_empty_when_repository_matches_server() {
+        let repository = Repository {
+            spe: true,
+            ..Repository::default()
+        };
+
+        let (to_enable, to_disable) = Foxy::join_preflight_dlc_changes(&repository, &[1_175_380]);
+
+        assert!(to_enable.is_empty());
+        assert!(to_disable.is_empty());
+    }
+
+    #[test]
+    fn launch_with_selected_applies_only_ticked_dlc_changes() {
+        let original = Repository {
+            gm: true,
+            rf: true,
+            ..Repository::default()
+        };
+        let mut pending = PendingJoinPreflightState::empty(
+            "Repo",
+            RepositoryServer::default(),
+            original.clone(),
+            false,
+        );
+        let (mut to_enable, mut to_disable) =
+            Foxy::join_preflight_dlc_changes(&original, &[1_681_170, 1_227_700]);
+        to_enable.retain(|dlc| dlc.code != "vn");
+        to_enable.push(JoinPreflightDlcChange {
+            code: "vn",
+            name: "S.O.G. Prairie Fire",
+            selected: false,
+        });
+        to_disable
+            .iter_mut()
+            .filter(|dlc| dlc.code == "rf")
+            .for_each(|dlc| dlc.selected = false);
+        pending.dlc_enable = to_enable;
+        pending.dlc_disable = to_disable;
+
+        let launch = Foxy::repository_with_join_preflight_selections(&pending);
+        assert!(launch.ws);
+        assert!(!launch.vn);
+        assert!(!launch.gm);
+        assert!(launch.rf);
+
+        let unchanged = Foxy::repository_without_join_preflight_suggestions(&pending);
+        assert!(!unchanged.ws);
+        assert!(unchanged.gm);
+        assert!(unchanged.rf);
     }
 
     #[test]
@@ -2574,6 +2721,45 @@ mod tests {
         );
 
         assert!(state.is_none());
+    }
+
+    #[test]
+    fn extra_enabled_addons_ignore_client_side_marks_when_the_game_has_no_such_concept() {
+        let repo = Repository {
+            optional_addons: vec![("@soundmod".to_string(), true)],
+            optional_addon_client_side: vec!["@soundmod".to_string()],
+            remote_client_side_addons: vec!["@soundmod".to_string()],
+            ..Repository::default()
+        };
+        let required = requirement("@cba_a3");
+        let requirements = requirement_match_keys_for_requirement(&required)
+            .into_iter()
+            .map(|key| (key, &required))
+            .collect::<HashMap<_, _>>();
+
+        let exempt = collect_extra_enabled_addons(
+            &repo,
+            &[],
+            &requirements,
+            &AddonDisplayNameSnapshot::new(),
+            true,
+        );
+        assert!(exempt.is_empty());
+
+        let extras = collect_extra_enabled_addons(
+            &repo,
+            &[],
+            &requirements,
+            &AddonDisplayNameSnapshot::new(),
+            false,
+        );
+        assert_eq!(
+            extras
+                .iter()
+                .map(|extra| extra.addon_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["@soundmod"]
+        );
     }
 
     #[test]

@@ -1,5 +1,5 @@
+use super::format_layout::local_file_matches_part_layout;
 use super::part_hashes::PartSpanSource;
-use super::pbo_layout::local_file_matches_part_layout;
 use super::persistence::{
     CleanPartMark, calculate_hash_from_items, persist_file_checksums, persist_mod_checksums,
     persist_part_checksums, persist_repository_checksums,
@@ -9,8 +9,8 @@ use super::propagation::{
 };
 use super::scheduling::{
     AddonHashMetrics, build_file_hash_jobs, collect_addon_hash_metrics, hash_cpu_budget,
-    hash_scheduler_limits, missing_local_hash_pass_is_noop,
-    recalculate_parts_for_jobs_with_profile,
+    hash_scheduler_limits, lend_tree_parts, missing_local_hash_pass_is_noop,
+    recalculate_parts_for_jobs_with_profile, return_tree_parts,
 };
 use super::*;
 use crate::core::tasks::remote_file_parts::flush_deferred_part_inserts_with_local_state;
@@ -304,8 +304,10 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
     let repo_indices = collect_repo_indices_for_mods(data_tree, &mod_indices);
 
     let mut updated_part_indices: HashSet<usize> = HashSet::new();
+    let lent_parts = lend_tree_parts(data_tree);
     let hash_jobs = build_file_hash_jobs(
         data_tree,
+        &lent_parts,
         &file_indices,
         if freshly_downloaded_files {
             PartSpanSource::RemoteLayout
@@ -354,6 +356,8 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
             total_files,
             checked_parts: 0,
             total_parts,
+            checked_bytes: 0,
+            total_bytes: 0,
         });
         let _ = tx.send(ProgressEvent::Stage {
             label: format!("Hashing 0/{} files", total_files),
@@ -363,6 +367,7 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
     let hash_started = Instant::now();
     let (hash_results, profile_decision, _cancelled) = recalculate_parts_for_jobs_with_profile(
         hash_jobs,
+        &context,
         hash_io_profile,
         sticky_auto_profile,
         progress_tx,
@@ -370,6 +375,7 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
         None,
     )
     .await;
+    return_tree_parts(data_tree, lent_parts);
     phase_timings.hash_wall += hash_started.elapsed();
     info!(
         "Hash profile decision: requested={} selected={} reason={} benchmark_files={} benchmark_bytes={} benchmark_elapsed={:.2}s",
@@ -413,9 +419,15 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
     // --- Apply hash results to data_tree ---
     let apply_parts_started = Instant::now();
     let mut whole_file_checksums_by_file_idx: HashMap<usize, String> = HashMap::new();
+    let mut fresh_content_hashes: Vec<(u64, String)> = Vec::new();
     for file_result in hash_results {
         if let Some(checksum) = file_result.whole_file_checksum {
             whole_file_checksums_by_file_idx.insert(file_result.file_idx, checksum);
+        }
+        if let Some(content_hash) = file_result.content_hash
+            && let Some(file) = data_tree.files.get(file_result.file_idx)
+        {
+            fresh_content_hashes.push((file.id, content_hash));
         }
         for (part_idx, updated_part) in file_result.updated_parts {
             if let Some(dest) = data_tree.parts.get_mut(part_idx) {
@@ -424,6 +436,7 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
             }
         }
     }
+    context.record_fresh_file_content_hashes(fresh_content_hashes);
     info!(
         "Phase 1 (apply part hashes) completed in {:.3}s ({} updated parts)",
         apply_parts_started.elapsed().as_secs_f64(),

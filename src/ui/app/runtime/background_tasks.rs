@@ -1,15 +1,19 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::TryRecvError as StdTryRecvError;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use log::{debug, info, warn};
 
 use crate::core::api::{self, SyncMode};
 use crate::ui::app::{Foxy, QuickScanProgressState, StartupQuickScanFilterResult};
-use crate::ui::types::{RepoState, sanitize_user_path};
+use crate::ui::types::{RepoState, Repository, sanitize_user_path};
 
 const FS_WATCH_DOWNLOAD_GRACE_MS: u64 = 3_000;
+const FS_WATCH_IDLE_RETRY_INTERVAL: Duration = Duration::from_secs(30);
+const FS_WATCH_CLEAN_BACKOFF_BASE: Duration = Duration::from_secs(5);
+const FS_WATCH_CLEAN_BACKOFF_MAX: Duration = Duration::from_secs(60);
 
 fn unix_time_millis() -> u64 {
     SystemTime::now()
@@ -82,6 +86,12 @@ impl Foxy {
     pub(in crate::ui::app) fn suppress_fs_watch_for_active_download(&self) {
         self.fs_watch_suppressed_until_ms
             .store(u64::MAX, Ordering::Relaxed);
+    }
+
+    /// Whether the open-ended suppression a running sync installed is still in
+    /// place, so the finishing sync knows to replace it with the short grace.
+    pub(in crate::ui::app) fn fs_watch_suppressed_for_active_sync(&self) -> bool {
+        self.fs_watch_suppressed_until_ms.load(Ordering::Relaxed) == u64::MAX
     }
 
     pub(in crate::ui::app) fn suppress_fs_watch_after_download(&self) {
@@ -162,6 +172,7 @@ impl Foxy {
             "Startup rechecks queued: {} (incomplete_skipped={} no_db_entry_skipped={} quick_scan_skipped={})",
             queued, skipped_incomplete, skipped_no_db, skipped_quick_scan
         );
+        self.note_startup_rechecks_queued(queued);
     }
 
     fn queue_startup_remote_refreshes(
@@ -206,6 +217,52 @@ impl Foxy {
         if queued > 0 {
             info!("Startup remote refreshes queued: {}", queued);
         }
+        self.note_startup_rechecks_queued(queued);
+    }
+
+    /// Queue a remote data recheck of every configured repository, drained one
+    /// at a time by `process_startup_rechecks`.
+    pub(in crate::ui::app) fn queue_recheck_all_repositories(&mut self) {
+        let mut queued = 0usize;
+        for repo in &self.repository_view_state.repositories {
+            if repo.address.trim().is_empty() || repo.path.trim().is_empty() {
+                continue;
+            }
+            let path = sanitize_user_path(&repo.path);
+            let already_queued = self
+                .startup_recheck_queue
+                .iter()
+                .any(|(address, queued_path, _)| *address == repo.address && *queued_path == path);
+            if already_queued {
+                continue;
+            }
+            self.startup_recheck_queue.push_back((
+                repo.address.clone(),
+                path,
+                SyncMode::RemoteRefreshOnly,
+            ));
+            queued += 1;
+        }
+        info!("Recheck of all repositories queued: {}", queued);
+    }
+
+    /// Start the startup eligibility plan before the first frame.
+    ///
+    /// The plan is a database preflight plus one `repo.json` probe per
+    /// repository, and the probe is two round trips of pure network latency.
+    /// Running it only after first paint left that latency stacked on top of
+    /// renderer initialization instead of hidden underneath it
+    /// (`conventions/SPEED_OF_LIGHT.md` O8). It never touches the UI, and it is
+    /// skipped when the database must not be opened at all.
+    pub(in crate::ui::app) fn start_startup_quick_scan_planning(&mut self) {
+        if self.settings_view_state.debug_mode
+            || !self.settings_view_state.auto_quick_scan_on_launch
+            || self.db_lock_conflict.is_some()
+            || self.pending_db_schema_wipe.is_some()
+        {
+            return;
+        }
+        self.start_quick_local_scan();
     }
 
     pub fn start_quick_local_scan(&mut self) {
@@ -246,6 +303,7 @@ impl Foxy {
         }
 
         let requested = normalized_requested_repositories.len();
+        self.startup_quick_scan_requested = requested;
         if requested == 0 {
             info!("Scheduling startup quick scan for 0 of 0 repositories");
             return;
@@ -323,6 +381,11 @@ impl Foxy {
         }
 
         if let Some(payload) = result {
+            self.note_startup_eligibility_plan(
+                payload.eligible_repositories.len(),
+                payload.prevalidated_repositories.len(),
+                payload.remote_changed_repositories.len(),
+            );
             if !payload.remote_changed_repositories.is_empty() {
                 info!(
                     "Scheduling startup remote refresh for {} repositories with changed remote checksums",
@@ -380,6 +443,11 @@ impl Foxy {
     }
 
     pub fn queue_quick_scan_for_urls_from_fs(&mut self, repo_urls: Vec<String>) {
+        self.fs_watch_scan_urls.extend(
+            repo_urls
+                .iter()
+                .map(|repo_url| Self::normalize_repo_url(repo_url)),
+        );
         self.queue_quick_scan_for_urls_with_flags(repo_urls, false, true);
     }
 
@@ -489,6 +557,7 @@ impl Foxy {
                     total_files,
                     checked_parts,
                     total_parts,
+                    ..
                 } => {
                     let state = self
                         .quick_scan_progress_by_instance
@@ -561,6 +630,12 @@ impl Foxy {
             }
 
             let has_updates = result.mods.iter().any(|m| m.needs_update);
+            if self
+                .fs_watch_scan_urls
+                .remove(&Self::normalize_repo_url(&result.repo_url))
+            {
+                self.note_fs_watch_scan_outcome(!has_updates);
+            }
             if !has_updates {
                 info!(
                     "Quick scan clean for repo {}",
@@ -653,22 +728,45 @@ impl Foxy {
         }
     }
 
+    /// Distinct repository download folders, ordered, as the watcher registers
+    /// them.
+    pub(crate) fn fs_watch_paths_from_repositories(repositories: &[Repository]) -> Vec<String> {
+        let mut seen = HashSet::new();
+        let mut paths = Vec::new();
+        for repo in repositories {
+            let folder = repo.path.trim();
+            if folder.is_empty() {
+                continue;
+            }
+            if seen.insert(Self::repo_instance_path_key(folder)) {
+                paths.push(folder.to_string());
+            }
+        }
+        paths.sort_by_key(|path| Self::repo_instance_path_key(path));
+        paths
+    }
+
+    fn fs_watch_signature_for(paths: &[String]) -> String {
+        paths
+            .iter()
+            .map(|path| Self::repo_instance_path_key(path))
+            .collect::<Vec<_>>()
+            .join("\u{1f}")
+    }
+
     pub fn start_fs_watcher(&mut self) {
         if self.fs_watch_worker.is_some() {
             debug!("Filesystem watcher is already running");
             return;
         }
 
-        let mut watch_paths = HashSet::new();
-        for repo in &self.repository_view_state.repositories {
-            let folder = repo.path.trim();
-            if folder.is_empty() {
-                continue;
-            }
-            watch_paths.insert(folder.to_string());
-        }
+        let watch_paths =
+            Self::fs_watch_paths_from_repositories(&self.repository_view_state.repositories);
+        self.fs_watch_index_dirty = false;
+        self.fs_watch_observed_repositories_revision = self.repositories_revision;
 
         if watch_paths.is_empty() {
+            self.fs_watch_signature = None;
             info!("Filesystem watcher not started: no repository folders configured");
             return;
         }
@@ -677,12 +775,106 @@ impl Foxy {
             "Starting filesystem watcher for {} paths",
             watch_paths.len()
         );
+        self.fs_watch_signature = Some(Self::fs_watch_signature_for(&watch_paths));
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.fs_watch_stop = Some(stop.clone());
+        self.fs_watch_idle_exit.store(false, Ordering::Relaxed);
+        self.fs_watch_idle_retry_at = Some(Instant::now() + FS_WATCH_IDLE_RETRY_INTERVAL);
         self.fs_watch_worker = Some(api::spawn_repo_fs_watcher(
-            watch_paths.into_iter().collect(),
+            watch_paths,
             self.fs_watch_suppressed_until_ms.clone(),
             self.fs_watch_tx.clone(),
             self.repaint_ctx.clone(),
+            stop,
+            self.fs_watch_idle_exit.clone(),
         ));
+    }
+
+    /// Whether an exited watcher worker should be respawned now. A worker that
+    /// found nothing to watch is retried only once its index was marked dirty,
+    /// the repositories changed, or the retry interval elapsed; respawning it
+    /// on every frame built a runtime and database probe per repaint.
+    fn fs_watcher_respawn_after_exit(
+        idle_exit: bool,
+        index_dirty: bool,
+        repositories_changed: bool,
+        retry_due: bool,
+    ) -> bool {
+        !idle_exit || index_dirty || repositories_changed || retry_due
+    }
+
+    /// Mark the watcher's repository/addon index stale. The index is built once
+    /// when the worker starts, so a repository added or synced afterwards stays
+    /// invisible to it until it is respawned.
+    pub(in crate::ui::app) fn mark_fs_watch_index_dirty(&mut self) {
+        self.fs_watch_index_dirty = true;
+        self.reset_fs_watch_clean_backoff();
+    }
+
+    /// Respawn the watcher when the repositories it was started for no longer
+    /// match the configured ones, when its index went stale, or when the worker
+    /// exited early (it does that when no watchable path or index existed yet).
+    ///
+    /// Deferred while a sync is running or queued so a bulk repository-space run
+    /// respawns once at the end instead of after every repository.
+    pub(in crate::ui::app) fn refresh_fs_watcher_if_stale(&mut self) {
+        if self.settings_view_state.debug_mode {
+            return;
+        }
+        let worker_exited = self
+            .fs_watch_worker
+            .as_ref()
+            .is_some_and(|handle| handle.is_finished());
+        let repositories_changed =
+            self.fs_watch_observed_repositories_revision != self.repositories_revision;
+        if !self.fs_watch_index_dirty && !worker_exited && !repositories_changed {
+            return;
+        }
+        if worker_exited
+            && !Self::fs_watcher_respawn_after_exit(
+                self.fs_watch_idle_exit.load(Ordering::Relaxed),
+                self.fs_watch_index_dirty,
+                repositories_changed,
+                self.fs_watch_idle_retry_at
+                    .is_none_or(|retry_at| Instant::now() >= retry_at),
+            )
+        {
+            return;
+        }
+
+        let watch_paths =
+            Self::fs_watch_paths_from_repositories(&self.repository_view_state.repositories);
+        let signature =
+            (!watch_paths.is_empty()).then(|| Self::fs_watch_signature_for(&watch_paths));
+        if !self.fs_watch_index_dirty && !worker_exited && signature == self.fs_watch_signature {
+            self.fs_watch_observed_repositories_revision = self.repositories_revision;
+            return;
+        }
+
+        if self.repository_sync_active()
+            || self.is_direct_download_running()
+            || !self.repository_space_sync_queue.is_empty()
+            || !self.repository_visual_folder_sync_queue.is_empty()
+            || !self.startup_recheck_queue.is_empty()
+        {
+            return;
+        }
+
+        info!("Restarting filesystem watcher after repository changes");
+        self.stop_fs_watcher();
+        self.start_fs_watcher();
+    }
+
+    /// Signal the filesystem watcher to exit and forget its handle so a
+    /// later [`Self::start_fs_watcher`] starts a fresh one (used when the
+    /// active game space switches and the watched folders change).
+    pub fn stop_fs_watcher(&mut self) {
+        if let Some(stop) = self.fs_watch_stop.take() {
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        if self.fs_watch_worker.take().is_some() {
+            info!("Filesystem watcher stop requested");
+        }
     }
 
     /// Keep only the filesystem-watch repository URLs whose auto quick-scan
@@ -708,11 +900,99 @@ impl Foxy {
             .collect()
     }
 
+    /// How long to hold watcher-triggered scans after `clean_streak`
+    /// consecutive clean ones: nothing after the first, then 5 s doubling to
+    /// a minute. Events that arrive inside the window are scanned when it
+    /// closes, so a real change is delayed, never dropped.
+    pub(crate) fn fs_watch_clean_backoff(clean_streak: u32) -> Option<Duration> {
+        let doublings = clean_streak.checked_sub(2)?;
+        Some(
+            FS_WATCH_CLEAN_BACKOFF_BASE
+                .saturating_mul(1u32 << doublings.min(4))
+                .min(FS_WATCH_CLEAN_BACKOFF_MAX),
+        )
+    }
+
+    fn note_fs_watch_scan_outcome(&mut self, clean: bool) {
+        if !clean {
+            self.fs_watch_clean_scan_streak = 0;
+            self.fs_watch_backoff_until = None;
+            return;
+        }
+        self.fs_watch_clean_scan_streak = self.fs_watch_clean_scan_streak.saturating_add(1);
+        if let Some(backoff) = Self::fs_watch_clean_backoff(self.fs_watch_clean_scan_streak) {
+            info!(
+                "Filesystem watcher scans found nothing {} times in a row; holding further watcher scans for {:?}",
+                self.fs_watch_clean_scan_streak, backoff
+            );
+            self.fs_watch_backoff_until = Some(Instant::now() + backoff);
+        }
+    }
+
+    /// Something other than the watcher changed the repository set or its
+    /// files, so the next watcher event is expected to be genuine.
+    pub(in crate::ui::app) fn reset_fs_watch_clean_backoff(&mut self) {
+        self.fs_watch_clean_scan_streak = 0;
+        self.fs_watch_backoff_until = None;
+    }
+
+    fn release_expired_fs_watch_backoff(&mut self) {
+        let Some(until) = self.fs_watch_backoff_until else {
+            return;
+        };
+        if Instant::now() < until {
+            return;
+        }
+        self.fs_watch_backoff_until = None;
+        if self.fs_watch_backoff_urls.is_empty() {
+            return;
+        }
+        let repo_urls: Vec<String> = self.fs_watch_backoff_urls.drain().collect();
+        debug!(
+            "Filesystem watcher backoff expired; scanning {} held repositories",
+            repo_urls.len()
+        );
+        self.dispatch_fs_watch_quick_scan(repo_urls);
+    }
+
+    fn dispatch_fs_watch_quick_scan(&mut self, repo_urls: Vec<String>) {
+        if self.syncing_repository.is_some() {
+            if self.current_sync_mode == Some(SyncMode::Download) {
+                debug!(
+                    "Ignoring filesystem-triggered quick scan for {} repositories during download",
+                    repo_urls.len()
+                );
+                return;
+            }
+            debug!(
+                "Deferring filesystem-triggered quick scan for {} repositories during sync",
+                repo_urls.len()
+            );
+            for url in repo_urls {
+                self.deferred_fs_scan.insert(url);
+            }
+            return;
+        }
+
+        debug!(
+            "Filesystem watcher queued quick scan for {} repositories",
+            repo_urls.len()
+        );
+        self.queue_quick_scan_for_urls_from_fs(repo_urls);
+    }
+
     pub fn poll_fs_watch_results(&mut self) {
+        self.release_expired_fs_watch_backoff();
         while let Ok(event) = self.fs_watch_rx.try_recv() {
             if event.repo_urls.is_empty() {
                 continue;
             }
+            self.fs_changed_since_prepare.extend(
+                event
+                    .repo_urls
+                    .iter()
+                    .map(|repo_url| Self::normalize_repo_url(repo_url)),
+            );
 
             // The watcher reports changes for every configured repository, but
             // automatic quick scans must respect the auto quick-scan setting
@@ -752,34 +1032,31 @@ impl Foxy {
                 continue;
             }
 
-            if self.syncing_repository.is_some() {
-                if self.current_sync_mode == Some(SyncMode::Download) {
-                    debug!(
-                        "Ignoring filesystem-triggered quick scan for {} repositories during download",
-                        repo_urls.len()
-                    );
-                    continue;
-                }
+            if self
+                .fs_watch_backoff_until
+                .is_some_and(|until| Instant::now() < until)
+            {
                 debug!(
-                    "Deferring filesystem-triggered quick scan for {} repositories during sync",
+                    "Holding filesystem-triggered quick scan for {} repositories during clean-scan backoff",
                     repo_urls.len()
                 );
-                for url in repo_urls {
-                    self.deferred_fs_scan.insert(url);
-                }
+                self.fs_watch_backoff_urls.extend(
+                    repo_urls
+                        .into_iter()
+                        .map(|url| Self::normalize_repo_url(&url)),
+                );
                 continue;
             }
 
-            debug!(
-                "Filesystem watcher queued quick scan for {} repositories",
-                repo_urls.len()
-            );
-            self.queue_quick_scan_for_urls_from_fs(repo_urls);
+            self.dispatch_fs_watch_quick_scan(repo_urls);
         }
     }
 
     pub fn process_startup_rechecks(&mut self) {
-        if self.syncing_repository.is_some() || self.quick_scan_worker.is_some() {
+        if self.syncing_repository.is_some()
+            || self.current_sync_mode.is_some()
+            || self.quick_scan_worker.is_some()
+        {
             return;
         }
         while let Some((address, path, mode)) = self.startup_recheck_queue.pop_front() {
@@ -816,5 +1093,101 @@ impl Foxy {
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn repo_at(path: &str) -> Repository {
+        Repository {
+            path: path.to_string(),
+            ..Repository::default()
+        }
+    }
+
+    #[test]
+    fn clean_scan_backoff_starts_after_second_clean_scan_and_caps() {
+        assert_eq!(Foxy::fs_watch_clean_backoff(0), None);
+        assert_eq!(Foxy::fs_watch_clean_backoff(1), None);
+        assert_eq!(
+            Foxy::fs_watch_clean_backoff(2),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(
+            Foxy::fs_watch_clean_backoff(3),
+            Some(Duration::from_secs(10))
+        );
+        assert_eq!(
+            Foxy::fs_watch_clean_backoff(5),
+            Some(Duration::from_secs(40))
+        );
+        assert_eq!(
+            Foxy::fs_watch_clean_backoff(6),
+            Some(Duration::from_secs(60))
+        );
+        assert_eq!(
+            Foxy::fs_watch_clean_backoff(40),
+            Some(Duration::from_secs(60))
+        );
+    }
+
+    #[test]
+    fn idle_watcher_exit_is_not_respawned_until_dirty_or_retry_due() {
+        assert!(!Foxy::fs_watcher_respawn_after_exit(
+            true, false, false, false
+        ));
+        assert!(Foxy::fs_watcher_respawn_after_exit(
+            true, true, false, false
+        ));
+        assert!(Foxy::fs_watcher_respawn_after_exit(
+            true, false, true, false
+        ));
+        assert!(Foxy::fs_watcher_respawn_after_exit(
+            true, false, false, true
+        ));
+        assert!(Foxy::fs_watcher_respawn_after_exit(
+            false, false, false, false
+        ));
+    }
+
+    #[test]
+    fn fs_watch_paths_skip_unconfigured_folders() {
+        let repositories = vec![repo_at("  "), repo_at("C:/mods"), repo_at("")];
+        assert_eq!(
+            Foxy::fs_watch_paths_from_repositories(&repositories),
+            vec!["C:/mods".to_string()]
+        );
+    }
+
+    #[test]
+    fn fs_watch_paths_collapse_equivalent_folders() {
+        let repositories = vec![
+            repo_at("C:/mods"),
+            repo_at("C:\\mods\\"),
+            repo_at("C:/other"),
+        ];
+        assert_eq!(
+            Foxy::fs_watch_paths_from_repositories(&repositories),
+            vec!["C:/mods".to_string(), "C:/other".to_string()]
+        );
+    }
+
+    #[test]
+    fn fs_watch_paths_are_order_independent() {
+        let one = Foxy::fs_watch_paths_from_repositories(&[repo_at("C:/b"), repo_at("C:/a")]);
+        let two = Foxy::fs_watch_paths_from_repositories(&[repo_at("C:/a"), repo_at("C:/b")]);
+        assert_eq!(one, two);
+    }
+
+    #[test]
+    fn fs_watch_signature_tracks_added_folder() {
+        let before = Foxy::fs_watch_paths_from_repositories(&[repo_at("C:/a")]);
+        let after = Foxy::fs_watch_paths_from_repositories(&[repo_at("C:/a"), repo_at("C:/b")]);
+        assert_ne!(
+            Foxy::fs_watch_signature_for(&before),
+            Foxy::fs_watch_signature_for(&after)
+        );
     }
 }

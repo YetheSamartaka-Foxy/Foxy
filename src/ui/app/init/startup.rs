@@ -6,12 +6,13 @@ use log::info;
 
 use crate::core::api::{self, QuickScanProgressEvent, QuickScanResult};
 use crate::ui::app::{
-    AddonBackupTaskResult, AddonDeleteResult, AddonHashRecalcResult, AddonInventoryViewCache,
-    CachedUpdateLoadResult, Foxy, ImageLoadResult, JoinPreflightQueryResult, ListGalleyCache,
-    MissionRowGalleyCache, PersistenceRequest, PersistenceResult, RepoMetadataFetchResult,
-    RepositoryAddonListCache, RepositoryAddonSizeLoadResult, RepositoryDbWipeResult,
-    RepositoryExternalAddonsListCache, RepositoryListCache, RepositorySettingsAddonPreloadResult,
-    RepositorySpaceImportResult, agent_driver::AgentGuiLaunchConfig,
+    AddonBackupTaskResult, AddonDeleteResult, AddonForceRedownloadProbeResult,
+    AddonHashRecalcResult, AddonInventoryViewCache, CachedUpdateLoadResult, Foxy, ImageLoadResult,
+    JoinPreflightQueryResult, ListGalleyCache, MissionRowGalleyCache, PersistenceRequest,
+    PersistenceResult, RepoMetadataFetchResult, RepositoryAddonListCache,
+    RepositoryAddonSizeLoadResult, RepositoryDbWipeResult, RepositoryExternalAddonsListCache,
+    RepositoryListCache, RepositorySettingsAddonPreloadResult, RepositorySpaceImportResult,
+    agent_driver::AgentGuiLaunchConfig,
 };
 use crate::ui::i18n::I18n;
 use crate::ui::palette;
@@ -28,11 +29,17 @@ impl Foxy {
         cc: &eframe::CreationContext<'_>,
         launch_debug_mode: bool,
         agent_gui: AgentGuiLaunchConfig,
+        debug_modal_previews: Vec<crate::ui::app::debug_modals::DebugModal>,
     ) -> Self {
         info!("Initializing Foxy UI state");
         let mut visuals = Visuals::dark();
         visuals.override_text_color = Some(palette::TEXT_NORMAL);
         cc.egui_ctx.set_theme(egui::Theme::Dark);
+        // egui 0.36 would otherwise push the theme into the native window after
+        // the first frame (SetWindowTheme + SetWindowCompositionAttribute on
+        // Windows). Foxy draws its own chrome, and that call has left the glow
+        // surface black on some hybrid-GPU machines.
+        cc.egui_ctx.options_mut(|o| o.sync_window_theme = false);
         cc.egui_ctx.set_visuals(visuals);
 
         // Use Roboto as the default proportional typeface. It is inserted at
@@ -154,6 +161,8 @@ impl Foxy {
             std::sync::mpsc::channel::<AddonHashRecalcResult>();
         let (addon_delete_result_tx, addon_delete_result_rx) =
             std::sync::mpsc::channel::<AddonDeleteResult>();
+        let (addon_force_redownload_result_tx, addon_force_redownload_result_rx) =
+            std::sync::mpsc::channel::<AddonForceRedownloadProbeResult>();
         let (cached_update_load_result_tx, cached_update_load_result_rx) =
             std::sync::mpsc::channel::<CachedUpdateLoadResult>();
         let (quick_scan_tx, quick_scan_rx) = std::sync::mpsc::channel::<QuickScanResult>();
@@ -180,17 +189,30 @@ impl Foxy {
         });
         let mut app = Self {
             app_icon: None,
+            tfr_logo: None,
             default_repo_image: None,
-            repaint_ctx: None,
+            game_logo_textures: Default::default(),
+            repaint_ctx: Some(cc.egui_ctx.clone()),
             agent_gui: None,
             show_debug_windows: false,
             show_delete_confirmation: false,
             delete_repository_delete_files: false,
             show_force_redownload_confirmation: false,
             show_wipe_db_confirmation: false,
+            wipe_db_include_benchmarks: false,
             show_wipe_repo_db_confirmation: false,
+            benchmark_armed: None,
+            benchmark_capture: None,
+            benchmark_prompt: None,
+            benchmarks_view: Default::default(),
+            benchmark_channels: Default::default(),
             pending_renderer_fallback_notice: false,
             pending_db_schema_wipe: None,
+            db_schema_wipe_recheck_all: true,
+            recheck_all_after_database_wipe: false,
+            db_lock_conflict: None,
+            pending_low_space_notice: false,
+            storage_compat_notice: None,
             current_view: FoxyView::RepositoryList,
             last_view: FoxyView::None,
             main_view_state: MainViewState {
@@ -208,6 +230,7 @@ impl Foxy {
             repository_visual_folders: Vec::new(),
             selected_repository_space_id: None,
             selected_repository_visual_folder_id: None,
+            game_space_overview: Default::default(),
             repository_space_detail_filter: String::new(),
             repository_space_detail_filter_space_id: None,
             show_add_repository_modal: false,
@@ -266,6 +289,8 @@ impl Foxy {
             detected_active_arma3_profile: None,
             pending_arma3_profile_action: None,
             cached_missions: None,
+            mission_scan_rx: None,
+            mission_scan_in_flight: None,
             selected_repository_for_settings: None,
             current_repository_settings_tab: RepositorySettingsTab::Configuration,
             current_help_tab: HelpTab::Overview,
@@ -300,12 +325,18 @@ impl Foxy {
             repository_space_import_result_rx,
             repository_space_import_result_tx,
             repository_space_import_in_flight: false,
+            repository_space_freshness_rx: None,
+            repository_space_last_refresh: None,
+            repository_space_remote_changes: Default::default(),
             addon_hash_recalc_result_rx,
             addon_hash_recalc_result_tx,
             addon_hash_recalc_in_flight: false,
             addon_delete_result_rx,
             addon_delete_result_tx,
             pending_addon_deletes: HashSet::new(),
+            addon_force_redownload_result_rx,
+            addon_force_redownload_result_tx,
+            pending_addon_force_redownloads: HashSet::new(),
             cached_update_load_result_rx,
             cached_update_load_result_tx,
             pending_cached_update_loads: HashSet::new(),
@@ -319,7 +350,18 @@ impl Foxy {
             fs_watch_rx,
             fs_watch_tx,
             fs_watch_worker: None,
+            fs_watch_stop: None,
+            fs_watch_idle_exit: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            fs_watch_idle_retry_at: None,
             fs_watch_suppressed_until_ms,
+            fs_watch_signature: None,
+            fs_watch_index_dirty: false,
+            fs_watch_observed_repositories_revision: 0,
+            fs_changed_since_prepare: HashSet::new(),
+            fs_watch_clean_scan_streak: 0,
+            fs_watch_backoff_until: None,
+            fs_watch_backoff_urls: HashSet::new(),
+            fs_watch_scan_urls: HashSet::new(),
             deferred_fs_scan: HashSet::new(),
             pending_quick_scan_urls: HashSet::new(),
             pending_quick_scan_prevalidated_urls: HashSet::new(),
@@ -371,6 +413,8 @@ impl Foxy {
             ts3_plugin_scan_rx: None,
             ts3_plugin_scanning: false,
             ts3_running_cache: None,
+            ts3_plugin_scan_prompt_on_update: false,
+            ts3_plugin_scan_requeued: false,
             prelaunch_recheck_at: None,
             backend_progress_rx: None,
             backend_worker: None,
@@ -378,6 +422,8 @@ impl Foxy {
             startup_pending_restore_worker: None,
             startup_repository_layout_logged: false,
             sync_started_at: None,
+            frame_cost: Default::default(),
+            frame_cost_at_sync_start: None,
             startup_recheck_queue: VecDeque::new(),
             repository_space_sync_queue: VecDeque::new(),
             repository_visual_folder_sync_queue: VecDeque::new(),
@@ -397,6 +443,8 @@ impl Foxy {
             download_finished: false,
             download_finished_repo: None,
             download_summary: None,
+            download_disk_space_shortfall: None,
+            update_modal_disk_space_probe: None,
             open_update_after_sync: false,
             needs_repaint: false,
             mod_download_progress: HashMap::new(),
@@ -419,6 +467,10 @@ impl Foxy {
             recheck_stage_percent: None,
             recheck_hash_counter: None,
             recheck_hash_part_counter: None,
+            recheck_hash_byte_counter: None,
+            recheck_progress_peak: None,
+            recheck_progress_floor: None,
+            recheck_hash_estimate: None,
             last_hash_progress_repaint: None,
             download_hash_sample_at: None,
             download_hash_sample_files: 0,
@@ -434,6 +486,10 @@ impl Foxy {
             pending_repository_visual_folder_delete: None,
             startup_frame_rendered: false,
             startup_tasks_started: false,
+            startup_diagnostics_rx: None,
+            startup_first_frame_at: None,
+            startup_quick_scan_requested: 0,
+            startup_sync: None,
             close_requested_at: None,
             update_modal_sorted_mod_indices: Vec::new(),
             update_modal_mod_name_lowers: Vec::new(),
@@ -454,6 +510,7 @@ impl Foxy {
             last_incomplete_config_sync_toast_at: None,
             show_memory_diagnostics_window: false,
             fps_ema: 0.0,
+            frame_intervals_ms: VecDeque::new(),
             memory_diagnostics_history: VecDeque::new(),
             memory_diagnostics_pinned_baseline: None,
             memory_diagnostics_last_sample_at: None,
@@ -463,6 +520,7 @@ impl Foxy {
             tracked_icon_texture_bytes: HashMap::new(),
             tracked_repo_image_texture_bytes: HashMap::new(),
             app_icon_texture_bytes: 0,
+            tfr_logo_texture_bytes: 0,
             default_repo_image_texture_bytes: 0,
             last_applied_palette: None,
             cached_color32: None,
@@ -497,18 +555,36 @@ impl Foxy {
             app_update_changelogs: Vec::new(),
             app_update_changelog_loading: HashSet::new(),
             app_update_changelogs_requested: false,
+            pending_app_update_prompt: false,
+            app_update_prompt_armed: false,
+            debug_modal_previews,
             // Swifty migration
             swifty_migration_state:
                 crate::ui::views::swifty_migration::types::SwiftyMigrationState::default(),
+            // Game spaces
+            game_spaces_view_state: crate::ui::views::game_spaces::GameSpacesViewState::default(),
+            game_space_settings_view_state:
+                crate::ui::views::game_spaces::settings::GameSpaceSettingsViewState::default(),
+            pending_game_space_switch: None,
+            game_space_switch_requested_at: None,
+            // Steam Workshop
+            workshop_view_state: crate::ui::views::workshop::WorkshopViewState::default(),
+            workshop_task_rx: None,
+            workshop_task_worker: None,
         };
         app.load_settings();
         app.pending_renderer_fallback_notice =
             crate::core::utils::renderer_fallback::renderer_fallback_notice_path().exists();
+        // Claim the database before anything can open it. Turso has no
+        // multi-process access, so a second window sharing one game space
+        // corrupts it silently rather than failing.
+        app.db_lock_conflict = app.claim_active_space_database();
         // Compare the local database schema generation against this binary's.
         // Bootstraps a sidecar for fresh/legacy databases (no prompt) and only
         // returns Some(..) when an out-of-date database needs an explicit wipe.
         app.pending_db_schema_wipe =
             crate::core::tasks::db_schema_version::evaluate_and_bootstrap();
+        app.apply_debug_modal_previews();
         if app.settings_view_state.debug_mode && !app.launch_debug_mode {
             info!("Ignoring persisted debug mode; launch with `ui --debug-mode` to enable");
         }
@@ -542,7 +618,12 @@ impl Foxy {
         app.apply_runtime_ui_scale(&cc.egui_ctx);
         // Capture the renderer eframe actually created so `health` can report
         // it (wgpu vs the glow fallback path).
-        let active_renderer = if cc.wgpu_render_state.is_some() {
+        let active_renderer = if let Some(render_state) = cc.wgpu_render_state.as_ref() {
+            // Reaching here means the instance, adapter and device all came up on
+            // this backend, so it is safe to pin the next launch to it.
+            crate::core::utils::renderer_fallback::remember_graphics_backend(
+                render_state.adapter.get_info().backend.to_str(),
+            );
             "wgpu"
         } else {
             "glow"
@@ -553,7 +634,12 @@ impl Foxy {
         app.load_repository_spaces();
         app.reconcile_repository_space_paths();
         app.load_repository_visual_folders();
-        api::log_startup_system_diagnostics(&app.startup_storage_paths());
+        let storage_paths = app.startup_storage_paths();
+        let storage_check_repositories = app.storage_check_repositories();
+        app.startup_diagnostics_rx = Some(api::spawn_startup_system_diagnostics(
+            storage_paths,
+            storage_check_repositories,
+        ));
         info!(
             "Startup state loaded: repositories={} repository_spaces={} debug_mode={}",
             app.repository_view_state.repositories.len(),
@@ -562,6 +648,7 @@ impl Foxy {
         );
         app.update_debug_mode();
         app.previous_debug_mode = app.settings_view_state.debug_mode;
+        app.start_startup_quick_scan_planning();
         let icon_bytes = include_bytes!("../../icons/foxy_256.png");
         if let Ok(image) = image::load_from_memory(icon_bytes).map(|img| img.to_rgba8()) {
             let (icon_width, icon_height) = image.dimensions();
@@ -579,6 +666,24 @@ impl Foxy {
             app.app_icon = Some(texture);
         } else {
             log::error!("Failed to load embedded icon.");
+        }
+        let tfr_logo_bytes = include_bytes!("../../icons/tfr_logo.png");
+        if let Ok(image) = image::load_from_memory(tfr_logo_bytes).map(|img| img.to_rgba8()) {
+            let (logo_width, logo_height) = image.dimensions();
+            app.tfr_logo_texture_bytes = (logo_width as usize)
+                .saturating_mul(logo_height as usize)
+                .saturating_mul(4);
+            let texture = cc.egui_ctx.load_texture(
+                "tfr_logo",
+                egui::ColorImage::from_rgba_unmultiplied(
+                    [logo_width as usize, logo_height as usize],
+                    &image,
+                ),
+                egui::TextureOptions::LINEAR,
+            );
+            app.tfr_logo = Some(texture);
+        } else {
+            log::error!("Failed to load embedded TFR logo.");
         }
         let repo_placeholder_bytes = include_bytes!("../../repo-image-placeholder.png");
         if let Ok(image) = image::load_from_memory(repo_placeholder_bytes).map(|img| img.to_rgba8())
@@ -670,10 +775,11 @@ impl Foxy {
     pub(crate) fn startup_storage_paths(&self) -> Vec<api::StartupStoragePath> {
         let mut paths = vec![
             api::StartupStoragePath::new("app_data", Self::get_config_directory()),
+            api::StartupStoragePath::new("game_space", Self::get_game_space_directory()),
             api::StartupStoragePath::new("logs", crate::core::utils::app_paths::foxy_logs_dir()),
             api::StartupStoragePath::new(
                 "database",
-                Self::get_config_directory().join("database.db"),
+                Self::get_game_space_directory().join("database.db"),
             ),
             api::StartupStoragePath::new("temp", self.effective_temp_directory()),
         ];
@@ -685,6 +791,21 @@ impl Foxy {
             &mut paths,
             "arma3",
             self.settings_view_state.arma3_directory.trim(),
+        );
+        push_configured_path(
+            &mut paths,
+            "twwh3",
+            self.settings_view_state.twwh3_directory.trim(),
+        );
+        push_configured_path(
+            &mut paths,
+            "reforger",
+            self.settings_view_state.reforger_directory.trim(),
+        );
+        push_configured_path(
+            &mut paths,
+            "generic",
+            self.settings_view_state.generic_directory.trim(),
         );
         push_configured_path(
             &mut paths,
@@ -771,6 +892,9 @@ impl Foxy {
 
     pub(in crate::ui::app) fn sync_debug_runtime_state(&mut self) {
         self.show_debug_windows = self.settings_view_state.show_debug_windows;
+        crate::core::api::set_extended_diagnostics(
+            self.settings_view_state.extended_diagnostics_logging,
+        );
         if !self.settings_view_state.show_memory_diagnostics_icon {
             self.show_memory_diagnostics_window = false;
         }

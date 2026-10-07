@@ -6,11 +6,17 @@
 //!
 //! The kind is derived from the compile profile, not from any environment:
 //! - **dev**: debug profile (`cargo run`, `cargo build`, the VS Code "Run"
-//!   button) - shows the source commit.
+//!   button).
 //! - **pre-release**: release profile built with the `prerelease` feature
-//!   (`cargo prerelease`) - release-optimized but still shows the commit.
+//!   (`cargo prerelease`).
 //! - **release**: plain release profile (`cargo build --release`, the GitHub
-//!   artifacts) - shows just the version.
+//!   artifacts).
+//!
+//! Every kind shows the source commit so a release-profile build made from a
+//! local checkout can still be told apart from the published artifact of the
+//! same version.
+
+use std::sync::LazyLock;
 
 /// Package version from `Cargo.toml`, e.g. `1.0.0`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -48,8 +54,8 @@ pub fn build_kind() -> &'static str {
 
 /// Version label for display.
 ///
-/// Official builds show just the version (`v1.0.0`); dev and pre-release builds
-/// append the source commit (`v1.0.0-dev (a1b2c3d)` / `v1.0.0-pre (a1b2c3d)`)
+/// Always carries the source commit (`v1.0.0 (a1b2c3d)`); dev and pre-release
+/// builds also mark the kind (`v1.0.0-dev (a1b2c3d-dirty)` / `v1.0.0-pre (a1b2c3d)`)
 /// so the running binary can be matched back to the checkout it was built from.
 pub fn version_label() -> String {
     if is_dev_build() {
@@ -57,6 +63,34 @@ pub fn version_label() -> String {
     } else if is_prerelease_build() {
         format!("v{VERSION}-pre ({GIT_HASH})")
     } else {
-        format!("v{VERSION}")
+        format!("v{VERSION} ({GIT_HASH})")
+    }
+}
+
+/// `version_label()` without the `v` prefix, for clap's `--version` output.
+pub fn clap_version() -> &'static str {
+    static LABEL: LazyLock<String> = LazyLock::new(|| {
+        version_label()
+            .strip_prefix('v')
+            .map(str::to_string)
+            .unwrap_or_else(version_label)
+    });
+    LABEL.as_str()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_label_always_carries_commit() {
+        let label = version_label();
+        assert!(label.starts_with(&format!("v{VERSION}")));
+        assert!(label.ends_with(&format!("({GIT_HASH})")));
+    }
+
+    #[test]
+    fn clap_version_drops_v_prefix() {
+        assert_eq!(format!("v{}", clap_version()), version_label());
     }
 }

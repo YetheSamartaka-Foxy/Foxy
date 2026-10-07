@@ -26,7 +26,7 @@ Use this project skill as `/foxy-gui-driver` in Claude Code. Keep this file smal
 
 - **Launch both channels:** set `$env:FOXY_CONFIG_DIR` to a throwaway dir and `$env:EGUI_INSPECTION = "1"`, then run `Foxy.exe ui --agent-gui --agent-port 0`. Set the same config env for `agent-gui` client commands. Keep inspection loopback.
 - **egui_mcp:** Foxy enables eframe's `inspection` feature. `EGUI_INSPECTION=1` exposes upstream inspection on `127.0.0.1:5719`; set it to `127.0.0.1:<port>` if needed.
-- **Real data, no 1.3 GB DB:** copy only `settings.json` / `repositories.json` / `repository_spaces.json` from `%APPDATA%\Foxy` into the isolated dir; addon lists rebuild from the disk scan.
+- **Real data, no 1.3 GB DB:** copy only `app_settings.json` / `games.json` from `%APPDATA%\Foxy` plus each `games\<space_id>\` config JSON (`game_settings.json`, `repositories.json`, `repository_spaces.json`) into the isolated dir, never `database.db`; addon lists rebuild from the disk scan. `agent-gui fixture` files still use the flat `settings.json` / `repositories.json` layout, which the app migrates on start.
 - **Reach addon tabs:** `agent-gui open-view repository-settings --repo-index 0 --tab external-addons`.
 - **Read state without nodes:** `agent-gui repositories`, `agent-gui addons --repo-index 0 --tab external-addons` (structured rows - addon rows aren't semantic), `agent-gui settings`, `agent-gui progress`.
 - **Reproduce high-DPI / big-window relayout:** `agent-gui scale 150`, `agent-gui resize --width 1100 --height 720`.

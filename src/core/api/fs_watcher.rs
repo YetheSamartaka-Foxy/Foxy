@@ -1,7 +1,10 @@
+use super::background_runtime::background_runtime;
 use super::logging::request_background_repaint;
 use super::*;
-use crate::core::db::params;
+use crate::core::db::{FoxyDb, params};
+use crate::core::tasks::init_database::init_database;
 use crate::core::utils::format::sanitize_log_path_str;
+use std::sync::atomic::AtomicBool;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn unix_time_millis() -> u64 {
@@ -23,6 +26,59 @@ fn path_matches_mod(root: &str, candidate: &str) -> bool {
     candidate.starts_with(&prefix)
 }
 
+/// Per-flush tally of what the OS reported, so a log bundle can tell a real
+/// edit from an attribute storm (an indexer, an antivirus pass) without the
+/// watcher having to guess.
+#[derive(Default)]
+struct EventKindTally {
+    create: usize,
+    modify_data: usize,
+    modify_metadata: usize,
+    modify_name: usize,
+    modify_other: usize,
+    remove: usize,
+    access: usize,
+    other: usize,
+    sample_path: Option<String>,
+}
+
+impl EventKindTally {
+    fn record(&mut self, kind: &notify::EventKind, sample: Option<&str>) {
+        use notify::EventKind;
+        use notify::event::ModifyKind;
+        match kind {
+            EventKind::Create(_) => self.create += 1,
+            EventKind::Modify(ModifyKind::Data(_)) => self.modify_data += 1,
+            EventKind::Modify(ModifyKind::Metadata(_)) => self.modify_metadata += 1,
+            EventKind::Modify(ModifyKind::Name(_)) => self.modify_name += 1,
+            EventKind::Modify(_) => self.modify_other += 1,
+            EventKind::Remove(_) => self.remove += 1,
+            EventKind::Access(_) => self.access += 1,
+            _ => self.other += 1,
+        }
+        if self.sample_path.is_none()
+            && let Some(path) = sample
+        {
+            self.sample_path = Some(sanitize_log_path_str(path));
+        }
+    }
+
+    fn summary(&self) -> String {
+        format!(
+            "create={} modify_data={} modify_metadata={} modify_name={} modify_other={} remove={} access={} other={} sample={}",
+            self.create,
+            self.modify_data,
+            self.modify_metadata,
+            self.modify_name,
+            self.modify_other,
+            self.remove,
+            self.access,
+            self.other,
+            self.sample_path.as_deref().unwrap_or("-")
+        )
+    }
+}
+
 #[derive(Clone, Debug)]
 struct LinkedRepoPath {
     remote_url: String,
@@ -35,9 +91,7 @@ struct ModPathEntry {
     linked_repos: Vec<LinkedRepoPath>,
 }
 
-async fn build_mod_repo_index(context: Arc<FoxyContext>) -> Vec<ModPathEntry> {
-    let db = context.db();
-
+async fn build_mod_repo_index(db: FoxyDb) -> Vec<ModPathEntry> {
     // Fetch only needed columns, run all three queries concurrently
     let (repos_result, repo_mods_result, mods_result) = tokio::join!(
         db.query_all(
@@ -154,11 +208,18 @@ fn repo_urls_for_changed_paths(
     repo_urls
 }
 
+/// Spawn the watcher worker. `idle_exit` is set when the worker returns without
+/// ever establishing a watch (no addon rows to index, no registrable path, or
+/// a watcher init failure), so the owner can back off instead of respawning it
+/// on the next frame; it stays false while the watcher is active and after a
+/// requested stop.
 pub fn spawn_repo_fs_watcher(
     watch_paths: Vec<String>,
     suppress_until_ms: Arc<AtomicU64>,
     result_tx: StdSender<FsChangeEvent>,
     repaint_ctx: Option<egui::Context>,
+    stop: Arc<AtomicBool>,
+    idle_exit: Arc<AtomicBool>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         info!(
@@ -166,21 +227,21 @@ pub fn spawn_repo_fs_watcher(
             watch_paths.len()
         );
         ensure_logger();
-        // DATABASE_URL is set once at startup in main.rs to avoid unsafe env::set_var
-        // race conditions in multi-threaded context.
 
-        let rt = match Builder::new_multi_thread().enable_all().build() {
-            Ok(rt) => rt,
-            Err(err) => {
-                error!("Failed to build runtime for fs watcher: {}", err);
-                return;
-            }
+        // The index probe only needs the shared database handle, not a
+        // runtime, HTTP client or context of its own.
+        let Some(rt) = background_runtime() else {
+            error!("Filesystem watcher disabled: shared background runtime unavailable");
+            idle_exit.store(true, Ordering::Relaxed);
+            return;
         };
-
-        let context = rt.block_on(create_context());
-        let mod_index = rt.block_on(build_mod_repo_index(context.clone()));
+        let mod_index = rt.block_on(async {
+            let db = FoxyDb::from_handle(init_database().await);
+            build_mod_repo_index(db).await
+        });
         if mod_index.is_empty() {
             warn!("Filesystem watcher disabled: no repository/mod path index available");
+            idle_exit.store(true, Ordering::Relaxed);
             return;
         }
 
@@ -193,6 +254,7 @@ pub fn spawn_repo_fs_watcher(
             Ok(w) => w,
             Err(err) => {
                 warn!("Failed to initialize filesystem watcher: {}", err);
+                idle_exit.store(true, Ordering::Relaxed);
                 return;
             }
         };
@@ -222,17 +284,37 @@ pub fn spawn_repo_fs_watcher(
 
         if !watching_any {
             warn!("Filesystem watcher disabled: no valid watch paths were registered");
+            idle_exit.store(true, Ordering::Relaxed);
             return;
         }
         info!("Filesystem watcher active");
 
         let debounce = Duration::from_millis(350);
         let mut pending_paths: HashSet<String> = HashSet::new();
+        let mut pending_kinds = EventKindTally::default();
         let mut last_event_at = Instant::now();
 
         loop {
+            if stop.load(Ordering::Relaxed) {
+                info!("Filesystem watcher stopped");
+                break;
+            }
             match rx.recv_timeout(Duration::from_millis(200)) {
                 Ok(Ok(event)) => {
+                    // Access events never change what a sync would find on
+                    // disk; counting them keeps the storm diagnosable.
+                    let is_access = matches!(event.kind, notify::EventKind::Access(_));
+                    pending_kinds.record(
+                        &event.kind,
+                        event
+                            .paths
+                            .first()
+                            .map(|path| path.to_string_lossy())
+                            .as_deref(),
+                    );
+                    if is_access {
+                        continue;
+                    }
                     for path in event.paths {
                         let normalized = normalize_path_for_match(path.to_string_lossy().as_ref());
                         if !normalized.is_empty() {
@@ -251,17 +333,20 @@ pub fn spawn_repo_fs_watcher(
 
                     if unix_time_millis() <= suppress_until_ms.load(Ordering::Relaxed) {
                         pending_paths.clear();
+                        pending_kinds = EventKindTally::default();
                         continue;
                     }
 
                     let repo_urls = repo_urls_for_changed_paths(&mod_index, &pending_paths);
+                    let kinds = std::mem::take(&mut pending_kinds);
 
                     pending_paths.clear();
 
                     if !repo_urls.is_empty() {
                         info!(
-                            "Filesystem watcher detected local changes for {} repositories",
-                            repo_urls.len()
+                            "Filesystem watcher detected local changes for {} repositories: {}",
+                            repo_urls.len(),
+                            kinds.summary()
                         );
                         if result_tx
                             .send(FsChangeEvent {
@@ -358,26 +443,23 @@ mod tests {
     #[test]
     fn repo_urls_for_changed_paths_prefers_matching_repository_root() {
         let mod_index = vec![ModPathEntry {
-            local_path: normalize_path_for_match("S:/Swifty/TFR_Repository/@diwako_anomalies"),
+            local_path: normalize_path_for_match("R:/Mods/MainRepo/@diwako_anomalies"),
             linked_repos: vec![
                 linked_repo(
-                    "http://a3.tfrod.cz:8080/mody/TFR_40K/",
-                    "S:/Swifty/TFR_Repository",
+                    "http://repo.example.invalid:8080/mody/RepoAlpha/",
+                    "R:/Mods/MainRepo",
                 ),
-                linked_repo(
-                    "http://example.invalid/other_repo/",
-                    "S:/Swifty/Other_Repository",
-                ),
+                linked_repo("http://example.invalid/other_repo/", "R:/Mods/OtherRepo"),
             ],
         }];
         let changed_paths = HashSet::from([normalize_path_for_match(
-            "S:/Swifty/TFR_Repository/@diwako_anomalies/addons/file.pbo",
+            "R:/Mods/MainRepo/@diwako_anomalies/addons/file.pbo",
         )]);
 
         let repo_urls = repo_urls_for_changed_paths(&mod_index, &changed_paths);
 
         assert_eq!(repo_urls.len(), 1);
-        assert!(repo_urls.contains("http://a3.tfrod.cz:8080/mody/TFR_40K/"));
+        assert!(repo_urls.contains("http://repo.example.invalid:8080/mody/RepoAlpha/"));
         assert!(!repo_urls.contains("http://example.invalid/other_repo/"));
     }
 
@@ -386,8 +468,8 @@ mod tests {
         let mod_index = vec![ModPathEntry {
             local_path: normalize_path_for_match("D:/SharedMods/@ace"),
             linked_repos: vec![
-                linked_repo("http://example.invalid/repo_a/", "S:/Swifty/RepoA"),
-                linked_repo("http://example.invalid/repo_b/", "S:/Swifty/RepoB"),
+                linked_repo("http://example.invalid/repo_a/", "R:/Mods/RepoA"),
+                linked_repo("http://example.invalid/repo_b/", "R:/Mods/RepoB"),
             ],
         }];
         let changed_paths = HashSet::from([normalize_path_for_match(

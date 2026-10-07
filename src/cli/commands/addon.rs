@@ -1,6 +1,7 @@
 use super::{
     AppState, CommandError, CommandSuccess, effective_repository, ensure_backend_ready,
-    find_repository_index, progress_output_muted, run_repository_sync,
+    ensure_remote_reachable_before_destructive, find_repository_index, progress_output_muted,
+    run_repository_sync,
 };
 use crate::cli::args::{
     AddonCommand, AddonForceRedownloadArgs, AddonListArgs, AddonRecalcHashesArgs, AddonSetArgs,
@@ -230,6 +231,7 @@ fn cmd_addon_force_redownload(
                 "Target addon path is not a directory",
             ));
         }
+        ensure_remote_reachable_before_destructive("addon.force-redownload", &repo.address)?;
         fs::remove_dir_all(&target).map_err(|e| {
             CommandError::operation(
                 "addon.force-redownload",

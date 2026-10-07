@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::core::api;
+use crate::core::benchmarks::BenchmarkKind;
 use crate::ui::app::{AddonInventoryEntry, Foxy, FoxyView, MemoryDiagnosticsSample};
 use crate::ui::types::{
     MAX_UI_SCALE_PERCENT, MIN_UI_SCALE_PERCENT, RepoState, RepositorySelection,
@@ -80,7 +81,16 @@ pub struct AgentGuiRuntime {
     /// When true, animation time is frozen and blink/hover/spinner animations
     /// are disabled so screenshots are byte-stable (`stable-render`).
     pub stable_render: bool,
+    /// The UI repaints every frame until then, so `fps` reads a live frame
+    /// rate; outside the window the agent costs no frames of its own.
+    pub fps_probe_until: Option<Instant>,
+    /// The next frame interval spans the idle gap before the probe began and
+    /// is not a frame time.
+    pub fps_probe_warming: bool,
 }
+
+/// How long one `fps` read keeps the UI repainting every frame.
+pub(crate) const FPS_PROBE_WINDOW: Duration = Duration::from_secs(3);
 
 /// Maximum stored observations for `diff` and maximum buffered `events`.
 const DIFF_BASELINE_CAP: usize = 32;
@@ -771,6 +781,17 @@ pub struct AgentGuiSnapshot {
 }
 
 impl AgentGuiRuntime {
+    /// Whether an `fps` read asked for live frames recently.
+    pub(crate) fn fps_probe_active(&self, now: Instant) -> bool {
+        self.fps_probe_until.is_some_and(|until| now < until)
+    }
+
+    /// Keep frames live for [`FPS_PROBE_WINDOW`] from `now`.
+    pub(crate) fn open_fps_probe(&mut self, now: Instant) {
+        self.fps_probe_warming |= !self.fps_probe_active(now);
+        self.fps_probe_until = Some(now + FPS_PROBE_WINDOW);
+    }
+
     fn new(rx: Receiver<AgentGuiUiRequest>, session: AgentGuiSession) -> Self {
         Self {
             rx,
@@ -793,6 +814,8 @@ impl AgentGuiRuntime {
             prev_download_finished: false,
             active_renderer: None,
             stable_render: false,
+            fps_probe_until: None,
+            fps_probe_warming: false,
         }
     }
 
@@ -1509,25 +1532,36 @@ impl Foxy {
                 ctx.request_repaint();
                 return;
             }
-            AgentGuiCommand::Fps => AgentGuiResponse::ok(
-                &command,
-                &view,
-                started_at,
-                json!({
-                    "fps": self.fps_ema,
-                    "fps_counter_visible": self.settings_view_state.show_fps_counter,
-                    // Diff these across two reads to detect multi-pass: if
-                    // (pass_delta - frame_delta) > 0 between two scroll samples,
-                    // egui is running extra layout passes (the cost behind the
-                    // "changed id between passes" warning / scroll FPS drop).
-                    "cumulative_frame_nr": ctx.cumulative_frame_nr(),
-                    "cumulative_pass_nr": ctx.cumulative_pass_nr(),
-                }),
-            ),
+            AgentGuiCommand::Fps => {
+                runtime.open_fps_probe(started_at);
+                ctx.request_repaint();
+                AgentGuiResponse::ok(
+                    &command,
+                    &view,
+                    started_at,
+                    json!({
+                        "fps": self.fps_ema,
+                        "fps_counter_visible": self.settings_view_state.show_fps_counter,
+                        // Recent frame intervals: a stall shows up in p95/max long
+                        // after the smoothed fps has recovered.
+                        "frame_ms": crate::ui::app::runtime::update_loop::frame_interval_stats(&self.frame_intervals_ms)
+                            .map(|(p50, p95, max)| json!({"p50": p50, "p95": p95, "max": max, "samples": self.frame_intervals_ms.len()})),
+                        // Diff these across two reads to detect multi-pass: if
+                        // (pass_delta - frame_delta) > 0 between two scroll samples,
+                        // egui is running extra layout passes (the cost behind the
+                        // "changed id between passes" warning / scroll FPS drop).
+                        "cumulative_frame_nr": ctx.cumulative_frame_nr(),
+                        "cumulative_pass_nr": ctx.cumulative_pass_nr(),
+                    }),
+                )
+            }
             AgentGuiCommand::Wait {
                 condition,
                 timeout_ms,
             } => {
+                if matches!(condition, AgentGuiWaitCondition::FpsAbove { .. }) {
+                    runtime.open_fps_probe(started_at);
+                }
                 if self.agent_gui_wait_satisfied(ctx, condition) {
                     AgentGuiResponse::ok(
                         &command,
@@ -1906,12 +1940,18 @@ impl Foxy {
                 started_at,
                 self.agent_gui_app_update_value(),
             ),
-            AgentGuiCommand::Memory { history, textures } => AgentGuiResponse::ok(
-                &command,
-                &view,
-                started_at,
-                self.agent_gui_memory_value(*history, *textures),
-            ),
+            AgentGuiCommand::Memory { history, textures } => {
+                // Diagnostics sample only during a sync or with the diagnostics
+                // window open, so a driver read would otherwise report an empty
+                // history to the one caller that explicitly asked for a number.
+                self.capture_memory_diagnostics_snapshot("agent-gui memory", false);
+                AgentGuiResponse::ok(
+                    &command,
+                    &view,
+                    started_at,
+                    self.agent_gui_memory_value(*history, *textures),
+                )
+            }
             AgentGuiCommand::ArmaProfiles => AgentGuiResponse::ok(
                 &command,
                 &view,
@@ -2260,6 +2300,13 @@ impl Foxy {
 
     fn agent_gui_complete_waits(&mut self, ctx: &egui::Context, runtime: &mut AgentGuiRuntime) {
         let now = Instant::now();
+        if runtime
+            .pending_waits
+            .iter()
+            .any(|wait| matches!(wait.condition, AgentGuiWaitCondition::FpsAbove { .. }))
+        {
+            runtime.open_fps_probe(now);
+        }
         let mut index = 0;
         while index < runtime.pending_waits.len() {
             let satisfied =
@@ -2381,6 +2428,22 @@ impl Foxy {
             | FoxyView::AppUpdate
             | FoxyView::VersionBrowser => {
                 self.open_reference_view(parsed);
+            }
+            FoxyView::GameSpaces => {
+                if self.current_view != FoxyView::GameSpaces {
+                    self.open_game_spaces_view();
+                }
+            }
+            FoxyView::GameSpaceSettings => {
+                if self.current_view != FoxyView::GameSpaceSettings {
+                    self.open_active_game_space_settings();
+                }
+                if let Some(tab) = tab {
+                    self.game_space_settings_view_state.current_tab =
+                        parse_agent_gui_game_space_settings_tab(tab).ok_or_else(|| {
+                            format!("Unsupported game-space-settings tab '{}'", tab)
+                        })?;
+                }
             }
             FoxyView::RepositoryList | FoxyView::SwiftyMigration | FoxyView::None => {
                 self.current_view = parsed;
@@ -2796,6 +2859,11 @@ impl Foxy {
             }
         };
         push(self.backend_worker.is_some(), "core-sync");
+        push(
+            !self.pending_repository_db_wipes.is_empty(),
+            "repository-db-wipe",
+        );
+        push(self.startup_sync_in_progress(), "startup-sync");
         push(self.quick_scan_worker.is_some(), "quick-scan");
         push(self.direct_download_worker.is_some(), "direct-download");
         push(
@@ -2915,6 +2983,9 @@ impl Foxy {
                 }
             }
             RepositorySettingsTab::OptionalAddons => {
+                // Report the marking the UI honors, not the stored list: a game
+                // without the capability has no client-side addons at all.
+                let client_side_supported = Self::client_side_addons_supported();
                 for (name, enabled) in &repo.optional_addons {
                     if !keep(name, *enabled) {
                         continue;
@@ -2924,12 +2995,14 @@ impl Foxy {
                         "enabled": enabled,
                         "kind": "optional",
                         "favorite": repo.optional_addon_favorites.iter().any(|f| f == name),
-                        "client_side": repo.optional_addon_client_side.iter().any(|c| c == name),
+                        "client_side": client_side_supported
+                            && repo.optional_addon_client_side.iter().any(|c| c == name),
                         "size_bytes": self.repository_addon_remote_size_bytes(&repo.address, name),
                     }));
                 }
             }
             RepositorySettingsTab::ExternalAddons => {
+                let client_side_supported = Self::client_side_addons_supported();
                 for (name, enabled, source) in &repo.external_addons {
                     if !keep(name, *enabled) {
                         continue;
@@ -2940,7 +3013,8 @@ impl Foxy {
                         "kind": "external",
                         "source": source,
                         "favorite": repo.external_addon_favorites.iter().any(|f| f == name),
-                        "client_side": repo.external_addon_client_side.iter().any(|c| c == name),
+                        "client_side": client_side_supported
+                            && repo.external_addon_client_side.iter().any(|c| c == name),
                         "size_bytes": self.repository_addon_remote_size_bytes(&repo.address, name),
                     }));
                 }
@@ -3106,6 +3180,12 @@ impl Foxy {
                 "manifest_entry_count": space.entries.len(),
                 "required_entry_count": required_entries,
                 "attached_repository_count": attached,
+                "remote_changes": self.repository_space_remote_delta(&space.id).map(|delta| json!({
+                    "added": delta.added,
+                    "removed": delta.removed,
+                    "required_changed": delta.required_changed,
+                    "total": delta.total(),
+                })),
             }));
         }
 
@@ -3235,6 +3315,34 @@ impl Foxy {
                 self.mark_settings_dirty();
                 json!(parsed)
             }
+            "extended-diagnostics-logging" | "extended_diagnostics_logging" => {
+                let parsed = parse_agent_gui_bool(trimmed).ok_or_else(|| {
+                    format!("Expected a boolean for extended-diagnostics-logging, got '{value}'")
+                })?;
+                if !self
+                    .settings_view_state
+                    .set_extended_diagnostics_logging(parsed)
+                {
+                    return Err(
+                        "Extended diagnostics logging stays on while benchmarks are enabled; disable benchmarks first"
+                            .to_string(),
+                    );
+                }
+                crate::core::api::set_extended_diagnostics(parsed);
+                self.mark_settings_dirty();
+                json!(parsed)
+            }
+            "benchmarks-enabled" | "benchmarks_enabled" => {
+                let parsed = parse_agent_gui_bool(trimmed).ok_or_else(|| {
+                    format!("Expected a boolean for benchmarks-enabled, got '{value}'")
+                })?;
+                self.apply_benchmarks_enabled(parsed);
+                self.mark_settings_dirty();
+                json!({
+                    "benchmarks_enabled": parsed,
+                    "extended_diagnostics_logging": self.settings_view_state.extended_diagnostics_logging,
+                })
+            }
             "ui-scale-percent" | "ui_scale_percent" => {
                 let parsed: u16 = trimmed.parse().map_err(|_| {
                     format!("Expected an integer percent for ui-scale-percent, got '{value}'")
@@ -3271,7 +3379,7 @@ impl Foxy {
             }
             other => {
                 return Err(format!(
-                    "Unsupported setting '{other}' (try debug-mode, show-activity-log, show-fps-counter, ui-scale-percent, locale, or download-speed-limit-mbps)"
+                    "Unsupported setting '{other}' (try debug-mode, show-activity-log, show-fps-counter, extended-diagnostics-logging, ui-scale-percent, locale, or download-speed-limit-mbps)"
                 ));
             }
         };
@@ -3295,6 +3403,9 @@ impl Foxy {
         let recheck_hash = self
             .recheck_hash_counter
             .map(|(done, total)| json!({ "done": done, "total": total }));
+        let recheck_hash_bytes = self
+            .recheck_hash_byte_counter
+            .map(|(done, total)| json!({ "done": done, "total": total }));
         json!({
             "busy": self.agent_gui_busy(),
             "busy_reasons": self.agent_gui_busy_reasons(),
@@ -3312,6 +3423,9 @@ impl Foxy {
             "recheck_stage_label": self.recheck_stage_label,
             "recheck_stage_percent": self.recheck_stage_percent,
             "recheck_hash_counter": recheck_hash,
+            "recheck_hash_bytes": recheck_hash_bytes,
+            "recheck_hash_progress": self.recheck_hash_progress_fraction(),
+            "recheck_progress": self.recheck_progress_fraction(),
             "update_modal_open": self.update_modal_open,
         })
     }
@@ -3381,6 +3495,14 @@ impl Foxy {
             self.pending_renderer_fallback_notice,
             "renderer-fallback-notice",
         );
+        push(
+            self.storage_compat_notice.is_some(),
+            "storage-compat-notice",
+        );
+        push(self.pending_db_schema_wipe.is_some(), "db-schema-wipe");
+        push(self.benchmark_prompt.is_some(), "benchmark-save");
+        push(self.benchmarks_view.export.is_some(), "benchmark-export");
+        push(self.pending_app_update_prompt, "app-update-available");
         push(self.show_add_profile_window, "add-profile");
         push(self.show_rename_profile_window, "rename-profile");
         push(
@@ -4051,6 +4173,19 @@ impl Foxy {
             "repo_image_texture_count": self.tracked_repo_image_texture_bytes.len(),
             "app_icon_texture_bytes": self.app_icon_texture_bytes,
             "default_repo_image_texture_bytes": self.default_repo_image_texture_bytes,
+            // egui rasterizes lazily, so the atlas grows as views introduce new
+            // sizes and glyphs. Without it the memory lane sees the growth but
+            // cannot name it, and the app's own buckets never will: the atlas
+            // belongs to epaint, not to Foxy state.
+            "font_atlas": self.repaint_ctx.as_ref().map(|ctx| {
+                let [width, height] = ctx.fonts(|fonts| fonts.font_image_size());
+                json!({
+                    "width": width,
+                    "height": height,
+                    "bytes": width * height * std::mem::size_of::<f32>(),
+                    "fill_ratio": ctx.fonts(|fonts| fonts.font_atlas_fill_ratio()),
+                })
+            }),
         });
         if history && let Value::Object(map) = &mut value {
             map.insert(
@@ -4870,6 +5005,29 @@ impl Foxy {
         Ok(index)
     }
 
+    /// The benchmark at `index` in the list as currently filtered and sorted.
+    fn agent_gui_resolve_benchmark_id(
+        &mut self,
+        params: &Value,
+    ) -> Result<String, (String, String)> {
+        self.ensure_benchmarks_loaded();
+        let index = params
+            .get("index")
+            .and_then(Value::as_u64)
+            .map(|index| index as usize)
+            .unwrap_or(0);
+        self.benchmarks_view
+            .visible_ids()
+            .get(index)
+            .cloned()
+            .ok_or_else(|| {
+                (
+                    "invalid-params".to_string(),
+                    format!("Benchmark index {index} is out of range"),
+                )
+            })
+    }
+
     /// Run one named semantic action. Errors are `(code, message)`.
     fn agent_gui_invoke(
         &mut self,
@@ -4913,11 +5071,18 @@ impl Foxy {
                 self.current_view = FoxyView::RepositoryList;
                 self.last_view = FoxyView::None;
             }
+            "open-game-space-overview" => {
+                self.current_view = FoxyView::RepositoryList;
+                self.last_view = FoxyView::None;
+                self.open_game_space_overview();
+            }
             "open-changelog" => self.open_reference_view(FoxyView::Changelog),
             "open-about" => self.open_reference_view(FoxyView::About),
             "open-help" => self.open_reference_view(FoxyView::Help),
             "open-app-update" => self.open_reference_view(FoxyView::AppUpdate),
             "open-add-repository-modal" => self.show_add_repository_modal = true,
+            "open-add-profile-window" => self.show_add_profile_window = true,
+            "open-rename-profile-window" => self.show_rename_profile_window = true,
             "close-modals" => self.agent_gui_close_modals(),
             "toggle-activity-log" => self.set_activity_log_visibility(
                 ctx,
@@ -4945,14 +5110,110 @@ impl Foxy {
             }
             "start-sync" => {
                 let index = self.agent_gui_resolve_repo_index(params)?;
+                self.arm_benchmark(BenchmarkKind::Update, Vec::new());
                 self.start_core_sync(index, api::SyncMode::Download);
+            }
+            "start-sync-full-files" => {
+                let index = self.agent_gui_resolve_repo_index(params)?;
+                self.arm_benchmark(BenchmarkKind::Update, Vec::new());
+                self.start_core_sync_full_download_control(index);
             }
             "recheck-repo" => {
                 let index = self.agent_gui_resolve_repo_index(params)?;
                 self.start_core_sync(index, api::SyncMode::RecheckOnly);
             }
+            "quick-check" => {
+                let index = self.agent_gui_resolve_repo_index(params)?;
+                self.arm_benchmark(BenchmarkKind::QuickCheck, Vec::new());
+                self.start_core_sync(index, api::SyncMode::QuickCheckOnly);
+            }
+            "remote-recheck" => {
+                let index = self.agent_gui_resolve_repo_index(params)?;
+                self.arm_benchmark(BenchmarkKind::Recheck, Vec::new());
+                self.start_remote_recheck_with_plan(index);
+            }
+            "wipe-repo-db" => {
+                let index = self.agent_gui_resolve_repo_index(params)?;
+                let keep_hash_record = params
+                    .get("keep-hash-record")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                self.wipe_repository_database_entries(index, !keep_hash_record);
+            }
+            "save-benchmark" => {
+                let draft = self.benchmark_prompt.take().ok_or_else(|| {
+                    (
+                        "no-prompt".to_string(),
+                        "No benchmark save prompt is open".to_string(),
+                    )
+                })?;
+                self.spawn_benchmark_save(draft);
+            }
+            "discard-benchmark" => {
+                if self.benchmark_prompt.take().is_none() {
+                    return Err((
+                        "no-prompt".to_string(),
+                        "No benchmark save prompt is open".to_string(),
+                    ));
+                }
+            }
+            "download-addons" => {
+                let index = self.agent_gui_resolve_repo_index(params)?;
+                let addons: Vec<String> = params
+                    .get("addons")
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if addons.is_empty() {
+                    return Err((
+                        "invalid-params".to_string(),
+                        "Provide addons as a JSON array of addon names".to_string(),
+                    ));
+                }
+                if !self.standalone_download_addons(index, &addons) {
+                    return Err((
+                        "invalid-state".to_string(),
+                        "Standalone addon download did not start (see log)".to_string(),
+                    ));
+                }
+            }
+            "expand-benchmark" => {
+                let id = self.agent_gui_resolve_benchmark_id(params)?;
+                if !self.benchmarks_view.expanded.remove(&id) {
+                    self.benchmarks_view.expanded.insert(id);
+                }
+            }
+            "expand-overview-benchmark" => {
+                let id = self.agent_gui_resolve_benchmark_id(params)?;
+                let expanded = &mut self.game_space_overview.expanded_benchmark;
+                *expanded = (expanded.as_deref() != Some(id.as_str())).then_some(id);
+            }
+            "select-benchmark" => {
+                let id = self.agent_gui_resolve_benchmark_id(params)?;
+                self.benchmarks_view.toggle_selected(&id);
+            }
+            "compare-benchmarks" => {
+                if self.benchmarks_view.selected.len() != 2 {
+                    return Err((
+                        "invalid-state".to_string(),
+                        "Select two benchmarks first (select-benchmark)".to_string(),
+                    ));
+                }
+                self.benchmarks_view.compare_open = true;
+            }
+            "export-benchmark" => {
+                let id = self.agent_gui_resolve_benchmark_id(params)?;
+                self.start_benchmark_export(&id);
+            }
             "recheck-integrity" => {
                 let index = self.agent_gui_resolve_repo_index(params)?;
+                self.arm_benchmark(BenchmarkKind::IntegrityCheck, Vec::new());
                 self.start_core_sync(index, api::SyncMode::RecheckIntegrity);
             }
             "force-redownload" => {
@@ -4962,6 +5223,33 @@ impl Foxy {
             "pause-download" => self.set_download_paused(true),
             "resume-download" => self.set_download_paused(false),
             "cancel-download" => self.cancel_sync(),
+            "switch-game-space" => {
+                let space_id = params
+                    .get("game-space")
+                    .or_else(|| params.get("game_space"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        (
+                            "invalid-params".to_string(),
+                            "Provide game-space (the target space id)".to_string(),
+                        )
+                    })?;
+                let entry = crate::core::game::spaces::load_registry()
+                    .map_err(|err| ("space-registry".to_string(), err))?
+                    .game_spaces
+                    .into_iter()
+                    .find(|entry| entry.id == space_id)
+                    .ok_or_else(|| {
+                        (
+                            "invalid-params".to_string(),
+                            format!("No game space with id '{space_id}'"),
+                        )
+                    })?;
+                if let Some(reason) = self.game_space_switch_block_reason() {
+                    return Err(("busy".to_string(), reason.to_string()));
+                }
+                self.start_game_space_switch(&entry);
+            }
             "launch-game" => {
                 let index = self.agent_gui_resolve_repo_index(params)?;
                 self.agent_gui_launch_repository(ctx, index)?;
@@ -5070,6 +5358,12 @@ const AGENT_ACTIONS: &[AgentAction] = &[
         summary: "Open the repository list",
     },
     AgentAction {
+        name: "open-game-space-overview",
+        destructive: false,
+        params: "",
+        summary: "Open the repository list with the active game space overview in the main panel",
+    },
+    AgentAction {
         name: "open-changelog",
         destructive: false,
         params: "",
@@ -5098,6 +5392,18 @@ const AGENT_ACTIONS: &[AgentAction] = &[
         destructive: false,
         params: "",
         summary: "Open the add-repository modal",
+    },
+    AgentAction {
+        name: "open-add-profile-window",
+        destructive: false,
+        params: "",
+        summary: "Open the add-profile window",
+    },
+    AgentAction {
+        name: "open-rename-profile-window",
+        destructive: false,
+        params: "",
+        summary: "Open the rename-profile window",
     },
     AgentAction {
         name: "close-modals",
@@ -5130,10 +5436,82 @@ const AGENT_ACTIONS: &[AgentAction] = &[
         summary: "Start a download sync for a repository",
     },
     AgentAction {
+        name: "start-sync-full-files",
+        destructive: true,
+        params: "repo-index",
+        summary: "Download the ordinary mismatch scope without delta patches",
+    },
+    AgentAction {
         name: "recheck-repo",
         destructive: true,
         params: "repo-index",
         summary: "Recheck a repository (remote refresh)",
+    },
+    AgentAction {
+        name: "quick-check",
+        destructive: false,
+        params: "repo-index",
+        summary: "Quick local check of a repository (the toolbar quick check)",
+    },
+    AgentAction {
+        name: "remote-recheck",
+        destructive: true,
+        params: "repo-index",
+        summary: "Remote recheck that also prepares the download plan (the toolbar recheck)",
+    },
+    AgentAction {
+        name: "wipe-repo-db",
+        destructive: true,
+        params: "repo-index, keep-hash-record?",
+        summary: "Wipe a repository's database entries and its verified-hash record, unless keep-hash-record is true (busy reason repository-db-wipe)",
+    },
+    AgentAction {
+        name: "save-benchmark",
+        destructive: true,
+        params: "",
+        summary: "Confirm the open benchmark save prompt (writes the benchmark folder)",
+    },
+    AgentAction {
+        name: "discard-benchmark",
+        destructive: false,
+        params: "",
+        summary: "Dismiss the open benchmark save prompt",
+    },
+    AgentAction {
+        name: "download-addons",
+        destructive: true,
+        params: "repo-index, addons",
+        summary: "Download only the named addons of a repository (the update modal's per-addon download)",
+    },
+    AgentAction {
+        name: "expand-benchmark",
+        destructive: false,
+        params: "index",
+        summary: "Toggle the detail of the nth visible benchmark in the Benchmarks tab",
+    },
+    AgentAction {
+        name: "expand-overview-benchmark",
+        destructive: false,
+        params: "index",
+        summary: "Toggle the inline detail of the nth visible benchmark in the game space overview",
+    },
+    AgentAction {
+        name: "select-benchmark",
+        destructive: false,
+        params: "index",
+        summary: "Toggle the compare selection of the nth visible benchmark",
+    },
+    AgentAction {
+        name: "compare-benchmarks",
+        destructive: false,
+        params: "",
+        summary: "Open the comparison of the two selected benchmarks",
+    },
+    AgentAction {
+        name: "export-benchmark",
+        destructive: true,
+        params: "index",
+        summary: "Export the nth visible benchmark to a ZIP (answers the save dialog; use dialog expect)",
     },
     AgentAction {
         name: "recheck-integrity",
@@ -5158,6 +5536,12 @@ const AGENT_ACTIONS: &[AgentAction] = &[
         destructive: false,
         params: "",
         summary: "Resume the paused download",
+    },
+    AgentAction {
+        name: "switch-game-space",
+        destructive: true,
+        params: "game-space",
+        summary: "Switch the active game space at runtime (drains saves, resets, reloads)",
     },
     AgentAction {
         name: "cancel-download",
@@ -5655,6 +6039,8 @@ pub fn parse_agent_gui_view(view: &str) -> Option<FoxyView> {
         "app-update" | "update" => Some(FoxyView::AppUpdate),
         "version-browser" | "versions" => Some(FoxyView::VersionBrowser),
         "swifty-migration" | "migration" => Some(FoxyView::SwiftyMigration),
+        "game-spaces" | "games" => Some(FoxyView::GameSpaces),
+        "game-space-settings" | "game-settings" => Some(FoxyView::GameSpaceSettings),
         "none" => Some(FoxyView::None),
         _ => None,
     }
@@ -5674,16 +6060,30 @@ pub fn parse_agent_gui_settings_tab(tab: &str) -> Option<String> {
     let tab = match normalize_selector(tab).as_str() {
         "application" | "app" => "Application",
         "backup-manager" | "backup" | "backups" => "Backup Manager",
-        "additional-search-folders" | "additional-folders" | "search-folders" | "folders" => {
-            "Additional search folders"
-        }
         "cleanup" => "Cleanup",
         "direct-download" | "download" => "Direct download",
-        "ts3-plugin" | "ts3-plugins" | "ts3" | "teamspeak" => "TS3 Plugin",
+        "scheduling" | "schedule" => "Scheduling",
         "customization" | "customisation" | "customize" | "customise" => "Customization",
+        "benchmarks" | "benchmark" => "Benchmarks",
         _ => return None,
     };
     Some(tab.to_string())
+}
+
+pub fn parse_agent_gui_game_space_settings_tab(
+    tab: &str,
+) -> Option<crate::ui::views::game_spaces::settings::GameSpaceSettingsTab> {
+    use crate::ui::views::game_spaces::settings::GameSpaceSettingsTab;
+    match normalize_selector(tab).as_str() {
+        "game" | "game-space" | "general" => Some(GameSpaceSettingsTab::Game),
+        "additional-search-folders" | "additional-folders" | "search-folders" | "folders" => {
+            Some(GameSpaceSettingsTab::SearchFolders)
+        }
+        "ts3-plugin" | "ts3-plugins" | "ts3" | "teamspeak" => Some(GameSpaceSettingsTab::Ts3Plugin),
+        "profiles" | "profile" => Some(GameSpaceSettingsTab::Profiles),
+        "steam-workshop" | "workshop" => Some(GameSpaceSettingsTab::SteamWorkshop),
+        _ => None,
+    }
 }
 
 fn repo_state_name(state: RepoState) -> &'static str {
@@ -5707,6 +6107,8 @@ fn view_to_agent_name(view: FoxyView) -> &'static str {
         FoxyView::AppUpdate => "app-update",
         FoxyView::VersionBrowser => "version-browser",
         FoxyView::SwiftyMigration => "swifty-migration",
+        FoxyView::GameSpaces => "game-spaces",
+        FoxyView::GameSpaceSettings => "game-space-settings",
         FoxyView::None => "none",
     }
 }
@@ -5747,6 +6149,10 @@ mod tests {
         assert_eq!(
             parse_agent_gui_view("repo-settings"),
             Some(FoxyView::RepositorySettings)
+        );
+        assert_eq!(
+            parse_agent_gui_view("game-space-settings"),
+            Some(FoxyView::GameSpaceSettings)
         );
         assert_eq!(parse_agent_gui_view("missing"), None);
     }
@@ -5957,22 +6363,41 @@ mod tests {
             Some("Backup Manager")
         );
         assert_eq!(
-            parse_agent_gui_settings_tab("additional-search-folders").as_deref(),
-            Some("Additional search folders")
-        );
-        assert_eq!(
             parse_agent_gui_settings_tab("direct-download").as_deref(),
             Some("Direct download")
         );
         assert_eq!(
-            parse_agent_gui_settings_tab("ts3").as_deref(),
-            Some("TS3 Plugin")
+            parse_agent_gui_settings_tab("scheduling").as_deref(),
+            Some("Scheduling")
         );
         assert_eq!(
             parse_agent_gui_settings_tab("customization").as_deref(),
             Some("Customization")
         );
+        assert_eq!(
+            parse_agent_gui_settings_tab("additional-search-folders"),
+            None
+        );
+        assert_eq!(parse_agent_gui_settings_tab("ts3"), None);
         assert_eq!(parse_agent_gui_settings_tab("missing"), None);
+    }
+
+    #[test]
+    fn parses_game_space_settings_tab_aliases() {
+        use crate::ui::views::game_spaces::settings::GameSpaceSettingsTab;
+        assert_eq!(
+            parse_agent_gui_game_space_settings_tab("game"),
+            Some(GameSpaceSettingsTab::Game)
+        );
+        assert_eq!(
+            parse_agent_gui_game_space_settings_tab("additional-search-folders"),
+            Some(GameSpaceSettingsTab::SearchFolders)
+        );
+        assert_eq!(
+            parse_agent_gui_game_space_settings_tab("ts3"),
+            Some(GameSpaceSettingsTab::Ts3Plugin)
+        );
+        assert_eq!(parse_agent_gui_game_space_settings_tab("missing"), None);
     }
 
     #[test]
@@ -6368,6 +6793,27 @@ mod tests {
             Some(100)
         );
         assert!(agent_gui_resolve_baseline(&runtime, "bogus").is_none());
+    }
+
+    #[test]
+    fn an_fps_probe_keeps_frames_live_only_for_its_window() {
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let mut runtime = AgentGuiRuntime::new(
+            rx,
+            AgentGuiSession {
+                pid: 1,
+                host: "127.0.0.1".to_string(),
+                port: 0,
+                token: "t".to_string(),
+                session_file: PathBuf::from("session.json"),
+            },
+        );
+        let now = Instant::now();
+        assert!(!runtime.fps_probe_active(now));
+        runtime.fps_probe_until = Some(now + FPS_PROBE_WINDOW);
+        assert!(runtime.fps_probe_active(now));
+        assert!(runtime.fps_probe_active(now + FPS_PROBE_WINDOW / 2));
+        assert!(!runtime.fps_probe_active(now + FPS_PROBE_WINDOW));
     }
 
     #[test]

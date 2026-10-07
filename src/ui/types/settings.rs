@@ -8,6 +8,17 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Instant;
 
+/// Last verified install state of one repository TS3 plugin.
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub struct Ts3PluginStatusRecord {
+    pub plugin_path: String,
+    pub addon_name: String,
+    /// BLAKE3 hash of the `.ts3_plugin` package the state was checked against.
+    pub package_hash: String,
+    pub is_installed: bool,
+    pub is_up_to_date: bool,
+}
+
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct SettingsViewState {
     pub debug_mode: bool,
@@ -18,6 +29,17 @@ pub struct SettingsViewState {
     pub show_memory_diagnostics_icon: bool,
     #[serde(default)]
     pub show_fps_counter: bool,
+    /// Debug-level log records plus per-operation profile and resource
+    /// samples in the log files. Off by default; costs disk and a little CPU.
+    #[serde(default)]
+    pub extended_diagnostics_logging: bool,
+    /// Offer to save user-triggered rechecks and updates as benchmarks.
+    #[serde(default)]
+    pub benchmarks_enabled: bool,
+    /// Extended diagnostics were switched on by enabling benchmarks, not by
+    /// the user, so disabling benchmarks switches them off again.
+    #[serde(default)]
+    pub extended_diagnostics_by_benchmarks: bool,
     /// Globally hide the repository banner image in the repository and space views.
     #[serde(default)]
     pub hide_repository_image: bool,
@@ -53,6 +75,20 @@ pub struct SettingsViewState {
     pub current_tab: String,
     pub arma3_directory: String,
     #[serde(default)]
+    pub twwh3_directory: String,
+    #[serde(default)]
+    pub reforger_directory: String,
+    #[serde(default)]
+    pub generic_directory: String,
+    #[serde(default)]
+    pub generic_executable: String,
+    #[serde(default)]
+    pub generic_steam_app_id: String,
+    #[serde(default)]
+    pub generic_launch_template: String,
+    #[serde(default)]
+    pub generic_mods_manifest: String,
+    #[serde(default)]
     pub arma3_profiles_directory: String,
     #[serde(default)]
     pub steam_directory: String,
@@ -65,6 +101,10 @@ pub struct SettingsViewState {
     pub download_speed_limit_mbps: Option<u32>,
     #[serde(default)]
     pub hash_io_profile: HashIoProfilePreference,
+    /// After a database reset, restore files the verified-hash record proves
+    /// unchanged instead of reading them again. An integrity recheck always reads.
+    #[serde(default = "default_trust_verified_hashes")]
+    pub trust_verified_hashes: bool,
     #[serde(default)]
     pub ui_renderer: UiRendererPreference,
     #[serde(default = "default_locale")]
@@ -137,9 +177,18 @@ pub struct SettingsViewState {
     /// Maps plugin file path to BLAKE3 hash of the last installed version.
     #[serde(default)]
     pub ts3_installed_plugin_hashes: HashMap<String, String>,
+    /// Result of the last verified TS3 plugin check, so the game space settings
+    /// tab can render a known state before the background recheck lands.
+    #[serde(default)]
+    pub ts3_plugin_statuses: Vec<Ts3PluginStatusRecord>,
     /// Whether the Swifty migration wizard has been offered to the user.
     #[serde(default)]
     pub swifty_migration_offered: bool,
+    /// Fingerprint of the storage-check findings the user chose not to see
+    /// again. The startup notice stays hidden only while the findings match
+    /// exactly; a new path, drive or filesystem raises it again.
+    #[serde(default)]
+    pub storage_notice_acknowledged: String,
     /// User-defined scheduled jobs (Settings -> Scheduling). Each runs an opt-in
     /// recheck/download pipeline and optional post-action while Foxy is open.
     #[serde(default)]
@@ -176,6 +225,10 @@ fn default_ui_scale_percent() -> u16 {
 }
 
 fn default_auto_recheck_on_launch() -> bool {
+    true
+}
+
+fn default_trust_verified_hashes() -> bool {
     true
 }
 
@@ -239,6 +292,9 @@ impl Default for SettingsViewState {
             show_activity_log: false,
             show_memory_diagnostics_icon: false,
             show_fps_counter: false,
+            extended_diagnostics_logging: false,
+            benchmarks_enabled: false,
+            extended_diagnostics_by_benchmarks: false,
             hide_repository_image: false,
             close_after_launch: true,
             hide_to_tray_after_launch: false,
@@ -257,6 +313,13 @@ impl Default for SettingsViewState {
             backup_max_age_days: default_backup_max_age_days(),
             current_tab: "Application".to_string(),
             arma3_directory: String::new(),
+            twwh3_directory: String::new(),
+            reforger_directory: String::new(),
+            generic_directory: String::new(),
+            generic_executable: String::new(),
+            generic_steam_app_id: String::new(),
+            generic_launch_template: String::new(),
+            generic_mods_manifest: String::new(),
             arma3_profiles_directory: String::new(),
             steam_directory: String::new(),
             teamspeak3_directory: String::new(),
@@ -264,6 +327,7 @@ impl Default for SettingsViewState {
             backup_directory: String::new(),
             download_speed_limit_mbps: default_download_speed_limit_mbps(),
             hash_io_profile: HashIoProfilePreference::default(),
+            trust_verified_hashes: default_trust_verified_hashes(),
             ui_renderer: UiRendererPreference::default(),
             locale: default_locale(),
             locale_preference_migrated: true,
@@ -291,12 +355,50 @@ impl Default for SettingsViewState {
             app_update_auto_check: default_app_update_auto_check(),
             app_update_check_interval_minutes: default_app_update_check_interval(),
             ts3_installed_plugin_hashes: HashMap::new(),
+            ts3_plugin_statuses: Vec::new(),
             swifty_migration_offered: false,
+            storage_notice_acknowledged: String::new(),
             scheduled_jobs: Vec::new(),
             additional_folders_filter: String::new(),
             cleanup_folders_filter: String::new(),
             language_filter: String::new(),
         }
+    }
+}
+
+impl SettingsViewState {
+    /// Benchmarks need the detailed log, so enabling them also enables
+    /// extended diagnostics unless the user already had them on; disabling
+    /// benchmarks only reverts what this coupling switched on. Returns
+    /// whether `extended_diagnostics_logging` changed.
+    pub fn set_benchmarks_enabled(&mut self, enabled: bool) -> bool {
+        self.benchmarks_enabled = enabled;
+        if enabled {
+            if self.extended_diagnostics_logging {
+                return false;
+            }
+            self.extended_diagnostics_logging = true;
+            self.extended_diagnostics_by_benchmarks = true;
+            true
+        } else if self.extended_diagnostics_by_benchmarks {
+            self.extended_diagnostics_by_benchmarks = false;
+            self.extended_diagnostics_logging = false;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// An explicit choice of the user; the benchmarks coupling no longer
+    /// owns the diagnostics switch afterwards. Diagnostics cannot be turned
+    /// off while benchmarks are enabled; returns whether the value applied.
+    pub fn set_extended_diagnostics_logging(&mut self, enabled: bool) -> bool {
+        if !enabled && self.benchmarks_enabled {
+            return false;
+        }
+        self.extended_diagnostics_logging = enabled;
+        self.extended_diagnostics_by_benchmarks = false;
+        true
     }
 }
 
@@ -324,4 +426,66 @@ pub enum ServerOnlineStatus {
 pub struct ServerStatusCache {
     pub last_check: Instant,
     pub status: ServerOnlineStatus,
+}
+
+#[cfg(test)]
+mod benchmark_diagnostics_tests {
+    use super::SettingsViewState;
+
+    #[test]
+    fn enabling_benchmarks_turns_on_diagnostics_and_reverts_them() {
+        let mut settings = SettingsViewState::default();
+        assert!(settings.set_benchmarks_enabled(true));
+        assert!(settings.extended_diagnostics_logging);
+        assert!(settings.extended_diagnostics_by_benchmarks);
+        assert!(settings.set_benchmarks_enabled(false));
+        assert!(!settings.extended_diagnostics_logging);
+        assert!(!settings.extended_diagnostics_by_benchmarks);
+    }
+
+    #[test]
+    fn diagnostics_enabled_by_the_user_survive_benchmarks() {
+        let mut settings = SettingsViewState::default();
+        settings.set_extended_diagnostics_logging(true);
+        assert!(!settings.set_benchmarks_enabled(true));
+        assert!(!settings.extended_diagnostics_by_benchmarks);
+        assert!(!settings.set_benchmarks_enabled(false));
+        assert!(settings.extended_diagnostics_logging);
+    }
+
+    #[test]
+    fn diagnostics_cannot_be_disabled_while_benchmarks_are_on() {
+        let mut settings = SettingsViewState::default();
+        settings.set_benchmarks_enabled(true);
+        assert!(!settings.set_extended_diagnostics_logging(false));
+        assert!(settings.extended_diagnostics_logging);
+        assert!(settings.extended_diagnostics_by_benchmarks);
+        assert!(settings.set_benchmarks_enabled(false));
+        assert!(!settings.extended_diagnostics_logging);
+    }
+
+    #[test]
+    fn user_taking_over_the_switch_ends_the_coupling() {
+        let mut settings = SettingsViewState::default();
+        settings.set_benchmarks_enabled(true);
+        assert!(settings.set_extended_diagnostics_logging(true));
+        assert!(!settings.set_benchmarks_enabled(false));
+        assert!(settings.extended_diagnostics_logging);
+    }
+}
+
+#[cfg(test)]
+mod verified_hash_setting_tests {
+    use super::SettingsViewState;
+
+    #[test]
+    fn settings_saved_before_the_option_existed_trust_verified_hashes() {
+        let mut saved = serde_json::to_value(SettingsViewState::default()).unwrap();
+        saved
+            .as_object_mut()
+            .unwrap()
+            .remove("trust_verified_hashes");
+        let settings: SettingsViewState = serde_json::from_value(saved).unwrap();
+        assert!(settings.trust_verified_hashes);
+    }
 }

@@ -2,6 +2,10 @@
 
 \- Keep UI code state-driven; store state in `Foxy` or view-specific structs.
 
+\- Every new `Foxy` field is either space-scoped (reset in `reset_space_scoped_state`) or app-global (listed in `APP_GLOBAL_FOXY_FIELDS` with a reason). A guard test fails on anything unaccounted, because a space-scoped field left out of the reset leaks the previous game space's data into the next one. See `conventions/GAME_SPACES_CONVENTIONS.md`.
+
+\- Gate game-varying UI on `GameCapabilities`, never on `module.id() == "arma3"`. A game that lacks a feature renders no control for it rather than a dead or disabled one.
+
 \- Use `render\_\*` or `ui\_\*` for drawing functions; `on\_\*` for event handlers.
 
 \- Avoid heavy work in `update`/draw; trigger work in background and update state when done.
@@ -9,6 +13,7 @@
 \- Large views are organized as directory modules (`mod.rs` + sub-files). When adding substantial new UI to an existing view, add a new subfile in that view's directory rather than growing `mod.rs`. Keep individual `.rs` files under \~800 lines.
 
 \- New screens belong in `src/ui/views/` with a focused module.
+\- The Steam Workshop store of the active game space is the `Steam Workshop` tab of the game-space settings view (`src/ui/views/workshop/`), shown when the target space declares `steam_workshop`. A non-active space renders an explanation instead, because the store resolves through `active_game_space_dir()`. The tab reloads from disk whenever it is entered (`WorkshopViewState::loaded`), and every action that downloads, unsubscribes, or copies mod folders goes through `WorkshopTask` on a worker thread; only the small `workshop.json` writes (enable, load order) run inline.
 
 \- Reuse shared UI helpers in `src/ui/app/ui\_helpers/` (via `Foxy` methods) before writing inline layout code. Key helpers include `render\_adaptive\_tab\_bar` (responsive tab bars), `modal\_icon\_button\_size`, `toolbar\_icon\_button\_size`, `adaptive\_button\_height`, and `ui\_state\_checkbox`.
 
@@ -21,6 +26,8 @@
 \- Preserve established UI margins, padding, and spacing in each view. When changing labels, button text, or control widths, adjust layout math so the existing gutters and alignment stay intact unless told explicitly otherwise.
 
 \- For long operations, show status: progress bar, label, or spinner.
+
+\- Spinners are `crate::ui::app::PacedSpinner`, never `egui::Spinner` or `ui.spinner()`: egui's spinner requests a repaint on every paint and keeps the whole UI drawing at the display rate (223 fps measured through a repository check). A repaint that only needs to come soon goes through `crate::ui::app::request_frame_after`, because egui starts a delayed frame one predicted frame early and a short `request\_repaint\_after` otherwise fires at once. The `UI frame cost during sync` log line reports frames, UI-thread CPU and the top repaint causes for every check.
 
 \- Any clickable card/row/surface (not just buttons) must set pointer cursor on hover (`CursorIcon::PointingHand`) so interactivity is obvious.
 
@@ -42,5 +49,15 @@
 
 \### Per-instance repository status
 
-\- Repository status/pending-update maps in the UI are keyed per *instance* via `repo\_instance\_key(url, local\_path)` (= `normalize\_repo\_url(url) + U+001F + content\_hash::normalize\_path(path)`), not by URL alone, so two installs of one URL in different folders show independent status. Use the `\*\_for\_address` helpers in `src/ui/app/repository/list\_cache.rs` and thread `local\_path` through results/events. `repo\_foxy\_modes` is the deliberate exception - foxy mode is a URL-level property. See the identity invariant in root `AGENTS.md` and `conventions/BACKEND\_CONVENTIONS.md`.
+\- Repository status/pending-update maps in the UI are keyed per *instance* via `repo\_instance\_key(url, local\_path)` (= `normalize\_repo\_url(url) + U+001F + content\_hash::normalize\_path(path)`), not by URL alone, so two installs of one URL in different folders show independent status. Use the `\*\_for\_address` helpers in `src/ui/app/repository/list\_cache.rs` and thread `local\_path` through results/events. `repo\_foxy\_modes` is the deliberate exception - foxy mode is a URL-level property. See the identity invariant in root `AGENTS.md` and `conventions/CORE\_CONVENTIONS.md`.
+
+\### Renderer startup
+
+\- `src/ui/launcher.rs` owns graphics startup. A crash inside a Vulkan ICD or an injected overlay layer kills the process before any panic hook runs, so the only evidence is the launch-attempt marker (`renderer_fallback::record_launch_attempt`) written before `eframe::run_native` and cleared in the app-creator closure. `next_launch_stage` moves a launch that finds the marker one rung down `GraphicsLaunchStage`: `Full` (every wgpu backend, or the one remembered in the graphics-backend record), `SafeBackend` (DX12 on Windows, GL on Linux), then `Glow`, which is persisted into the renderer setting and shows the existing fallback notice.
+
+\- Clear the marker only once the app is constructed, never earlier: an error returned by eframe is logged and is not a crash. A narrowed launch that fails before construction drops the remembered backend and retries on every backend, so a driver or GPU change never costs a working launch, and a retry never opens a second window over a session that already started.
+
+\- Keep `MemoryHints::MemoryUsage` for wgpu (`configure_graphics_memory_hints`): Foxy uploads a font atlas and a few images, and the default performance hints only reserve commit.
+
+\- `foxy ui --debug-modal <app-update|db-schema-wipe|storage-check>` previews a startup modal with placeholder data; register a new startup modal there and with the agent driver so it stays testable.
 

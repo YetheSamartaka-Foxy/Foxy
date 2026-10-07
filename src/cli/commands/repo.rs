@@ -1,6 +1,7 @@
 use super::{
-    AppState, CommandError, CommandSuccess, ensure_backend_ready, find_repository_index,
-    progress_output_muted, run_repository_sync,
+    AppState, CommandError, CommandSuccess, ensure_backend_ready,
+    ensure_remote_reachable_before_destructive, find_repository_index, progress_output_muted,
+    run_repository_sync,
 };
 use crate::cli::args::{
     CliArgs, RepoAddArgs, RepoCloneArgs, RepoCommand, RepoForceRedownloadArgs, RepoRemoveArgs,
@@ -14,7 +15,8 @@ use crate::core::tasks::purge_repository::{
 use crate::ui::app::Foxy;
 use crate::ui::types::{
     Repository, RepositoryServer, apply_repo_client_parameters,
-    apply_repo_dlc_content_from_repo_json, sanitize_repository_paths, sanitize_user_path,
+    apply_repo_dlc_content_from_repo_json, repo_json_dlc_content_value, sanitize_repository_paths,
+    sanitize_user_path,
 };
 use reqwest::blocking::get;
 use serde_json::{Value, json};
@@ -240,7 +242,7 @@ fn cmd_repo_wipe_db(cli: &CliArgs, args: RepoWipeDbArgs) -> Result<CommandSucces
         return Ok(CommandSuccess {
             action: "repo.wipe-db".to_string(),
             message: "Dry-run: repo wipe-db previewed".to_string(),
-            data: json!({"repository": repo.name, "repository_url": normalized, "dry_run": true}),
+            data: json!({"repository": repo.name, "repository_url": normalized, "dry_run": true, "keep_hash_record": args.keep_hash_record}),
             exit_code: exit_codes::SUCCESS,
         });
     }
@@ -251,11 +253,14 @@ fn cmd_repo_wipe_db(cli: &CliArgs, args: RepoWipeDbArgs) -> Result<CommandSucces
     runtime
         .block_on(purge_repository_db_only_by_url(&normalized))
         .map_err(|e| CommandError::operation("repo.wipe-db", format!("Failed: {}", e)))?;
+    if !args.keep_hash_record {
+        crate::core::tasks::calculate_hashes::forget_verified_hashes_under(&repo.path);
+    }
 
     Ok(CommandSuccess {
         action: "repo.wipe-db".to_string(),
         message: format!("Repository DB wiped for {}", repo.name),
-        data: json!({"repository": repo.name, "repository_url": normalized}),
+        data: json!({"repository": repo.name, "repository_url": normalized, "keep_hash_record": args.keep_hash_record}),
         exit_code: exit_codes::SUCCESS,
     })
 }
@@ -290,10 +295,12 @@ fn cmd_repo_force_redownload(
         });
     }
 
+    ensure_remote_reachable_before_destructive("repo.force-redownload", &normalized)?;
     ensure_backend_ready();
     let runtime = Runtime::new().map_err(|e| {
         CommandError::operation("repo.force-redownload", format!("Runtime error: {}", e))
     })?;
+    crate::core::utils::profiling::phase("purge");
     runtime
         .block_on(purge_repository_by_url(&normalized, repo_path.as_deref()))
         .map_err(|e| {
@@ -424,7 +431,7 @@ fn populate_repo_from_remote_metadata(
     {
         apply_repo_client_parameters(repo, value);
     }
-    if apply_dlc_content && let Some(value) = json.get("dlcContent") {
+    if apply_dlc_content && let Some(value) = repo_json_dlc_content_value(&json) {
         apply_repo_dlc_content_from_repo_json(repo, value);
     }
 

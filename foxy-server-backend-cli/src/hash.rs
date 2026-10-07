@@ -8,7 +8,6 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cli::GenerationMode;
-use crate::pbo;
 use crate::types::{Checksums, DiscoveredFile, FilePart, ModFile, ProcessedMod, ResolvedMod};
 
 const BUF_SIZE_SWIFTY: usize = 256 * 1024;
@@ -83,25 +82,45 @@ struct FileWorkItem {
     file: DiscoveredFile,
     mod_index: usize,
     file_data_order: usize,
-    output_path: std::path::PathBuf,
+    /// `None` when the mod is hashed in place and nothing is copied.
+    output_path: Option<std::path::PathBuf>,
 }
 
-/// Process all mods: copy files to output, hash parts, compute checksums.
+/// Process all mods: hash parts and compute checksums, copying every file into
+/// `<output_dir>/<mod>/` when an output directory is given.
 pub fn process_mods(
     resolved_mods: &[ResolvedMod],
-    output_dir: &Path,
+    output_dir: Option<&Path>,
     progress: &ProgressBar,
     mode: GenerationMode,
+    prune_unused_optionals: bool,
+    incremental: bool,
 ) -> Result<Vec<ProcessedMod>> {
     let mut work_items: Vec<FileWorkItem> = Vec::new();
+    let mut cache = (incremental && output_dir.is_some())
+        .then(|| crate::incremental::HashCache::load(output_dir.unwrap()));
+    let mut cached_mods = vec![None; resolved_mods.len()];
+    let mut fingerprints = vec![None; resolved_mods.len()];
 
     for (mod_index, resolved) in resolved_mods.iter().enumerate() {
-        let files = crate::discover::discover_files(&resolved.source_path)?;
+        let files = if prune_unused_optionals {
+            crate::discover::discover_files_with_pruning(&resolved.source_path, true)?
+        } else {
+            crate::discover::discover_files(&resolved.source_path)?
+        };
+        if let (Some(cache), Some(root)) = (&cache, output_dir) {
+            let fingerprint =
+                crate::incremental::fingerprint(resolved, &files, mode, prune_unused_optionals)?;
+            cached_mods[mod_index] = cache.reusable(resolved, root, &fingerprint);
+            fingerprints[mod_index] = Some(fingerprint);
+            if cached_mods[mod_index].is_some() {
+                continue;
+            }
+        }
 
         for (file_data_order, file) in files.into_iter().enumerate() {
-            let output_path = output_dir
-                .join(&resolved.mod_name)
-                .join(&file.relative_path);
+            let output_path =
+                output_dir.map(|dir| dir.join(&resolved.mod_name).join(&file.relative_path));
             work_items.push(FileWorkItem {
                 file,
                 mod_index,
@@ -115,7 +134,7 @@ pub fn process_mods(
 
     let dirs: std::collections::HashSet<_> = work_items
         .iter()
-        .filter_map(|w| w.output_path.parent().map(|p| p.to_path_buf()))
+        .filter_map(|w| w.output_path.as_ref()?.parent().map(|p| p.to_path_buf()))
         .collect();
     for dir in &dirs {
         std::fs::create_dir_all(dir)
@@ -128,7 +147,7 @@ pub fn process_mods(
         .map(|item| {
             let mod_file = copy_and_hash_file(
                 &item.file.absolute_path,
-                &item.output_path,
+                item.output_path.as_deref(),
                 &item.file,
                 item.file_data_order,
                 mode,
@@ -152,6 +171,10 @@ pub fn process_mods(
 
     let mut processed_mods = Vec::with_capacity(resolved_mods.len());
     for (mod_index, resolved) in resolved_mods.iter().enumerate() {
+        if let Some(processed) = cached_mods[mod_index].take() {
+            processed_mods.push(processed);
+            continue;
+        }
         let files = std::mem::take(&mut mod_files[mod_index]);
         let checksums = compute_mod_checksums(&files, mode);
         processed_mods.push(ProcessedMod {
@@ -163,11 +186,22 @@ pub fn process_mods(
             client_side: resolved.client_side,
         });
     }
+    if let (Some(cache), Some(root)) = (&mut cache, output_dir) {
+        for (index, item) in resolved_mods.iter().enumerate() {
+            cache.store(
+                &item.mod_name,
+                fingerprints[index].take().unwrap(),
+                processed_mods[index].clone(),
+                root,
+            )?;
+        }
+        cache.save(root)?;
+    }
 
     Ok(processed_mods)
 }
 
-fn compute_mod_checksums(files: &[ModFile], mode: GenerationMode) -> Checksums {
+pub(crate) fn compute_mod_checksums(files: &[ModFile], mode: GenerationMode) -> Checksums {
     let md5 = if matches!(mode, GenerationMode::Swifty | GenerationMode::Hybrid) {
         Some(compute_addon_checksum(FlexHasher::new_md5(), files, |f| {
             f.checksums.unwrap_md5()
@@ -229,11 +263,11 @@ pub fn hash_file_sha1(path: &Path) -> Result<String> {
     Ok(hex::encode(hasher.finalize()).to_uppercase())
 }
 
-/// Copy a file from source to destination while simultaneously hashing its parts.
-/// In HybridMode, computes both MD5 and BLAKE3 in a single I/O pass.
+/// Hash a file's parts in a single I/O pass, copying it to `dest` when given.
+/// In HybridMode, computes both MD5 and BLAKE3 from the same read.
 fn copy_and_hash_file(
     source: &Path,
-    dest: &Path,
+    dest: Option<&Path>,
     discovered: &DiscoveredFile,
     data_order: usize,
     mode: GenerationMode,
@@ -242,27 +276,36 @@ fn copy_and_hash_file(
     let use_blake3 = matches!(mode, GenerationMode::Foxy | GenerationMode::Hybrid);
     let buf_size = buf_size_for_mode(mode);
 
-    let mut parts = if pbo::is_pbo(source) {
-        match pbo::parse_pbo_parts(source) {
-            Ok(p) => p,
-            Err(e) => {
-                log::warn!(
-                    "PBO parse failed for {}, treating as single file: {}",
-                    source.display(),
-                    e
-                );
-                pbo::single_part(&discovered.relative_path, discovered.file_size)
-            }
+    let registry = foxy_formats::builtin_registry();
+    let mut parts = match registry.parse_parts_for_file(source) {
+        Ok(Some((_format_id, parts))) => format_parts_to_manifest_parts(parts),
+        Ok(None) => format_parts_to_manifest_parts(foxy_formats::single_file_parts(
+            &discovered.relative_path,
+            discovered.file_size,
+        )),
+        Err(e) => {
+            log::warn!(
+                "Content format parse failed for {}, treating as single file: {}",
+                source.display(),
+                e
+            );
+            format_parts_to_manifest_parts(foxy_formats::single_file_parts(
+                &discovered.relative_path,
+                discovered.file_size,
+            ))
         }
-    } else {
-        pbo::single_part(&discovered.relative_path, discovered.file_size)
     };
 
     let mut src_file = std::fs::File::open(source)
         .with_context(|| format!("Failed to open source: {}", source.display()))?;
-    let dst_file = std::fs::File::create(dest)
-        .with_context(|| format!("Failed to create destination: {}", dest.display()))?;
-    let mut writer = BufWriter::with_capacity(buf_size, dst_file);
+    let mut writer = match dest {
+        Some(dest) => {
+            let dst_file = std::fs::File::create(dest)
+                .with_context(|| format!("Failed to create destination: {}", dest.display()))?;
+            Sink::File(BufWriter::with_capacity(buf_size, dst_file))
+        }
+        None => Sink::Discard,
+    };
 
     let mut buf = vec![0u8; buf_size];
     let mut file_position: u64 = 0;
@@ -332,6 +375,18 @@ fn copy_and_hash_file(
     })
 }
 
+fn format_parts_to_manifest_parts(parts: Vec<foxy_formats::FilePart>) -> Vec<FilePart> {
+    parts
+        .into_iter()
+        .map(|part| FilePart {
+            path: part.path,
+            checksums: Checksums::default(),
+            start: part.start,
+            length: part.length,
+        })
+        .collect()
+}
+
 fn compute_file_checksums(parts: &[FilePart], mode: GenerationMode) -> Checksums {
     let md5 = if matches!(mode, GenerationMode::Swifty | GenerationMode::Hybrid) {
         Some(compute_parent_checksum(
@@ -358,10 +413,33 @@ fn compute_file_checksums(parts: &[FilePart], mode: GenerationMode) -> Checksums
     assemble_checksums(md5, blake3, mode)
 }
 
+/// Destination of the bytes read while hashing: the copied file, or nothing
+/// when a mod is hashed in place.
+enum Sink {
+    File(BufWriter<std::fs::File>),
+    Discard,
+}
+
+impl Sink {
+    fn write_all(&mut self, data: &[u8]) -> std::io::Result<()> {
+        match self {
+            Sink::File(writer) => writer.write_all(data),
+            Sink::Discard => Ok(()),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Sink::File(writer) => writer.flush(),
+            Sink::Discard => Ok(()),
+        }
+    }
+}
+
 /// Copy exactly `count` bytes from reader to writer without hashing.
 fn copy_bytes(
     reader: &mut std::fs::File,
-    writer: &mut BufWriter<std::fs::File>,
+    writer: &mut Sink,
     buf: &mut [u8],
     mut count: u64,
 ) -> Result<()> {
@@ -465,7 +543,87 @@ fn current_utc_ticks() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Checksums, FilePart, ModFile};
+    use crate::types::{Checksums, DiscoveredFile, FilePart, ModFile};
+
+    fn push_pbo_entry(bytes: &mut Vec<u8>, name: &[u8], length: u32) {
+        bytes.extend_from_slice(name);
+        bytes.push(0);
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&length.to_le_bytes());
+    }
+
+    fn write_fixture_pbo(path: &Path) {
+        let mut bytes = Vec::new();
+        bytes.push(0);
+        bytes.extend_from_slice(b"sreV");
+        bytes.extend_from_slice(&[0u8; 16]);
+        bytes.push(0);
+        push_pbo_entry(&mut bytes, b"Data\\Thing.bin", 4);
+        push_pbo_entry(&mut bytes, b"", 0);
+        bytes.extend_from_slice(b"DATA");
+        bytes.extend_from_slice(b"TAIL");
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    fn push_pac1_chunk(out: &mut Vec<u8>, tag: &[u8; 4], body: &[u8]) {
+        out.extend_from_slice(tag);
+        out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        out.extend_from_slice(body);
+    }
+
+    fn push_pac1_folder(out: &mut Vec<u8>, name: &str, child_count: u32) {
+        out.push(0);
+        out.push(name.len() as u8);
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(&child_count.to_le_bytes());
+    }
+
+    fn push_pac1_file(out: &mut Vec<u8>, name: &str, offset: u32, length: u32) {
+        out.push(1);
+        out.push(name.len() as u8);
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(&offset.to_le_bytes());
+        out.extend_from_slice(&length.to_le_bytes());
+        out.extend_from_slice(&length.to_le_bytes());
+        out.extend_from_slice(&[0u8; 4]);
+        out.extend_from_slice(&0u32.to_be_bytes());
+        out.extend_from_slice(&[0u8; 4]);
+    }
+
+    fn write_fixture_pak(path: &Path) {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"FORM");
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        bytes.extend_from_slice(b"PAC1");
+        push_pac1_chunk(&mut bytes, b"HEAD", b"head");
+
+        let data_chunk_start = bytes.len();
+        bytes.extend_from_slice(b"DATA");
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        let data_body_start = bytes.len();
+        bytes.extend_from_slice(b"ALPHA");
+        bytes.extend_from_slice(b"gap");
+        let beta_start = bytes.len();
+        bytes.extend_from_slice(b"BETA");
+        let data_body_len = bytes.len() - data_body_start;
+        bytes[data_chunk_start + 4..data_chunk_start + 8]
+            .copy_from_slice(&(data_body_len as u32).to_be_bytes());
+
+        let mut tree = Vec::new();
+        push_pac1_folder(&mut tree, "", 2);
+        push_pac1_folder(&mut tree, "world", 1);
+        push_pac1_file(&mut tree, "entities.bin", data_body_start as u32, 5);
+        push_pac1_folder(&mut tree, "textures", 1);
+        push_pac1_file(&mut tree, "icon.edds", beta_start as u32, 4);
+        push_pac1_chunk(&mut bytes, b"FILE", &tree);
+
+        let form_len = (bytes.len() - 8) as u32;
+        bytes[4..8].copy_from_slice(&form_len.to_be_bytes());
+        std::fs::write(path, bytes).unwrap();
+    }
 
     #[test]
     fn addon_checksum_matches_legacy_path_sensitive_rollup() {
@@ -843,6 +1001,139 @@ mod tests {
         assert_ne!(
             compute_foxy_repo_checksum(&mods_ab),
             compute_foxy_repo_checksum(&mods_ba)
+        );
+    }
+
+    #[test]
+    fn copy_and_hash_file_uses_format_registry_for_pbo_parts() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.pbo");
+        let dest = dir.path().join("out").join("source.pbo");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        write_fixture_pbo(&source);
+        let file_size = std::fs::metadata(&source).unwrap().len();
+        let discovered = DiscoveredFile {
+            absolute_path: source.clone(),
+            relative_path: "addons/source.pbo".to_string(),
+            file_size,
+        };
+
+        let file = copy_and_hash_file(&source, Some(&dest), &discovered, 7, GenerationMode::Swifty)
+            .unwrap();
+        let header_len = 22 + "Data\\Thing.bin".len() as u64 + 1 + 20 + 21;
+
+        assert_eq!(file.data_order, 7);
+        assert_eq!(
+            std::fs::read(&source).unwrap(),
+            std::fs::read(&dest).unwrap()
+        );
+        assert_eq!(file.parts.len(), 3);
+        assert_eq!(file.parts[0].path, foxy_formats::PBO_HEADER_PART);
+        assert_eq!(file.parts[0].start, 0);
+        assert_eq!(file.parts[0].length, header_len);
+        assert_eq!(file.parts[1].path, "Data\\Thing.bin");
+        assert_eq!(file.parts[1].start, header_len);
+        assert_eq!(file.parts[1].length, 4);
+        assert_eq!(file.parts[2].path, foxy_formats::PBO_END_PART);
+        assert_eq!(file.parts[2].start, header_len + 4);
+        assert_eq!(file.parts[2].length, 4);
+        assert!(!file.checksums.unwrap_md5().is_empty());
+    }
+
+    #[test]
+    fn copy_and_hash_file_uses_format_registry_for_pac1_parts() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.PAK");
+        let dest = dir.path().join("out").join("source.PAK");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        write_fixture_pak(&source);
+        let file_size = std::fs::metadata(&source).unwrap().len();
+        let discovered = DiscoveredFile {
+            absolute_path: source.clone(),
+            relative_path: "addons/source.PAK".to_string(),
+            file_size,
+        };
+
+        let file =
+            copy_and_hash_file(&source, Some(&dest), &discovered, 8, GenerationMode::Foxy).unwrap();
+
+        assert_eq!(file.data_order, 8);
+        assert_eq!(
+            std::fs::read(&source).unwrap(),
+            std::fs::read(&dest).unwrap()
+        );
+        assert_eq!(
+            file.parts
+                .iter()
+                .map(|part| part.path.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                foxy_formats::PAC1_HEADER_PART,
+                "world/entities.bin",
+                "$$GAP:1$$",
+                "textures/icon.edds",
+                foxy_formats::PAC1_END_PART,
+            ]
+        );
+        assert_eq!(file.parts[1].length, 5);
+        assert_eq!(file.parts[2].length, 3);
+        assert_eq!(file.parts[3].length, 4);
+        assert!(
+            file.parts
+                .iter()
+                .all(|part| !part.checksums.unwrap_blake3().is_empty())
+        );
+        assert!(!file.checksums.unwrap_blake3().is_empty());
+    }
+
+    #[test]
+    fn process_mods_emits_pac1_parts_for_pak_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_mod = dir.path().join("@pakmod");
+        let source_addons = source_mod.join("addons");
+        let output = dir.path().join("repo");
+        std::fs::create_dir_all(&source_addons).unwrap();
+        write_fixture_pak(&source_addons.join("content.PAK"));
+
+        let resolved = vec![ResolvedMod {
+            mod_name: "@pakmod".to_string(),
+            source_path: source_mod,
+            is_required: true,
+            enabled: true,
+            client_side: false,
+        }];
+        let processed = process_mods(
+            &resolved,
+            Some(&output),
+            &ProgressBar::hidden(),
+            GenerationMode::Foxy,
+            false,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(processed.len(), 1);
+        assert_eq!(processed[0].files.len(), 1);
+        assert_eq!(
+            processed[0].files[0]
+                .parts
+                .iter()
+                .map(|part| part.path.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                foxy_formats::PAC1_HEADER_PART,
+                "world/entities.bin",
+                "$$GAP:1$$",
+                "textures/icon.edds",
+                foxy_formats::PAC1_END_PART,
+            ]
+        );
+        assert!(
+            output
+                .join("@pakmod")
+                .join("addons")
+                .join("content.PAK")
+                .is_file()
         );
     }
 }

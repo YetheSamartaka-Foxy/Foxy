@@ -1,0 +1,26 @@
+{
+  "ok": true,
+  "command": "progress",
+  "view": "repository-list",
+  "elapsed_ms": 0,
+  "data": {
+    "busy": false,
+    "busy_reasons": [],
+    "syncing_repository": null,
+    "current_sync_mode": null,
+    "download_active": false,
+    "download_label": null,
+    "download_percent": null,
+    "download_paused": false,
+    "download_finished": false,
+    "download_speed_bps": 0.0,
+    "download_eta_secs": null,
+    "total_downloaded_bytes": 0,
+    "active_mod_downloads": 0,
+    "recheck_stage_label": null,
+    "recheck_stage_percent": null,
+    "recheck_hash_counter": null,
+    "update_modal_open": false
+  },
+  "errors": []
+}

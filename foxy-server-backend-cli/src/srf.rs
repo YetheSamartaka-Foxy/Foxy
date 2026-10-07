@@ -1,15 +1,34 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
+use serde_json::Value;
 use std::path::Path;
 
 use crate::cli::GenerationMode;
 use crate::hash;
-use crate::pbo;
 use crate::types::{
     FoxyAddonFile, FoxyAddonJson, FoxyAddonPart, FoxyAddonsJson, ModEntry, ProcessedMod,
-    RepoConfig, RepoJson, SrfFile, SrfManifest, SrfPart,
+    RepoConfig, RepoGame, RepoJson, SrfFile, SrfManifest, SrfPart,
 };
 
 pub const FOXY_MODE_VERSION: &str = "FoxyModeV1";
+
+/// Read back a generated manifest (`repo.json`, `foxy_addons.json`,
+/// `foxy_addon.json`, `mod.srf`).
+///
+/// Published manifests are often hand-edited on the server, so a UTF-8 BOM is
+/// stripped the way the client's fetch path does instead of failing with a bare
+/// `expected value at line 1 column 1`.
+pub fn read_manifest(path: &Path) -> Result<Value> {
+    let bytes =
+        std::fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    if bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF]) {
+        bail!(
+            "{} is UTF-16 encoded; save it as UTF-8 JSON",
+            path.display()
+        );
+    }
+    let json = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&bytes);
+    serde_json::from_slice(json).with_context(|| format!("Failed to parse {}", path.display()))
+}
 
 // ---------------------------------------------------------------------------
 // SwiftyMode: mod.srf
@@ -39,7 +58,7 @@ pub fn write_mod_srf(processed_mod: &ProcessedMod, output_dir: &Path) -> Result<
                 path: f.relative_path.replace('/', "\\"),
                 checksum: f.checksums.unwrap_md5().to_string(),
                 length: f.length,
-                file_type: if pbo::is_pbo(Path::new(&f.relative_path)) {
+                file_type: if is_pbo_manifest_file(Path::new(&f.relative_path)) {
                     "SwiftyPboFile".to_string()
                 } else {
                     "SwiftyFile".to_string()
@@ -89,7 +108,7 @@ pub fn write_foxy_addon_json(processed_mod: &ProcessedMod, output_dir: &Path) ->
                 path: f.relative_path.replace('\\', "/"),
                 checksum: f.checksums.unwrap_blake3().to_string(),
                 length: f.length,
-                file_type: if pbo::is_pbo(Path::new(&f.relative_path)) {
+                file_type: if is_pbo_manifest_file(Path::new(&f.relative_path)) {
                     "FoxyPboFile".to_string()
                 } else {
                     "FoxyFile".to_string()
@@ -111,6 +130,10 @@ pub fn write_foxy_addon_json(processed_mod: &ProcessedMod, output_dir: &Path) ->
     std::fs::write(&path, json).with_context(|| format!("Failed to write {}", path.display()))?;
 
     Ok(())
+}
+
+fn is_pbo_manifest_file(path: &Path) -> bool {
+    foxy_formats::builtin_registry().format_id_for_path(path) == Some(foxy_formats::PBO_FORMAT_ID)
 }
 
 // ---------------------------------------------------------------------------
@@ -205,6 +228,7 @@ pub fn write_repo_json(
 
     let repo = RepoJson {
         repo_name: config.repo_name.clone(),
+        game: (config.game != RepoGame::Arma3).then_some(config.game),
         checksum: repo_checksum.to_string(),
         foxy_mode,
         required_mods,
@@ -218,6 +242,7 @@ pub fn write_repo_json(
         repo_basic_authentication: config.repo_basic_authentication.clone(),
         version: config.version.clone(),
         servers: config.servers.clone(),
+        dlc_content: config.dlc_content,
     };
 
     let json = serde_json::to_string(&repo).context("Failed to serialize repo.json")?;
@@ -234,7 +259,9 @@ fn process_images(config: &RepoConfig, base: &Path, output_dir: &Path) -> Result
     Ok((repo_image_checksum, icon_image_checksum))
 }
 
-fn copy_and_hash_image(image_path: &str, base: &Path, output_dir: &Path) -> Result<String> {
+/// Copy an image referenced by a config next to the generated manifest and
+/// return its SHA-1, or an empty string when the path is unset or missing.
+pub fn copy_and_hash_image(image_path: &str, base: &Path, output_dir: &Path) -> Result<String> {
     if image_path.is_empty() {
         return Ok(String::new());
     }
@@ -260,6 +287,22 @@ fn copy_and_hash_image(image_path: &str, base: &Path, output_dir: &Path) -> Resu
 mod tests {
     use super::*;
     use crate::types::{Checksums, FilePart, ModFile};
+
+    #[test]
+    fn read_manifest_accepts_a_utf8_bom_and_names_bad_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("repo.json");
+        std::fs::write(&path, b"\xEF\xBB\xBF{\"repoName\":\"Test\"}").unwrap();
+        assert_eq!(read_manifest(&path).unwrap()["repoName"], "Test");
+
+        std::fs::write(&path, b"\xFF\xFE{\0").unwrap();
+        let err = format!("{:#}", read_manifest(&path).unwrap_err());
+        assert!(err.contains("UTF-16"), "{err}");
+
+        std::fs::write(&path, b"not json").unwrap();
+        let err = format!("{:#}", read_manifest(&path).unwrap_err());
+        assert!(err.contains("repo.json"), "{err}");
+    }
 
     #[test]
     fn mod_srf_serializes_swifty_compatibility_fields() {
@@ -315,7 +358,7 @@ mod tests {
                     path: f.relative_path.replace('/', "\\"),
                     checksum: f.checksums.unwrap_md5().to_string(),
                     length: f.length,
-                    file_type: if pbo::is_pbo(Path::new(&f.relative_path)) {
+                    file_type: if is_pbo_manifest_file(Path::new(&f.relative_path)) {
                         "SwiftyPboFile".to_string()
                     } else {
                         "SwiftyFile".to_string()
@@ -349,6 +392,7 @@ mod tests {
     #[test]
     fn repo_json_serializes_swifty_compatibility_fields() {
         let repo = RepoJson {
+            game: None,
             repo_name: "Repo".to_string(),
             checksum: "REPOCHECKSUM".to_string(),
             foxy_mode: None,
@@ -382,6 +426,7 @@ mod tests {
                 password: "pw".to_string(),
                 battle_eye: false,
             }],
+            dlc_content: None,
         };
 
         let json = serde_json::to_string(&repo).expect("repo serialization should work");
@@ -406,6 +451,7 @@ mod tests {
     #[test]
     fn repo_json_includes_foxy_mode_when_set() {
         let repo = RepoJson {
+            game: None,
             repo_name: "FoxyRepo".to_string(),
             checksum: "CHECK".to_string(),
             foxy_mode: Some("FoxyModeV1".to_string()),
@@ -420,6 +466,7 @@ mod tests {
             repo_basic_authentication: crate::types::RepoBasicAuthentication::default(),
             version: "3.2.0.0".to_string(),
             servers: vec![],
+            dlc_content: None,
         };
 
         let json = serde_json::to_string(&repo).expect("repo serialization should work");

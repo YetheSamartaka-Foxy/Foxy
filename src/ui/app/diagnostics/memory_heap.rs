@@ -223,6 +223,8 @@ impl Foxy {
     pub(super) fn heap_bytes_of_settings(settings: &SettingsViewState) -> usize {
         let mut total = Self::heap_bytes_of_string(&settings.current_tab)
             + Self::heap_bytes_of_string(&settings.arma3_directory)
+            + Self::heap_bytes_of_string(&settings.twwh3_directory)
+            + Self::heap_bytes_of_string(&settings.reforger_directory)
             + Self::heap_bytes_of_string(&settings.arma3_profiles_directory)
             + Self::heap_bytes_of_string(&settings.steam_directory)
             + Self::heap_bytes_of_string(&settings.temp_directory)
@@ -316,6 +318,9 @@ impl Foxy {
             ProgressEvent::Stage { label, .. } => Self::heap_bytes_of_string(label),
             ProgressEvent::DownloadMod { mod_name, .. } => Self::heap_bytes_of_string(mod_name),
             ProgressEvent::Failed(message) => Self::heap_bytes_of_string(message),
+            ProgressEvent::DiskSpaceShortfall(shortfall) => {
+                Self::heap_bytes_of_string(&shortfall.path)
+            }
             ProgressEvent::Diff { mods } => {
                 mods.capacity() * size_of::<ModDiffSummary>()
                     + mods
@@ -338,6 +343,7 @@ impl Foxy {
             | ProgressEvent::DownloadTelemetry { .. }
             | ProgressEvent::HashTelemetry { .. }
             | ProgressEvent::HashSummary { .. }
+            | ProgressEvent::HashEstimate { .. }
             | ProgressEvent::Finished
             | ProgressEvent::Cancelled => 0,
         }

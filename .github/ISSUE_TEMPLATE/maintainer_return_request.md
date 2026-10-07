@@ -8,7 +8,7 @@ assignees: ""
 
 ## Summary
 
-I am requesting maintainer return, shared maintenance, or stewardship succession under the Foxy Community Source License 1.0.0.
+I am requesting maintainer return, shared maintenance, or stewardship succession under the Foxy Community Source License 1.1.0.
 
 ## Requesting maintainer
 

@@ -245,7 +245,7 @@ impl Foxy {
                         );
                         if let Some(spinner_rect) = spinner_rect {
                             ui.ctx().request_repaint_after(Duration::from_millis(16));
-                            egui::Spinner::new().size(16.0).paint_at(ui, spinner_rect);
+                            crate::ui::app::PacedSpinner::new().size(16.0).paint_at(ui, spinner_rect);
                         }
                     }
 
@@ -408,7 +408,7 @@ impl Foxy {
                             let profile_name = self
                                 .resolve_arma3_profile_for_repo(selected_idx)
                                 .unwrap_or_default();
-                            let missions = self.get_or_scan_missions(&profile_name);
+                            let missions = self.missions_for_render(&profile_name);
                             let valid = *idx < missions.len();
 
                             let btn_fg = if valid {

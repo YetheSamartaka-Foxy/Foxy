@@ -15,7 +15,8 @@ use super::SharedRollbackSession;
 use super::bandwidth::AdaptiveBandwidthLimiter;
 use super::metrics::{DownloadMetrics, DownloadSchedulerState};
 use super::range_scheduler::{
-    download_large_file_with_range_queue, range_part_meta_path, remove_range_meta,
+    download_large_file_with_range_queue, range_chunk_size_for, range_part_meta_path,
+    remove_range_meta,
 };
 use super::{ATTEMPT_DELAY_MS, ATTEMPT_LIMIT, BUFFERED_WRITE_CAPACITY, LARGE_FILE_THRESHOLD};
 
@@ -91,10 +92,14 @@ async fn promote_part_file(
         rollback.promote_file(file_id, part_path, target_path).await
     } else {
         #[cfg(target_os = "windows")]
-        if target_path.exists() {
+        if crate::core::utils::profiling::fs::exists(target_path) {
+            let profiled = crate::core::utils::profiling::FsTimer::start();
             tokio::fs::remove_file(target_path).await?;
+            profiled.stop("remove", 0);
         }
+        let profiled = crate::core::utils::profiling::FsTimer::start();
         tokio::fs::rename(part_path, target_path).await?;
+        profiled.stop("rename", 0);
         Ok(())
     }
 }
@@ -128,7 +133,10 @@ async fn download_file_simple(
     // length does not reflect sequential progress, so it cannot be appended
     // to. Discard both and start fresh.
     let meta_path = range_part_meta_path(path);
-    if tokio::fs::metadata(&meta_path).await.is_ok() {
+    if crate::core::utils::profiling::fs::metadata_async(&meta_path)
+        .await
+        .is_ok()
+    {
         match tokio::fs::remove_file(&part_path).await {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -140,7 +148,7 @@ async fn download_file_simple(
     }
 
     // Check for existing .part file from a previous session to resume from
-    if let Ok(meta) = tokio::fs::metadata(&part_path).await {
+    if let Ok(meta) = crate::core::utils::profiling::fs::metadata_async(&part_path).await {
         let part_size = meta.len();
         if part_size > 0 && part_size < total_size as u64 {
             bytes_received = part_size;
@@ -210,6 +218,7 @@ async fn download_file_simple(
         }
 
         // On first attempt (or after resume reset) create the part file; on resume, append
+        let profiled = crate::core::utils::profiling::FsTimer::start();
         let file = if bytes_received == 0 {
             tokio::fs::File::create(&part_path).await?
         } else {
@@ -218,6 +227,7 @@ async fn download_file_simple(
                 .open(&part_path)
                 .await?
         };
+        profiled.stop("create", 0);
         let mut writer = tokio::io::BufWriter::with_capacity(BUFFERED_WRITE_CAPACITY, file);
         let mut response = resp;
         let mut stream_failed = false;
@@ -243,7 +253,9 @@ async fn download_file_simple(
                         .download_total
                         .fetch_add(n, Ordering::Relaxed);
                     let write_started = std::time::Instant::now();
+                    let profiled = crate::core::utils::profiling::FsTimer::start();
                     writer.write_all(&bytes).await?;
+                    profiled.stop("write", n as u64);
                     disk_write_time = disk_write_time.saturating_add(write_started.elapsed());
                     disk_write_count = disk_write_count.saturating_add(1);
                 }
@@ -261,7 +273,10 @@ async fn download_file_simple(
             }
         }
 
-        writer.flush().await?;
+        let profiled = crate::core::utils::profiling::FsTimer::start();
+        let flushed = writer.flush().await;
+        profiled.stop("flush", 1);
+        flushed?;
 
         if !stream_failed {
             // Stream ended normally - verify size and promote .part file.
@@ -352,7 +367,12 @@ pub(super) async fn download_file_ranges(
     // completed chunks tracked in a .foxy.part.meta sidecar so interrupted
     // downloads resume in the next session.
     let split_count = total_size
-        .div_ceil(scheduler.limits.range_chunk_target)
+        .div_ceil(range_chunk_size_for(
+            total_size as u64,
+            scheduler.limits.max_ranges_per_file,
+            scheduler.limits.min_range_chunk as u64,
+            scheduler.limits.range_chunk_target as u64,
+        ) as usize)
         .max(1);
     let part_path = format!("{}.foxy.part", path);
     let bytes = download_large_file_with_range_queue(

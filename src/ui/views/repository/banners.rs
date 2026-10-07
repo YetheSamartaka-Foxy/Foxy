@@ -4,6 +4,7 @@ use super::{
 };
 use crate::core::api::SyncMode;
 use crate::ui::app::Foxy;
+use crate::ui::i18n::fmt_bytes;
 use crate::ui::types::RepoState;
 use eframe::egui::{
     self, Align, Button, Color32, CornerRadius, CursorIcon, Frame, Layout, Margin, RichText, Ui,
@@ -111,10 +112,31 @@ impl Foxy {
             } else {
                 (checked.to_string(), total.to_string())
             };
-            self.t_fmt(
+            let counter = self.t_fmt(
                 "Calculating file hashes ({checked}/{total})",
                 &[("checked", checked_text), ("total", total_text)],
-            )
+            );
+            let remaining = self
+                .recheck_hash_byte_counter
+                .map(|(checked, total)| total.saturating_sub(checked));
+            match self.recheck_hash_estimate {
+                Some((estimated_remaining, bytes_per_sec)) if bytes_per_sec > 0 => {
+                    let remaining_bytes = remaining.unwrap_or(estimated_remaining);
+                    let eta = Self::format_hash_eta(remaining_bytes, bytes_per_sec);
+                    format!(
+                        "{counter} - {}",
+                        self.t_fmt(
+                            "{size} at {rate}/s, about {eta} remaining",
+                            &[
+                                ("size", fmt_bytes(remaining_bytes)),
+                                ("rate", fmt_bytes(bytes_per_sec)),
+                                ("eta", eta),
+                            ],
+                        )
+                    )
+                }
+                _ => counter,
+            }
         } else if let Some(stage) = &self.recheck_stage_label {
             self.translate_repository_check_stage(stage)
         } else {
@@ -125,22 +147,7 @@ impl Foxy {
             .sync_started_at
             .map(|started| started.elapsed())
             .unwrap_or_default();
-        let progress = if let Some((checked_parts, total_parts)) = self.recheck_hash_part_counter {
-            if total_parts > 0 {
-                Some((checked_parts as f32 / total_parts as f32).clamp(0.0, 1.0))
-            } else {
-                None
-            }
-        } else if let Some((checked, total)) = self.recheck_hash_counter {
-            if total > 0 {
-                Some((checked as f32 / total as f32).clamp(0.0, 1.0))
-            } else {
-                None
-            }
-        } else {
-            self.recheck_stage_percent
-                .map(|percent| percent.clamp(0.0, 1.0))
-        };
+        let progress = self.recheck_progress_fraction();
 
         Some(RepositoryCheckStatusBanner {
             title,
@@ -624,5 +631,123 @@ impl Foxy {
             },
             show_pending_action: false,
         })
+    }
+}
+
+impl Foxy {
+    /// "M min" or "S s" for the hash benchmark ETA; coarse on purpose, the
+    /// rate is a sample and the number is a hint, not a countdown.
+    pub(crate) fn format_hash_eta(remaining_bytes: u64, bytes_per_sec: u64) -> String {
+        let seconds = remaining_bytes.div_ceil(bytes_per_sec.max(1));
+        if seconds >= 90 {
+            format!("{} min", seconds.div_ceil(60))
+        } else {
+            format!("{seconds} s")
+        }
+    }
+
+    /// Fraction of the running hash pass, for the check banner and the
+    /// benchmark progress sample.
+    pub(crate) fn recheck_hash_progress_fraction(&self) -> Option<f32> {
+        hash_progress_fraction(
+            self.recheck_hash_byte_counter,
+            self.recheck_hash_part_counter,
+            self.recheck_hash_counter,
+        )
+    }
+
+    pub(crate) fn floored_recheck_hash_fraction(&self) -> Option<f32> {
+        self.recheck_hash_progress_fraction()
+            .map(|fraction| above_floor(self.recheck_progress_floor, fraction))
+    }
+
+    /// The check banner's bar: the hash pass over what the stages before it
+    /// left, else the stage percent, never below the highest value already shown.
+    pub(crate) fn recheck_progress_fraction(&self) -> Option<f32> {
+        held_progress(
+            self.floored_recheck_hash_fraction().or_else(|| {
+                self.recheck_stage_percent
+                    .map(|percent| percent.clamp(0.0, 1.0))
+            }),
+            self.recheck_progress_peak,
+        )
+    }
+}
+
+fn above_floor(floor: Option<f32>, fraction: f32) -> f32 {
+    let floor = floor.unwrap_or(0.0).clamp(0.0, 1.0);
+    floor + (1.0 - floor) * fraction.clamp(0.0, 1.0)
+}
+
+fn held_progress(current: Option<f32>, peak: Option<f32>) -> Option<f32> {
+    match (current, peak) {
+        (Some(current), Some(peak)) => Some(current.max(peak)),
+        (current, peak) => current.or(peak),
+    }
+}
+
+/// Bytes when the hasher reports them, else parts, else files: heavy
+/// archives hash first, so a parts count runs far ahead of the work done.
+fn hash_progress_fraction(
+    bytes: Option<(u64, u64)>,
+    parts: Option<(usize, usize)>,
+    files: Option<(usize, usize)>,
+) -> Option<f32> {
+    let ratio =
+        |done: f64, total: f64| (total > 0.0).then(|| (done / total).clamp(0.0, 1.0) as f32);
+    bytes
+        .and_then(|(done, total)| ratio(done as f64, total as f64))
+        .or_else(|| parts.and_then(|(done, total)| ratio(done as f64, total as f64)))
+        .or_else(|| files.and_then(|(done, total)| ratio(done as f64, total as f64)))
+}
+
+#[cfg(test)]
+mod hash_eta_tests {
+    use super::Foxy;
+
+    #[test]
+    fn hash_eta_reports_minutes_for_long_runs_and_seconds_for_short_ones() {
+        assert_eq!(Foxy::format_hash_eta(86_700_000_000, 107_000_000), "14 min");
+        assert_eq!(Foxy::format_hash_eta(50_000_000, 100_000_000), "1 s");
+        assert_eq!(Foxy::format_hash_eta(1_000, 0), "17 min");
+    }
+
+    #[test]
+    fn the_hash_pass_fills_the_bar_from_where_the_stages_left_it() {
+        use super::above_floor;
+        assert_eq!(above_floor(Some(0.2), 0.0), 0.2);
+        assert_eq!(above_floor(Some(0.2), 0.5), 0.6);
+        assert_eq!(above_floor(Some(0.2), 1.0), 1.0);
+        assert_eq!(above_floor(None, 0.25), 0.25);
+    }
+
+    #[test]
+    fn check_progress_never_falls_below_the_hash_peak() {
+        use super::held_progress;
+        assert_eq!(held_progress(Some(0.86), Some(0.9998)), Some(0.9998));
+        assert_eq!(held_progress(Some(0.2), Some(0.9998)), Some(0.9998));
+        assert_eq!(held_progress(Some(1.0), Some(0.9998)), Some(1.0));
+        assert_eq!(held_progress(Some(0.3), None), Some(0.3));
+        assert_eq!(held_progress(None, Some(0.5)), Some(0.5));
+        assert_eq!(held_progress(None, None), None);
+    }
+
+    #[test]
+    fn hash_progress_prefers_bytes_then_parts_then_files() {
+        use super::hash_progress_fraction;
+        assert_eq!(
+            hash_progress_fraction(Some((25, 100)), Some((90, 100)), Some((1, 10))),
+            Some(0.25)
+        );
+        assert_eq!(
+            hash_progress_fraction(Some((0, 0)), Some((90, 100)), Some((1, 10))),
+            Some(0.9)
+        );
+        assert_eq!(hash_progress_fraction(None, None, Some((1, 10))), Some(0.1));
+        assert_eq!(
+            hash_progress_fraction(Some((150, 100)), None, None),
+            Some(1.0)
+        );
+        assert_eq!(hash_progress_fraction(None, Some((0, 0)), None), None);
     }
 }

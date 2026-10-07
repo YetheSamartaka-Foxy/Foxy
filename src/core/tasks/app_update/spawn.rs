@@ -72,6 +72,31 @@ pub fn spawn_update_check(
                 },
             };
 
+            let outcome = match &fetch_result {
+                Ok((manifest, _)) => {
+                    if is_newer(&manifest.latest, &current_version) {
+                        "available"
+                    } else {
+                        "up_to_date"
+                    }
+                }
+                Err(_) => "failed",
+            };
+            log::info!(
+                "{}",
+                crate::core::utils::speed_of_light::sol_line(
+                    "app_update_check",
+                    0,
+                    started.elapsed(),
+                    &crate::core::utils::speed_of_light::SolLight::SelfBaseline,
+                    &[
+                        ("op_id", operation_id.clone()),
+                        ("mode", format!("{:?}", mode)),
+                        ("outcome", outcome.to_string()),
+                    ],
+                )
+            );
+
             match fetch_result {
                 Ok((manifest, changelogs)) => {
                     let has_newer = is_newer(&manifest.latest, &current_version);

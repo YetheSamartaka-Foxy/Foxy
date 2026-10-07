@@ -1,0 +1,10 @@
+{
+  "ok": true,
+  "command": "download-summary",
+  "view": "repository-list",
+  "elapsed_ms": 0,
+  "data": {
+    "present": false
+  },
+  "errors": []
+}

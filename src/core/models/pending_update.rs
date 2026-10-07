@@ -9,6 +9,15 @@ fn now_ts() -> i64 {
     Utc::now().timestamp()
 }
 
+/// Upsert keyed on the `(repository_url, local_path)` pending-update identity.
+/// Shared with the startup schema probe (`db_schema_check`) so a database whose
+/// `pending_updates` predates the composite key is caught before it silently
+/// swallows every pending-update write.
+pub(crate) const PENDING_UPDATE_UPSERT_SQL: &str = "INSERT INTO pending_updates (repository_url, local_path, diff_json, updated_at) \
+     VALUES (?, ?, ?, ?) \
+     ON CONFLICT (repository_url, local_path) DO UPDATE SET \
+     diff_json = excluded.diff_json, updated_at = excluded.updated_at";
+
 /// Canonicalize a download folder so the pending-update key matches regardless of
 /// separator style, trailing slash, or (on Windows) case. The UI looks the row up
 /// by `repository.path`; the core writes it from `context.target_local_path`.
@@ -36,10 +45,7 @@ async fn upsert_payload(
 ) -> Result<(), DbErr> {
     db.execute_retry(
         "upsert pending update",
-        "INSERT INTO pending_updates (repository_url, local_path, diff_json, updated_at) \
-         VALUES (?, ?, ?, ?) \
-         ON CONFLICT (repository_url, local_path) DO UPDATE SET \
-         diff_json = excluded.diff_json, updated_at = excluded.updated_at",
+        PENDING_UPDATE_UPSERT_SQL,
         params![repository_url, local_path, payload, now_ts()],
     )
     .await?;

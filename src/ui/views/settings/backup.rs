@@ -79,7 +79,7 @@ impl Foxy {
 
         let mut open_folder_path: Option<std::path::PathBuf> = None;
 
-        ScrollArea::vertical().show(ui, |ui| {
+        ScrollArea::both().auto_shrink([false, true]).show(ui, |ui| {
             ui.vertical(|ui| {
                 render_wrapped_info_row(
                     ui,
@@ -133,7 +133,7 @@ impl Foxy {
                 if self.is_backup_manager_inventory_refresh_pending() {
                     ui.horizontal(|ui| {
                         ui.add_space(horizontal_padding);
-                        ui.spinner();
+                        ui.add(crate::ui::app::PacedSpinner::new());
                         ui.add_space(8.0);
                         ui.label(
                             RichText::new(self.t("Refreshing addon backup inventory..."))
@@ -453,12 +453,8 @@ impl Foxy {
         };
 
         egui::Window::new(title)
-            .frame(
-                egui::Frame::window(&ui.ctx().global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(eframe::egui::CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ui.ctx()))
+            .title_frame(self.modal_window_chrome(ui.ctx()))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)
@@ -595,7 +591,7 @@ impl Foxy {
 
         let logs_dir = app_paths::foxy_logs_dir();
 
-        // Collect log files (non-recursive – logs sit directly in the folder).
+        // Collect log files (non-recursive - logs sit directly in the folder).
         let mut entries: Vec<_> = fs::read_dir(&logs_dir)
             .map_err(|e| format!("Failed to read log directory: {e}"))?
             .filter_map(|entry| {
@@ -690,7 +686,7 @@ impl Foxy {
             .iter()
             .map(|path| file_size(path).unwrap_or_default())
             .sum::<u64>();
-        let database_dir = Self::get_config_directory();
+        let database_dir = Self::get_game_space_directory();
         let database_db = database_dir.join("database.db");
         let database_wal = database_dir.join("database.db-wal");
         let database_shm = database_dir.join("database.db-shm");
@@ -791,8 +787,12 @@ impl Foxy {
             Self::format_bytes_short(database_total_size)
         ));
         manifest.push_str(&format!(
-            "settings_json={}\n",
-            Self::format_optional_bytes(file_size(database_dir.join("settings.json")))
+            "app_settings_json={}\n",
+            Self::format_optional_bytes(file_size(Self::get_app_settings_path()))
+        ));
+        manifest.push_str(&format!(
+            "game_settings_json={}\n",
+            Self::format_optional_bytes(file_size(database_dir.join("game_settings.json")))
         ));
         manifest.push_str(&format!(
             "repositories_json={}\n",
@@ -802,6 +802,19 @@ impl Foxy {
             "repository_spaces_json={}\n",
             Self::format_optional_bytes(file_size(database_dir.join("repository_spaces.json")))
         ));
+        manifest.push_str(&format!(
+            "exclusive_lock={}
+",
+            crate::core::tasks::db_process_lock::diagnostics_state()
+        ));
+        let schema_problems = crate::core::tasks::db_schema_check::live_schema_problems();
+        manifest.push_str(&format!(
+            "schema_compatible={}\n",
+            schema_problems.is_empty()
+        ));
+        for problem in &schema_problems {
+            manifest.push_str(&format!("schema_problem={problem}\n"));
+        }
 
         manifest.push_str("\n[app_state]\n");
         manifest.push_str(&format!(
@@ -875,7 +888,7 @@ impl Foxy {
         let mut file = std::fs::File::open(path).ok()?;
         let file_len = file.metadata().ok()?.len();
 
-        // Read the last 4 KiB – more than enough to contain the final line.
+        // Read the last 4 KiB - more than enough to contain the final line.
         let start = file_len.saturating_sub(4096);
         file.seek(SeekFrom::Start(start)).ok()?;
 

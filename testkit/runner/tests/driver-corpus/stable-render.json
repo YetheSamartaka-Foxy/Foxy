@@ -1,0 +1,10 @@
+{
+  "ok": true,
+  "command": "stable-render",
+  "view": "repository-list",
+  "elapsed_ms": 0,
+  "data": {
+    "stable_render": true
+  },
+  "errors": []
+}

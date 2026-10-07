@@ -74,6 +74,10 @@ pub enum ProgressEvent {
         total_files: usize,
         checked_parts: usize,
         total_parts: usize,
+        /// Estimated bytes covered so far; 0 of 0 when the sender does not
+        /// track bytes, and consumers then fall back to parts.
+        checked_bytes: u64,
+        total_bytes: u64,
     },
     DownloadMod {
         mod_name: String,
@@ -104,6 +108,13 @@ pub enum ProgressEvent {
         cumulative_hash_ms: u64,
         after_download_hash_ms: u64,
     },
+    /// Emitted once the auto hash benchmark has measured the disk: how many
+    /// bytes the run still has to read and the sampled rate, so the UI can
+    /// show a size and an ETA instead of a bare stage label.
+    HashEstimate {
+        remaining_bytes: u64,
+        bytes_per_sec: u64,
+    },
     Diff {
         mods: Vec<ModDiffSummary>,
     },
@@ -114,6 +125,9 @@ pub enum ProgressEvent {
         is_foxy: bool,
         app_update_url: Option<String>,
     },
+    /// The destination volume cannot take the planned download; always
+    /// followed by `Failed` carrying the same shortfall as text.
+    DiskSpaceShortfall(crate::core::utils::disk_space::DiskSpaceShortfall),
     Finished,
     Failed(String),
     Cancelled,
@@ -137,12 +151,27 @@ pub struct RepositorySyncOptions {
     pub rollback_temp_directory: Option<String>,
     pub download_speed_limit_mbps: Option<u32>,
     pub recent_local_path_reset: bool,
+    /// The filesystem watcher saw the repository folder change after the last
+    /// prepared download queue, so a `Download` must rebuild the queue instead
+    /// of reusing it.
+    pub discard_prepared_queue: bool,
     pub force_redownload: bool,
+    /// Keep the ordinary mismatch scope but download each queued file in full.
+    /// Used by the agent test harness for patch-versus-full controls.
+    pub force_full_downloads: bool,
     pub allow_suspect_full_redownload: bool,
     pub download_pause_rx: watch::Receiver<bool>,
     pub cancel_rx: watch::Receiver<bool>,
     pub hash_algorithm_preference: crate::ui::types::HashAlgorithmPreference,
     pub hash_io_profile: crate::ui::types::HashIoProfilePreference,
+    /// Restore files the verified-hash record proves unchanged when the database
+    /// holds no state for them, instead of reading them again.
+    pub trust_verified_hashes: bool,
+    /// The caller's durable addon selection, written to `addons.enabled` before
+    /// the pipeline reads it. Distinct from the run's enabled overrides, which
+    /// can be a transient one-shot scope (a standalone addon download narrows
+    /// them to a single addon) that must never become the stored state.
+    pub persisted_addon_selection: Option<Vec<(String, bool)>>,
 }
 
 #[cfg(test)]

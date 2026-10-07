@@ -15,6 +15,9 @@ pub enum RepositoryListContextAction {
     GoToRepositorySpace,
     RemoveFromVisualFolder,
     OpenLocalPath,
+    QuickLocalCheck,
+    RemoteRecheck,
+    OpenSettings,
     MoveUp,
     MoveDown,
 }
@@ -201,6 +204,9 @@ pub struct RepositorySpaceManifest {
     pub icon: String,
     #[serde(rename = "iconChecksum", alias = "iconImageChecksum", default)]
     pub icon_checksum: String,
+    /// Written by newer servers; absent from older and hand-written manifests.
+    #[serde(rename = "spaceChecksum", default)]
+    pub space_checksum: String,
     #[serde(rename = "appUpdateUrl", alias = "app_update_url", default)]
     pub app_update_url: String,
     #[serde(default)]
@@ -265,6 +271,16 @@ pub struct Ts3PluginUpdatePrompt {
     pub file_hash: String,
 }
 
+/// Payload delivered by the background TS3 plugin scan worker.
+#[derive(Debug)]
+pub struct Ts3PluginScanResult {
+    pub statuses: Vec<crate::core::ts3_plugin::Ts3PluginStatus>,
+    pub ts3_running: bool,
+    /// Mirrors the request flag so a prompt request cannot be lost when the
+    /// user starts an unrelated recheck while the scan is running.
+    pub prompt_on_update: bool,
+}
+
 #[derive(Debug)]
 pub struct DecodedImagePayload {
     pub size: [usize; 2],
@@ -322,6 +338,19 @@ pub struct AddonDeleteResult {
     pub outcome: Result<usize, String>,
 }
 
+/// Result of the remote reachability probe that guards an addon force
+/// redownload. The probe runs off the UI thread; the local folder is removed
+/// on the UI thread only after `outcome` is `Ok`.
+#[derive(Debug)]
+pub struct AddonForceRedownloadProbeResult {
+    pub repo_address: String,
+    pub repo_path: String,
+    pub repo_name: String,
+    pub addon_name: String,
+    pub target_path: std::path::PathBuf,
+    pub outcome: Result<(), String>,
+}
+
 /// Disposition of a background cached pending-update load. Mirrors the branches
 /// of the previous synchronous loader so UI-thread state transitions are
 /// preserved exactly.
@@ -368,6 +397,8 @@ pub struct FetchedRepositorySpace {
     pub repo_image_path: String,
     pub repo_image_checksum: String,
     pub app_update_url: String,
+    /// Checksum of the published content, see `repository_space_manifest_checksum`.
+    pub manifest_checksum: String,
     pub entries: Vec<RepositorySpaceEntry>,
 }
 

@@ -1,9 +1,84 @@
-use super::part_hashes::{PartHashProgress, PartSpanSource, calculate_part_hashes};
+use super::direct_read::DirectReadPlan;
+use super::part_hashes::{
+    HashRunCounters, PartHashProgress, PartReadOptions, PartSpanSource, calculate_part_hashes,
+};
 use super::*;
+use crate::core::utils::content_hash::{
+    Blake3ReadStrategy, blake3_mmap_file_hash_full, is_blake3_checksum, select_blake3_read_strategy,
+};
 use crate::core::utils::resource_profile::{ResourcePressure, ResourceProfile};
-use crate::core::utils::speed_of_light::{SolLight, sol_line};
+use crate::core::utils::speed_of_light::{SolLight, op_id_extra, sol_line};
 use crate::ui::types::HashIoProfilePreference;
+use std::path::PathBuf;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::time::Duration;
 use sysinfo::Disks;
+
+/// A hash job's parts: indices into the tree's part list, which every job of
+/// a pass shares instead of each holding a copy of its file's parts.
+#[derive(Clone)]
+pub(super) struct JobParts {
+    all: Arc<Vec<FoxyModFilePart>>,
+    indices: Vec<usize>,
+    /// `all[n]` is the part at `indices[n]` rather than at `indices[n]` itself.
+    positional: bool,
+}
+
+impl JobParts {
+    /// Parts owned by this job alone, keyed by their tree index.
+    #[cfg(test)]
+    pub(super) fn owned(parts: Vec<(usize, FoxyModFilePart)>) -> Self {
+        let (indices, parts): (Vec<usize>, Vec<FoxyModFilePart>) = parts.into_iter().unzip();
+        Self {
+            all: Arc::new(parts),
+            indices,
+            positional: true,
+        }
+    }
+
+    fn shared(all: &Arc<Vec<FoxyModFilePart>>, indices: Vec<usize>) -> Self {
+        Self {
+            all: all.clone(),
+            indices,
+            positional: false,
+        }
+    }
+
+    pub(super) fn len(&self) -> usize {
+        self.indices.len()
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.indices.is_empty()
+    }
+
+    /// Each part with its tree index, in the job's order.
+    pub(super) fn iter(&self) -> impl Iterator<Item = (usize, &FoxyModFilePart)> + '_ {
+        self.indices.iter().enumerate().map(|(position, &index)| {
+            let slot = if self.positional { position } else { index };
+            (index, &self.all[slot])
+        })
+    }
+
+    pub(super) fn parts(&self) -> impl Iterator<Item = &FoxyModFilePart> + '_ {
+        self.iter().map(|(_, part)| part)
+    }
+
+    pub(super) fn indices(&self) -> &[usize] {
+        &self.indices
+    }
+}
+
+/// Move the tree's parts behind one `Arc` for the jobs of a hash pass; hand
+/// them back with [`return_tree_parts`] before anything reads the tree's parts.
+pub(super) fn lend_tree_parts(data_tree: &mut Tree) -> Arc<Vec<FoxyModFilePart>> {
+    Arc::new(std::mem::take(&mut data_tree.parts))
+}
+
+pub(super) fn return_tree_parts(data_tree: &mut Tree, parts: Arc<Vec<FoxyModFilePart>>) {
+    data_tree.parts = Arc::try_unwrap(parts).unwrap_or_else(|shared| (*shared).clone());
+}
 
 #[derive(Clone)]
 pub(super) struct FileHashJob {
@@ -11,36 +86,50 @@ pub(super) struct FileHashJob {
     pub(super) file_path: String,
     pub(super) file_length: u64,
     pub(super) file_remote_checksum: String,
-    pub(super) indexed_parts: Vec<(usize, FoxyModFilePart)>,
+    pub(super) indexed_parts: JobParts,
     pub(super) span_source: PartSpanSource,
+    /// The database already holds a local checksum for the file or a part.
+    pub(super) has_local_baseline: bool,
+    /// Capture the file identity around the hash, for the verified-hash record.
+    pub(super) capture_identity: bool,
 }
 
 pub(super) struct FileHashResult {
     pub(super) file_idx: usize,
     pub(super) updated_parts: Vec<(usize, FoxyModFilePart)>,
     pub(super) whole_file_checksum: Option<String>,
+    /// Content fingerprint sampled while the file was hot; see
+    /// `PartHashCalculation::content_hash`.
+    pub(super) content_hash: Option<String>,
     pub(super) file_path: String,
     pub(super) elapsed: std::time::Duration,
     pub(super) parts_count: usize,
     pub(super) missing_file: bool,
     pub(super) part_metrics: super::part_hashes::PartHashMetrics,
+    /// Set when the file matched the remote and did not change while it was
+    /// read, for the verified-hash record.
+    pub(super) verified: Option<super::verified_record::VerifiedFile>,
 }
 
 #[derive(Clone, Copy)]
 pub(super) struct HashRunProgress {
     total_files: usize,
     total_parts: usize,
+    total_bytes: u64,
     initial_files_done: usize,
     initial_parts_done: usize,
+    initial_bytes_done: u64,
 }
 
 impl HashRunProgress {
-    fn new(total_files: usize, total_parts: usize) -> Self {
+    fn new(total_files: usize, total_parts: usize, total_bytes: u64) -> Self {
         Self {
             total_files,
             total_parts,
+            total_bytes,
             initial_files_done: 0,
             initial_parts_done: 0,
+            initial_bytes_done: 0,
         }
     }
 }
@@ -111,7 +200,12 @@ impl HashProfileDecision {
 
 const MIN_AUTO_BENCHMARK_FILES: usize = 3;
 const MIN_AUTO_BENCHMARK_BYTES: u64 = 256 * 1024 * 1024;
+/// Most profiles the auto benchmark can try; the sample is sized for one
+/// disjoint group per profile.
+const MAX_BENCHMARK_GROUPS: usize = 3;
 const LOW_WAIT_AGGRESSIVE_THRESHOLD: f64 = 0.01;
+const PROFILE_SWITCH_MIN_IMPROVEMENT_PERCENT: f64 = 10.0;
+static AUTO_BENCHMARK_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 
 fn cap_auto_hash_profile(
     profile: HashIoProfilePreference,
@@ -333,20 +427,43 @@ fn detect_hash_storage_class(jobs: &[FileHashJob]) -> HashStorageClass {
     detect_storage_class_for_path(path)
 }
 
-pub(crate) fn detect_storage_class_for_path(path: &str) -> HashStorageClass {
-    let path = path.trim();
-    if path.is_empty() {
-        return HashStorageClass::Unknown;
+/// How long a refreshed mount table is reused. Long enough that a per-file
+/// lookup is cheap, short enough that plugging a drive in is picked up.
+const STORAGE_CLASS_CACHE_TTL: Duration = Duration::from_secs(60);
+
+type StorageClassMounts = Vec<(PathBuf, HashStorageClass)>;
+
+static STORAGE_CLASS_MOUNTS: Mutex<Option<(Instant, StorageClassMounts)>> = Mutex::new(None);
+
+/// Snapshot of mount point -> storage class. Not space-derived (disk topology is
+/// process-global), but still invalidated on space switch so a space that lives
+/// on a freshly attached drive never inherits a stale classification.
+pub(crate) fn invalidate_storage_class_cache() {
+    if let Ok(mut guard) = STORAGE_CLASS_MOUNTS.lock() {
+        *guard = None;
     }
-    let path = Path::new(path);
-    let disks = Disks::new_with_refreshed_list();
-    disks
+}
+
+fn storage_class_mounts() -> StorageClassMounts {
+    let Ok(mut guard) = STORAGE_CLASS_MOUNTS.lock() else {
+        return refresh_storage_class_mounts();
+    };
+    if let Some((refreshed_at, mounts)) = guard.as_ref()
+        && refreshed_at.elapsed() < STORAGE_CLASS_CACHE_TTL
+    {
+        return mounts.clone();
+    }
+    let mounts = refresh_storage_class_mounts();
+    *guard = Some((Instant::now(), mounts.clone()));
+    mounts
+}
+
+fn refresh_storage_class_mounts() -> StorageClassMounts {
+    Disks::new_with_refreshed_list()
         .iter()
-        .filter(|disk| storage_path_starts_with_mount(path, disk.mount_point()))
-        .max_by_key(|disk| disk.mount_point().as_os_str().len())
         .map(|disk| {
             let kind = format!("{:?}", disk.kind()).to_ascii_lowercase();
-            if kind.contains("hdd") {
+            let class = if kind.contains("hdd") {
                 HashStorageClass::Hdd
             } else if kind.contains("ssd") {
                 HashStorageClass::Ssd
@@ -354,12 +471,27 @@ pub(crate) fn detect_storage_class_for_path(path: &str) -> HashStorageClass {
                 HashStorageClass::Removable
             } else {
                 HashStorageClass::Unknown
-            }
+            };
+            (disk.mount_point().to_path_buf(), class)
         })
+        .collect()
+}
+
+pub(crate) fn detect_storage_class_for_path(path: &str) -> HashStorageClass {
+    let path = path.trim();
+    if path.is_empty() {
+        return HashStorageClass::Unknown;
+    }
+    let path = Path::new(path);
+    storage_class_mounts()
+        .into_iter()
+        .filter(|(mount, _)| storage_path_starts_with_mount(path, mount))
+        .max_by_key(|(mount, _)| mount.as_os_str().len())
+        .map(|(_, class)| class)
         .unwrap_or(HashStorageClass::Unknown)
 }
 
-fn storage_path_starts_with_mount(path: &Path, mount: &Path) -> bool {
+pub(super) fn storage_path_starts_with_mount(path: &Path, mount: &Path) -> bool {
     path.starts_with(mount)
         || normalized_storage_path(path).starts_with(&normalized_storage_path(mount))
 }
@@ -452,6 +584,15 @@ fn benchmark_profiles_for_environment(
     profiles
 }
 
+fn rotate_benchmark_profiles(profiles: &mut [HashIoProfilePreference], sequence: usize) -> usize {
+    if profiles.len() < 2 {
+        return 0;
+    }
+    let rotation = sequence % profiles.len();
+    profiles.rotate_left(rotation);
+    rotation
+}
+
 fn benchmark_wait_ratio(metrics: &HashRunMetrics) -> f64 {
     let wait = metrics.semaphore_wait_elapsed_sum.as_secs_f64();
     let compute = metrics.blocking_hash_elapsed_sum.as_secs_f64();
@@ -475,6 +616,32 @@ fn benchmark_supports_boosted_aggressive(
         && benchmark_wait_ratio(metrics) <= LOW_WAIT_AGGRESSIVE_THRESHOLD
 }
 
+fn select_benchmark_profile(
+    initial_profile: HashIoProfilePreference,
+    trials: &[(HashIoProfilePreference, f64, bool)],
+) -> Option<(HashIoProfilePreference, f64, bool)> {
+    let fastest = trials
+        .iter()
+        .copied()
+        .max_by(|left, right| left.1.total_cmp(&right.1))?;
+    let Some(initial) = trials
+        .iter()
+        .copied()
+        .find(|(profile, _, _)| *profile == initial_profile)
+    else {
+        return Some(fastest);
+    };
+    if fastest.0 == initial_profile {
+        return Some(fastest);
+    }
+    let required = initial.1 * (1.0 + PROFILE_SWITCH_MIN_IMPROVEMENT_PERCENT / 100.0);
+    if fastest.1 >= required {
+        Some(fastest)
+    } else {
+        Some(initial)
+    }
+}
+
 fn log_hash_scheduler_selection(
     label: &str,
     requested_profile: HashIoProfilePreference,
@@ -493,8 +660,10 @@ fn log_hash_scheduler_selection(
     );
 }
 
+/// `parts` is the tree's part list, lent by [`lend_tree_parts`].
 pub(super) fn build_file_hash_jobs(
     data_tree: &Tree,
+    parts: &Arc<Vec<FoxyModFilePart>>,
     file_indices: &[usize],
     span_source: PartSpanSource,
 ) -> Vec<FileHashJob> {
@@ -506,36 +675,109 @@ pub(super) fn build_file_hash_jobs(
         let Some(file) = data_tree.files.get(file_idx) else {
             continue;
         };
-        let mut indexed_parts: Vec<(usize, FoxyModFilePart)> = file_node
+        let mut part_indices: Vec<usize> = file_node
             .parts
             .iter()
-            .filter_map(|&part_idx| {
-                data_tree
-                    .parts
-                    .get(part_idx)
-                    .cloned()
-                    .map(|p| (part_idx, p))
-            })
+            .copied()
+            .filter(|&part_idx| part_idx < parts.len())
             .collect();
-        indexed_parts.sort_by_key(|(_, part)| part.data_order);
+        let has_local_baseline = !file.local_checksum.is_empty()
+            || part_indices
+                .iter()
+                .any(|&part_idx| !parts[part_idx].local_checksum.is_empty());
+        part_indices.sort_by_key(|&part_idx| parts[part_idx].data_order);
         jobs.push(FileHashJob {
             file_idx,
             file_path: file.local_path.clone(),
             file_length: file.length,
             file_remote_checksum: file.remote_checksum.clone(),
-            indexed_parts,
+            indexed_parts: JobParts::shared(parts, part_indices),
             span_source,
+            has_local_baseline,
+            capture_identity: false,
         });
     }
     jobs
 }
+
+/// The storage inputs a file's hash reads depend on, resolved once per run and
+/// carried down to every file.
+#[derive(Clone, Copy)]
+pub(super) struct WholeFileHashIo {
+    profile: HashIoProfilePreference,
+    storage_class: HashStorageClass,
+}
+
+impl WholeFileHashIo {
+    fn new(profile: HashIoProfilePreference, storage_class: HashStorageClass) -> Self {
+        Self {
+            profile,
+            storage_class,
+        }
+    }
+
+    fn strategy_for(&self, path: &Path, len: u64) -> Blake3ReadStrategy {
+        select_blake3_read_strategy(self.profile, self.storage_class, len, path)
+    }
+
+    fn part_reader_capacity(&self) -> usize {
+        if self.rotational() {
+            super::part_hashes::ROTATIONAL_HASH_READER_CAPACITY
+        } else {
+            super::part_hashes::HASH_READER_CAPACITY
+        }
+    }
+
+    fn rotational(&self) -> bool {
+        matches!(
+            self.storage_class,
+            HashStorageClass::Hdd | HashStorageClass::Removable
+        )
+    }
+
+    /// Existing files on a local disk are read around the cache: one file at a
+    /// time on rotational storage, a read ahead of the hasher on SSD.
+    fn direct_read_plan(&self) -> Option<DirectReadPlan> {
+        if !cfg!(windows) {
+            return None;
+        }
+        match self.storage_class {
+            HashStorageClass::Hdd | HashStorageClass::Removable => Some(DirectReadPlan::new(
+                ROTATIONAL_DIRECT_BLOCK,
+                ROTATIONAL_DIRECT_DEPTH,
+                0,
+                true,
+            )),
+            HashStorageClass::Ssd => Some(DirectReadPlan::new(
+                SSD_DIRECT_BLOCK,
+                SSD_DIRECT_DEPTH,
+                SSD_DIRECT_MIN_LEN,
+                false,
+            )),
+            HashStorageClass::Unknown => None,
+        }
+    }
+}
+
+const ROTATIONAL_DIRECT_BLOCK: usize = 16 * 1024 * 1024;
+const ROTATIONAL_DIRECT_DEPTH: usize = 4;
+const SSD_DIRECT_BLOCK: usize = 4 * 1024 * 1024;
+const SSD_DIRECT_DEPTH: usize = 2;
+/// Below this a file is one read either way, and a cached copy may still
+/// answer it from memory.
+const SSD_DIRECT_MIN_LEN: u64 = 1024 * 1024;
 
 async fn calculate_whole_file_checksum(
     file_path: String,
     expected_checksum: String,
     expected_len: u64,
     semaphore: Arc<Semaphore>,
-) -> (Option<String>, super::part_hashes::PartHashMetrics) {
+    hash_io: WholeFileHashIo,
+) -> (
+    Option<String>,
+    Option<String>,
+    super::part_hashes::PartHashMetrics,
+) {
     const WHOLE_FILE_HASH_BUF_SIZE: usize = 4 * 1024 * 1024;
 
     let started = Instant::now();
@@ -551,7 +793,7 @@ async fn calculate_whole_file_checksum(
             debug!("Whole-file hash skipped for {}: {}", file_path, err);
             metrics.metadata_elapsed = metadata_started.elapsed();
             metrics.total_elapsed = started.elapsed();
-            return (None, metrics);
+            return (None, None, metrics);
         }
     };
     metrics.metadata_elapsed = metadata_started.elapsed();
@@ -565,7 +807,7 @@ async fn calculate_whole_file_checksum(
             expected_len
         );
         metrics.total_elapsed = started.elapsed();
-        return (None, metrics);
+        return (None, None, metrics);
     }
 
     let wait_started = Instant::now();
@@ -574,40 +816,66 @@ async fn calculate_whole_file_checksum(
 
     let blocking_started = Instant::now();
     let file_path_for_hash = file_path.clone();
-    let result = tokio::task::spawn_blocking(move || -> std::io::Result<String> {
-        let _permit = permit;
-        let mut file = std::fs::File::open(&file_path_for_hash)?;
-        let mut hasher = FlexHasher::from_checksum(&expected_checksum);
-        let mut buffer = vec![0u8; WHOLE_FILE_HASH_BUF_SIZE];
-        loop {
-            let read = file.read(&mut buffer)?;
-            if read == 0 {
-                break;
+    let mmap_strategy = if is_blake3_checksum(&expected_checksum) {
+        hash_io.strategy_for(Path::new(&file_path), metadata.len())
+    } else {
+        Blake3ReadStrategy::Buffered
+    };
+    let result =
+        tokio::task::spawn_blocking(move || -> std::io::Result<(String, Option<String>)> {
+            let _permit = permit;
+            let profiled = crate::core::utils::profiling::FsTimer::start();
+            let fingerprint = |file: &mut std::fs::File| {
+                crate::core::utils::content_hash::fast_file_content_hash_from_reader(
+                    file, &metadata,
+                )
+                .ok()
+            };
+            if let Some(hex) =
+                blake3_mmap_file_hash_full(Path::new(&file_path_for_hash), mmap_strategy)
+            {
+                profiled.stop("hash_mmap", expected_len);
+                let content_hash = std::fs::File::open(&file_path_for_hash)
+                    .ok()
+                    .and_then(|mut file| fingerprint(&mut file));
+                return Ok((hex, content_hash));
             }
-            hasher.update(&buffer[..read]);
-        }
-        Ok(hasher.finalize_hex())
-    })
-    .await;
+            let mut file = std::fs::File::open(&file_path_for_hash)?;
+            let mut hasher = FlexHasher::from_checksum(&expected_checksum);
+            let mut buffer = vec![0u8; WHOLE_FILE_HASH_BUF_SIZE];
+            let mut read_bytes = 0u64;
+            loop {
+                let read = file.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                read_bytes += read as u64;
+                hasher.update(&buffer[..read]);
+            }
+            profiled.stop("hash_read", read_bytes);
+            let content_hash = fingerprint(&mut file);
+            Ok((hasher.finalize_hex(), content_hash))
+        })
+        .await;
     metrics.blocking_hash_elapsed = blocking_started.elapsed();
 
-    let checksum = match result {
-        Ok(Ok(checksum)) => {
+    let (checksum, content_hash) = match result {
+        Ok(Ok((checksum, content_hash))) => {
             metrics.hashed_bytes = expected_len;
-            Some(checksum)
+            (Some(checksum), content_hash)
         }
         Ok(Err(err)) => {
             warn!("Whole-file hash failed for {}: {}", file_path, err);
-            None
+            (None, None)
         }
         Err(err) => {
             error!("Whole-file hash task panicked for {}: {}", file_path, err);
-            None
+            (None, None)
         }
     };
 
     metrics.total_elapsed = started.elapsed();
-    (checksum, metrics)
+    (checksum, content_hash, metrics)
 }
 
 pub(super) async fn recalculate_parts_for_jobs(
@@ -617,29 +885,48 @@ pub(super) async fn recalculate_parts_for_jobs(
     progress_tx: Option<&Sender<ProgressEvent>>,
     progress: HashRunProgress,
     cancel_rx: Option<&watch::Receiver<bool>>,
+    hash_io: WholeFileHashIo,
 ) -> (Vec<FileHashResult>, bool) {
     // Shared semaphore limits the total in-flight spawn_blocking hash tasks across all files.
     let semaphore = Arc::new(Semaphore::new(global_part_concurrency));
+    let game_formats = crate::core::game::registry().active().content_formats();
 
-    // Shared counter for completed files - used for progress reporting
-    let files_done = Arc::new(AtomicUsize::new(
-        progress.initial_files_done.min(progress.total_files),
-    ));
-    let parts_done = Arc::new(AtomicUsize::new(
-        progress.initial_parts_done.min(progress.total_parts),
-    ));
+    let counters = HashRunCounters {
+        files_done: Arc::new(AtomicUsize::new(
+            progress.initial_files_done.min(progress.total_files),
+        )),
+        total_files: progress.total_files,
+        parts_done: Arc::new(AtomicUsize::new(
+            progress.initial_parts_done.min(progress.total_parts),
+        )),
+        total_parts: progress.total_parts,
+        bytes_done: Arc::new(AtomicU64::new(
+            progress.initial_bytes_done.min(progress.total_bytes),
+        )),
+        total_bytes: progress.total_bytes,
+    };
     let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    // Prioritize heavy files first so big PBOs are not starved behind many tiny 1-part files.
-    jobs.sort_by_key(|job| Reverse(job.indexed_parts.len()));
+    if hash_io.rotational() {
+        order_hash_jobs_physically(&mut jobs).await;
+    } else {
+        order_hash_jobs(&mut jobs);
+    }
+    let direct_plan = hash_io.direct_read_plan();
     let progress_sender = progress_tx.cloned();
     let cancel_receiver = cancel_rx.cloned();
     let results = stream::iter(jobs.into_iter().map(|job| {
         let sem = semaphore.clone();
-        let done_counter = files_done.clone();
-        let part_counter = parts_done.clone();
+        let counters = counters.clone();
         let ptx = progress_sender.clone();
+        let job_bytes = job_estimated_bytes(&job);
+        let part_bytes: u64 = job
+            .indexed_parts
+            .iter()
+            .map(|(_, part)| part.remote_length)
+            .sum();
         let cancel = cancel_receiver.clone();
+        let direct_plan = direct_plan.clone();
         let cancelled_flag = cancelled.clone();
         async move {
             let FileHashJob {
@@ -649,13 +936,16 @@ pub(super) async fn recalculate_parts_for_jobs(
                 file_remote_checksum,
                 indexed_parts,
                 span_source,
+                has_local_baseline: _,
+                capture_identity,
             } = job;
             let parts_count = indexed_parts.len();
             if cancelled_flag.load(Ordering::Relaxed)
                 || cancel.as_ref().is_some_and(|rx| *rx.borrow())
             {
                 cancelled_flag.store(true, Ordering::Relaxed);
-                let completed = done_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                counters.bytes_done.fetch_add(job_bytes, Ordering::Relaxed);
+                let completed = counters.files_done.fetch_add(1, Ordering::Relaxed) + 1;
                 if completed.is_multiple_of(500) || completed == progress.total_files {
                     info!(
                         "Phase 1 progress: {}/{} files hashed (cancelling)",
@@ -666,73 +956,119 @@ pub(super) async fn recalculate_parts_for_jobs(
                     file_idx,
                     updated_parts: Vec::new(),
                     whole_file_checksum: None,
+                    content_hash: None,
                     file_path,
                     elapsed: std::time::Duration::ZERO,
                     parts_count,
                     missing_file: false,
                     part_metrics: Default::default(),
+                    verified: None,
                 };
             }
             let file_started = Instant::now();
             let missing_file = !Path::new(&file_path).exists();
-            let (part_calculation, whole_file_checksum) = if indexed_parts.is_empty()
-                && !file_remote_checksum.is_empty()
-            {
-                let (checksum, metrics) = calculate_whole_file_checksum(
-                    file_path.clone(),
-                    file_remote_checksum,
-                    file_length,
-                    sem,
-                )
-                .await;
-                (
-                    super::part_hashes::PartHashCalculation {
-                        parts: Vec::new(),
-                        metrics,
-                    },
-                    checksum,
-                )
+            let record_check = if capture_identity {
+                super::verified_record::capture_identity_async(&file_path)
+                    .await
+                    .map(|identity| {
+                        (
+                            identity,
+                            super::verified_record::parts_signature(
+                                &file_remote_checksum,
+                                indexed_parts.parts(),
+                            ),
+                            file_remote_checksum.clone(),
+                        )
+                    })
             } else {
-                let parts_only: Vec<FoxyModFilePart> =
-                    indexed_parts.iter().map(|(_, p)| p.clone()).collect();
-                let part_progress = ptx.clone().map(|tx| {
-                    PartHashProgress::new(
-                        part_counter.clone(),
-                        progress.total_parts,
-                        done_counter.clone(),
-                        progress.total_files,
-                        tx,
-                    )
-                });
-                (
-                    calculate_part_hashes(parts_only, &file_path, sem, span_source, part_progress)
-                        .await,
-                    None,
-                )
+                None
             };
+            let (part_calculation, whole_file_checksum) =
+                if indexed_parts.is_empty() && !file_remote_checksum.is_empty() {
+                    let (checksum, content_hash, metrics) = calculate_whole_file_checksum(
+                        file_path.clone(),
+                        file_remote_checksum,
+                        file_length,
+                        sem,
+                        hash_io,
+                    )
+                    .await;
+                    (
+                        super::part_hashes::PartHashCalculation {
+                            parts: Vec::new(),
+                            metrics,
+                            content_hash,
+                        },
+                        checksum,
+                    )
+                } else {
+                    let parts_only: Vec<FoxyModFilePart> =
+                        indexed_parts.iter().map(|(_, p)| p.clone()).collect();
+                    let part_progress = ptx
+                        .clone()
+                        .map(|tx| PartHashProgress::new(counters.clone(), tx));
+                    (
+                        calculate_part_hashes(
+                            parts_only,
+                            &file_path,
+                            sem,
+                            PartReadOptions {
+                                span_source,
+                                game_formats,
+                                reader_capacity: hash_io.part_reader_capacity(),
+                                sequential_scan: hash_io.rotational(),
+                                direct: direct_plan
+                                    .as_ref()
+                                    .filter(|_| span_source == PartSpanSource::DetectLocalLayout),
+                            },
+                            part_progress,
+                            cancel.clone(),
+                        )
+                        .await,
+                        None,
+                    )
+                };
             let file_elapsed = file_started.elapsed();
+            let content_hash = part_calculation.content_hash.clone();
             let updated_parts = if cancel.as_ref().is_some_and(|rx| *rx.borrow()) {
                 cancelled_flag.store(true, Ordering::Relaxed);
                 Vec::new()
             } else {
                 indexed_parts
-                    .into_iter()
+                    .indices()
+                    .iter()
+                    .copied()
                     .zip(part_calculation.parts)
-                    .map(|((part_idx, _), updated_part)| (part_idx, updated_part))
                     .collect()
             };
+            let verified = match record_check {
+                Some((before, signature, remote_checksum))
+                    if super::verified_record::result_is_clean(
+                        &remote_checksum,
+                        &updated_parts,
+                        whole_file_checksum.as_deref(),
+                    ) =>
+                {
+                    let after = super::verified_record::capture_identity_async(&file_path).await;
+                    (after.as_ref() == Some(&before)).then_some(
+                        super::verified_record::VerifiedFile {
+                            identity: before,
+                            signature,
+                        },
+                    )
+                }
+                _ => None,
+            };
 
-            // Report file-level progress
-            let completed = done_counter.fetch_add(1, Ordering::Relaxed) + 1;
+            // Parts report their own bytes; whole-file jobs and part lists
+            // without lengths are counted here, once the file is done.
+            let part_reported = if ptx.is_some() { part_bytes } else { 0 };
+            counters
+                .bytes_done
+                .fetch_add(job_bytes.saturating_sub(part_reported), Ordering::Relaxed);
+            let completed = counters.files_done.fetch_add(1, Ordering::Relaxed) + 1;
             if let Some(ref tx) = ptx {
-                let _ = tx.send(ProgressEvent::RecheckHashProgress {
-                    checked_files: completed.min(progress.total_files),
-                    total_files: progress.total_files,
-                    checked_parts: part_counter
-                        .load(Ordering::Relaxed)
-                        .min(progress.total_parts),
-                    total_parts: progress.total_parts,
-                });
+                let _ = tx.send(counters.event());
             }
             if completed.is_multiple_of(500) || completed == progress.total_files {
                 info!(
@@ -745,11 +1081,13 @@ pub(super) async fn recalculate_parts_for_jobs(
                 file_idx,
                 updated_parts,
                 whole_file_checksum,
+                content_hash,
                 file_path,
                 elapsed: file_elapsed,
                 parts_count,
                 missing_file,
                 part_metrics: part_calculation.metrics,
+                verified,
             }
         }
     }))
@@ -759,6 +1097,51 @@ pub(super) async fn recalculate_parts_for_jobs(
     let was_cancelled =
         cancelled.load(Ordering::Relaxed) || cancel_rx.as_ref().is_some_and(|rx| *rx.borrow());
     (results, was_cancelled)
+}
+
+/// Below this size a file costs about as much in seeking as in reading on a
+/// rotational disk.
+const SMALL_HASH_JOB_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Heavy files first so big archives are not starved behind many tiny files,
+/// then the small-file tail in path order, which keeps the files of one addon
+/// (downloaded together) next to each other on disk.
+fn order_hash_jobs(jobs: &mut [FileHashJob]) {
+    jobs.sort_by_cached_key(|job| {
+        if job_estimated_bytes(job) >= SMALL_HASH_JOB_BYTES {
+            (false, Reverse(job.indexed_parts.len()), String::new())
+        } else {
+            (true, Reverse(0), job.file_path.to_ascii_lowercase())
+        }
+    });
+}
+
+/// Rotational storage reads jobs in on-disk order, one sweep of the platter,
+/// so the two workers read neighbouring files and every move of the head is
+/// short. Resident and unlocatable files follow in path order.
+async fn order_hash_jobs_physically(jobs: &mut Vec<FileHashJob>) {
+    let started = Instant::now();
+    let paths: Vec<String> = jobs.iter().map(|job| job.file_path.clone()).collect();
+    let clusters = tokio::task::spawn_blocking(move || {
+        paths
+            .iter()
+            .map(|path| super::physical_order::first_cluster(Path::new(path)))
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap_or_default();
+    if clusters.len() != jobs.len() {
+        order_hash_jobs(jobs);
+        return;
+    }
+    let located =
+        super::physical_order::sort_by_first_cluster(jobs, clusters, |job| job.file_path.as_str());
+    info!(
+        "Hash job physical order: files={} located={} elapsed={:.3}s",
+        jobs.len(),
+        located,
+        started.elapsed().as_secs_f64()
+    );
 }
 
 fn job_estimated_bytes(job: &FileHashJob) -> u64 {
@@ -803,10 +1186,14 @@ pub(super) fn missing_local_hash_pass_is_noop(data_tree: &Tree, file_indices: &[
     })
 }
 
-fn split_benchmark_jobs(jobs: &mut Vec<FileHashJob>) -> Vec<FileHashJob> {
-    const MAX_BENCHMARK_FILES: usize = 12;
-    const MAX_BENCHMARK_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_BENCHMARK_FILES_PER_GROUP: usize = 12;
+const MAX_BENCHMARK_BYTES_PER_GROUP: u64 = 512 * 1024 * 1024;
 
+/// Take the calibration sample out of `jobs`: enough files and bytes for
+/// `groups` disjoint trial groups, so every trial hashes its own data and no
+/// byte is hashed twice or read warm from a previous trial.
+fn split_benchmark_jobs(jobs: &mut Vec<FileHashJob>, groups: usize) -> Vec<FileHashJob> {
+    let groups = groups.max(1);
     if jobs.len() < MIN_AUTO_BENCHMARK_FILES {
         return Vec::new();
     }
@@ -814,7 +1201,10 @@ fn split_benchmark_jobs(jobs: &mut Vec<FileHashJob>) -> Vec<FileHashJob> {
     // Layout-heavy PBOs can dominate real hashing time even when they are not
     // the largest files. Prefer those first, then fill the byte budget.
     jobs.sort_by_key(|job| Reverse((job.indexed_parts.len(), job_estimated_bytes(job))));
-    let take_count = jobs.len().min(MAX_BENCHMARK_FILES);
+    let min_files = MIN_AUTO_BENCHMARK_FILES.saturating_mul(groups);
+    let max_files = MAX_BENCHMARK_FILES_PER_GROUP.saturating_mul(groups);
+    let max_bytes = MAX_BENCHMARK_BYTES_PER_GROUP.saturating_mul(groups as u64);
+    let take_count = jobs.len().min(max_files);
     let mut selected = Vec::new();
     let mut selected_bytes = 0u64;
     for _ in 0..take_count {
@@ -824,7 +1214,7 @@ fn split_benchmark_jobs(jobs: &mut Vec<FileHashJob>) -> Vec<FileHashJob> {
         let job = jobs.remove(0);
         selected_bytes = selected_bytes.saturating_add(job_estimated_bytes(&job));
         selected.push(job);
-        if selected.len() >= MIN_AUTO_BENCHMARK_FILES && selected_bytes >= MAX_BENCHMARK_BYTES {
+        if selected.len() >= min_files && selected_bytes >= max_bytes {
             break;
         }
     }
@@ -834,6 +1224,54 @@ fn split_benchmark_jobs(jobs: &mut Vec<FileHashJob>) -> Vec<FileHashJob> {
 fn benchmark_sample_is_sufficient(benchmark_jobs: &[FileHashJob]) -> bool {
     benchmark_jobs.len() >= MIN_AUTO_BENCHMARK_FILES
         && benchmark_jobs.iter().map(job_estimated_bytes).sum::<u64>() >= MIN_AUTO_BENCHMARK_BYTES
+}
+
+fn benchmark_group_load_score(group: &[FileHashJob], totals: (u64, usize, usize)) -> u128 {
+    let (total_bytes, total_parts, total_files) = totals;
+    let bytes = group.iter().map(job_estimated_bytes).sum::<u64>() as u128;
+    let parts = group
+        .iter()
+        .map(|job| job.indexed_parts.len())
+        .sum::<usize>() as u128;
+    let files = group.len() as u128;
+    let total_bytes = total_bytes.max(1) as u128;
+    let total_parts = total_parts.max(1) as u128;
+    let total_files = total_files.max(1) as u128;
+    bytes * total_parts * total_files
+        + parts * total_bytes * total_files
+        + files * total_bytes * total_parts
+}
+
+/// Deal the sample into disjoint trial groups balanced by bytes, parts and
+/// file count. Groups that would be too small to judge are folded back until
+/// every remaining group is sufficient; the result has at least one group.
+fn deal_benchmark_groups(sample: Vec<FileHashJob>, groups: usize) -> Vec<Vec<FileHashJob>> {
+    let mut groups = groups.clamp(1, sample.len().max(1));
+    let totals = (
+        sample.iter().map(job_estimated_bytes).sum(),
+        sample.iter().map(|job| job.indexed_parts.len()).sum(),
+        sample.len(),
+    );
+    loop {
+        let mut dealt: Vec<Vec<FileHashJob>> = (0..groups).map(|_| Vec::new()).collect();
+        for job in &sample {
+            let index = dealt
+                .iter()
+                .enumerate()
+                .min_by_key(|(index, group)| (benchmark_group_load_score(group, totals), *index))
+                .map(|(index, _)| index)
+                .unwrap_or(0);
+            dealt[index].push(job.clone());
+        }
+        if groups == 1
+            || dealt
+                .iter()
+                .all(|group| benchmark_sample_is_sufficient(group))
+        {
+            return dealt;
+        }
+        groups -= 1;
+    }
 }
 
 #[derive(Default)]
@@ -858,6 +1296,8 @@ struct HashRunMetrics {
     layout_entry_payload_bytes: u64,
     mapped_parts: usize,
     fallback_parts: usize,
+    direct_files: usize,
+    direct_fallback_files: usize,
 }
 
 impl HashRunMetrics {
@@ -884,6 +1324,8 @@ impl HashRunMetrics {
             metrics.layout_entry_payload_bytes += result.part_metrics.layout_entry_payload_bytes;
             metrics.mapped_parts += result.part_metrics.mapped_parts;
             metrics.fallback_parts += result.part_metrics.fallback_parts;
+            metrics.direct_files += result.part_metrics.direct_files;
+            metrics.direct_fallback_files += result.part_metrics.direct_fallback_files;
         }
         metrics
     }
@@ -967,15 +1409,50 @@ fn benchmark_metrics_are_sufficient(metrics: &HashRunMetrics) -> bool {
         && metrics.hashed_bytes >= MIN_AUTO_BENCHMARK_BYTES
 }
 
+/// The checksum algorithm the jobs verify against, for the `SOL op=hash`
+/// line: a BLAKE3 pass and an MD5 pass have different compute references.
+fn hash_algorithm_label(jobs: &[FileHashJob]) -> &'static str {
+    let mut blake3 = false;
+    let mut md5 = false;
+    for checksum in jobs.iter().flat_map(|job| {
+        std::iter::once(job.file_remote_checksum.as_str()).chain(
+            job.indexed_parts
+                .iter()
+                .map(|(_, part)| part.remote_checksum.as_str()),
+        )
+    }) {
+        if checksum.is_empty() {
+            continue;
+        }
+        if is_blake3_checksum(checksum) {
+            blake3 = true;
+        } else {
+            md5 = true;
+        }
+        if blake3 && md5 {
+            return "mixed";
+        }
+    }
+    match (blake3, md5) {
+        (true, false) => "blake3",
+        (false, true) => "md5",
+        (true, true) => "mixed",
+        (false, false) => "unknown",
+    }
+}
+
 fn log_hash_run_metrics(
     label: &str,
     selected_profile: HashIoProfilePreference,
     wall_elapsed: std::time::Duration,
     results: &[FileHashResult],
+    operation_id: Option<&str>,
+    algorithm: &str,
+    cancelled: bool,
 ) {
     let metrics = HashRunMetrics::from_results(results);
     info!(
-        "Hash part run metrics: label={} profile={} wall={:.3}s files={} missing_files={} parts={} estimated_bytes={} hashed_bytes={} file_elapsed_sum={:.3}s file_elapsed_max={:.3}s part_total_sum={:.3}s metadata_sum={:.3}s layout_sum={:.3}s layout_parse_sum={:.3}s layout_map_sum={:.3}s semaphore_wait_sum={:.3}s blocking_hash_sum={:.3}s layout_files={} remote_span_files={} layout_entries={} layout_entry_payload_bytes={} mapped_parts={} fallback_parts={}",
+        "Hash part run metrics: label={} profile={} wall={:.3}s files={} missing_files={} parts={} estimated_bytes={} hashed_bytes={} file_elapsed_sum={:.3}s file_elapsed_max={:.3}s part_total_sum={:.3}s metadata_sum={:.3}s layout_sum={:.3}s layout_parse_sum={:.3}s layout_map_sum={:.3}s semaphore_wait_sum={:.3}s blocking_hash_sum={:.3}s layout_files={} remote_span_files={} layout_entries={} layout_entry_payload_bytes={} mapped_parts={} fallback_parts={} direct_files={} direct_fallback_files={}",
         label,
         selected_profile,
         wall_elapsed.as_secs_f64(),
@@ -998,11 +1475,40 @@ fn log_hash_run_metrics(
         metrics.layout_entries,
         metrics.layout_entry_payload_bytes,
         metrics.mapped_parts,
-        metrics.fallback_parts
+        metrics.fallback_parts,
+        metrics.direct_files,
+        metrics.direct_fallback_files
     );
     // Speed-of-light accounting (see conventions/SPEED_OF_LIGHT.md, O3).
     // No absolute light is computed in-app; compare this rate to the best
-    // demonstrated hash run for the same storage path.
+    // demonstrated hash run for the same storage path. `compute_s` and
+    // `wait_s` are legacy names: they are the summed blocking-task elapsed
+    // (reads and scheduling included, not CPU service) and the summed
+    // semaphore wait, repeated under their accurate names.
+    let blocking_s = format!("{:.3}", metrics.blocking_hash_elapsed_sum.as_secs_f64());
+    let permit_wait_s = format!("{:.3}", metrics.semaphore_wait_elapsed_sum.as_secs_f64());
+    let mut extras = vec![
+        ("label", label.to_string()),
+        ("files", metrics.files.to_string()),
+        ("parts", metrics.parts.to_string()),
+        ("compute_s", blocking_s.clone()),
+        ("wait_s", permit_wait_s.clone()),
+        ("blocking_elapsed_s", blocking_s),
+        ("permit_wait_s", permit_wait_s),
+        (
+            "file_elapsed_max_s",
+            format!("{:.3}", metrics.file_elapsed_max.as_secs_f64()),
+        ),
+        ("missing_files", metrics.missing_files.to_string()),
+        ("profile", selected_profile.to_string()),
+        ("algorithm", algorithm.to_string()),
+        ("timer_scope", "batch_wall".to_string()),
+        (
+            "outcome",
+            if cancelled { "cancelled" } else { "completed" }.to_string(),
+        ),
+    ];
+    extras.extend(op_id_extra(operation_id));
     info!(
         "{}",
         sol_line(
@@ -1010,19 +1516,7 @@ fn log_hash_run_metrics(
             metrics.hashed_bytes,
             wall_elapsed,
             &SolLight::SelfBaseline,
-            &[
-                ("label", label.to_string()),
-                ("files", metrics.files.to_string()),
-                ("parts", metrics.parts.to_string()),
-                (
-                    "compute_s",
-                    format!("{:.3}", metrics.blocking_hash_elapsed_sum.as_secs_f64()),
-                ),
-                (
-                    "wait_s",
-                    format!("{:.3}", metrics.semaphore_wait_elapsed_sum.as_secs_f64()),
-                ),
-            ],
+            &extras,
         )
     );
 }
@@ -1106,17 +1600,89 @@ pub(super) fn log_addon_hash_metrics(label: &str, data_tree: &Tree, results: &[F
     }
 }
 
+/// Hashes `jobs`, restoring from the operation's verified-hash record the
+/// files it proves untouched, and refreshing the record from what was read.
 pub(super) async fn recalculate_parts_for_jobs_with_profile(
     mut jobs: Vec<FileHashJob>,
+    context: &FoxyContext,
     requested_profile: HashIoProfilePreference,
     sticky_auto_profile: Option<HashIoProfilePreference>,
     progress_tx: Option<&Sender<ProgressEvent>>,
     total_files: usize,
     cancel_rx: Option<&watch::Receiver<bool>>,
 ) -> (Vec<FileHashResult>, HashProfileDecision, bool) {
+    let Some(record) = context.verified_hash_record.clone() else {
+        return hash_jobs_with_profile(
+            jobs,
+            context,
+            requested_profile,
+            sticky_auto_profile,
+            progress_tx,
+            total_files,
+            cancel_rx,
+        )
+        .await;
+    };
+    for job in &mut jobs {
+        job.capture_identity = true;
+    }
+    let (mut restored, jobs) = super::verified_record::restore(&record, jobs).await;
+    let (mut results, decision, cancelled) = if jobs.is_empty() && !restored.is_empty() {
+        (
+            Vec::new(),
+            HashProfileDecision {
+                reason: "every file restored from the verified-hash record".to_string(),
+                sticky: false,
+                ..HashProfileDecision::manual(requested_profile)
+            },
+            false,
+        )
+    } else {
+        hash_jobs_with_profile(
+            jobs,
+            context,
+            requested_profile,
+            sticky_auto_profile,
+            progress_tx,
+            total_files.saturating_sub(restored.len()),
+            cancel_rx,
+        )
+        .await
+    };
+    if !cancelled {
+        super::verified_record::update(&record, restored.iter().chain(&results)).await;
+    }
+    results.append(&mut restored);
+    (results, decision, cancelled)
+}
+
+async fn hash_jobs_with_profile(
+    mut jobs: Vec<FileHashJob>,
+    context: &FoxyContext,
+    requested_profile: HashIoProfilePreference,
+    sticky_auto_profile: Option<HashIoProfilePreference>,
+    progress_tx: Option<&Sender<ProgressEvent>>,
+    total_files: usize,
+    cancel_rx: Option<&watch::Receiver<bool>>,
+) -> (Vec<FileHashResult>, HashProfileDecision, bool) {
+    let operation_id = context.operation_id();
     let total_parts: usize = jobs.iter().map(|job| job.indexed_parts.len()).sum();
+    let total_bytes: u64 = jobs.iter().map(job_estimated_bytes).sum();
+    let algorithm = hash_algorithm_label(&jobs);
     let resource_profile = ResourceProfile::sample();
     let storage_class = detect_hash_storage_class(&jobs);
+    info!(
+        "Hash run power: {}",
+        crate::core::utils::power::recent_sample().summary()
+    );
+    super::storage_probe::log_storage_read_measurement(
+        context,
+        &jobs,
+        storage_class,
+        requested_profile,
+        cancel_rx,
+    )
+    .await;
     if resource_profile.pressure != ResourcePressure::Normal {
         info!(
             "Hash scheduler resource pressure detected: {}",
@@ -1160,12 +1726,21 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
             limits.file_concurrency,
             limits.global_part_concurrency,
             progress_tx,
-            HashRunProgress::new(total_files, total_parts),
+            HashRunProgress::new(total_files, total_parts, total_bytes),
             cancel_rx,
+            WholeFileHashIo::new(profile, storage_class),
         )
         .await;
         let (results, cancelled) = results;
-        log_hash_run_metrics("sticky_auto", profile, run_started.elapsed(), &results);
+        log_hash_run_metrics(
+            "sticky_auto",
+            profile,
+            run_started.elapsed(),
+            &results,
+            operation_id,
+            algorithm,
+            cancelled,
+        );
         let mut decision = HashProfileDecision::sticky_auto(profile);
         if let Some(reason) = cap_reason {
             decision.reason = reason;
@@ -1204,8 +1779,9 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
             limits.file_concurrency,
             limits.global_part_concurrency,
             progress_tx,
-            HashRunProgress::new(total_files, total_parts),
+            HashRunProgress::new(total_files, total_parts, total_bytes),
             cancel_rx,
+            WholeFileHashIo::new(effective_profile, storage_class),
         )
         .await;
         let (results, cancelled) = results;
@@ -1214,6 +1790,9 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
             effective_profile,
             run_started.elapsed(),
             &results,
+            operation_id,
+            algorithm,
+            cancelled,
         );
         let mut decision = HashProfileDecision::manual(effective_profile);
         if effective_profile != requested_profile {
@@ -1250,7 +1829,7 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
         &initial_limits,
     );
 
-    let benchmark_jobs = split_benchmark_jobs(&mut jobs);
+    let benchmark_jobs = split_benchmark_jobs(&mut jobs, MAX_BENCHMARK_GROUPS);
     let benchmark_bytes: u64 = benchmark_jobs.iter().map(job_estimated_bytes).sum();
     if !benchmark_sample_is_sufficient(&benchmark_jobs) {
         warn!(
@@ -1267,8 +1846,9 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
             initial_limits.file_concurrency,
             initial_limits.global_part_concurrency,
             progress_tx,
-            HashRunProgress::new(total_files, total_parts),
+            HashRunProgress::new(total_files, total_parts, total_bytes),
             cancel_rx,
+            WholeFileHashIo::new(initial_profile, storage_class),
         )
         .await;
         let (results, cancelled) = results;
@@ -1277,6 +1857,9 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
             initial_profile,
             run_started.elapsed(),
             &results,
+            operation_id,
+            algorithm,
+            cancelled,
         );
         return (
             results,
@@ -1297,20 +1880,39 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
         .iter()
         .map(|job| job.indexed_parts.len())
         .sum();
-    let benchmark_profiles = benchmark_profiles_for_environment(
+    let mut benchmark_profiles = benchmark_profiles_for_environment(
         initial_profile,
         resource_profile,
         storage_class,
         benchmark_jobs.len(),
         benchmark_total_parts,
     );
+    let profile_sequence = AUTO_BENCHMARK_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let profile_rotation = rotate_benchmark_profiles(&mut benchmark_profiles, profile_sequence);
+    info!(
+        "Hash profile auto trial order: operation_id={} sequence={} rotation={} profiles={}",
+        operation_id.unwrap_or("none"),
+        profile_sequence,
+        profile_rotation,
+        benchmark_profiles
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    );
     let benchmark_file_count = benchmark_jobs.len();
     let benchmark_started = Instant::now();
-    let mut best_results = None;
-    let mut best_profile = initial_profile;
-    let mut best_throughput = 0.0f64;
-    let mut best_hashed_bytes = 0u64;
-    let mut boost_remaining = false;
+    // Every profile hashes its own group of the sample, so the trials neither
+    // repeat work nor read data a previous trial pulled into the page cache.
+    // A sample too small to feed every profile tries the first ones only.
+    let groups = deal_benchmark_groups(benchmark_jobs, benchmark_profiles.len());
+    let group_count = groups.len();
+    let trials: Vec<(HashIoProfilePreference, Vec<FileHashJob>)> =
+        benchmark_profiles.into_iter().zip(groups).collect();
+    let mut benchmark_results: Vec<FileHashResult> = Vec::new();
+    let mut benchmark_hashed_bytes = 0u64;
+    let mut valid_trials: Vec<(HashIoProfilePreference, f64, bool)> = Vec::new();
+    let mut trial_progress = HashRunProgress::new(total_files, total_parts, total_bytes);
     if let Some(tx) = progress_tx {
         let _ = tx.send(ProgressEvent::Stage {
             label: "Hashing profile".to_string(),
@@ -1318,69 +1920,67 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
         });
     }
 
-    for profile in benchmark_profiles {
+    for (group_index, (profile, group_jobs)) in trials.into_iter().enumerate() {
         if cancel_rx.as_ref().is_some_and(|rx| *rx.borrow()) {
+            let benchmarked_files = benchmark_results.len();
             return (
-                Vec::new(),
+                benchmark_results,
                 HashProfileDecision {
                     requested: HashIoProfilePreference::Auto,
                     selected: initial_profile,
                     reason: "cancelled during auto benchmark".to_string(),
-                    benchmarked_files: 0,
-                    benchmarked_bytes: 0,
+                    benchmarked_files,
+                    benchmarked_bytes: benchmark_hashed_bytes,
                     benchmark_elapsed: benchmark_started.elapsed(),
                     sticky: false,
                 },
                 true,
             );
         }
-        let sample_jobs = benchmark_jobs.clone();
+        let group_parts: usize = group_jobs.iter().map(|job| job.indexed_parts.len()).sum();
+        let group_bytes: u64 = group_jobs.iter().map(job_estimated_bytes).sum();
+        let group_files = group_jobs.len();
         let limits = hash_scheduler_limits_for_environment(
-            sample_jobs.len(),
-            benchmark_total_parts,
+            group_files,
+            group_parts,
             profile,
             resource_profile,
             storage_class,
         );
         log_hash_scheduler_selection("auto_benchmark", requested_profile, profile, &limits);
         let profile_started = Instant::now();
-        let results = recalculate_parts_for_jobs(
-            sample_jobs,
+        let (results, cancelled) = recalculate_parts_for_jobs(
+            group_jobs,
             limits.file_concurrency,
             limits.global_part_concurrency,
-            None,
-            HashRunProgress::new(total_files, total_parts),
+            progress_tx,
+            trial_progress,
             cancel_rx,
+            WholeFileHashIo::new(profile, storage_class),
         )
         .await;
-        let (mut results, cancelled) = results;
-        if cancelled {
-            return (
-                results,
-                HashProfileDecision {
-                    requested: HashIoProfilePreference::Auto,
-                    selected: profile,
-                    reason: "cancelled during auto benchmark".to_string(),
-                    benchmarked_files: 0,
-                    benchmarked_bytes: 0,
-                    benchmark_elapsed: benchmark_started.elapsed(),
-                    sticky: false,
-                },
-                true,
-            );
-        }
         let elapsed = profile_started.elapsed();
         let elapsed_secs = elapsed.as_secs_f64().max(0.001);
         let metrics = HashRunMetrics::from_results(&results);
         let throughput = metrics.hashed_bytes as f64 / elapsed_secs;
-        log_hash_run_metrics("auto_benchmark_sample", profile, elapsed, &results);
-        info!(
-            "Hash profile auto benchmark sample: profile={} files={} missing_files={} parts={} estimated_bytes={} hashed_bytes={} elapsed={:.2}s throughput={:.2} MB/s limits={}/{} wait_ratio={:.4}",
+        log_hash_run_metrics(
+            "auto_benchmark_sample",
             profile,
+            elapsed,
+            &results,
+            operation_id,
+            algorithm,
+            cancelled,
+        );
+        info!(
+            "Hash profile auto benchmark sample: profile={} group={}/{} files={} missing_files={} parts={} estimated_bytes={} hashed_bytes={} elapsed={:.2}s throughput={:.2} MB/s limits={}/{} wait_ratio={:.4}",
+            profile,
+            group_index + 1,
+            group_count,
             results.len(),
             metrics.missing_files,
-            benchmark_total_parts,
-            benchmark_bytes,
+            group_parts,
+            group_bytes,
             metrics.hashed_bytes,
             elapsed_secs,
             throughput / (1024.0 * 1024.0),
@@ -1388,7 +1988,31 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
             limits.global_part_concurrency,
             benchmark_wait_ratio(&metrics)
         );
-        if !benchmark_metrics_are_sufficient(&metrics) {
+        // The group's hashes are real results whatever the trial says about
+        // the profile; they are never recomputed.
+        let sufficient = benchmark_metrics_are_sufficient(&metrics);
+        benchmark_hashed_bytes = benchmark_hashed_bytes.saturating_add(metrics.hashed_bytes);
+        trial_progress.initial_files_done += group_files;
+        trial_progress.initial_parts_done += group_parts;
+        trial_progress.initial_bytes_done += group_bytes;
+        benchmark_results.extend(results);
+        if cancelled {
+            let benchmarked_files = benchmark_results.len();
+            return (
+                benchmark_results,
+                HashProfileDecision {
+                    requested: HashIoProfilePreference::Auto,
+                    selected: profile,
+                    reason: "cancelled during auto benchmark".to_string(),
+                    benchmarked_files,
+                    benchmarked_bytes: benchmark_hashed_bytes,
+                    benchmark_elapsed: benchmark_started.elapsed(),
+                    sticky: false,
+                },
+                true,
+            );
+        }
+        if !sufficient {
             warn!(
                 "Hash profile auto benchmark rejected: profile={} files={} missing_files={} estimated_bytes={} hashed_bytes={} minimum_files={} minimum_hashed_bytes={}; using storage heuristic",
                 profile,
@@ -1401,58 +2025,79 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
             );
             continue;
         }
-        if throughput > best_throughput {
-            boost_remaining = benchmark_supports_boosted_aggressive(
-                profile,
-                &metrics,
-                storage_class,
-                resource_profile,
-            );
-            best_throughput = throughput;
-            best_profile = profile;
-            best_hashed_bytes = metrics.hashed_bytes;
-            best_results = Some(std::mem::take(&mut results));
-        }
+        let boost = benchmark_supports_boosted_aggressive(
+            profile,
+            &metrics,
+            storage_class,
+            resource_profile,
+        );
+        valid_trials.push((profile, throughput, boost));
     }
 
-    let Some(mut benchmark_results) = best_results else {
+    let Some((best_profile, best_throughput, boost_remaining)) =
+        select_benchmark_profile(initial_profile, &valid_trials)
+    else {
         warn!(
             "Hash profile auto benchmark produced no valid sample; using storage heuristic profile={}",
             initial_profile
         );
-        jobs.extend(benchmark_jobs);
         let run_started = Instant::now();
-        let results = recalculate_parts_for_jobs(
+        let (mut results, cancelled) = recalculate_parts_for_jobs(
             jobs,
             initial_limits.file_concurrency,
             initial_limits.global_part_concurrency,
             progress_tx,
-            HashRunProgress::new(total_files, total_parts),
+            HashRunProgress {
+                total_files,
+                total_parts,
+                total_bytes,
+                initial_files_done: benchmark_file_count,
+                initial_parts_done: benchmark_total_parts,
+                initial_bytes_done: benchmark_bytes,
+            },
             cancel_rx,
+            WholeFileHashIo::new(initial_profile, storage_class),
         )
         .await;
-        let (results, cancelled) = results;
         log_hash_run_metrics(
             "auto_heuristic",
             initial_profile,
             run_started.elapsed(),
             &results,
+            operation_id,
+            algorithm,
+            cancelled,
         );
+        benchmark_results.append(&mut results);
         return (
-            results,
+            benchmark_results,
             HashProfileDecision {
                 requested: HashIoProfilePreference::Auto,
                 selected: initial_profile,
                 reason: format!("auto benchmark invalid; {initial_reason}"),
-                benchmarked_files: 0,
-                benchmarked_bytes: 0,
-                benchmark_elapsed: std::time::Duration::ZERO,
+                benchmarked_files: benchmark_file_count,
+                benchmarked_bytes: benchmark_hashed_bytes,
+                benchmark_elapsed: benchmark_started.elapsed(),
                 sticky: false,
             },
             cancelled,
         );
     };
-
+    if let Some((fastest_profile, fastest_throughput, _)) = valid_trials
+        .iter()
+        .copied()
+        .max_by(|left, right| left.1.total_cmp(&right.1))
+        && fastest_profile != best_profile
+    {
+        info!(
+            "Hash profile auto stability guard: selected={} sample_bps={:.0} fastest={} fastest_bps={:.0} minimum_improvement_percent={:.1}",
+            best_profile,
+            best_throughput,
+            fastest_profile,
+            fastest_throughput,
+            PROFILE_SWITCH_MIN_IMPROVEMENT_PERCENT
+        );
+    }
     let benchmark_elapsed = benchmark_started.elapsed();
     let remaining_parts: usize = jobs.iter().map(|job| job.indexed_parts.len()).sum();
     let remaining_limits = if boost_remaining {
@@ -1485,7 +2130,7 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
         benchmark_file_count,
         benchmark_total_parts,
         benchmark_bytes,
-        best_hashed_bytes,
+        benchmark_hashed_bytes,
         benchmark_elapsed.as_secs_f64(),
         jobs.len(),
         remaining_limits.file_concurrency,
@@ -1499,6 +2144,13 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
             total_files,
             checked_parts: benchmark_total_parts.min(total_parts),
             total_parts,
+            checked_bytes: benchmark_bytes.min(total_bytes),
+            total_bytes,
+        });
+        let remaining_bytes: u64 = jobs.iter().map(job_estimated_bytes).sum();
+        let _ = tx.send(ProgressEvent::HashEstimate {
+            remaining_bytes,
+            bytes_per_sec: best_throughput as u64,
         });
     }
     let remaining_started = Instant::now();
@@ -1510,18 +2162,43 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
         HashRunProgress {
             total_files,
             total_parts,
+            total_bytes,
             initial_files_done: benchmark_file_count,
             initial_parts_done: benchmark_total_parts,
+            initial_bytes_done: benchmark_bytes,
         },
         cancel_rx,
+        WholeFileHashIo::new(best_profile, storage_class),
     )
     .await;
     let (mut remaining_results, cancelled) = remaining_results;
+    let remaining_elapsed = remaining_started.elapsed();
     log_hash_run_metrics(
         "auto_selected_remaining",
         best_profile,
-        remaining_started.elapsed(),
+        remaining_elapsed,
         &remaining_results,
+        operation_id,
+        algorithm,
+        cancelled,
+    );
+    let heldout = HashRunMetrics::from_results(&remaining_results);
+    let heldout_throughput =
+        heldout.hashed_bytes as f64 / remaining_elapsed.as_secs_f64().max(0.001);
+    let generalization_ratio = heldout_throughput / best_throughput.max(f64::EPSILON);
+    info!(
+        "Hash profile auto heldout: selected={} files={} missing_files={} parts={} estimated_bytes={} hashed_bytes={} elapsed={:.3}s sample_bps={:.0} heldout_bps={:.0} generalization_ratio={:.4} sufficient={}",
+        best_profile,
+        heldout.files,
+        heldout.missing_files,
+        heldout.parts,
+        heldout.estimated_bytes,
+        heldout.hashed_bytes,
+        remaining_elapsed.as_secs_f64(),
+        best_throughput,
+        heldout_throughput,
+        generalization_ratio,
+        benchmark_metrics_are_sufficient(&heldout),
     );
     benchmark_results.append(&mut remaining_results);
     (
@@ -1541,7 +2218,7 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
                 )
             },
             benchmarked_files: benchmark_file_count,
-            benchmarked_bytes: best_hashed_bytes,
+            benchmarked_bytes: benchmark_hashed_bytes,
             benchmark_elapsed,
             sticky: true,
         },
@@ -1553,24 +2230,198 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
 mod tests {
     use super::*;
 
+    #[test]
+    fn benchmark_profile_order_rotates_with_operation_sequence() {
+        let original = vec![
+            HashIoProfilePreference::Conservative,
+            HashIoProfilePreference::Balanced,
+            HashIoProfilePreference::Aggressive,
+        ];
+        let mut first = original.clone();
+        assert_eq!(rotate_benchmark_profiles(&mut first, 0), 0);
+        assert_eq!(first, original);
+
+        let mut second = original.clone();
+        assert_eq!(rotate_benchmark_profiles(&mut second, 1), 1);
+        assert_eq!(
+            second,
+            vec![
+                HashIoProfilePreference::Balanced,
+                HashIoProfilePreference::Aggressive,
+                HashIoProfilePreference::Conservative,
+            ]
+        );
+    }
+
+    #[test]
+    fn benchmark_profile_keeps_initial_choice_for_small_sample_wins() {
+        let selected = select_benchmark_profile(
+            HashIoProfilePreference::Aggressive,
+            &[
+                (HashIoProfilePreference::Aggressive, 100.0, true),
+                (HashIoProfilePreference::Balanced, 109.9, false),
+            ],
+        );
+        assert_eq!(
+            selected,
+            Some((HashIoProfilePreference::Aggressive, 100.0, true))
+        );
+    }
+
+    #[test]
+    fn benchmark_profile_switches_for_a_material_sample_win() {
+        let selected = select_benchmark_profile(
+            HashIoProfilePreference::Aggressive,
+            &[
+                (HashIoProfilePreference::Aggressive, 100.0, true),
+                (HashIoProfilePreference::Balanced, 111.0, false),
+            ],
+        );
+        assert_eq!(
+            selected,
+            Some((HashIoProfilePreference::Balanced, 111.0, false))
+        );
+    }
+
+    #[test]
+    fn benchmark_profile_uses_fastest_valid_trial_when_initial_is_missing() {
+        let selected = select_benchmark_profile(
+            HashIoProfilePreference::Aggressive,
+            &[
+                (HashIoProfilePreference::Conservative, 90.0, false),
+                (HashIoProfilePreference::Balanced, 100.0, false),
+            ],
+        );
+        assert_eq!(
+            selected,
+            Some((HashIoProfilePreference::Balanced, 100.0, false))
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn only_files_that_match_the_remote_carry_a_verified_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let job = |name: &str, content: &[u8], remote: &[u8]| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, content).unwrap();
+            FileHashJob {
+                file_path: path.to_str().unwrap().to_owned(),
+                file_length: content.len() as u64,
+                indexed_parts: JobParts::owned(vec![(
+                    0,
+                    FoxyModFilePart {
+                        remote_length: remote.len() as u64,
+                        remote_checksum: blake3::hash(remote).to_hex().to_uppercase(),
+                        ..Default::default()
+                    },
+                )]),
+                capture_identity: true,
+                ..test_job(0, 0)
+            }
+        };
+        let jobs = vec![
+            job("clean.pbo", b"same bytes", b"same bytes"),
+            job("stale.pbo", b"old bytes!", b"new bytes!"),
+        ];
+        let (results, cancelled) = recalculate_parts_for_jobs(
+            jobs,
+            2,
+            2,
+            None,
+            HashRunProgress::new(2, 2, 20),
+            None,
+            WholeFileHashIo::new(HashIoProfilePreference::Auto, HashStorageClass::Ssd),
+        )
+        .await;
+        assert!(!cancelled);
+        let verified = |name: &str| {
+            results
+                .iter()
+                .find(|result| result.file_path.ends_with(name))
+                .unwrap()
+                .verified
+                .is_some()
+        };
+        assert!(verified("clean.pbo"));
+        assert!(!verified("stale.pbo"));
+    }
+
+    #[test]
+    fn jobs_share_the_tree_parts_and_hand_them_back_whole() {
+        use crate::core::models::model_tree::FileNode;
+        let part = |file_id: u64, order: i64| FoxyModFilePart {
+            file_id,
+            data_order: order,
+            path: format!("p{order}"),
+            ..Default::default()
+        };
+        let mut tree = Tree {
+            files: vec![
+                FoxyModFile {
+                    id: 1,
+                    local_checksum: "LOCAL".into(),
+                    ..Default::default()
+                },
+                FoxyModFile {
+                    id: 2,
+                    ..Default::default()
+                },
+            ],
+            parts: vec![part(1, 1), part(2, 0), part(1, 0)],
+            file_nodes: vec![
+                FileNode {
+                    file_idx: 0,
+                    parts: vec![0, 2],
+                },
+                FileNode {
+                    file_idx: 1,
+                    parts: vec![1, 9],
+                },
+            ],
+            ..Default::default()
+        };
+        let lent = lend_tree_parts(&mut tree);
+        assert!(tree.parts.is_empty());
+        let jobs = build_file_hash_jobs(&tree, &lent, &[0, 1], PartSpanSource::DetectLocalLayout);
+        let listed = |job: &FileHashJob| -> Vec<(usize, String)> {
+            job.indexed_parts
+                .iter()
+                .map(|(index, part)| (index, part.path.clone()))
+                .collect()
+        };
+        assert_eq!(listed(&jobs[0]), vec![(2, "p0".into()), (0, "p1".into())]);
+        assert!(jobs[0].has_local_baseline);
+        assert_eq!(listed(&jobs[1]), vec![(1, "p0".into())]);
+        assert!(!jobs[1].has_local_baseline);
+        drop(jobs);
+        return_tree_parts(&mut tree, lent);
+        assert_eq!(tree.parts.len(), 3);
+        assert_eq!(tree.parts[2].path, "p0");
+    }
+
     fn test_job(parts: usize, bytes_per_part: u64) -> FileHashJob {
         FileHashJob {
             file_idx: 0,
             file_path: String::new(),
             file_length: (parts as u64).saturating_mul(bytes_per_part),
             file_remote_checksum: String::new(),
-            indexed_parts: (0..parts)
-                .map(|idx| {
-                    (
-                        idx,
-                        FoxyModFilePart {
-                            remote_length: bytes_per_part,
-                            ..Default::default()
-                        },
-                    )
-                })
-                .collect(),
+            indexed_parts: JobParts::owned(
+                (0..parts)
+                    .map(|idx| {
+                        (
+                            idx,
+                            FoxyModFilePart {
+                                remote_length: bytes_per_part,
+                                ..Default::default()
+                            },
+                        )
+                    })
+                    .collect(),
+            ),
             span_source: PartSpanSource::DetectLocalLayout,
+            has_local_baseline: false,
+            capture_identity: false,
         }
     }
 
@@ -1630,6 +2481,69 @@ mod tests {
         assert!(!missing_local_hash_pass_is_noop(&tree, &[0]));
     }
 
+    #[test]
+    fn storage_class_snapshot_is_reused_and_invalidated() {
+        invalidate_storage_class_cache();
+        let first = storage_class_mounts();
+        assert!(
+            STORAGE_CLASS_MOUNTS.lock().unwrap().is_some(),
+            "first lookup must populate the snapshot"
+        );
+        let second = storage_class_mounts();
+        assert_eq!(first.len(), second.len());
+        invalidate_storage_class_cache();
+        assert!(STORAGE_CLASS_MOUNTS.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn empty_path_has_unknown_storage_class() {
+        assert_eq!(
+            detect_storage_class_for_path("   "),
+            HashStorageClass::Unknown
+        );
+    }
+
+    #[tokio::test]
+    async fn whole_file_checksum_uses_mmap_for_blake3_on_ssd() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.bin");
+        let bytes = vec![0x5au8; 256 * 1024];
+        std::fs::write(&path, &bytes).unwrap();
+        let expected = blake3::hash(&bytes).to_hex().to_uppercase();
+
+        let (checksum, _, _) = calculate_whole_file_checksum(
+            path.to_string_lossy().to_string(),
+            expected.clone(),
+            bytes.len() as u64,
+            Arc::new(Semaphore::new(1)),
+            WholeFileHashIo::new(HashIoProfilePreference::Auto, HashStorageClass::Ssd),
+        )
+        .await;
+
+        assert_eq!(checksum.as_deref(), Some(expected.as_str()));
+    }
+
+    #[tokio::test]
+    async fn whole_file_checksum_md5_ignores_mmap_strategy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.bin");
+        std::fs::write(&path, b"hello").unwrap();
+        let mut md5 = FlexHasher::new_md5();
+        md5.update(b"hello");
+        let expected = md5.finalize_hex();
+
+        let (checksum, _, _) = calculate_whole_file_checksum(
+            path.to_string_lossy().to_string(),
+            expected.clone(),
+            5,
+            Arc::new(Semaphore::new(1)),
+            WholeFileHashIo::new(HashIoProfilePreference::Aggressive, HashStorageClass::Ssd),
+        )
+        .await;
+
+        assert_eq!(checksum.as_deref(), Some(expected.as_str()));
+    }
+
     #[tokio::test]
     async fn whole_file_checksum_hashes_no_part_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -1637,11 +2551,12 @@ mod tests {
         std::fs::write(&path, b"hello").unwrap();
         let expected = blake3::hash(b"hello").to_hex().to_uppercase();
 
-        let (checksum, metrics) = calculate_whole_file_checksum(
+        let (checksum, _, metrics) = calculate_whole_file_checksum(
             path.to_string_lossy().to_string(),
             expected.clone(),
             5,
             Arc::new(Semaphore::new(1)),
+            WholeFileHashIo::new(HashIoProfilePreference::Auto, HashStorageClass::Unknown),
         )
         .await;
 
@@ -1656,11 +2571,12 @@ mod tests {
         std::fs::write(&path, b"hello").unwrap();
         let expected = blake3::hash(b"hello").to_hex().to_uppercase();
 
-        let (checksum, metrics) = calculate_whole_file_checksum(
+        let (checksum, _, metrics) = calculate_whole_file_checksum(
             path.to_string_lossy().to_string(),
             expected,
             10,
             Arc::new(Semaphore::new(1)),
+            WholeFileHashIo::new(HashIoProfilePreference::Auto, HashStorageClass::Unknown),
         )
         .await;
 
@@ -1741,10 +2657,57 @@ mod tests {
             test_job(32, 1024),
             test_job(16, 1024),
         ];
-        let selected = split_benchmark_jobs(&mut jobs);
+        let selected = split_benchmark_jobs(&mut jobs, 1);
         assert_eq!(selected.len(), 5);
         assert!(job_estimated_bytes(&selected[0]) >= job_estimated_bytes(&selected[1]));
         assert_eq!(selected[0].indexed_parts.len(), 64);
+    }
+
+    #[test]
+    fn benchmark_sample_scales_with_the_number_of_trial_groups() {
+        // 40 files of 128 MiB: one group stops at 12 files / 512 MiB, three
+        // groups take three times as much so each trial gets its own data.
+        let mut jobs: Vec<FileHashJob> = (0..40).map(|_| test_job(1, 128 << 20)).collect();
+        let one = split_benchmark_jobs(&mut jobs.clone(), 1);
+        assert_eq!(one.len(), 4);
+        let three = split_benchmark_jobs(&mut jobs, 3);
+        assert_eq!(three.len(), 12);
+        assert_eq!(jobs.len(), 28);
+    }
+
+    #[test]
+    fn benchmark_groups_are_disjoint_balanced_and_each_sufficient() {
+        let sample: Vec<FileHashJob> = (0..12).map(|i| test_job(12 - i, 32 << 20)).collect();
+        let groups = deal_benchmark_groups(sample.clone(), 3);
+        assert_eq!(groups.len(), 3);
+        let total: usize = groups.iter().map(Vec::len).sum();
+        assert_eq!(total, sample.len());
+        let parts: Vec<Vec<usize>> = groups
+            .iter()
+            .map(|group| group.iter().map(|job| job.indexed_parts.len()).collect())
+            .collect();
+        assert_eq!(parts, [[12, 7, 6, 1], [11, 8, 5, 2], [10, 9, 4, 3]]);
+        assert!(parts.iter().all(|group| group.iter().sum::<usize>() == 26));
+        assert!(
+            groups
+                .iter()
+                .all(|group| benchmark_sample_is_sufficient(group))
+        );
+    }
+
+    #[test]
+    fn benchmark_groups_fold_back_until_every_group_can_judge() {
+        // Four 96 MiB files: three groups would be one or two files each,
+        // below the minimum, so the sample folds to one group.
+        let sample: Vec<FileHashJob> = (0..4).map(|_| test_job(1, 96 << 20)).collect();
+        let groups = deal_benchmark_groups(sample, 3);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].len(), 4);
+        // Six such files feed two groups of three, not three of two.
+        let sample: Vec<FileHashJob> = (0..6).map(|_| test_job(1, 96 << 20)).collect();
+        let groups = deal_benchmark_groups(sample, 3);
+        assert_eq!(groups.len(), 2);
+        assert!(deal_benchmark_groups(Vec::new(), 3).len() == 1);
     }
 
     #[test]
@@ -2013,6 +2976,48 @@ mod tests {
     }
 
     // ── job_estimated_bytes ─────────────────────────────────────────────
+
+    #[test]
+    fn rotational_storage_reads_parts_in_larger_requests() {
+        let io = |storage| WholeFileHashIo::new(HashIoProfilePreference::Auto, storage);
+        assert_eq!(
+            io(HashStorageClass::Hdd).part_reader_capacity(),
+            super::super::part_hashes::ROTATIONAL_HASH_READER_CAPACITY
+        );
+        assert_eq!(
+            io(HashStorageClass::Ssd).part_reader_capacity(),
+            super::super::part_hashes::HASH_READER_CAPACITY
+        );
+    }
+
+    #[test]
+    fn hash_jobs_run_heavy_first_then_small_files_in_path_order() {
+        let job = |path: &str, parts: usize, bytes_per_part: u64| FileHashJob {
+            file_path: path.to_string(),
+            ..test_job(parts, bytes_per_part)
+        };
+        let mut jobs = vec![
+            job("D:/repo/@b/addons/small.pbo", 40, 1024),
+            job("D:/repo/@a/addons/big.pbo", 10, 8 * 1024 * 1024),
+            job("D:/repo/@A/mod.cpp", 1, 100),
+            job("D:/repo/@c/addons/huge.pbo", 400, 1024 * 1024),
+            job("D:/repo/@b/addons/small.pbo.bisign", 1, 500),
+        ];
+
+        order_hash_jobs(&mut jobs);
+
+        let order: Vec<&str> = jobs.iter().map(|job| job.file_path.as_str()).collect();
+        assert_eq!(
+            order,
+            [
+                "D:/repo/@c/addons/huge.pbo",
+                "D:/repo/@a/addons/big.pbo",
+                "D:/repo/@A/mod.cpp",
+                "D:/repo/@b/addons/small.pbo",
+                "D:/repo/@b/addons/small.pbo.bisign",
+            ]
+        );
+    }
 
     #[test]
     fn job_estimated_bytes_sums_part_lengths() {

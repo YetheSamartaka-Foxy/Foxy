@@ -61,6 +61,10 @@ impl FoxyModFilePart {
         })
     }
 
+    pub(crate) fn id_is_persisted_rowid(id: u64) -> bool {
+        (1..=i64::MAX as u64).contains(&id)
+    }
+
     pub(crate) fn file_checksums_are_clean(
         file_local_checksum: &str,
         file_remote_checksum: &str,
@@ -227,5 +231,14 @@ mod tests {
         assert!(part.local_checksum.is_empty());
         assert_eq!(part.local_length, 0);
         assert_eq!(part.local_start, 0);
+    }
+
+    #[test]
+    fn persisted_rowid_range_rejects_synthetic_and_zero_ids() {
+        assert!(FoxyModFilePart::id_is_persisted_rowid(1));
+        assert!(FoxyModFilePart::id_is_persisted_rowid(i64::MAX as u64));
+        assert!(!FoxyModFilePart::id_is_persisted_rowid(0));
+        assert!(!FoxyModFilePart::id_is_persisted_rowid(u64::MAX));
+        assert!(!FoxyModFilePart::id_is_persisted_rowid(u64::MAX - 7));
     }
 }

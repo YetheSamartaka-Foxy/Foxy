@@ -96,6 +96,24 @@ impl Foxy {
             total_bytes,
         });
 
+        if let Some(message) = direct_download_destination_problem(&plan, &destination_path) {
+            log::warn!(
+                "Direct download refused by destination check: op={} destination={} reason={}",
+                operation_id,
+                sanitize_log_path(&destination_path),
+                message
+            );
+            let _ = send_progress(DirectDownloadProgressEvent::Finished {
+                error_message: Some(message),
+                files_done: 0,
+                files_total,
+                downloaded_bytes: 0,
+                total_bytes,
+                elapsed: started_at.elapsed(),
+            });
+            return;
+        }
+
         if files_total == 0 {
             log::warn!(
                 "Direct download plan was empty: op={} elapsed={:.2?}",
@@ -357,4 +375,69 @@ impl Foxy {
             started_at.elapsed()
         );
     }
+}
+
+/// The blocking finding for a direct download destination, phrased for the
+/// user: a FAT drive and a file of 4 GiB or more, a read-only drive, a name
+/// Windows cannot create, or a case collision. `None` when the plan can be
+/// written; survivable findings are logged only.
+fn direct_download_destination_problem(
+    plan: &crate::ui::app::DirectDownloadPlan,
+    destination: &std::path::Path,
+) -> Option<String> {
+    use crate::core::utils::storage_compat::{
+        PathLimitReport, StorageIssueCode, StorageIssueSeverity, VolumeProber, evaluate_volume,
+    };
+
+    let volume = VolumeProber::new().probe(destination)?;
+    let paths: Vec<String> = plan
+        .files
+        .iter()
+        .map(|file| file.local_path.to_string_lossy().to_string())
+        .collect();
+    let report = PathLimitReport::from_files(
+        paths
+            .iter()
+            .zip(plan.files.iter())
+            .map(|(path, file)| (path.as_str(), file.size_bytes)),
+        &volume,
+    );
+    let mut issues = evaluate_volume("repository", destination, &volume);
+    issues.extend(report.issues("repository", destination, &volume));
+    let drive = volume.root.display().to_string();
+    for issue in issues {
+        if issue.severity >= StorageIssueSeverity::Warning {
+            log::warn!("{}", issue.log_line());
+        }
+        if issue.severity != StorageIssueSeverity::Blocking {
+            continue;
+        }
+        let message = match issue.code {
+            StorageIssueCode::FileExceedsFilesystemLimit => tr_fmt(
+                "{count} files are larger than the 4 GiB limit of {drive} ({fs}). Choose a folder on an NTFS or exFAT drive.",
+                &[
+                    ("count", issue.affected_files.to_string()),
+                    ("drive", drive.clone()),
+                    ("fs", issue.filesystem.clone()),
+                ],
+            ),
+            StorageIssueCode::ReadOnlyVolume => {
+                tr_fmt("{drive} is read-only.", &[("drive", drive.clone())])
+            }
+            StorageIssueCode::InvalidWindowsName => tr_fmt(
+                "{count} files have names Windows cannot create (for example {example}).",
+                &[
+                    ("count", issue.affected_files.to_string()),
+                    ("example", issue.example.clone()),
+                ],
+            ),
+            StorageIssueCode::CaseCollision => tr_fmt(
+                "Two files differ only by letter case ({example}) and cannot coexist on {drive}.",
+                &[("example", issue.example.clone()), ("drive", drive.clone())],
+            ),
+            _ => continue,
+        };
+        return Some(message);
+    }
+    None
 }

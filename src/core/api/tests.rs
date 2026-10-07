@@ -1,12 +1,14 @@
 use super::quick_scan::{
     StartupQuickScanEligibility, batch_eligible_repos, content_hash_baseline_ready_joined,
     launch_quick_scan_repo_eligible_joined, launch_quick_scan_repo_startup_eligibility,
-    quick_local_change_diff, refresh_content_hashes_when_tree_matches,
+    quick_local_change_diff, refresh_content_hashes_for_repository,
     remote_checksum_state_ready_joined,
 };
 use super::*;
 use crate::core::db::{FoxyDb, params};
-use crate::core::tasks::calculate_hashes::propagate_checksums_to_siblings;
+use crate::core::tasks::calculate_hashes::{
+    pre_propagate_sibling_checksums, propagate_checksums_to_siblings,
+};
 use std::collections::HashSet;
 
 /// Build a fresh Turso test database (full bootstrap schema) for fixtures.
@@ -278,7 +280,7 @@ async fn quick_scan_separates_same_url_instances_by_local_path() {
             .with_target_local_path(shared_root.to_string_lossy()),
     );
     assert!(
-        refresh_content_hashes_when_tree_matches(shared_context, repo_url, None).await,
+        refresh_content_hashes_for_repository(shared_context, repo_url, None).await,
         "shared instance should establish a clean content baseline"
     );
 
@@ -416,7 +418,7 @@ async fn shared_addon_propagation_keeps_sibling_quick_scan_clean() {
     .expect("insert sibling pending update");
 
     assert!(
-        refresh_content_hashes_when_tree_matches(context.clone(), repo_a_url, None).await,
+        refresh_content_hashes_for_repository(context.clone(), repo_a_url, None).await,
         "repo A should refresh content-hash baseline from shared files"
     );
 
@@ -477,6 +479,173 @@ async fn shared_addon_propagation_keeps_sibling_quick_scan_clean() {
     assert!(
         !pending_update_exists(&fdb, repo_b_url, "").await,
         "sibling pending update should be cleared after propagation"
+    );
+}
+
+#[tokio::test]
+async fn pre_propagation_copies_sibling_content_hash_so_quick_scan_stays_clean() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db = build_db().await;
+    let fdb = FoxyDb::from_turso(db.clone());
+
+    let context = Arc::new(FoxyContext::new(db.clone(), reqwest::Client::new()));
+
+    let shared_root = temp.path().join("shared");
+    let addon_dir = shared_root.join("@shared_addon");
+    std::fs::create_dir_all(&addon_dir).expect("create addon dir");
+    let shared_file = addon_dir.join("data.pbo");
+    std::fs::write(&shared_file, b"shared-addon-content-v1").expect("write shared file");
+
+    let repo_a_url = "https://example.invalid/repo-a/";
+    let repo_b_url = "https://example.invalid/repo-b/";
+    let addon_local_path = addon_dir.to_string_lossy().to_string();
+    let shared_file_path = shared_file.to_string_lossy().to_string();
+    let file_length = std::fs::metadata(&shared_file)
+        .expect("file metadata")
+        .len() as i64;
+
+    seed_repository(
+        &fdb,
+        1,
+        "Repo A",
+        repo_a_url,
+        &shared_root.to_string_lossy(),
+        "REPO_REMOTE",
+        "REPO_REMOTE",
+        "",
+    )
+    .await;
+    seed_repository(
+        &fdb,
+        2,
+        "Repo B",
+        repo_b_url,
+        &shared_root.to_string_lossy(),
+        "",
+        "REPO_REMOTE_B",
+        "",
+    )
+    .await;
+
+    seed_addon(
+        &fdb,
+        11,
+        "@shared_addon",
+        "https://example.invalid/repo-a/@shared_addon/",
+        &addon_local_path,
+        "MOD_REMOTE",
+        "MOD_REMOTE",
+        "",
+        true,
+    )
+    .await;
+    seed_addon(
+        &fdb,
+        12,
+        "@shared_addon",
+        "https://example.invalid/repo-b/@shared_addon/",
+        &addon_local_path,
+        "",
+        "MOD_REMOTE",
+        "",
+        true,
+    )
+    .await;
+
+    seed_repository_addon(&fdb, 1, 11).await;
+    seed_repository_addon(&fdb, 2, 12).await;
+
+    seed_file(
+        &fdb,
+        21,
+        "data.pbo",
+        "https://example.invalid/repo-a/@shared_addon/data.pbo",
+        &shared_file_path,
+        "FILE_REMOTE",
+        "FILE_REMOTE",
+        "",
+        file_length,
+        0,
+    )
+    .await;
+    seed_file(
+        &fdb,
+        22,
+        "data.pbo",
+        "https://example.invalid/repo-b/@shared_addon/data.pbo",
+        &shared_file_path,
+        "",
+        "FILE_REMOTE",
+        "",
+        file_length,
+        0,
+    )
+    .await;
+
+    seed_addon_file(&fdb, 11, 21).await;
+    seed_addon_file(&fdb, 12, 22).await;
+
+    assert!(
+        refresh_content_hashes_for_repository(context.clone(), repo_a_url, None).await,
+        "repo A should refresh content-hash baseline from shared files"
+    );
+
+    assert_eq!(
+        pre_propagate_sibling_checksums(context.clone(), repo_b_url).await,
+        1,
+        "repo B should receive the shared file tree checksum from repo A"
+    );
+
+    let (_, _, file_a_content) = checksums(&fdb, "files", 21).await;
+    let (file_b_local, file_b_remote, file_b_content) = checksums(&fdb, "files", 22).await;
+    assert_eq!(file_b_local, file_b_remote);
+    assert_eq!(file_b_content, file_a_content);
+    assert!(!file_b_content.is_empty());
+
+    let (_, _, addon_a_content) = checksums(&fdb, "addons", 11).await;
+    let (addon_b_local, addon_b_remote, addon_b_content) = checksums(&fdb, "addons", 12).await;
+    assert_eq!(addon_b_local, addon_b_remote);
+    assert_eq!(addon_b_content, addon_a_content);
+    assert!(!addon_b_content.is_empty());
+
+    // Tree checksums already copied by an earlier pass must still get the
+    // content-hash baseline on the next pass.
+    fdb.execute(
+        "UPDATE files SET local_content_hash = '' WHERE id = 22",
+        params![],
+    )
+    .await
+    .expect("clear sibling file content hash");
+    fdb.execute(
+        "UPDATE addons SET local_content_hash = '' WHERE id = 12",
+        params![],
+    )
+    .await
+    .expect("clear sibling addon content hash");
+    assert_eq!(
+        pre_propagate_sibling_checksums(context.clone(), repo_b_url).await,
+        0
+    );
+    let (_, _, file_b_content) = checksums(&fdb, "files", 22).await;
+    assert_eq!(file_b_content, file_a_content);
+    let (_, _, addon_b_content) = checksums(&fdb, "addons", 12).await;
+    assert_eq!(addon_b_content, addon_a_content);
+
+    let diff = quick_local_change_diff(
+        context.clone(),
+        repo_b_url,
+        None,
+        None,
+        None,
+        false,
+        true,
+        false,
+        None,
+    )
+    .await;
+    assert!(
+        !diff.iter().any(|m| m.needs_update),
+        "repo B should be clean once tree checksums and content baseline are propagated"
     );
 }
 
@@ -554,7 +723,7 @@ async fn content_hash_refresh_does_not_bless_addon_with_missing_manifest_file() 
     seed_addon_file(&fdb, 11, 22).await;
 
     assert!(
-        refresh_content_hashes_when_tree_matches(context, repo_url, None).await,
+        refresh_content_hashes_for_repository(context, repo_url, None).await,
         "content hash refresh should complete"
     );
 
@@ -859,4 +1028,311 @@ async fn startup_eligibility_requires_part_metadata() {
         launch_quick_scan_repo_startup_eligibility(context, repo_url).await,
         StartupQuickScanEligibility::NeedsBootstrap
     );
+}
+
+/// The preflight decides two things from part rows - "is any remote part
+/// checksum missing" and "is any part still unhashed" - and answers both with
+/// `LIMIT 1` probes rather than an aggregate over every part in the repository.
+/// A part whose file is not already proven clean must still hold the repository
+/// out of the fast path.
+#[tokio::test]
+async fn startup_eligibility_detects_a_part_missing_its_local_checksum() {
+    let db = create_test_db().await;
+    let fdb = FoxyDb::from_turso(db.clone());
+
+    let repo_url = "https://example.invalid/unhashed-part/";
+
+    seed_repository(
+        &fdb,
+        1,
+        "Unhashed part",
+        repo_url,
+        "",
+        "REPO_LOCAL",
+        "REPO_REMOTE",
+        "REPO_CONTENT",
+    )
+    .await;
+    // Blank addon content hash keeps the addon fast path from short-circuiting
+    // before the file and part levels are consulted.
+    seed_addon(
+        &fdb,
+        1,
+        "@unhashed",
+        "",
+        "",
+        "MOD_LOCAL",
+        "MOD_REMOTE",
+        "",
+        false,
+    )
+    .await;
+    seed_file(
+        &fdb,
+        1,
+        "data.pbo",
+        "",
+        "",
+        "FILE_LOCAL",
+        "FILE_REMOTE",
+        "FILE_CONTENT",
+        1024,
+        0,
+    )
+    .await;
+    seed_repository_addon(&fdb, 1, 1).await;
+    seed_addon_file(&fdb, 1, 1).await;
+    seed_subfile(&fdb, 1, 1, "", "PART_REMOTE").await;
+
+    let context = Arc::new(FoxyContext::new(db.clone(), reqwest::Client::new()));
+    assert_eq!(
+        launch_quick_scan_repo_startup_eligibility(context.clone(), repo_url).await,
+        StartupQuickScanEligibility::Ineligible
+    );
+
+    // A part with no remote checksum is a metadata gap, not a local one, and
+    // must also keep the repository out of the local-only path.
+    fdb.execute(
+        "UPDATE subfiles SET local_checksum = 'PART_LOCAL', remote_checksum = '' WHERE id = 1",
+        params![],
+    )
+    .await
+    .expect("clear part remote checksum");
+    assert_eq!(
+        launch_quick_scan_repo_startup_eligibility(context.clone(), repo_url).await,
+        StartupQuickScanEligibility::Ineligible
+    );
+
+    // Both part checksums present: only the blank addon content hash is left,
+    // which is a baseline refresh rather than a tree repair.
+    fdb.execute(
+        "UPDATE subfiles SET remote_checksum = 'PART_REMOTE' WHERE id = 1",
+        params![],
+    )
+    .await
+    .expect("restore part remote checksum");
+    assert_eq!(
+        launch_quick_scan_repo_startup_eligibility(context, repo_url).await,
+        StartupQuickScanEligibility::NeedsBootstrap
+    );
+}
+
+/// A part probe that cannot run answers nothing, not "nothing is missing". The
+/// preflight has no evidence either way, so the repository must fall back to the
+/// conservative verdict instead of being reported ready from a failed query.
+#[tokio::test]
+async fn startup_eligibility_is_conservative_when_a_part_probe_fails() {
+    let db = create_test_db().await;
+    let fdb = FoxyDb::from_turso(db.clone());
+
+    let repo_url = "https://example.invalid/broken-parts/";
+
+    seed_repository(
+        &fdb,
+        1,
+        "Broken parts",
+        repo_url,
+        "",
+        "REPO_LOCAL",
+        "REPO_REMOTE",
+        "REPO_CONTENT",
+    )
+    .await;
+    // Blank addon content hash keeps the addon fast path from short-circuiting
+    // before the part level is consulted.
+    seed_addon(
+        &fdb,
+        1,
+        "@broken",
+        "",
+        "",
+        "MOD_LOCAL",
+        "MOD_REMOTE",
+        "",
+        false,
+    )
+    .await;
+    seed_file(
+        &fdb,
+        1,
+        "data.pbo",
+        "",
+        "",
+        "FILE_LOCAL",
+        "FILE_REMOTE",
+        "FILE_CONTENT",
+        1024,
+        0,
+    )
+    .await;
+    seed_repository_addon(&fdb, 1, 1).await;
+    seed_addon_file(&fdb, 1, 1).await;
+    seed_subfile(&fdb, 1, 1, "PART_LOCAL", "PART_REMOTE").await;
+
+    let context = Arc::new(FoxyContext::new(db.clone(), reqwest::Client::new()));
+    assert_eq!(
+        launch_quick_scan_repo_startup_eligibility(context.clone(), repo_url).await,
+        StartupQuickScanEligibility::NeedsBootstrap
+    );
+
+    fdb.execute("DROP TABLE subfiles", params![])
+        .await
+        .expect("drop subfiles");
+
+    assert_eq!(
+        launch_quick_scan_repo_startup_eligibility(context, repo_url).await,
+        StartupQuickScanEligibility::Ineligible,
+        "a failed part probe must not be read as a clean repository"
+    );
+}
+
+/// A deselected optional addon is never downloaded, so its files can never earn
+/// local tree checksums, part checksums or content hashes. Counting it in the
+/// startup preflight left the repository `unknown` on every launch and forced a
+/// manual recheck that never stuck.
+#[tokio::test]
+async fn startup_eligibility_ignores_disabled_addon_without_local_state() {
+    let db = create_test_db().await;
+    let fdb = FoxyDb::from_turso(db.clone());
+
+    let repo_url = "https://example.invalid/optional/";
+
+    seed_repository(
+        &fdb,
+        1,
+        "Optional",
+        repo_url,
+        "",
+        "REPO_LOCAL",
+        "REPO_REMOTE",
+        "REPO_CONTENT",
+    )
+    .await;
+    seed_addon(
+        &fdb,
+        1,
+        "@required",
+        "",
+        "",
+        "MOD_LOCAL",
+        "MOD_REMOTE",
+        "MOD_CONTENT",
+        true,
+    )
+    .await;
+    seed_file(
+        &fdb,
+        1,
+        "data.pbo",
+        "",
+        "",
+        "FILE_LOCAL",
+        "FILE_REMOTE",
+        "FILE_CONTENT",
+        1024,
+        0,
+    )
+    .await;
+    seed_repository_addon(&fdb, 1, 1).await;
+    seed_addon_file(&fdb, 1, 1).await;
+    seed_subfile(&fdb, 1, 1, "PART_LOCAL", "PART_REMOTE").await;
+
+    // Never-downloaded optional addon: no local content hash anywhere and no
+    // local part checksum, mirroring a folder that does not exist on disk.
+    seed_addon(
+        &fdb,
+        2,
+        "@optional_not_installed",
+        "",
+        "",
+        "EMPTY_LOCAL",
+        "MOD_REMOTE_2",
+        "",
+        false,
+    )
+    .await;
+    seed_file(
+        &fdb,
+        2,
+        "missing.pbo",
+        "",
+        "",
+        "EMPTY_LOCAL",
+        "FILE_REMOTE_2",
+        "",
+        2048,
+        0,
+    )
+    .await;
+    seed_repository_addon(&fdb, 1, 2).await;
+    seed_addon_file(&fdb, 2, 2).await;
+    seed_subfile(&fdb, 2, 2, "", "PART_REMOTE_2").await;
+
+    let context = Arc::new(FoxyContext::new(db.clone(), reqwest::Client::new()));
+
+    // While the addon still looks enabled it blocks the fast path.
+    assert_eq!(
+        launch_quick_scan_repo_startup_eligibility(context.clone(), repo_url).await,
+        StartupQuickScanEligibility::Ineligible
+    );
+
+    fdb.execute("UPDATE addons SET enabled = 0 WHERE id = 2", params![])
+        .await
+        .expect("disable optional addon");
+
+    assert_eq!(
+        launch_quick_scan_repo_startup_eligibility(context, repo_url).await,
+        StartupQuickScanEligibility::Prevalidated
+    );
+    assert_eq!(
+        content_hash_baseline_ready_joined(&fdb, 1, "test").await,
+        Some(true)
+    );
+}
+
+#[tokio::test]
+async fn persisting_addon_selection_updates_only_changed_rows() {
+    use crate::core::tasks::addon_enabled_state::persist_repository_addon_enabled_states;
+    use std::collections::HashMap;
+
+    let db = create_test_db().await;
+    let fdb = FoxyDb::from_turso(db.clone());
+
+    let repo_url = "https://example.invalid/selection/";
+    let local_path = "D:/games/selection";
+
+    seed_repository(&fdb, 1, "Selection", repo_url, local_path, "", "", "").await;
+    seed_addon(&fdb, 1, "@keep", "", "", "", "", "", true).await;
+    seed_addon(&fdb, 2, "@Drop", "", "", "", "", "", false).await;
+    seed_repository_addon(&fdb, 1, 1).await;
+    seed_repository_addon(&fdb, 1, 2).await;
+
+    let context = Arc::new(FoxyContext::new(db.clone(), reqwest::Client::new()));
+    let mut overrides = HashMap::new();
+    overrides.insert("@keep".to_string(), true);
+    overrides.insert("@drop".to_string(), false);
+
+    let changed =
+        persist_repository_addon_enabled_states(context.clone(), repo_url, local_path, &overrides)
+            .await;
+    assert_eq!(changed, 1, "only the deselected addon should change");
+
+    let enabled_after = |id: i64| {
+        let fdb = fdb.clone();
+        async move {
+            fdb.query_one("SELECT enabled FROM addons WHERE id = ?", params![id])
+                .await
+                .expect("query addon")
+                .expect("addon row")
+                .get_bool("enabled")
+                .expect("enabled column")
+        }
+    };
+    assert!(enabled_after(1).await);
+    assert!(!enabled_after(2).await);
+
+    // Re-running is a no-op once the stored state already matches.
+    let changed_again =
+        persist_repository_addon_enabled_states(context, repo_url, local_path, &overrides).await;
+    assert_eq!(changed_again, 0);
 }

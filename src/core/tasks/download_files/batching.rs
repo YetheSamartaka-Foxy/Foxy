@@ -1,14 +1,15 @@
 use crate::core::api::ProgressEvent;
 use crate::core::models::context::FoxyContext;
 use crate::core::models::download_target_file::DownloadTargetFile;
-use crate::core::tasks::delta_patch::try_patch_first;
+use crate::core::tasks::calculate_hashes::PatchedFileSegments;
+use crate::core::tasks::delta_patch::{PatchRequestBudget, try_patch_first};
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use log::{debug, error, info, warn};
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::broadcast::Sender;
 use tokio::sync::{Semaphore, mpsc, watch};
 use tokio::time::sleep;
@@ -46,6 +47,9 @@ pub(crate) struct DownloadModCompletion {
     pub(crate) file_ids: HashSet<u64>,
     pub(crate) bytes: u64,
     pub(crate) success: bool,
+    /// Part checksums a delta-patch apply verified while writing the file, so
+    /// the hash stage can record them instead of re-reading the output.
+    pub(crate) patched_segments: Option<PatchedFileSegments>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -121,6 +125,7 @@ async fn download_single_file(
         permit_type
     );
 
+    let mut patched_segments: Option<PatchedFileSegments> = None;
     let (result, download_method): (Result<Option<TransferStats>, anyhow::Error>, &str) =
         if has_patch_plan {
             match try_patch_first(
@@ -131,17 +136,27 @@ async fn download_single_file(
                 rollback_session.clone(),
                 rate_limiter.clone(),
                 metrics.clone(),
+                scheduler.patch_apply_permits.clone(),
+                // The global permits bound the total; the per-file cap is the
+                // ceiling so the last blob in flight can take the permits the
+                // finished files freed instead of the fair share at dispatch.
+                PatchRequestBudget {
+                    range_permits: scheduler.range_permits.clone(),
+                    per_file_requests: scheduler.limits.max_ranges_per_file,
+                    max_run_bytes: scheduler.limits.range_chunk_target as u64,
+                },
             )
             .await
             {
-                Ok(true) => {
+                Ok(Some(segments)) => {
                     file.download_total
                         .store(expected_transfer_bytes, Ordering::SeqCst);
                     file.download_cycle
                         .store(expected_transfer_bytes, Ordering::SeqCst);
+                    patched_segments = Some(segments);
                     (Ok(None), "delta_patch")
                 }
-                Ok(false) => {
+                Ok(None) => {
                     let r = download_file_ranges(
                         context.clone(),
                         &file,
@@ -205,6 +220,7 @@ async fn download_single_file(
         .fetch_sub(1, Ordering::Relaxed);
     if is_large {
         scheduler.active_large_files.fetch_sub(1, Ordering::Relaxed);
+        scheduler.range_cap_changed.notify_waiters();
     }
 
     match &result {
@@ -287,6 +303,7 @@ async fn download_single_file(
                     file_ids: [file.file_id].into_iter().collect(),
                     bytes: file.size as u64,
                     success: true,
+                    patched_segments: patched_segments.take(),
                 };
                 if tx.try_send(completion).is_err() {
                     warn!(
@@ -373,10 +390,12 @@ pub(super) async fn process_mod_batch(
     let mut attempt = 0usize;
 
     let progress_stop = Arc::new(AtomicBool::new(false));
+    let progress_wake = Arc::new(tokio::sync::Notify::new());
     let progress_handle = if let Some(tx) = progress_tx.clone() {
         let mod_name = mod_name_arc.clone();
         let entries = progress_entries.clone();
         let stop_signal = progress_stop.clone();
+        let wake_signal = progress_wake.clone();
         Some(tokio::spawn(async move {
             let mut last_sent: Option<(usize, u64)> = None;
             loop {
@@ -402,7 +421,8 @@ pub(super) async fn process_mod_batch(
                     });
                     last_sent = Some(snapshot);
                 }
-                sleep(MOD_PROGRESS_TICK_INTERVAL).await;
+                let _ =
+                    tokio::time::timeout(MOD_PROGRESS_TICK_INTERVAL, wake_signal.notified()).await;
             }
             let (files_done, bytes_done) = summarize_mod_progress(&entries);
             let effective_total = mod_bytes_total.max(bytes_done as usize);
@@ -438,14 +458,18 @@ pub(super) async fn process_mod_batch(
         attempt += 1;
 
         let mut small_queue: VecDeque<DownloadTargetFile> = VecDeque::new();
-        let mut large_queue: VecDeque<DownloadTargetFile> = VecDeque::new();
+        let mut large_files: Vec<DownloadTargetFile> = Vec::new();
         for file in remaining.drain(..) {
             if file.size > LARGE_FILE_THRESHOLD {
-                large_queue.push_back(file);
+                large_files.push(file);
             } else {
                 small_queue.push_back(file);
             }
         }
+        // Longest-processing-time first: the biggest file claims a permit
+        // earliest, so it is not left transferring alone at the end of the run.
+        large_files.sort_by_key(|file| std::cmp::Reverse(file.size));
+        let mut large_queue: VecDeque<DownloadTargetFile> = VecDeque::from(large_files);
 
         let mut running_total = 0usize;
         let mut inflight: FuturesUnordered<_> = FuturesUnordered::new();
@@ -566,6 +590,17 @@ pub(super) async fn process_mod_batch(
             break;
         }
 
+        let mut final_wave =
+            if running_total == 1 && large_queue.is_empty() && small_queue.is_empty() {
+                let (_, bytes_done) = summarize_mod_progress(&progress_entries);
+                Some((
+                    Instant::now(),
+                    mod_bytes_total.saturating_sub(bytes_done as usize),
+                ))
+            } else {
+                None
+            };
+
         while let Some(res) = inflight.next().await {
             match res {
                 Ok((Ok(()), _is_large, _file)) => {
@@ -656,6 +691,33 @@ pub(super) async fn process_mod_batch(
                 }
                 break;
             }
+            if running_total == 1
+                && large_queue.is_empty()
+                && small_queue.is_empty()
+                && final_wave.is_none()
+            {
+                let (_, bytes_done) = summarize_mod_progress(&progress_entries);
+                final_wave = Some((
+                    Instant::now(),
+                    mod_bytes_total.saturating_sub(bytes_done as usize),
+                ));
+            }
+        }
+
+        if let Some((started, remaining_bytes)) = final_wave {
+            info!(
+                "Download final wave: op_id={} mod_id={} attempt={} remaining_bytes={} last_byte_tail_s={:.3} outcome={}",
+                context.operation_id().unwrap_or("none"),
+                batch.mod_id,
+                attempt,
+                remaining_bytes,
+                started.elapsed().as_secs_f64(),
+                if failed.is_empty() && !saw_cancelled_error {
+                    "completed"
+                } else {
+                    "incomplete"
+                }
+            );
         }
 
         if cancellation_requested(&cancel_rx) || saw_cancelled_error {
@@ -725,6 +787,7 @@ pub(super) async fn process_mod_batch(
 
     if let Some(handle) = progress_handle {
         progress_stop.store(true, Ordering::SeqCst);
+        progress_wake.notify_one();
         let _ = handle.await;
     }
 

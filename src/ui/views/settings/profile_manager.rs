@@ -30,8 +30,7 @@ pub struct Arma3ProfileAction {
 }
 
 impl Foxy {
-    /// List of detected Arma 3 profiles with rename/clone/delete actions,
-    /// rendered in the application settings under the profiles directory.
+    /// List of detected Arma 3 profiles with rename/clone/delete actions.
     pub(super) fn render_arma3_profile_management(&mut self, ui: &mut Ui, horizontal_padding: f32) {
         ui.horizontal(|ui| {
             ui.add_space(horizontal_padding);
@@ -147,7 +146,7 @@ impl Foxy {
     }
 
     /// Confirmation modal for the pending profile action.
-    pub(super) fn render_arma3_profile_action_modal(&mut self, ui: &mut Ui) {
+    pub(crate) fn render_arma3_profile_action_modal(&mut self, ui: &mut Ui) {
         let Some(action) = self.pending_arma3_profile_action.clone() else {
             return;
         };
@@ -161,12 +160,8 @@ impl Foxy {
         let mut close_modal = false;
         let mut confirmed = false;
         egui::Window::new(title)
-            .frame(
-                egui::Frame::window(&ui.ctx().global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(eframe::egui::CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ui.ctx()))
+            .title_frame(self.modal_window_chrome(ui.ctx()))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)

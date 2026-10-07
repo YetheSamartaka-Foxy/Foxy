@@ -33,11 +33,13 @@ use super::metrics::{
 use super::progress::{download_progress_percent, start_progress_ticker};
 use super::range_scheduler::{RangePartMeta, range_part_meta_path};
 use super::transfer::cancellation_requested;
+use crate::core::tasks::calculate_hashes::{HashStorageClass, detect_storage_class_for_path};
+use crate::core::utils::disk_space::{
+    DISK_SPACE_MARGIN_BYTES, DiskSpaceShortfall, disk_space_needed, disk_space_shortfall,
+};
 use crate::core::utils::resource_profile::{ResourcePressure, ResourceProfile};
 use crate::core::utils::speed_of_light::{SolLight, sol_line};
 
-/// Disk space safety margin (500 MB) to avoid filling the drive completely.
-const DISK_SPACE_MARGIN_BYTES: u64 = 500 * 1024 * 1024;
 /// Maximum retries for network connectivity pre-check.
 const CONNECTIVITY_CHECK_MAX_RETRIES: u32 = 3;
 /// Base delay for connectivity check retries.
@@ -49,11 +51,84 @@ const PROGRESS_CHECKPOINT_PRESSURE_BYTES: usize = 32 * 1024 * 1024;
 const PROGRESS_CHECKPOINT_SLOW_WRITE_MS: u128 = 250;
 const PROGRESS_CHECKPOINT_RECOVERY_FLUSHES: usize = 3;
 
-fn download_limits_for_profile(resource_profile: ResourceProfile) -> DownloadResourceLimits {
+fn download_limits_for_profile(
+    resource_profile: ResourceProfile,
+    destination_storage: HashStorageClass,
+) -> DownloadResourceLimits {
+    let rotational = matches!(
+        destination_storage,
+        HashStorageClass::Hdd | HashStorageClass::Removable
+    );
     match resource_profile.pressure {
+        ResourcePressure::Normal if rotational => DownloadResourceLimits::rotational(),
         ResourcePressure::Normal => DownloadResourceLimits::normal(),
+        ResourcePressure::Constrained if rotational => {
+            DownloadResourceLimits::constrained().with_rotational_destination()
+        }
         ResourcePressure::Constrained => DownloadResourceLimits::constrained(),
+        ResourcePressure::Severe if rotational => {
+            DownloadResourceLimits::severe().with_rotational_destination()
+        }
         ResourcePressure::Severe => DownloadResourceLimits::severe(),
+    }
+}
+
+/// Nominal sequential rate of a 7200 rpm disk. A reading aid, not a
+/// calibrated device bound: the traffic model counts logical bytes and cannot
+/// tell a platter read from a page-cache hit, so its ratio is labelled
+/// nominal and may legitimately exceed one on a warm run.
+const ROTATIONAL_SEQUENTIAL_BPS: u64 = 110_000_000;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct DiskLight {
+    bytes: u64,
+    light_bps: u64,
+    ideal_secs: f64,
+    /// `ideal / actual` unclamped; `None` when the elapsed time is zero.
+    ratio_raw: Option<f64>,
+    /// Legacy clamped ratio, `0.0` when no ratio is computable.
+    ratio: f64,
+}
+
+/// Logical disk traffic of a download stage on rotational media: `full_bytes`
+/// written once, the patch sources (`delta_savings_bytes`) read once, and every
+/// byte that was not delta patched read back by the on-arrival hash. Logical,
+/// not physical: a reread served from the page cache is counted all the same.
+fn rotational_disk_light(
+    full_bytes: u64,
+    delta_savings_bytes: u64,
+    patched_full_bytes: u64,
+    elapsed: std::time::Duration,
+) -> DiskLight {
+    let hash_reread_bytes = full_bytes.saturating_sub(patched_full_bytes);
+    let bytes = full_bytes
+        .saturating_add(delta_savings_bytes)
+        .saturating_add(hash_reread_bytes);
+    let ideal_secs = bytes as f64 / ROTATIONAL_SEQUENTIAL_BPS as f64;
+    let ratio_raw =
+        crate::core::utils::speed_of_light::sol_ratio_raw(ideal_secs, elapsed.as_secs_f64());
+    DiskLight {
+        bytes,
+        light_bps: ROTATIONAL_SEQUENTIAL_BPS,
+        ideal_secs,
+        ratio_raw,
+        ratio: ratio_raw.map_or(0.0, |ratio| ratio.clamp(0.0, 1.0)),
+    }
+}
+
+/// Terminal outcome of the download stage as carried on its `SOL` line, so
+/// consumers can keep cancelled and failed runs out of best-case selection.
+fn download_sol_outcome(
+    cancelled: bool,
+    mods_failed: usize,
+    mods_cancelled: usize,
+) -> &'static str {
+    if cancelled || mods_cancelled > 0 {
+        "cancelled"
+    } else if mods_failed > 0 {
+        "failed"
+    } else {
+        "completed"
     }
 }
 
@@ -496,10 +571,11 @@ fn reconcile_download_progress(
 }
 
 /// Check that enough disk space is available for the planned downloads.
-/// Returns Ok(()) if sufficient, or an error message if not.
-fn check_disk_space(targets: &[DownloadTargetWithModName]) -> Result<(), String> {
+/// Returns the shortfall when the destination volume cannot take them.
+fn check_disk_space(targets: &[DownloadTargetWithModName]) -> Option<DiskSpaceShortfall> {
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
     if targets.is_empty() {
-        return Ok(());
+        return None;
     }
 
     let total_needed: u64 = targets
@@ -518,34 +594,165 @@ fn check_disk_space(targets: &[DownloadTargetWithModName]) -> Result<(), String>
         .next();
 
     let Some(check_path) = check_path else {
-        return Ok(()); // Can't determine path, proceed optimistically
+        return None; // Can't determine path, proceed optimistically
     };
 
     match fs4::available_space(check_path) {
         Ok(available) => {
-            let needed_with_margin = total_needed.saturating_add(DISK_SPACE_MARGIN_BYTES);
-            if available < needed_with_margin {
-                Err(format!(
-                    "Insufficient disk space: need {:.1} GB ({:.1} GB + {:.0} MB margin) but only {:.1} GB available on {}",
-                    needed_with_margin as f64 / (1024.0 * 1024.0 * 1024.0),
-                    total_needed as f64 / (1024.0 * 1024.0 * 1024.0),
-                    DISK_SPACE_MARGIN_BYTES as f64 / (1024.0 * 1024.0),
-                    available as f64 / (1024.0 * 1024.0 * 1024.0),
-                    check_path.display()
-                ))
-            } else {
+            let shortfall = disk_space_shortfall(total_needed, available, check_path);
+            if shortfall.is_none() {
                 info!(
                     "Disk space check passed: need {:.1} GB, available {:.1} GB",
-                    needed_with_margin as f64 / (1024.0 * 1024.0 * 1024.0),
-                    available as f64 / (1024.0 * 1024.0 * 1024.0),
+                    disk_space_needed(total_needed) as f64 / GIB,
+                    available as f64 / GIB,
                 );
-                Ok(())
             }
+            shortfall
         }
         Err(err) => {
             warn!("Could not check disk space: {}", err);
-            Ok(()) // Proceed optimistically if we can't check
+            None // Proceed optimistically if we can't check
         }
+    }
+}
+
+fn format_disk_space_shortfall(shortfall: &DiskSpaceShortfall) -> String {
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    format!(
+        "Insufficient disk space: need {:.1} GB ({:.1} GB + {:.0} MB margin) but only {:.1} GB available on {}",
+        shortfall.needed_bytes as f64 / GIB,
+        shortfall
+            .needed_bytes
+            .saturating_sub(DISK_SPACE_MARGIN_BYTES) as f64
+            / GIB,
+        DISK_SPACE_MARGIN_BYTES as f64 / (1024.0 * 1024.0),
+        shortfall.available_bytes as f64 / GIB,
+        shortfall.path
+    )
+}
+
+/// Refuse to start when the destination filesystem cannot take the planned
+/// files: a FAT volume and a file of 4 GiB or more, a read-only volume, a name
+/// Windows cannot create, or two files that differ only by letter case on a
+/// case-insensitive volume. Those fail deep inside the transfer otherwise, or
+/// worse, overwrite each other and re-flag the addon on every check. One volume
+/// probe per addon and pure string work per file; nothing is opened.
+///
+/// Findings that are survivable (a path at the Windows `MAX_PATH` limit) are
+/// logged and do not block.
+fn check_destination_filesystem(
+    targets: &[DownloadTargetWithModName],
+    metrics: &DownloadMetrics,
+) -> Result<(), String> {
+    use crate::core::utils::storage_compat::{
+        PathLimitReport, StorageIssueCode, StorageIssueSeverity, VolumeInfo, VolumeProber,
+        evaluate_volume,
+    };
+
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let prober = VolumeProber::new();
+    let mut mod_volume: HashMap<u64, Option<PathBuf>> = HashMap::new();
+    let mut volumes: HashMap<PathBuf, VolumeInfo> = HashMap::new();
+    let mut files_by_volume: HashMap<PathBuf, Vec<(&str, u64)>> = HashMap::new();
+
+    for target in targets {
+        let root = mod_volume
+            .entry(target.mod_id)
+            .or_insert_with(|| {
+                let path = Path::new(target.download.download_local_path.as_ref());
+                let anchor = path.parent().unwrap_or(path);
+                let volume = prober.probe(anchor)?;
+                let root = volume.root.clone();
+                volumes.entry(root.clone()).or_insert(volume);
+                Some(root)
+            })
+            .clone();
+        if let Some(root) = root {
+            files_by_volume.entry(root).or_default().push((
+                target.download.download_local_path.as_ref(),
+                target.download.size as u64,
+            ));
+        }
+    }
+
+    let mut blocking = Vec::new();
+    let mut roots: Vec<&PathBuf> = files_by_volume.keys().collect();
+    roots.sort();
+    for root in roots {
+        let volume = &volumes[root];
+        let files = &files_by_volume[root];
+        let report = PathLimitReport::from_files(files.iter().copied(), volume);
+        let description = format!(
+            "root=\"{}\" fs=\"{}\" family={} journaled={} removable={} remote={} read_only={} files={} largest_file_bytes={} longest_path_chars={}",
+            sanitize_log_path(root),
+            volume.filesystem,
+            volume.family.as_str(),
+            volume.journaled(),
+            volume.removable,
+            volume.remote,
+            volume.read_only,
+            report.file_count,
+            report.largest_file_bytes,
+            report.longest_path_chars
+        );
+        info!("download_destination: {description}");
+        metrics.record_destination(description);
+        let mut issues = evaluate_volume("repository", root, volume);
+        issues.extend(report.issues("repository", root, volume));
+        for issue in issues {
+            if issue.severity >= StorageIssueSeverity::Warning {
+                warn!("{}", issue.log_line());
+            }
+            if issue.severity != StorageIssueSeverity::Blocking {
+                continue;
+            }
+            let drive = root.display();
+            let fs = &issue.filesystem;
+            blocking.push(match issue.code {
+                StorageIssueCode::FileExceedsFilesystemLimit => format!(
+                    "{} of the files are larger than the 4 GiB file size limit of {} ({}); largest is {}. Move the repository to an NTFS or exFAT drive.",
+                    issue.affected_files,
+                    drive,
+                    fs,
+                    metrics_format_bytes(issue.largest_file_bytes)
+                ),
+                StorageIssueCode::ReadOnlyVolume => {
+                    format!("{drive} is read-only.")
+                }
+                StorageIssueCode::InvalidWindowsName => format!(
+                    "{} of the files have names Windows cannot create (for example \"{}\"). The repository maintainer has to rename them.",
+                    issue.affected_files, issue.example
+                ),
+                StorageIssueCode::CaseCollision => format!(
+                    "two files differ only by letter case ({}) and cannot coexist on {} ({}).",
+                    issue.example, drive, fs
+                ),
+                _ => continue,
+            });
+        }
+    }
+
+    if blocking.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Cannot download to this location: {}",
+            blocking.join(" ")
+        ))
+    }
+}
+
+fn metrics_format_bytes(bytes: u64) -> String {
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    const MIB: f64 = 1024.0 * 1024.0;
+    if bytes as f64 >= GIB {
+        format!("{:.2} GiB", bytes as f64 / GIB)
+    } else if bytes as f64 >= MIB {
+        format!("{:.2} MiB", bytes as f64 / MIB)
+    } else {
+        format!("{bytes} B")
     }
 }
 
@@ -655,22 +862,6 @@ pub(crate) async fn download_files(
     telemetry_epoch: Arc<std::sync::OnceLock<std::time::Instant>>,
 ) -> anyhow::Result<DownloadRunReport> {
     info!("Download worker started: op={}", operation_id);
-    let resource_profile = ResourceProfile::sample();
-    let resource_limits = download_limits_for_profile(resource_profile);
-    info!(
-        "Download resource profile: {}; limits large_files={} small_files={} ranges={} per_file_ranges={}..{} range_chunk={}",
-        resource_profile.summary(),
-        resource_limits.max_large_files,
-        resource_limits.max_small_files,
-        resource_limits.max_active_range_requests,
-        resource_limits.min_ranges_per_file,
-        resource_limits.max_ranges_per_file,
-        resource_limits.range_chunk_target
-    );
-    let large_file_permits = Arc::new(Semaphore::new(resource_limits.max_large_files));
-    let small_file_permits = Arc::new(Semaphore::new(resource_limits.max_small_files));
-    let scheduler_state = Arc::new(DownloadSchedulerState::new(resource_limits));
-
     let rate_limiter = Arc::new(AdaptiveBandwidthLimiter::from_mbps(
         download_speed_limit_mbps,
     ));
@@ -687,6 +878,28 @@ pub(crate) async fn download_files(
             }
         }
     };
+
+    let resource_profile = ResourceProfile::sample();
+    let destination_storage = targets
+        .first()
+        .map(|target| detect_storage_class_for_path(&target.download.download_local_path))
+        .unwrap_or(HashStorageClass::Unknown);
+    let resource_limits = download_limits_for_profile(resource_profile, destination_storage);
+    info!(
+        "Download resource profile: {}; destination_storage={:?} limits large_files={} small_files={} ranges={} per_file_ranges={}..{} range_chunk={} patch_applies={}",
+        resource_profile.summary(),
+        destination_storage,
+        resource_limits.max_large_files,
+        resource_limits.max_small_files,
+        resource_limits.max_active_range_requests,
+        resource_limits.min_ranges_per_file,
+        resource_limits.max_ranges_per_file,
+        resource_limits.range_chunk_target,
+        resource_limits.max_patch_applies
+    );
+    let large_file_permits = Arc::new(Semaphore::new(resource_limits.max_large_files));
+    let small_file_permits = Arc::new(Semaphore::new(resource_limits.max_small_files));
+    let scheduler_state = Arc::new(DownloadSchedulerState::new(resource_limits));
 
     // When the pipeline provides a scoped file-id set (e.g. from quick-scan
     // pending updates), drop any download-target rows that leaked in from
@@ -724,19 +937,20 @@ pub(crate) async fn download_files(
         return Err(anyhow!("download cancelled"));
     }
 
-    let (patchable_file_ids, patch_planned_bytes, full_bytes) = if context.force_download_targets {
-        let full_bytes = targets
-            .iter()
-            .map(|target| target.download.size as u64)
-            .sum();
-        for target in &mut targets {
-            target.download.expected_download_bytes = target.download.size;
-        }
-        (HashSet::new(), full_bytes, full_bytes)
-    } else {
-        let _phase = metrics.phase("load_patch_plans");
-        apply_download_plan_bytes(context.clone(), &mut targets).await
-    };
+    let (patchable_file_ids, patch_planned_bytes, full_bytes) =
+        if context.force_download_targets || context.force_full_downloads {
+            let full_bytes = targets
+                .iter()
+                .map(|target| target.download.size as u64)
+                .sum();
+            for target in &mut targets {
+                target.download.expected_download_bytes = target.download.size;
+            }
+            (HashSet::new(), full_bytes, full_bytes)
+        } else {
+            let _phase = metrics.phase("load_patch_plans");
+            apply_download_plan_bytes(context.clone(), &mut targets).await
+        };
     info!(
         "Download queue delta planning: files={} patchable_files={} planned_transfer_bytes={} full_bytes={}",
         targets.len(),
@@ -804,12 +1018,25 @@ pub(crate) async fn download_files(
     // Issue 09: Check available disk space before starting downloads
     {
         let _phase = metrics.phase("disk_space_check");
-        if let Err(space_err) = check_disk_space(&targets) {
+        if let Some(shortfall) = check_disk_space(&targets) {
+            let space_err = format_disk_space_shortfall(&shortfall);
             error!("{}", space_err);
             if let Some(tx) = progress_tx.as_ref() {
+                send_progress_event(
+                    tx,
+                    ProgressEvent::DiskSpaceShortfall(shortfall),
+                    &operation_id,
+                );
                 send_progress_event(tx, ProgressEvent::Failed(space_err.clone()), &operation_id);
             }
             return Err(anyhow!(space_err));
+        }
+        if let Err(fs_err) = check_destination_filesystem(&targets, &metrics) {
+            error!("{}", fs_err);
+            if let Some(tx) = progress_tx.as_ref() {
+                send_progress_event(tx, ProgressEvent::Failed(fs_err.clone()), &operation_id);
+            }
+            return Err(anyhow!(fs_err));
         }
     }
     if cancellation_requested(&cancel_rx) {
@@ -885,8 +1112,12 @@ pub(crate) async fn download_files(
     // When SQLite reports contention or a slow checkpoint, progress persistence backs off
     // until several clean flushes complete. The final flush remains authoritative.
     let checkpoint_stop = Arc::new(AtomicBool::new(false));
+    // Woken on shutdown so the stage does not wait out the current delay; without
+    // it the download stage is quantized to the checkpoint period.
+    let checkpoint_wake = Arc::new(tokio::sync::Notify::new());
     let checkpoint_handle = {
         let stop_signal = checkpoint_stop.clone();
+        let wake_signal = checkpoint_wake.clone();
         let ctx = context.clone();
         let refs = all_download_refs.clone();
         let checkpoint_metrics = metrics.clone();
@@ -897,7 +1128,7 @@ pub(crate) async fn download_files(
             let mut dirty_threshold = PROGRESS_CHECKPOINT_NORMAL_BYTES;
             let mut clean_pressure_flushes = 0usize;
             loop {
-                tokio::time::sleep(delay).await;
+                let _ = tokio::time::timeout(delay, wake_signal.notified()).await;
                 if stop_signal.load(Ordering::SeqCst) {
                     break;
                 }
@@ -1082,6 +1313,7 @@ pub(crate) async fn download_files(
                             .collect(),
                         bytes: finished_batch.total_size as u64,
                         success,
+                        patched_segments: None,
                     };
                     if tx.try_send(completion).is_err() {
                         warn!(
@@ -1108,6 +1340,7 @@ pub(crate) async fn download_files(
 
     // Stop the checkpoint task and do a final progress flush (only files with progress)
     checkpoint_stop.store(true, Ordering::SeqCst);
+    checkpoint_wake.notify_one();
     let _ = checkpoint_handle.await;
     {
         let _phase = metrics.phase("final_progress_flush");
@@ -1207,6 +1440,106 @@ pub(crate) async fn download_files(
         _ if peak_bps > 0 => SolLight::PeakSample(peak_bps),
         _ => SolLight::SelfBaseline,
     };
+    let cancelled = cancellation_requested(&cancel_rx);
+    let mut sol_extras = vec![
+        ("files", total_files.to_string()),
+        ("peak_1s_bps", peak_bps.to_string()),
+        ("delta_savings_percent", delta_savings_percent.to_string()),
+        ("destination_storage", format!("{destination_storage:?}")),
+        ("op_id", operation_id.to_string()),
+        (
+            "outcome",
+            download_sol_outcome(cancelled, mods_failed, mods_cancelled).to_string(),
+        ),
+        ("mods_succeeded", mods_succeeded.to_string()),
+        ("mods_failed", mods_failed.to_string()),
+        ("mods_cancelled", mods_cancelled.to_string()),
+        ("full_bytes", total_full_bytes.to_string()),
+        ("delta_savings_bytes", delta_savings_bytes.to_string()),
+        ("expected_bytes", total_expected_bytes.to_string()),
+        ("credited_bytes", total_downloaded_bytes.to_string()),
+        (
+            "range_retries",
+            metrics
+                .counters
+                .range_retries
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .to_string(),
+        ),
+        (
+            "peak_window_s",
+            format!("{:.3}", metrics.peak_window().as_secs_f64()),
+        ),
+    ];
+    // The ramp before the first plateau window and the tail after the last
+    // one are the two terms between the plateau rate and the wall time.
+    let series = metrics.series();
+    let shape = super::metrics::ramp_tail_profile(&series, peak_bps, download_elapsed);
+    if shape.reached {
+        sol_extras.push(("ramp_s", format!("{:.3}", shape.ramp.as_secs_f64())));
+        sol_extras.push(("plateau_s", format!("{:.3}", shape.plateau.as_secs_f64())));
+        sol_extras.push(("tail_s", format!("{:.3}", shape.tail.as_secs_f64())));
+        sol_extras.push(("ramp_deficit_bytes", shape.ramp_deficit_bytes.to_string()));
+        sol_extras.push(("tail_deficit_bytes", shape.tail_deficit_bytes.to_string()));
+        let describe = |point: &super::metrics::SeriesPoint| {
+            format!(
+                "{:.1}s:{:.1}MB/s:{}f/{}r",
+                point.end_offset.as_secs_f64(),
+                point.network_delta as f64 / point.elapsed.as_secs_f64().max(1e-9) / 1e6,
+                point.active_files,
+                point.active_ranges
+            )
+        };
+        let ramp: Vec<String> = series
+            .iter()
+            .take(shape.ramp_windows + 1)
+            .take(12)
+            .map(describe)
+            .collect();
+        let tail: Vec<String> = series.iter().rev().take(4).map(describe).collect();
+        info!(
+            "Download shape: op={} ramp={:.2}s plateau={:.2}s tail={:.2}s ramp_deficit={} tail_deficit={} ramp_windows=[{}] tail_windows=[{}]",
+            operation_id,
+            shape.ramp.as_secs_f64(),
+            shape.plateau.as_secs_f64(),
+            shape.tail.as_secs_f64(),
+            metrics_format_bytes(shape.ramp_deficit_bytes),
+            metrics_format_bytes(shape.tail_deficit_bytes),
+            ramp.join(" "),
+            tail.join(" ")
+        );
+    }
+    // On a rotational destination the disk, not the link, is the likelier
+    // bound: every byte is written once, patch sources are read once, and full
+    // downloads are read back by the hash. Report that nominal light too so a
+    // low network ratio is not misread as a slow link; it is logical traffic
+    // against a nominal rate, not a calibrated device bound.
+    if matches!(
+        destination_storage,
+        HashStorageClass::Hdd | HashStorageClass::Removable
+    ) {
+        let patched_full_bytes = metrics
+            .counters
+            .patched_full_bytes
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let disk = rotational_disk_light(
+            total_full_bytes,
+            delta_savings_bytes,
+            patched_full_bytes,
+            download_elapsed,
+        );
+        sol_extras.push(("disk_bytes", disk.bytes.to_string()));
+        sol_extras.push(("disk_light_bps", disk.light_bps.to_string()));
+        sol_extras.push(("disk_ideal_s", format!("{:.3}", disk.ideal_secs)));
+        sol_extras.push(("disk_sol", format!("{:.3}", disk.ratio)));
+        sol_extras.push(("disk_light_src", "nominal_hdd_sequential".to_string()));
+        sol_extras.push((
+            "disk_sol_raw",
+            disk.ratio_raw
+                .map_or_else(|| "na".to_string(), |ratio| format!("{ratio:.4}")),
+        ));
+        sol_extras.push(("disk_reference_status", "nominal".to_string()));
+    }
     info!(
         "{}",
         sol_line(
@@ -1214,13 +1547,111 @@ pub(crate) async fn download_files(
             wire_bytes,
             download_elapsed,
             &light,
-            &[
-                ("files", total_files.to_string()),
-                ("peak_1s_bps", peak_bps.to_string()),
-                ("delta_savings_percent", delta_savings_percent.to_string()),
-            ],
+            &sol_extras
         )
     );
+    for stage in metrics.patch_stages() {
+        let attempt_span_id = format!("{operation_id}-delta-patch-{}", stage.file_id);
+        let stage_extras = vec![
+            ("record_kind", "stage".to_owned()),
+            ("op_id", operation_id.to_string()),
+            ("parent_op_id", operation_id.to_string()),
+            ("parent_span_id", attempt_span_id.clone()),
+            ("span_id", format!("{attempt_span_id}-{}", stage.stage)),
+            ("stage_id", stage.stage.to_owned()),
+            ("file_id", stage.file_id.to_string()),
+            ("start_offset_ns", stage.start_offset_ns.to_string()),
+            ("end_offset_ns", stage.end_offset_ns.to_string()),
+            ("outcome", stage.outcome.to_owned()),
+            ("timer_scope", "stage_wall".to_owned()),
+        ];
+        info!(
+            "{}",
+            sol_line(
+                "delta_patch_stage",
+                0,
+                std::time::Duration::from_nanos(
+                    stage.end_offset_ns.saturating_sub(stage.start_offset_ns)
+                ),
+                &SolLight::SelfBaseline,
+                &stage_extras,
+            )
+        );
+    }
+    if let Some(patch) = metrics.patch_summary() {
+        let conservation = if patch.fallbacks == 0
+            && patch.cancellations == 0
+            && patch.useful_output_bytes
+                == patch
+                    .unique_insert_bytes
+                    .saturating_add(patch.source_copy_bytes)
+        {
+            "ok"
+        } else {
+            "partial"
+        };
+        let patch_extras = vec![
+            ("op_id", operation_id.to_string()),
+            ("parent_op_id", operation_id.to_string()),
+            ("span_id", format!("{operation_id}-delta-patch")),
+            (
+                "stage_ids",
+                "planning,fetch,apply,promote,verify,finalize".to_owned(),
+            ),
+            ("start_offset_ns", patch.start_offset_ns.to_string()),
+            ("end_offset_ns", patch.end_offset_ns.to_string()),
+            ("attempts", patch.attempts.to_string()),
+            ("patched_files", patch.successes.to_string()),
+            ("fallbacks", patch.fallbacks.to_string()),
+            ("cancellations", patch.cancellations.to_string()),
+            ("requests", patch.requests.to_string()),
+            ("retries", patch.retries.to_string()),
+            ("useful_output_bytes", patch.useful_output_bytes.to_string()),
+            ("unique_insert_bytes", patch.unique_insert_bytes.to_string()),
+            (
+                "actual_received_bytes",
+                patch.actual_received_bytes.to_string(),
+            ),
+            ("source_copy_bytes", patch.source_copy_bytes.to_string()),
+            ("staging_bytes", patch.staging_bytes.to_string()),
+            ("planning_ns", patch.planning_ns.to_string()),
+            (
+                "planning_s",
+                format!("{:.6}", patch.planning_ns as f64 / 1e9),
+            ),
+            ("fetch_ns", patch.fetch_ns.to_string()),
+            ("fetch_s", format!("{:.6}", patch.fetch_ns as f64 / 1e9)),
+            ("apply_ns", patch.apply_ns.to_string()),
+            ("apply_s", format!("{:.6}", patch.apply_ns as f64 / 1e9)),
+            ("promote_ns", patch.promote_ns.to_string()),
+            ("promote_s", format!("{:.6}", patch.promote_ns as f64 / 1e9)),
+            ("verify_ns", patch.verify_ns.to_string()),
+            ("verify_s", format!("{:.6}", patch.verify_ns as f64 / 1e9)),
+            ("finalize_ns", patch.finalize_ns.to_string()),
+            (
+                "finalize_s",
+                format!("{:.6}", patch.finalize_ns as f64 / 1e9),
+            ),
+            ("verify_promote_ns", patch.verify_promote_ns.to_string()),
+            (
+                "verify_promote_s",
+                format!("{:.6}", patch.verify_promote_ns as f64 / 1e9),
+            ),
+            ("byte_conservation", conservation.to_owned()),
+            ("outcome", patch.outcome().to_owned()),
+            ("timer_scope", "action_wall".to_owned()),
+        ];
+        info!(
+            "{}",
+            sol_line(
+                "delta_patch",
+                patch.useful_output_bytes,
+                patch.makespan(),
+                &SolLight::SelfBaseline,
+                &patch_extras,
+            )
+        );
+    }
 
     let report = metrics.build_report(&mod_outcomes);
 
@@ -1361,10 +1792,91 @@ mod tests {
     fn constrained_profile_reduces_download_concurrency() {
         let profile =
             ResourceProfile::from_memory(8 * 1024 * 1024 * 1024, 3 * 1024 * 1024 * 1024, 0);
-        let limits = download_limits_for_profile(profile);
+        let limits = download_limits_for_profile(profile, HashStorageClass::Ssd);
 
         assert_eq!(limits.max_large_files, 4);
         assert_eq!(limits.max_active_range_requests, 16);
+    }
+
+    #[test]
+    fn rotational_disk_light_counts_writes_patch_reads_and_hash_rereads() {
+        // 23.2 GB written, 11.4 GB copied by patches (read once), 11.8 GB of
+        // full downloads read back by the hash; patched files are not re-read.
+        let disk = rotational_disk_light(
+            23_200_000_000,
+            11_400_000_000,
+            11_400_000_000,
+            std::time::Duration::from_secs(748),
+        );
+        assert_eq!(disk.bytes, 23_200_000_000 + 11_400_000_000 + 11_800_000_000);
+        assert!((disk.ideal_secs - 421.8).abs() < 1.0);
+        assert!(disk.ratio > 0.56 && disk.ratio < 0.57);
+        assert_eq!(disk.ratio_raw.map(|r| (r * 1000.0).round()), Some(564.0));
+        let zero = rotational_disk_light(0, 0, 0, std::time::Duration::ZERO);
+        assert_eq!(zero.ratio, 0.0);
+        assert_eq!(zero.ratio_raw, None);
+    }
+
+    #[test]
+    fn rotational_disk_light_keeps_a_warm_run_above_one_in_the_raw_ratio() {
+        // 4.33 GB written plus a presumed full reread is 78.7 s at the nominal
+        // rate; a warm run finishing in 45 s is faster than the nominal bound,
+        // which the raw ratio must show instead of reading as "at the light".
+        let disk = rotational_disk_light(4_331_121_846, 0, 0, std::time::Duration::from_secs(45));
+        assert_eq!(disk.ratio, 1.0);
+        assert!(disk.ratio_raw.unwrap() > 1.7);
+    }
+
+    #[test]
+    fn download_sol_outcome_prefers_cancelled_then_failed() {
+        assert_eq!(download_sol_outcome(false, 0, 0), "completed");
+        assert_eq!(download_sol_outcome(false, 2, 0), "failed");
+        assert_eq!(download_sol_outcome(false, 2, 1), "cancelled");
+        assert_eq!(download_sol_outcome(true, 0, 0), "cancelled");
+    }
+
+    #[test]
+    fn rotational_destination_gets_the_hdd_profile_and_ssd_is_unchanged() {
+        let normal =
+            ResourceProfile::from_memory(32 * 1024 * 1024 * 1024, 20 * 1024 * 1024 * 1024, 0);
+
+        assert_eq!(
+            download_limits_for_profile(normal, HashStorageClass::Ssd),
+            DownloadResourceLimits::normal()
+        );
+        assert_eq!(
+            download_limits_for_profile(normal, HashStorageClass::Unknown),
+            DownloadResourceLimits::normal()
+        );
+        for class in [HashStorageClass::Hdd, HashStorageClass::Removable] {
+            let limits = download_limits_for_profile(normal, class);
+            assert_eq!(limits, DownloadResourceLimits::rotational());
+            assert_eq!(
+                limits.max_large_files,
+                DownloadResourceLimits::normal().max_large_files
+            );
+            assert_eq!(
+                limits.max_small_files,
+                DownloadResourceLimits::normal().max_small_files
+            );
+            assert_eq!(
+                limits.range_chunk_target,
+                DownloadResourceLimits::normal().range_chunk_target
+            );
+            assert_eq!(
+                limits.max_patch_applies,
+                super::super::ROTATIONAL_MAX_PATCH_APPLIES
+            );
+        }
+
+        let constrained =
+            ResourceProfile::from_memory(8 * 1024 * 1024 * 1024, 3 * 1024 * 1024 * 1024, 0);
+        let limits = download_limits_for_profile(constrained, HashStorageClass::Hdd);
+        assert_eq!(limits.max_large_files, 4);
+        assert_eq!(
+            limits.max_patch_applies,
+            super::super::ROTATIONAL_MAX_PATCH_APPLIES
+        );
     }
 
     #[test]

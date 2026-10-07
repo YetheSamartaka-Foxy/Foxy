@@ -188,10 +188,10 @@ pub fn swifty_data_exists() -> bool {
 
 /// Derive base, updater, and repository-space URLs from a Swifty repository address.
 ///
-/// For `http://a3.tfrod.cz:8080/mody/TFR_Main`:
-///   base     = `http://a3.tfrod.cz:8080/mody/`
-///   updater  = `http://a3.tfrod.cz:8080/mody/Foxy`
-///   space    = `http://a3.tfrod.cz:8080/mody/repository_space.json`
+/// For `http://repo.example.invalid:8080/mody/MainRepo`:
+///   base     = `http://repo.example.invalid:8080/mody/`
+///   updater  = `http://repo.example.invalid:8080/mody/Foxy`
+///   space    = `http://repo.example.invalid:8080/mody/repository_space.json`
 pub fn derive_urls(address: &str) -> Option<DerivedUrls> {
     let trimmed = address.trim().trim_end_matches('/');
     if trimmed.is_empty() {
@@ -278,12 +278,15 @@ mod tests {
 
     #[test]
     fn derive_urls_standard_path() {
-        let urls = derive_urls("http://a3.tfrod.cz:8080/mody/TFR_Main").unwrap();
-        assert_eq!(urls.base_url, "http://a3.tfrod.cz:8080/mody/");
-        assert_eq!(urls.updater_url, "http://a3.tfrod.cz:8080/mody/Foxy");
+        let urls = derive_urls("http://repo.example.invalid:8080/mody/MainRepo").unwrap();
+        assert_eq!(urls.base_url, "http://repo.example.invalid:8080/mody/");
+        assert_eq!(
+            urls.updater_url,
+            "http://repo.example.invalid:8080/mody/Foxy"
+        );
         assert_eq!(
             urls.space_url,
-            "http://a3.tfrod.cz:8080/mody/repository_space.json"
+            "http://repo.example.invalid:8080/mody/repository_space.json"
         );
     }
 
@@ -389,12 +392,12 @@ mod tests {
     #[test]
     fn repo_name_from_address_works() {
         assert_eq!(
-            repo_name_from_address("http://x.com/mods/TFR_Main"),
-            "TFR_Main"
+            repo_name_from_address("http://x.com/mods/MainRepo"),
+            "MainRepo"
         );
         assert_eq!(
-            repo_name_from_address("http://x.com/mods/TFR_Main/"),
-            "TFR_Main"
+            repo_name_from_address("http://x.com/mods/MainRepo/"),
+            "MainRepo"
         );
         assert_eq!(repo_name_from_address("http://x.com"), "x.com");
     }

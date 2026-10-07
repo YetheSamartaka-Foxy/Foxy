@@ -25,7 +25,7 @@
 --   * strftime('%s','now') / CURRENT_TIMESTAMP defaults.
 --   * All UNIQUE constraints that back ON CONFLICT upserts.
 --
--- The `turso` crate exposes `Connection::execute_batch` (0.6.1+), so this whole
+-- The `turso` crate exposes `Connection::execute_batch` (0.7.2), so this whole
 -- file can be applied in one call; the runner also tolerates statement-by-
 -- statement application by splitting on `;` for portability.
 
@@ -50,6 +50,30 @@ CREATE TABLE IF NOT EXISTS pending_updates (
     diff_json      TEXT NOT NULL,
     updated_at     INTEGER NOT NULL DEFAULT (strftime('%s','now')),
     PRIMARY KEY (repository_url, local_path)
+);
+
+CREATE TABLE IF NOT EXISTS storage_read_measurements (
+    volume_key      TEXT PRIMARY KEY,
+    method          TEXT NOT NULL,
+    read_bytes      INTEGER NOT NULL,
+    elapsed_ns      INTEGER NOT NULL,
+    read_bps        INTEGER NOT NULL,
+    measured_at_utc TEXT NOT NULL
+);
+
+-- Index of the benchmark folders under games/<space>/benchmarks. The folders
+-- are authoritative; rows are rebuilt from them after a wipe.
+CREATE TABLE IF NOT EXISTS benchmarks (
+    id             TEXT PRIMARY KEY,
+    created_at     INTEGER NOT NULL,
+    kind           TEXT NOT NULL,
+    name           TEXT NOT NULL DEFAULT '',
+    repository_url TEXT NOT NULL DEFAULT '',
+    local_path     TEXT NOT NULL DEFAULT '',
+    outcome        TEXT NOT NULL DEFAULT '',
+    elapsed_ms     INTEGER NOT NULL DEFAULT 0,
+    favourite      INTEGER NOT NULL DEFAULT 0,
+    hidden         INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS addons (
@@ -86,8 +110,8 @@ CREATE TABLE IF NOT EXISTS files (
 -- subfiles uniqueness (file_id, path) is a STANDALONE unique index
 -- (idx_subfiles_file_id_path below), NOT an inline `CONSTRAINT … UNIQUE`. A
 -- named index is a first-class object the bulk-load path can DROP before a
--- whole-wipe force-redownload load and CREATE once afterward, so the 66k-row
--- INSERT maintains only the rowid PK instead of four B-trees
+-- whole-wipe force-redownload load and CREATE once afterward, so the INSERT
+-- maintains only the rowid PK instead of the unique (file_id, path) tree
 -- (after_turso_regression_analysis5.md P0-d). `ON CONFLICT (file_id, path)`
 -- resolves against this index identically to the old inline constraint.
 CREATE TABLE IF NOT EXISTS subfiles (
@@ -153,11 +177,11 @@ CREATE TABLE IF NOT EXISTS download_patch_file (
 );
 
 CREATE TABLE IF NOT EXISTS download_patch_op (
-    -- Plain INTEGER PRIMARY KEY (rowid alias) rather than AUTOINCREMENT: Turso's
-    -- MVCC mode (journal_mode='mvcc', default-on) rejects AUTOINCREMENT at parse
-    -- time, and `id` is not semantically consumed - rows are keyed by the
-    -- (file_id, data_order) UNIQUE constraint, so rowid reuse after deletes is
-    -- harmless. (plan.md §6/§11.)
+    -- Plain INTEGER PRIMARY KEY (rowid alias) rather than AUTOINCREMENT: `id`
+    -- is not semantically consumed - rows are keyed by the (file_id, data_order)
+    -- UNIQUE constraint, so rowid reuse after deletes is harmless. Turso 0.7
+    -- MVCC can parse AUTOINCREMENT via sequences, but Foxy still should not
+    -- use it (WAL is the default; sequence `changes()` had leaks through 0.7.2).
     id               INTEGER PRIMARY KEY,
     file_id          INTEGER NOT NULL,
     data_order       INTEGER NOT NULL,
@@ -196,8 +220,10 @@ CREATE INDEX IF NOT EXISTS idx_files_local_path_remote_checksum
 -- (replaces the former inline `CONSTRAINT subfiles_unique_file_id_path`).
 CREATE UNIQUE INDEX IF NOT EXISTS idx_subfiles_file_id_path
     ON subfiles(file_id, path);
-CREATE INDEX IF NOT EXISTS idx_subfiles_file_id_data_order
-    ON subfiles(file_id, data_order, id);
+-- (schema v25) idx_subfiles_file_id_data_order (file_id, data_order, id) removed:
+-- Tree::load and patch-plan part reloads sort in process, so the ordered
+-- covering index charged ~1.4 s per 433k-row insert without serving those
+-- reads. The unique (file_id, path) index stays for ON CONFLICT.
 -- (schema v24) idx_subfiles_path_remote_checksum (path, remote_checksum) removed:
 -- every subfiles query filters by file_id (covered above), so it had no primary
 -- user; dropping it cuts each part write from 4 -> 3 B-trees. See

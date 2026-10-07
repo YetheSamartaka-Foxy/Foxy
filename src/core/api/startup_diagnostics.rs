@@ -1,8 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use crate::core::utils::format::sanitize_log_path;
-use log::info;
+use crate::core::api::quick_scan::StartupRepositoryInstance;
+use crate::core::models::repository_limits::repository_path_limits;
+use crate::core::utils::format::{sanitize_log_path, sanitize_log_url};
+use crate::core::utils::storage_compat::{
+    SIDECAR_SUFFIX_RESERVE, StorageIssue, StorageIssueCode, StorageIssueSeverity, StorageRoleKind,
+    VolumeProber, WINDOWS_MAX_PATH_CHARS, evaluate_volume, storage_role_kind,
+};
+use log::{info, warn};
 use sysinfo::{Disks, Networks, System};
 
 #[derive(Clone, Debug)]
@@ -20,10 +26,287 @@ impl StartupStoragePath {
     }
 }
 
-pub fn log_startup_system_diagnostics(storage_paths: &[StartupStoragePath]) {
-    for line in startup_system_diagnostics_lines(storage_paths) {
-        info!("{line}");
+/// Free-space floor for the drives Foxy writes its own state through.
+///
+/// A heuristic, and deliberately generous: Foxy stages multi-gigabyte addon
+/// downloads and backups through these paths while the database and its WAL grow
+/// on the same volume. A drive that runs out mid-sync does not fail cleanly -
+/// writes start erroring part-way through, which lands the local state in the
+/// same silently-wrong shape a stale schema does.
+pub const CRITICAL_FREE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+
+/// Roles whose drive backs Foxy's own writes rather than the game install.
+const SPACE_CRITICAL_ROLES: &[&str] = &[
+    "database",
+    "app_data",
+    "game_space",
+    "logs",
+    "temp",
+    "backups",
+];
+
+/// Whether `role` sits on a drive too full for Foxy to work through safely.
+pub fn role_space_is_critical(role: &str, available: u64) -> bool {
+    SPACE_CRITICAL_ROLES.contains(&role) && available < CRITICAL_FREE_BYTES
+}
+
+/// What the background storage check hands back to the UI.
+#[derive(Clone, Debug, Default)]
+pub struct StartupDiagnosticsReport {
+    /// A drive Foxy writes its own state through is below [`CRITICAL_FREE_BYTES`].
+    pub low_space: bool,
+    /// Filesystem findings for the storage paths and the repository
+    /// manifests, already logged; advisories included.
+    pub storage_issues: Vec<StorageIssue>,
+}
+
+/// Log the startup system summary off the launch path.
+///
+/// Building it refreshes every sysinfo subsystem and enumerates drives, network
+/// interfaces and GPUs, which costs a few hundred milliseconds of pure wall
+/// clock. None of it gates the first frame, so it runs on its own thread and
+/// reports back only what the UI needs: whether a drive Foxy writes through is
+/// critically full, and which paths sit on a filesystem Foxy cannot use safely
+/// (`conventions/SPEED_OF_LIGHT.md` O8). `repositories` must be empty when the
+/// database is not safe to open (lock conflict, pending schema wipe).
+pub fn spawn_startup_system_diagnostics(
+    storage_paths: Vec<StartupStoragePath>,
+    repositories: Vec<StartupRepositoryInstance>,
+) -> std::sync::mpsc::Receiver<StartupDiagnosticsReport> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in startup_system_diagnostics_lines(&storage_paths) {
+            info!("{line}");
+        }
+        let _ = tx.send(storage_compat_report(&storage_paths, &repositories));
+    });
+    rx
+}
+
+/// The storage half of [`spawn_startup_system_diagnostics`] alone, for a
+/// runtime game-space switch that brings new paths and repositories without
+/// re-describing the machine.
+pub fn spawn_storage_compat_check(
+    storage_paths: Vec<StartupStoragePath>,
+    repositories: Vec<StartupRepositoryInstance>,
+) -> std::sync::mpsc::Receiver<StartupDiagnosticsReport> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(storage_compat_report(&storage_paths, &repositories));
+    });
+    rx
+}
+
+fn storage_compat_report(
+    storage_paths: &[StartupStoragePath],
+    repositories: &[StartupRepositoryInstance],
+) -> StartupDiagnosticsReport {
+    let low_space = low_space_warning_lines(storage_paths);
+    for line in &low_space {
+        warn!("{line}");
     }
+
+    let prober = VolumeProber::new();
+    let mut storage_issues = volume_compat_issues(storage_paths, &prober);
+    storage_issues.extend(repository_limit_issues(repositories, &prober));
+    for issue in &storage_issues {
+        if issue.severity >= StorageIssueSeverity::Warning {
+            warn!("{}", issue.log_line());
+        } else {
+            info!("{}", issue.log_line());
+        }
+    }
+
+    StartupDiagnosticsReport {
+        low_space: !low_space.is_empty(),
+        storage_issues,
+    }
+}
+
+/// Volume-level findings for every distinct `(role, path)`.
+fn volume_compat_issues(
+    storage_paths: &[StartupStoragePath],
+    prober: &VolumeProber,
+) -> Vec<StorageIssue> {
+    let mut issues = Vec::new();
+    let mut seen = BTreeSet::new();
+    for storage_path in storage_paths {
+        if storage_path.role.trim().is_empty()
+            || storage_role_kind(&storage_path.role) == StorageRoleKind::Other
+        {
+            continue;
+        }
+        let path = normalized_path(&storage_path.path);
+        if !seen.insert((
+            storage_path.role.clone(),
+            path.to_string_lossy().to_lowercase(),
+        )) {
+            continue;
+        }
+        let Some(volume) = prober.probe(&path) else {
+            continue;
+        };
+        issues.extend(evaluate_volume(&storage_path.role, &path, &volume));
+    }
+    issues
+}
+
+/// Manifest-derived findings per repository instance: files the destination
+/// filesystem cannot hold, and paths that reach the Windows `MAX_PATH` limit.
+/// One aggregate query per repository, no tree load, no file access.
+fn repository_limit_issues(
+    repositories: &[StartupRepositoryInstance],
+    prober: &VolumeProber,
+) -> Vec<StorageIssue> {
+    if repositories.is_empty() {
+        return Vec::new();
+    }
+    let Some(runtime) = crate::core::api::background_runtime() else {
+        warn!("Storage check skipped repository limits: shared background runtime unavailable");
+        return Vec::new();
+    };
+
+    let started_at = std::time::Instant::now();
+    let mut issues = Vec::new();
+    let mut queried = 0usize;
+    for repository in repositories {
+        let path = normalized_path(Path::new(repository.local_path.trim()));
+        let Some(volume) = prober.probe(&path) else {
+            continue;
+        };
+        queried += 1;
+        let size_limit = volume.max_file_bytes().unwrap_or(i64::MAX as u64);
+        let path_chars_limit = if cfg!(windows) {
+            (WINDOWS_MAX_PATH_CHARS - SIDECAR_SUFFIX_RESERVE) as u64
+        } else {
+            i64::MAX as u64
+        };
+        let limits = match runtime.block_on(repository_path_limits(
+            &repository.repo_url,
+            &repository.local_path,
+            size_limit,
+            path_chars_limit,
+        )) {
+            Ok(Some(limits)) => limits,
+            Ok(None) => continue,
+            Err(err) => {
+                warn!(
+                    "Storage check could not read path limits for {}: {}",
+                    sanitize_log_url(&repository.repo_url),
+                    err
+                );
+                continue;
+            }
+        };
+        let base = |code, severity| StorageIssue {
+            code,
+            severity,
+            role: "repository".to_string(),
+            path: path.clone(),
+            volume_root: volume.root.clone(),
+            filesystem: volume.filesystem.clone(),
+            affected_files: 0,
+            largest_file_bytes: 0,
+            longest_path_chars: 0,
+            example: String::new(),
+        };
+        if limits.files_over_size_limit > 0 {
+            let mut issue = base(
+                StorageIssueCode::FileExceedsFilesystemLimit,
+                StorageIssueSeverity::Blocking,
+            );
+            issue.affected_files = limits.files_over_size_limit as usize;
+            issue.largest_file_bytes = limits.largest_file_bytes;
+            issues.push(issue);
+        }
+        if cfg!(windows) && limits.paths_at_or_over_limit > 0 {
+            let mut issue = base(
+                StorageIssueCode::PathTooLongForWindows,
+                StorageIssueSeverity::Warning,
+            );
+            issue.affected_files = limits.paths_at_or_over_limit as usize;
+            issue.longest_path_chars = limits.longest_path_chars as usize;
+            issues.push(issue);
+        }
+    }
+    info!(
+        "storage_check: repositories={} queried={} findings={} elapsed_ms={}",
+        repositories.len(),
+        queried,
+        issues.len(),
+        started_at.elapsed().as_millis()
+    );
+    issues
+}
+
+/// One `storage_fs:` line per distinct `(role, path)` describing the volume
+/// behind it, for the startup summary and the diagnostics export.
+pub fn storage_volume_lines(storage_paths: &[StartupStoragePath]) -> Vec<String> {
+    let prober = VolumeProber::new();
+    let mut lines = Vec::new();
+    let mut seen = BTreeSet::new();
+    for storage_path in storage_paths {
+        if storage_path.role.trim().is_empty() {
+            continue;
+        }
+        let path = normalized_path(&storage_path.path);
+        if !seen.insert((
+            storage_path.role.clone(),
+            path.to_string_lossy().to_lowercase(),
+        )) {
+            continue;
+        }
+        match prober.probe(&path) {
+            Some(volume) => lines.push(format!(
+                "storage_fs: role={} path=\"{}\" root=\"{}\" fs=\"{}\" family={} journaled={} removable={} remote={} read_only={} case_insensitive={}",
+                storage_path.role,
+                sanitize_log_path(&path),
+                sanitize_log_path(&volume.root),
+                volume.filesystem,
+                volume.family.as_str(),
+                volume.journaled(),
+                volume.removable,
+                volume.remote,
+                volume.read_only,
+                volume.case_insensitive_lookup()
+            )),
+            None => lines.push(format!(
+                "storage_fs: role={} path=\"{}\" volume=<unresolved>",
+                storage_path.role,
+                sanitize_log_path(&path)
+            )),
+        }
+    }
+    lines
+}
+
+/// One `low_space:` line per role whose drive is below [`CRITICAL_FREE_BYTES`].
+/// Empty when every Foxy-owned path has headroom.
+pub fn low_space_warning_lines(storage_paths: &[StartupStoragePath]) -> Vec<String> {
+    let disks = Disks::new_with_refreshed_list();
+    let mut lines = Vec::new();
+    let mut seen = BTreeSet::new();
+    for storage_path in storage_paths {
+        let path = normalized_path(&storage_path.path);
+        let Some(disk) = disk_for_path(&path, &disks) else {
+            continue;
+        };
+        let available = disk.available_space();
+        if !role_space_is_critical(&storage_path.role, available) {
+            continue;
+        }
+        if !seen.insert(disk.mount_point().to_path_buf()) {
+            continue;
+        }
+        lines.push(format!(
+            "low_space: role={} drive=\"{}\" available={} minimum={} - Foxy writes its database, temporary copies and backups here; downloads and database writes can fail part-way through",
+            storage_path.role,
+            sanitize_log_path(disk.mount_point()),
+            format_bytes(available),
+            format_bytes(CRITICAL_FREE_BYTES)
+        ));
+    }
+    lines
 }
 
 pub fn startup_system_diagnostics_lines(storage_paths: &[StartupStoragePath]) -> Vec<String> {
@@ -71,6 +354,7 @@ pub fn startup_system_diagnostics_lines(storage_paths: &[StartupStoragePath]) ->
     lines.extend(antivirus_summary_lines());
     lines.extend(used_drive_summary_lines(storage_paths));
     lines.extend(path_space_summary_lines(storage_paths));
+    lines.extend(storage_volume_lines(storage_paths));
     lines.push(process_summary_line(&system));
     lines.push("-- END STARTUP SYSTEM SUMMARY --".to_string());
     lines
@@ -230,52 +514,12 @@ fn power_summary_line() -> String {
 }
 
 // ── #6 elevation / privilege level ──────────────────────────────────────────
-#[cfg(target_os = "windows")]
 fn privilege_summary_line() -> String {
-    match is_process_elevated() {
+    match crate::core::utils::deelevate::is_process_elevated() {
         Some(true) => "elevation: elevated=yes".to_string(),
         Some(false) => "elevation: elevated=no".to_string(),
         None => "elevation: elevated=<unknown>".to_string(),
     }
-}
-
-#[cfg(target_os = "windows")]
-fn is_process_elevated() -> Option<bool> {
-    use winapi::shared::minwindef::DWORD;
-    use winapi::um::handleapi::CloseHandle;
-    use winapi::um::processthreadsapi::{GetCurrentProcess, OpenProcessToken};
-    use winapi::um::securitybaseapi::GetTokenInformation;
-    use winapi::um::winnt::{TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
-
-    unsafe {
-        let mut token = std::ptr::null_mut();
-        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
-            return None;
-        }
-
-        let mut elevation: TOKEN_ELEVATION = std::mem::zeroed();
-        let mut returned: DWORD = 0;
-        let size = std::mem::size_of::<TOKEN_ELEVATION>() as DWORD;
-        let ok = GetTokenInformation(
-            token,
-            TokenElevation,
-            &mut elevation as *mut _ as *mut _,
-            size,
-            &mut returned,
-        );
-        CloseHandle(token);
-
-        if ok == 0 {
-            None
-        } else {
-            Some(elevation.TokenIsElevated != 0)
-        }
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn privilege_summary_line() -> String {
-    "elevation: unavailable on this platform".to_string()
 }
 
 // ── #5 display scaling / DPI ────────────────────────────────────────────────
@@ -763,6 +1007,31 @@ mod tests {
     }
 
     #[test]
+    fn low_space_applies_only_to_foxy_owned_roles() {
+        let tight = CRITICAL_FREE_BYTES - 1;
+        assert!(role_space_is_critical("database", tight));
+        assert!(role_space_is_critical("temp", tight));
+        assert!(role_space_is_critical("backups", tight));
+        // The game install can legitimately sit on a nearly full drive; Foxy
+        // does not write its own state there.
+        assert!(!role_space_is_critical("arma3", tight));
+        assert!(!role_space_is_critical("repository", tight));
+        assert!(!role_space_is_critical("steam", tight));
+    }
+
+    #[test]
+    fn low_space_threshold_is_a_floor_not_a_ratio() {
+        // The August 2026 field report: 5.6 GiB free on a 930 GiB system drive
+        // holding the database, logs, temp and backups.
+        assert!(role_space_is_critical("database", 5 * 1024 * 1024 * 1024));
+        assert!(!role_space_is_critical("database", CRITICAL_FREE_BYTES));
+        assert!(!role_space_is_critical(
+            "database",
+            200 * 1024 * 1024 * 1024
+        ));
+    }
+
+    #[test]
     fn emits_all_diagnostic_sections() {
         // Exercises every collector end-to-end (including the platform-specific
         // ones) and asserts each section is present without panicking.
@@ -784,6 +1053,7 @@ mod tests {
             "network:",
             "antivirus:",
             "path_space:",
+            "storage_fs:",
             "process:",
         ] {
             assert!(

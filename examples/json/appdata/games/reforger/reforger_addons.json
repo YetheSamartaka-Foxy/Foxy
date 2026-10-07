@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "entries": [
+    {
+      "source": "reforger",
+      "guid": "596ABCDEF0123456",
+      "name": "Example Reforger Addon",
+      "enabled": true,
+      "frozen": false,
+      "version": "1.0.0",
+      "installed_path": "C:\\Users\\Player\\Documents\\My Games\\ArmaReforger\\addons\\596ABCDEF0123456",
+      "added_at": 0,
+      "updated_at": 0
+    }
+  ]
+}

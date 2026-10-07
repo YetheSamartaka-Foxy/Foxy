@@ -102,6 +102,20 @@ impl Foxy {
             self.settings_view_state.check_steam_running_before_launch;
         let global_hide_repository_image = self.settings_view_state.hide_repository_image;
 
+        // Game-specific overrides exist only where the active game's settings
+        // schema has the matching global toggle; the rest are app-wide.
+        let module = crate::core::game::registry().active();
+        let schema = module.settings_schema();
+        let game_toggle = |id: &str| schema.toggles.iter().any(|toggle| toggle.id == id);
+        let show_apply_client_parameters = game_toggle("apply_repo_json_client_parameters");
+        let show_apply_dlc_content = game_toggle("apply_repo_json_dlc_content");
+        let show_warn_editor_external_addons = game_toggle("warn_editor_external_addons");
+        let show_editor_mission_list = game_toggle("enable_editor_mission_list");
+        let show_server_list = game_toggle("enable_server_list");
+        let show_check_server_addons = game_toggle("check_server_addons_before_join");
+        let show_check_ts3 = game_toggle("check_ts3_running_before_join");
+        let show_check_steam = game_toggle("check_steam_running_before_launch");
+
         let repo = &mut self.repository_view_state.repositories[repo_index];
 
         ui.scope(|ui| {
@@ -151,78 +165,94 @@ impl Foxy {
                     block_width,
                     changed,
                 );
-                Self::render_repo_override_combo(
-                    ui,
-                    &mut repo.apply_repo_json_client_parameters,
-                    global_apply_repo_json_client_parameters,
-                    ("repo_apply_repo_json_client_parameters", repo_index),
-                    "Auto apply repo.json launch parameters",
-                    block_width,
-                    changed,
-                );
-                Self::render_repo_override_combo(
-                    ui,
-                    &mut repo.apply_repo_json_dlc_content,
-                    global_apply_repo_json_dlc_content,
-                    ("repo_apply_repo_json_dlc_content", repo_index),
-                    "Auto apply repo.json DLC content",
-                    block_width,
-                    changed,
-                );
-                Self::render_repo_override_combo(
-                    ui,
-                    &mut repo.warn_editor_external_addons,
-                    global_warn_editor_external_addons,
-                    ("repo_warn_editor_external_addons", repo_index),
-                    "Editor external addons warning",
-                    block_width,
-                    changed,
-                );
-                Self::render_repo_override_combo(
-                    ui,
-                    &mut repo.enable_editor_mission_list,
-                    global_enable_editor_mission_list,
-                    ("repo_enable_editor_mission_list", repo_index),
-                    "Show Editor Missions list",
-                    block_width,
-                    changed,
-                );
-                Self::render_repo_override_combo(
-                    ui,
-                    &mut repo.enable_server_list,
-                    global_enable_server_list,
-                    ("repo_enable_server_list", repo_index),
-                    "Show Servers list",
-                    block_width,
-                    changed,
-                );
-                Self::render_repo_override_combo(
-                    ui,
-                    &mut repo.check_server_addons_before_join,
-                    global_check_server_addons_before_join,
-                    ("repo_check_server_addons_before_join", repo_index),
-                    "Check server addons before joining",
-                    block_width,
-                    changed,
-                );
-                Self::render_repo_override_combo(
-                    ui,
-                    &mut repo.check_ts3_running_before_join,
-                    global_check_ts3_running_before_join,
-                    ("repo_check_ts3_running_before_join", repo_index),
-                    "Check TeamSpeak is running before joining",
-                    block_width,
-                    changed,
-                );
-                Self::render_repo_override_combo(
-                    ui,
-                    &mut repo.check_steam_running_before_launch,
-                    global_check_steam_running_before_launch,
-                    ("repo_check_steam_running_before_launch", repo_index),
-                    "Check Steam is running before launching",
-                    block_width,
-                    changed,
-                );
+                if show_apply_client_parameters {
+                    Self::render_repo_override_combo(
+                        ui,
+                        &mut repo.apply_repo_json_client_parameters,
+                        global_apply_repo_json_client_parameters,
+                        ("repo_apply_repo_json_client_parameters", repo_index),
+                        "Auto apply repo.json launch parameters",
+                        block_width,
+                        changed,
+                    );
+                }
+                if show_apply_dlc_content {
+                    Self::render_repo_override_combo(
+                        ui,
+                        &mut repo.apply_repo_json_dlc_content,
+                        global_apply_repo_json_dlc_content,
+                        ("repo_apply_repo_json_dlc_content", repo_index),
+                        "Auto apply repo.json DLC content",
+                        block_width,
+                        changed,
+                    );
+                }
+                if show_warn_editor_external_addons {
+                    Self::render_repo_override_combo(
+                        ui,
+                        &mut repo.warn_editor_external_addons,
+                        global_warn_editor_external_addons,
+                        ("repo_warn_editor_external_addons", repo_index),
+                        "Editor external addons warning",
+                        block_width,
+                        changed,
+                    );
+                }
+                if show_editor_mission_list {
+                    Self::render_repo_override_combo(
+                        ui,
+                        &mut repo.enable_editor_mission_list,
+                        global_enable_editor_mission_list,
+                        ("repo_enable_editor_mission_list", repo_index),
+                        "Show Editor Missions list",
+                        block_width,
+                        changed,
+                    );
+                }
+                if show_server_list {
+                    Self::render_repo_override_combo(
+                        ui,
+                        &mut repo.enable_server_list,
+                        global_enable_server_list,
+                        ("repo_enable_server_list", repo_index),
+                        "Show Servers list",
+                        block_width,
+                        changed,
+                    );
+                }
+                if show_check_server_addons {
+                    Self::render_repo_override_combo(
+                        ui,
+                        &mut repo.check_server_addons_before_join,
+                        global_check_server_addons_before_join,
+                        ("repo_check_server_addons_before_join", repo_index),
+                        "Check server addons before joining",
+                        block_width,
+                        changed,
+                    );
+                }
+                if show_check_ts3 {
+                    Self::render_repo_override_combo(
+                        ui,
+                        &mut repo.check_ts3_running_before_join,
+                        global_check_ts3_running_before_join,
+                        ("repo_check_ts3_running_before_join", repo_index),
+                        "Check TeamSpeak is running before joining",
+                        block_width,
+                        changed,
+                    );
+                }
+                if show_check_steam {
+                    Self::render_repo_override_combo(
+                        ui,
+                        &mut repo.check_steam_running_before_launch,
+                        global_check_steam_running_before_launch,
+                        ("repo_check_steam_running_before_launch", repo_index),
+                        "Check Steam is running before launching",
+                        block_width,
+                        changed,
+                    );
+                }
                 Self::render_repo_override_combo(
                     ui,
                     &mut repo.hide_repo_image,

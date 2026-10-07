@@ -1,12 +1,16 @@
 mod addon;
 mod agent_gui;
+mod config;
 mod direct_download;
+mod game;
 mod launch;
 mod profile;
 mod repo;
 mod server;
 mod settings;
 mod space;
+mod steam_helper;
+mod workshop;
 
 use crate::cli::args::{CliArgs, CliCommand};
 use crate::cli::exit_codes;
@@ -29,13 +33,17 @@ use tokio::sync::{broadcast, watch};
 
 use self::addon::run_addon_command;
 use self::agent_gui::run_agent_gui_command;
+use self::config::run_config_command;
 use self::direct_download::cmd_direct_download;
+use self::game::run_game_command;
 use self::launch::cmd_launch;
 use self::profile::run_profile_command;
 use self::repo::run_repo_command;
 use self::server::run_server_command;
 use self::settings::run_settings_command;
 use self::space::run_space_command;
+use self::steam_helper::run_steam_helper_command;
+use self::workshop::run_workshop_command;
 
 #[derive(Clone, Debug)]
 pub struct CommandSuccess {
@@ -94,9 +102,31 @@ struct AppState {
 
 impl AppState {
     fn load() -> Result<Self, CommandError> {
-        let mut settings: SettingsViewState = read_json_or_default(&Foxy::get_settings_path())
-            .map_err(|e| CommandError::operation("settings.load", e))?;
+        let merged = crate::core::game::spaces::read_merged_settings_value(
+            &Foxy::get_app_settings_path(),
+            &Foxy::get_game_settings_path(),
+        )
+        .map_err(|e| CommandError::operation("settings.load", e))?;
+        let mut settings: SettingsViewState = match merged {
+            Some(value) => {
+                let defaults = serde_json::to_value(SettingsViewState::default()).map_err(|e| {
+                    CommandError::operation(
+                        "settings.load",
+                        format!("Failed to serialize default settings: {}", e),
+                    )
+                })?;
+                let value = crate::core::game::spaces::merge_value_over_defaults(defaults, value);
+                serde_json::from_value(value).map_err(|e| {
+                    CommandError::operation(
+                        "settings.load",
+                        format!("Failed to parse settings: {}", e),
+                    )
+                })?
+            }
+            None => SettingsViewState::default(),
+        };
         sanitize_settings(&mut settings);
+        crate::core::api::set_extended_diagnostics(settings.extended_diagnostics_logging);
 
         let mut repositories: Vec<Repository> =
             read_json_or_default(&Foxy::get_repositories_path())
@@ -119,14 +149,31 @@ impl AppState {
     fn save_settings(&self) -> Result<(), CommandError> {
         let mut settings = self.settings.clone();
         sanitize_settings(&mut settings);
-        write_json_pretty(&Foxy::get_settings_path(), &settings)
-            .map_err(|e| CommandError::operation("settings.save", e))
+        let value = serde_json::to_value(&settings).map_err(|e| {
+            CommandError::operation(
+                "settings.save",
+                format!("Failed to serialize settings: {}", e),
+            )
+        })?;
+        crate::core::game::spaces::write_split_settings(
+            &value,
+            &Foxy::get_app_settings_path(),
+            &Foxy::get_game_settings_path(),
+        )
+        .map_err(|e| CommandError::operation("settings.save", e))
     }
 
     fn save_repositories(&self) -> Result<(), CommandError> {
         let repositories = repositories_for_save(&self.repositories);
         write_json_pretty(&Foxy::get_repositories_path(), &repositories)
             .map_err(|e| CommandError::operation("repo.save", e))
+    }
+
+    fn save_spaces(&self) -> Result<(), CommandError> {
+        let mut spaces = self.spaces.clone();
+        sanitize_repository_spaces_paths(&mut spaces);
+        write_json_pretty(&Foxy::get_repository_spaces_path(), &spaces)
+            .map_err(|e| CommandError::operation("space.save", e))
     }
 }
 
@@ -154,7 +201,30 @@ fn ensure_backend_ready() {
     crate::core::tasks::init_database::check_and_wipe_database();
 }
 
+/// Gate for commands that delete local data and then re-download it: refuse
+/// to touch the disk while the repository cannot serve its manifest.
+fn ensure_remote_reachable_before_destructive(
+    action: &str,
+    repository_url: &str,
+) -> Result<(), CommandError> {
+    let runtime = tokio::runtime::Runtime::new()
+        .map_err(|e| CommandError::operation(action, format!("Runtime error: {}", e)))?;
+    runtime
+        .block_on(async {
+            let client = crate::core::tasks::create_web_client::create_web_client().await;
+            crate::core::tasks::remote_reachability::ensure_remote_repository_reachable(
+                &client,
+                repository_url,
+            )
+            .await
+        })
+        .map_err(|err| {
+            CommandError::operation(action, format!("{}. Local files were not removed", err))
+        })
+}
+
 pub fn run_command(cli: &CliArgs, command: CliCommand) -> Result<CommandSuccess, CommandError> {
+    crate::core::game::spaces::ensure_game_spaces_layout();
     let started = Instant::now();
     let result = match command {
         CliCommand::Version => Ok(CommandSuccess {
@@ -175,6 +245,10 @@ pub fn run_command(cli: &CliArgs, command: CliCommand) -> Result<CommandSuccess,
         CliCommand::Addon { command } => run_addon_command(cli, command),
         CliCommand::Profile { command } => run_profile_command(cli, command),
         CliCommand::Space { command } => run_space_command(cli, command),
+        CliCommand::Game { command } => run_game_command(cli, command),
+        CliCommand::Config { command } => run_config_command(cli, command),
+        CliCommand::Workshop { command } => run_workshop_command(cli, command),
+        CliCommand::SteamHelper { command } => run_steam_helper_command(command),
         CliCommand::Server { command } => run_server_command(cli, command),
         CliCommand::DirectDownload(args) => cmd_direct_download(cli, args),
         CliCommand::Launch(args) => cmd_launch(cli, args),
@@ -365,15 +439,21 @@ fn run_repository_sync(
     ensure_backend_ready();
     let (tx, mut rx) = broadcast::channel(512);
     let (_pause_tx, pause_rx) = watch::channel(false);
+    // The sender has to outlive the worker: the pipeline treats a closed cancel
+    // channel as a cancellation, so a temporary sender here races the database
+    // open and intermittently fails the sync with "Cancelled".
+    let (_cancel_tx, cancel_rx) = watch::channel(false);
     let worker = api::spawn_repository_sync(
         repo.address.clone(),
         repo.path.clone(),
-        selected_mod_states,
+        selected_mod_states.clone(),
         tx,
         mode,
         api::RepositorySyncOptions {
             operation_id: api::next_operation_id("cli-sync"),
+            persisted_addon_selection: Some(selected_mod_states),
             prepare_download_plan: false,
+            discard_prepared_queue: false,
             repository_space_shared_path: None,
             auto_backup_directory: None,
             rollback_temp_directory: Some(if settings.temp_directory.trim().is_empty() {
@@ -388,11 +468,13 @@ fn run_repository_sync(
                 .filter(|limit| *limit > 0),
             recent_local_path_reset: false,
             force_redownload,
+            force_full_downloads: false,
             allow_suspect_full_redownload: force_redownload,
             download_pause_rx: pause_rx,
-            cancel_rx: watch::channel(false).1,
+            cancel_rx,
             hash_algorithm_preference: repo.hash_algorithm_preference,
             hash_io_profile: settings.hash_io_profile,
+            trust_verified_hashes: settings.trust_verified_hashes,
         },
         None,
     );
@@ -423,7 +505,9 @@ fn run_repository_sync(
                 ProgressEvent::DownloadTelemetry { .. } => {}
                 ProgressEvent::HashTelemetry { .. } => {}
                 ProgressEvent::HashSummary { .. } => {}
+                ProgressEvent::HashEstimate { .. } => {}
                 ProgressEvent::SiblingPropagation { .. } => {}
+                ProgressEvent::DiskSpaceShortfall(_) => {}
                 ProgressEvent::DownloadMod {
                     mod_name,
                     files_done,
@@ -450,6 +534,7 @@ fn run_repository_sync(
                     total_files,
                     checked_parts,
                     total_parts,
+                    ..
                 } => {
                     if !quiet && last_print.elapsed() >= Duration::from_millis(300) {
                         if total_parts > 0 {

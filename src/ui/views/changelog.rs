@@ -194,8 +194,8 @@ mod tests {
 
     #[test]
     fn extracts_version_links_from_h1_headings() {
-        let parsed = parse_changelog_markdown("# 1.2.0\n## Added\n# 1.1.0\n- Fixed");
+        let parsed = parse_changelog_markdown("# 1.2.0\n## Added\n# 1.2.0\n- Fixed");
 
-        assert_eq!(changelog_versions(&parsed), vec!["1.2.0", "1.1.0"]);
+        assert_eq!(changelog_versions(&parsed), vec!["1.2.0", "1.2.0"]);
     }
 }

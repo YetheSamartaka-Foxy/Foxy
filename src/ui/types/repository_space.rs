@@ -66,6 +66,10 @@ pub struct RepositorySpace {
     pub repo_image_checksum: String,
     #[serde(default)]
     pub app_update_url: String,
+    /// Checksum of the manifest these fields were last taken from; a refresh
+    /// that fetches the same checksum leaves the space untouched.
+    #[serde(default)]
+    pub manifest_checksum: String,
     #[serde(default)]
     pub entries: Vec<RepositorySpaceEntry>,
 }

@@ -9,8 +9,11 @@ use crate::core::tasks::calculate_hashes::{
     pre_propagate_sibling_checksums,
 };
 use crate::core::tasks::init_database::{DB_WRITE_PERMITS, DB_WRITE_SEMAPHORE};
-use crate::core::tasks::remote_mods::{remote_mods_with_data, resolve_mod_local_path};
+use crate::core::tasks::remote_mods::{
+    RemoteRebuildWork, remote_mods_with_data, resolve_mod_local_path,
+};
 use crate::core::utils::fetch_json::fetch_json;
+use crate::core::utils::speed_of_light::{SolLight, op_id_extra, sol_line};
 use crate::ui::types::HashAlgorithmPreference;
 use log::{debug, error, info, warn};
 use serde::Deserialize;
@@ -305,9 +308,9 @@ async fn repository_has_remote_state(
     // so a file with a non-empty remote_checksum implies its parts already carry
     // theirs (mirrors the local rollup ordering in `calculate_hashes`). With all
     // files complete, the parts are complete too, so the part term in
-    // `remote_state_complete_from_addons` is satisfied with part_count = 0. If a
-    // partial graph ever slipped through, the repository-level checksum equality
-    // that gates the skip decision still catches it.
+    // `remote_state_complete_from_addons` is satisfied with part_count = 0. The
+    // one hole in that derivation (files persisted, parts never landed) is
+    // closed by the `LIMIT 1` part probe below.
     let rows = match context
         .db()
         .query_all(
@@ -354,7 +357,66 @@ async fn repository_has_remote_state(
         })
         .collect::<Vec<_>>();
 
-    remote_state_complete_from_addons(&states, enabled_overrides)
+    if !remote_state_complete_from_addons(&states, enabled_overrides) {
+        return false;
+    }
+
+    // The derivation above assumes the parts landed with the files. A deferred
+    // rebuild writes the file rows inline and holds the part rows in memory until
+    // the hash pass persists them, so a process exit in between leaves every file
+    // "complete" over an empty `subfiles`. Such a graph cannot produce local tree
+    // hashes and the quick scan preflight already refuses it; the skip decision
+    // must agree, or every sync re-reads the whole repository for nothing.
+    let enabled_file_count: i64 = states
+        .iter()
+        .filter(|addon| addon_enabled_for_remote_state(addon, enabled_overrides))
+        .map(|addon| addon.file_count)
+        .sum();
+    if enabled_file_count == 0 || context.deferred_part_count() > 0 {
+        return true;
+    }
+    match repository_part_rows_exist(context, repository_id).await {
+        Some(true) => true,
+        Some(false) => {
+            info!(
+                "Repository id={} has {} enabled files but no part rows and no deferred part inserts; remote state is incomplete",
+                repository_id, enabled_file_count
+            );
+            false
+        }
+        None => false,
+    }
+}
+
+/// Indexed `LIMIT 1` probe for any part row under the repository's enabled
+/// addons. Mirrors the quick scan preflight probe so both gates agree on what a
+/// missing part graph looks like.
+async fn repository_part_rows_exist(context: Arc<FoxyContext>, repository_id: i64) -> Option<bool> {
+    match context
+        .db()
+        .query_one(
+            r#"SELECT 1 FROM subfiles sf
+               WHERE sf.file_id IN (
+                   SELECT af.file_id
+                   FROM addon_files af
+                   JOIN repository_addons ra ON ra.addon_id = af.addon_id
+                   JOIN addons a ON a.id = ra.addon_id
+                   WHERE ra.repository_id = ? AND a.enabled = 1
+               )
+               LIMIT 1"#,
+            params![repository_id],
+        )
+        .await
+    {
+        Ok(row) => Some(row.is_some()),
+        Err(err) => {
+            warn!(
+                "Failed to probe part rows for repository_id={}: {}",
+                repository_id, err
+            );
+            None
+        }
+    }
 }
 
 /// Cheaply fetch the repository's canonical remote checksum without touching the
@@ -370,11 +432,7 @@ pub(crate) async fn probe_remote_repository_checksum(
     repository_url: &str,
     hash_algorithm_preference: HashAlgorithmPreference,
 ) -> Option<String> {
-    let normalized_url = if repository_url.ends_with('/') {
-        repository_url.to_string()
-    } else {
-        format!("{}/", repository_url)
-    };
+    let normalized_url = crate::core::models::repository::normalize_repository_url(repository_url);
     let repo_url = format!("{}repo.json", normalized_url);
 
     let data = match fetch_json(context.clone(), &repo_url).await {
@@ -424,6 +482,45 @@ pub(crate) async fn probe_remote_repository_checksum(
     }
 }
 
+/// Emit the `SOL op=remote_refresh` action record (conventions/SPEED_OF_LIGHT.md,
+/// O5): one line per refresh with its branch as `outcome`, the index requests
+/// it made, and the manifest work when the graph was rebuilt.
+fn log_remote_refresh_sol(
+    context: &FoxyContext,
+    started: std::time::Instant,
+    outcome: &str,
+    index_requests: usize,
+    work: Option<RemoteRebuildWork>,
+) {
+    let work = work.unwrap_or_default();
+    let secs = |d: std::time::Duration| format!("{:.3}", d.as_secs_f64());
+    let mut extras = vec![
+        ("outcome", outcome.to_string()),
+        ("index_requests", index_requests.to_string()),
+        ("manifest_requests", work.mods.to_string()),
+        ("mods", work.mods.to_string()),
+        ("files", work.files.to_string()),
+        ("parts", work.parts.to_string()),
+        ("response_bytes", work.response_bytes.to_string()),
+        ("fetch_sum_s", secs(work.fetch)),
+        ("parse_sum_s", secs(work.parse)),
+        ("persist_sum_s", secs(work.persist)),
+        ("fan_out_wall_s", secs(work.fan_out_wall)),
+        ("timer_scope", "action_wall".to_string()),
+    ];
+    extras.extend(op_id_extra(context.operation_id()));
+    info!(
+        "{}",
+        sol_line(
+            "remote_refresh",
+            0,
+            started.elapsed(),
+            &SolLight::SelfBaseline,
+            &extras,
+        )
+    );
+}
+
 /// Acquire repository information from URL, process addons if local and remote repository checksums differ
 pub(crate) async fn remote_repository(
     context: Arc<FoxyContext>,
@@ -434,11 +531,9 @@ pub(crate) async fn remote_repository(
     hash_algorithm_preference: HashAlgorithmPreference,
 ) -> Option<RemoteRepositoryMetadata> {
     // Normalize remote URL to always have trailing slash for consistent path joins
-    let normalized_url = if repository_url.ends_with('/') {
-        repository_url.to_string()
-    } else {
-        format!("{}/", repository_url)
-    };
+    let normalized_url = crate::core::models::repository::normalize_repository_url(repository_url);
+    let refresh_started = std::time::Instant::now();
+    let mut index_requests = 1usize;
     let repo_url = format!("{}repo.json", normalized_url);
     info!("Loading repository metadata from: {}", repo_url);
 
@@ -449,6 +544,7 @@ pub(crate) async fn remote_repository(
                 "Error fetching addons for repository {}: {}",
                 repository_url, e
             );
+            log_remote_refresh_sol(&context, refresh_started, "failed", index_requests, None);
             return None;
         }
     };
@@ -516,6 +612,7 @@ pub(crate) async fn remote_repository(
     // stable. The fetched payload is reused below as the mod metadata source.
     let foxy_addons_data = if foxy_mode.is_foxy() {
         let foxy_addons_url = format!("{}foxy_addons.json", normalized_url);
+        index_requests += 1;
         info!(
             "FoxyMode detected - loading mod metadata from: {}",
             foxy_addons_url
@@ -602,6 +699,7 @@ pub(crate) async fn remote_repository(
                 "Failed to upsert repository metadata for {}: {}",
                 normalized_url, err
             );
+            log_remote_refresh_sol(&context, refresh_started, "failed", index_requests, None);
             return None;
         }
     };
@@ -679,6 +777,13 @@ pub(crate) async fn remote_repository(
         force_refresh || !remote_addon_links_match || !repository_space_paths_match,
     ) {
         info!("Up-to-date: Repository {}.", repository.remote_url.clone());
+        log_remote_refresh_sol(
+            &context,
+            refresh_started,
+            "skipped_clean",
+            index_requests,
+            None,
+        );
         return Some(RemoteRepositoryMetadata {
             foxy_mode,
             app_update_url,
@@ -699,6 +804,13 @@ pub(crate) async fn remote_repository(
         info!(
             "Repository {} remote graph unchanged (repo.json checksum matches stored remote checksum); using existing DB metadata for local verification",
             repository.remote_url
+        );
+        log_remote_refresh_sol(
+            &context,
+            refresh_started,
+            "graph_unchanged",
+            index_requests,
+            None,
         );
         return Some(RemoteRepositoryMetadata {
             foxy_mode,
@@ -741,6 +853,7 @@ pub(crate) async fn remote_repository(
             "Repository {}: Local path is not set, please set the value and run recheck again",
             repository.name
         );
+        log_remote_refresh_sol(&context, refresh_started, "failed", index_requests, None);
         return None;
     }
 
@@ -750,15 +863,6 @@ pub(crate) async fn remote_repository(
     let mods_data = foxy_addons_data.unwrap_or(data);
 
     let repository = Arc::new(repository);
-
-    // Suppress WAL autocheckpoint during the metadata rebuild to avoid
-    // frequent fsyncs from mid-write checkpoints. The WAL will grow temporarily
-    // but self-corrects when autocheckpoint is restored.
-    let db = context.db();
-    let suppressed_wal = db
-        .execute("PRAGMA wal_autocheckpoint = 0", params![])
-        .await
-        .is_ok();
 
     // Temporarily increase write concurrency for the rebuild. During first-run
     // metadata rebuild there are no competing writers (no downloads, no hash
@@ -772,7 +876,7 @@ pub(crate) async fn remote_repository(
         *DB_WRITE_PERMITS + extra_permits
     );
 
-    remote_mods_with_data(
+    let rebuild_work = remote_mods_with_data(
         context.clone(),
         repository.clone(),
         mods_data,
@@ -790,12 +894,6 @@ pub(crate) async fn remote_repository(
             "Metadata rebuild: restored write permits to {}",
             *DB_WRITE_PERMITS
         );
-    }
-
-    if suppressed_wal {
-        let _ = db
-            .execute("PRAGMA wal_autocheckpoint = 256", params![])
-            .await;
     }
 
     let final_has_linked_addons =
@@ -818,6 +916,13 @@ pub(crate) async fn remote_repository(
         &final_repository,
         final_has_linked_addons,
         final_has_remote_state,
+    );
+    log_remote_refresh_sol(
+        &context,
+        refresh_started,
+        "rebuilt",
+        index_requests,
+        Some(rebuild_work),
     );
 
     Some(RemoteRepositoryMetadata {
@@ -1026,6 +1131,79 @@ mod tests {
         std::fs::remove_dir_all(root).expect("remove test tree");
     }
 
+    async fn seed_repository_with_file(fdb: &FoxyDb) {
+        fdb.execute(
+            "INSERT INTO repositories (id, name, remote_url, local_path, remote_checksum) VALUES (1, 'r', 'https://example.com/', 'C:/mods/', 'REPO')",
+            params![],
+        )
+        .await
+        .expect("seed repository");
+        fdb.execute(
+            "INSERT INTO addons (id, name, local_path, enabled, remote_checksum, required) VALUES (1, '@a', 'C:/mods/@a', 1, 'ADDON', 1)",
+            params![],
+        )
+        .await
+        .expect("seed addon");
+        fdb.execute(
+            "INSERT INTO repository_addons (repository_id, addon_id) VALUES (1, 1)",
+            params![],
+        )
+        .await
+        .expect("link addon");
+        fdb.execute(
+            "INSERT INTO files (id, name, remote_path, local_path, remote_checksum, length) VALUES (10, 'a.pbo', 'https://example.com/@a/addons/a.pbo', 'C:/mods/@a/addons/a.pbo', 'FILE', 4)",
+            params![],
+        )
+        .await
+        .expect("seed file");
+        fdb.execute(
+            "INSERT INTO addon_files (addon_id, file_id) VALUES (1, 10)",
+            params![],
+        )
+        .await
+        .expect("link file");
+    }
+
+    #[tokio::test]
+    async fn remote_state_incomplete_when_files_have_no_part_rows() {
+        let db = crate::core::tasks::db_turso::build_test_database().await;
+        let fdb = FoxyDb::from_turso(db.clone());
+        seed_repository_with_file(&fdb).await;
+        let context = Arc::new(FoxyContext::new(db, reqwest::Client::new()));
+
+        assert!(!repository_has_remote_state(context.clone(), 1, None).await);
+
+        fdb.execute(
+            "INSERT INTO subfiles (file_id, path, local_length, local_start, remote_length, remote_start, local_checksum, remote_checksum, data_order) VALUES (10, 'p0', 0, 0, 4, 0, '', 'PART', 0)",
+            params![],
+        )
+        .await
+        .expect("seed part");
+
+        assert!(repository_has_remote_state(context, 1, None).await);
+    }
+
+    #[tokio::test]
+    async fn remote_state_complete_when_part_rows_are_deferred_in_memory() {
+        use crate::core::models::context::DeferredPartInsert;
+
+        let db = crate::core::tasks::db_turso::build_test_database().await;
+        let fdb = FoxyDb::from_turso(db.clone());
+        seed_repository_with_file(&fdb).await;
+        let context = Arc::new(FoxyContext::new(db, reqwest::Client::new()));
+        context.set_defer_part_inserts(true);
+        context.buffer_deferred_parts(vec![DeferredPartInsert {
+            file_id: 10,
+            path: "p0".to_owned(),
+            remote_length: 4,
+            remote_start: 0,
+            remote_checksum: "PART".to_owned(),
+            data_order: 0,
+        }]);
+
+        assert!(repository_has_remote_state(context, 1, None).await);
+    }
+
     // ── should_skip_remote_refresh ──────────────────────────────────────
 
     #[test]
@@ -1161,9 +1339,9 @@ mod tests {
     #[test]
     fn local_path_identity_uses_windows_case_rules() {
         let mut repo = make_repo("ABC", "DEF");
-        repo.local_path = "C:/Mods/TFR/".to_string();
+        repo.local_path = "C:/Mods/Alpha/".to_string();
 
-        assert!(local_path_identity_unchanged(&repo, "c:\\mods\\tfr\\"));
+        assert!(local_path_identity_unchanged(&repo, "c:\\mods\\alpha\\"));
     }
 
     fn addon_state(name: &str) -> RepositoryAddonRemoteState {

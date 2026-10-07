@@ -1,4 +1,4 @@
 interface:
   display_name: "Foxy Locale Translator"
   short_description: "Translate and validate Foxy locale JSON safely."
-  default_prompt: "Translate Foxy locale JSON files from en.json, apply batches with the locale helper script, and validate changed keys."
+  default_prompt: "Translate Foxy locale JSON files from en.json, apply batches with the locale-apply helper binary, and validate changed keys."

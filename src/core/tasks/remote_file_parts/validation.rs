@@ -59,7 +59,7 @@ pub(super) fn local_file_matches_part_layout(
     file: &FoxyModFile,
     parts: &[FoxyModFilePart],
 ) -> bool {
-    let local_size = match std::fs::metadata(&file.local_path) {
+    let local_size = match crate::core::utils::profiling::fs::metadata(&file.local_path) {
         Ok(meta) if meta.is_file() => meta.len(),
         _ => return false,
     };

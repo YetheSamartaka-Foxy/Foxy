@@ -9,6 +9,17 @@ use std::sync::Arc;
 pub(crate) const REPOSITORY_COLUMNS: &str = "id, name, remote_url, local_path, image, local_checksum, remote_checksum, \
      local_content_hash, foxy_mode";
 
+/// Upsert keyed on the `(remote_url, local_path)` repository identity. Shared
+/// with the startup schema probe (`db_schema_check`), which prepares it against
+/// the live database: an older schema without the composite UNIQUE fails to
+/// parse the `ON CONFLICT` target, which is exactly what the probe must catch.
+pub(crate) const REPOSITORY_UPSERT_SQL: &str = "INSERT INTO repositories \
+     (name, remote_url, image, local_path, remote_checksum, local_checksum, local_content_hash, foxy_mode) \
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+     ON CONFLICT (remote_url, local_path) DO UPDATE SET \
+     name = excluded.name, image = excluded.image, \
+     remote_checksum = excluded.remote_checksum, foxy_mode = excluded.foxy_mode";
+
 /// Build a [`FoxyRepository`] from a seam [`DbRow`].
 pub(crate) fn repository_from_row(row: &DbRow) -> Result<FoxyRepository, DbErr> {
     Ok(FoxyRepository {
@@ -90,6 +101,19 @@ pub(crate) fn normalize_repository_local_path_identity(path: &str) -> String {
     crate::core::utils::content_hash::normalize_path(path)
 }
 
+/// Canonical remote-URL form: surrounding whitespace removed, separators
+/// forward-slashed, exactly one trailing slash. A repository instance is keyed
+/// by `(remote_url, local_path)`, so a stray trailing space in a configured
+/// address is enough to make every DB lookup miss its own row. An empty address
+/// stays empty rather than becoming a bare `/`.
+pub(crate) fn normalize_repository_url(url: &str) -> String {
+    let mut normalized = url.trim().replace('\\', "/");
+    if !normalized.is_empty() && !normalized.ends_with('/') {
+        normalized.push('/');
+    }
+    normalized
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn upsert_repository_entry(
     context: Arc<FoxyContext>,
@@ -106,12 +130,7 @@ pub(crate) async fn upsert_repository_entry(
     let db = context.db();
     db.execute_retry(
         "upsert repository entry",
-        "INSERT INTO repositories \
-         (name, remote_url, image, local_path, remote_checksum, local_checksum, local_content_hash, foxy_mode) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
-         ON CONFLICT (remote_url, local_path) DO UPDATE SET \
-         name = excluded.name, image = excluded.image, \
-         remote_checksum = excluded.remote_checksum, foxy_mode = excluded.foxy_mode",
+        REPOSITORY_UPSERT_SQL,
         params![
             name,
             repository_url,
@@ -229,6 +248,44 @@ pub async fn is_repository_foxy(remote_url: &str, local_path: &str) -> Option<bo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_repository_url_trims_surrounding_whitespace() {
+        assert_eq!(
+            normalize_repository_url("  https://example.com/repo/  "),
+            "https://example.com/repo/"
+        );
+        assert_eq!(
+            normalize_repository_url("https://example.com/repo\t\n"),
+            "https://example.com/repo/"
+        );
+    }
+
+    #[test]
+    fn normalize_repository_url_adds_single_trailing_slash() {
+        assert_eq!(
+            normalize_repository_url("https://example.com/repo"),
+            "https://example.com/repo/"
+        );
+        assert_eq!(
+            normalize_repository_url("https://example.com/repo/"),
+            "https://example.com/repo/"
+        );
+    }
+
+    #[test]
+    fn normalize_repository_url_forward_slashes_separators() {
+        assert_eq!(
+            normalize_repository_url("https://example.com\\repo"),
+            "https://example.com/repo/"
+        );
+    }
+
+    #[test]
+    fn normalize_repository_url_keeps_blank_blank() {
+        assert_eq!(normalize_repository_url(""), "");
+        assert_eq!(normalize_repository_url("   "), "");
+    }
 
     #[test]
     fn foxy_mode_from_db_str_v1() {

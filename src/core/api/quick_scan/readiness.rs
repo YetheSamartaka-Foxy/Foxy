@@ -142,7 +142,11 @@ async fn quick_scan_preflight_combined_inner(
         });
     }
 
-    // Query 1: mod stats via subquery (avoids JOIN row inflation)
+    // Query 1: mod stats via subquery (avoids JOIN row inflation).
+    // Scoped to enabled addons, like the diff itself: a deselected optional
+    // addon is never downloaded, so its files can never earn local tree
+    // checksums, part checksums or content hashes, and counting it here would
+    // hold the repository out of the fast path on every launch.
     let mod_stats_started = Instant::now();
     let mod_row = match db
         .query_one(
@@ -152,7 +156,8 @@ async fn quick_scan_preflight_combined_inner(
                 SUM(CASE WHEN local_checksum = '' THEN 1 ELSE 0 END) AS missing_local,
                 SUM(CASE WHEN local_content_hash = '' THEN 1 ELSE 0 END) AS missing_content
             FROM addons
-            WHERE id IN (SELECT addon_id FROM repository_addons WHERE repository_id = ?)"#,
+            WHERE id IN (SELECT addon_id FROM repository_addons WHERE repository_id = ?)
+            AND enabled = 1"#,
             params![repository.id as i64],
         )
         .await
@@ -238,7 +243,8 @@ async fn quick_scan_preflight_combined_inner(
                 SELECT af.file_id
                 FROM addon_files af
                 JOIN repository_addons ra ON ra.addon_id = af.addon_id
-                WHERE ra.repository_id = ?
+                JOIN addons a ON a.id = ra.addon_id
+                WHERE ra.repository_id = ? AND a.enabled = 1
             )"#,
             params![repository.id as i64],
         )
@@ -307,52 +313,51 @@ async fn quick_scan_preflight_combined_inner(
         });
     }
 
+    // Part rows only ever contribute two booleans here, and both are already
+    // decided whenever a higher level is missing. Probing with `LIMIT 1` stops
+    // at the first row that settles the question; the aggregate this replaced
+    // had to read every part row in the repository to reach the same answer,
+    // which cost over a second on a repository with 141k parts and gated the
+    // whole startup verdict (`conventions/SPEED_OF_LIGHT.md` O8).
     let part_stats_started = Instant::now();
-    let (part_count, missing_part_remote, missing_part_local) = match db
-        .query_one(
-            r#"SELECT
-                COUNT(*) AS total,
-                SUM(CASE WHEN sf.remote_checksum = '' THEN 1 ELSE 0 END) AS missing_remote,
-                SUM(CASE
-                    WHEN f.local_checksum IS NOT NULL
-                         AND f.local_checksum != ''
-                         AND f.local_checksum = f.remote_checksum
-                         AND f.remote_checksum != ''
-                    THEN 0
-                    WHEN sf.local_checksum IS NULL OR sf.local_checksum = ''
-                    THEN 1
-                    ELSE 0
-                END) AS missing_local
-            FROM subfiles sf
-            JOIN files f ON f.id = sf.file_id
-            WHERE sf.file_id IN (
-                SELECT af.file_id
-                FROM addon_files af
-                JOIN repository_addons ra ON ra.addon_id = af.addon_id
-                WHERE ra.repository_id = ?
-            )"#,
-            params![repository.id as i64],
+    let deferred_parts = context.deferred_part_count() > 0;
+    let part_rows_exist = if deferred_parts {
+        true
+    } else {
+        scoped_part_exists(&db, repository.id as i64, repo_url, None).await?
+    };
+    // `None` means "not probed because a higher level already decided", which
+    // the log must not render as a proven absence.
+    let missing_part_remote = if missing_mod_remote > 0 || missing_file_remote > 0 {
+        None
+    } else {
+        Some(
+            scoped_part_exists(
+                &db,
+                repository.id as i64,
+                repo_url,
+                Some(PART_MISSING_REMOTE_CHECKSUM),
+            )
+            .await?,
         )
-        .await
+    };
+    let missing_part_local = if repo_missing_tree || missing_mod_local > 0 || missing_file_local > 0
     {
-        Ok(Some(row)) => {
-            let total: i64 = row.get_i64("total").unwrap_or(0);
-            let mr: i64 = row.get_i64("missing_remote").unwrap_or(0);
-            let ml: i64 = row.get_i64("missing_local").unwrap_or(0);
-            (total, mr, ml)
-        }
-        Ok(None) => (0i64, 0i64, 0i64),
-        Err(err) => {
-            warn!(
-                "Failed to query part stats for preflight {}: {}",
-                repo_url, err
-            );
-            return None;
-        }
+        None
+    } else {
+        Some(
+            scoped_part_exists(
+                &db,
+                repository.id as i64,
+                repo_url,
+                Some(PART_MISSING_LOCAL_CHECKSUM),
+            )
+            .await?,
+        )
     };
     let part_stats_elapsed = part_stats_started.elapsed();
 
-    let parts_metadata_available = part_count > 0 || context.deferred_part_count() > 0;
+    let parts_metadata_available = part_rows_exist;
     if !parts_metadata_available {
         info!(
             "Quick scan preflight for repo {}: part metadata is missing (files={} parts=0, no deferred rows); remote metadata refresh required before local hashing",
@@ -361,13 +366,13 @@ async fn quick_scan_preflight_combined_inner(
     }
     let remote_ready = missing_mod_remote == 0
         && missing_file_remote == 0
-        && missing_part_remote == 0
+        && !missing_part_remote.unwrap_or(false)
         && parts_metadata_available;
 
     let tree_missing = repo_missing_tree
         || missing_mod_local > 0
         || missing_file_local > 0
-        || missing_part_local > 0;
+        || missing_part_local.unwrap_or(false);
     let content_ready =
         !repo_missing_content && missing_mod_content == 0 && missing_file_content == 0;
     let content_missing_all = repo_missing_content
@@ -386,7 +391,7 @@ async fn quick_scan_preflight_combined_inner(
     };
 
     info!(
-        "Quick scan preflight timings: repo={} outcome=full bootstrap_plan={:?} repository_query={:.2?} mod_stats={:.2?} file_stats={:.2?} part_stats={:.2?} total={:.2?} addons={} files={} parts={} missing_remote={}/{}/{} missing_local={}/{}/{} missing_content={}/{}",
+        "Quick scan preflight timings: repo={} outcome=full bootstrap_plan={:?} repository_query={:.2?} mod_stats={:.2?} file_stats={:.2?} part_stats={:.2?} total={:.2?} addons={} files={} parts_present={} missing_remote={}/{}/{} missing_local={}/{}/{} missing_content={}/{}",
         repo_url,
         bootstrap_plan,
         repository_query_elapsed,
@@ -396,13 +401,13 @@ async fn quick_scan_preflight_combined_inner(
         preflight_started.elapsed(),
         mod_count,
         file_count,
-        part_count,
+        part_rows_exist,
         missing_mod_remote,
         missing_file_remote,
-        missing_part_remote,
+        probe_log_value(missing_part_remote),
         missing_mod_local,
         missing_file_local,
-        missing_part_local,
+        probe_log_value(missing_part_local),
         missing_mod_content,
         missing_file_content
     );
@@ -411,6 +416,70 @@ async fn quick_scan_preflight_combined_inner(
         remote_ready,
         bootstrap_plan,
     })
+}
+
+/// A part row the server never published a checksum for.
+const PART_MISSING_REMOTE_CHECKSUM: &str = "sf.remote_checksum = ''";
+
+/// A part row that has never been hashed locally, unless its file is already
+/// proven clean at the file level, in which case its parts do not need one.
+const PART_MISSING_LOCAL_CHECKSUM: &str = "(sf.local_checksum IS NULL OR sf.local_checksum = '') \
+     AND NOT (f.local_checksum IS NOT NULL AND f.local_checksum != '' \
+     AND f.local_checksum = f.remote_checksum AND f.remote_checksum != '')";
+
+/// Existence probe over one repository's enabled-addon part rows.
+///
+/// `predicate` is a constant SQL fragment chosen by the caller, never user
+/// input. `LIMIT 1` is the point: the preflight needs booleans, and a scan that
+/// stops at the first qualifying row is what keeps a large repository from
+/// paying a full part-table read on every launch.
+///
+/// `None` on a query error, never `false`: a failed probe must not be read as
+/// "nothing is missing", which would let the preflight report remote metadata
+/// ready or the local tree complete on no evidence at all. Every caller
+/// propagates it into the conservative preflight fallback.
+async fn scoped_part_exists(
+    db: &FoxyDb,
+    repository_id: i64,
+    repo_url: &str,
+    predicate: Option<&str>,
+) -> Option<bool> {
+    let filter = predicate
+        .map(|predicate| format!("AND {predicate}"))
+        .unwrap_or_default();
+    let sql = format!(
+        r#"SELECT 1 FROM subfiles sf
+            JOIN files f ON f.id = sf.file_id
+            WHERE sf.file_id IN (
+                SELECT af.file_id
+                FROM addon_files af
+                JOIN repository_addons ra ON ra.addon_id = af.addon_id
+                JOIN addons a ON a.id = ra.addon_id
+                WHERE ra.repository_id = ? AND a.enabled = 1
+            )
+            {filter}
+            LIMIT 1"#
+    );
+    match db.query_one(&sql, params![repository_id]).await {
+        Ok(row) => Some(row.is_some()),
+        Err(err) => {
+            warn!(
+                "Failed to probe part rows for preflight {}: {}",
+                repo_url, err
+            );
+            None
+        }
+    }
+}
+
+/// How a part probe reads in the preflight log: its answer, or that a higher
+/// level already decided and it never ran.
+fn probe_log_value(probed: Option<bool>) -> &'static str {
+    match probed {
+        Some(true) => "true",
+        Some(false) => "false",
+        None => "skipped",
+    }
 }
 
 /// Indexed existence probe for repository part metadata.
@@ -602,6 +671,75 @@ pub(crate) fn collect_files_with_missing_local_tree_hashes(tree: &Tree) -> HashS
     file_ids
 }
 
+/// The subset of [`collect_files_with_missing_local_tree_hashes`] a targeted
+/// init can actually make progress on. A file that is absent on disk can never
+/// earn a local tree hash, so re-running the init over it on every sync only
+/// re-reads part rows and flips the "targeted init ran" state for nothing;
+/// such a file is reported through the quick scan's `!exists` path instead.
+/// A missing file that still carries stale local state is kept so the hash
+/// pass can clear it.
+pub(crate) fn collect_hashable_files_with_missing_local_tree_hashes(tree: &Tree) -> HashSet<u64> {
+    collect_files_with_missing_local_tree_hashes(tree)
+        .into_iter()
+        .filter(|file_id| {
+            tree.file_id_to_index
+                .get(file_id)
+                .and_then(|&file_idx| tree.files.get(file_idx).map(|file| (file_idx, file)))
+                .is_none_or(|(file_idx, file)| {
+                    local_file_present(&file.local_path)
+                        || file_has_local_tree_state(tree, file_idx, file)
+                })
+        })
+        .collect()
+}
+
+fn local_file_present(local_path: &str) -> bool {
+    let local_path = local_path.trim();
+    !local_path.is_empty()
+        && std::fs::metadata(local_path)
+            .map(|metadata| metadata.is_file())
+            .unwrap_or(false)
+}
+
+/// Files a targeted tree-hash init must still baseline: the ones it hashed
+/// plus any requested file it skipped (already tree-synced through sibling
+/// propagation) that carries no content hash. Without a baseline the quick
+/// scan reports such a file as a content mismatch while the tree checksums
+/// keep it out of the download queue.
+pub(crate) fn collect_targeted_init_content_baseline_files(
+    tree: &Tree,
+    requested_file_ids: &HashSet<u64>,
+    processed_file_ids: &HashSet<u64>,
+) -> HashSet<u64> {
+    let mut file_ids = processed_file_ids.clone();
+    for file in &tree.files {
+        if !requested_file_ids.contains(&file.id) || processed_file_ids.contains(&file.id) {
+            continue;
+        }
+        let tree_synced =
+            !file.local_checksum.trim().is_empty() && file.local_checksum == file.remote_checksum;
+        if tree_synced && file.local_content_hash.trim().is_empty() {
+            file_ids.insert(file.id);
+        }
+    }
+    file_ids
+}
+
+fn file_has_local_tree_state(tree: &Tree, file_idx: usize, file: &FoxyModFile) -> bool {
+    if !file.local_checksum.trim().is_empty() {
+        return true;
+    }
+    tree.file_nodes.get(file_idx).is_some_and(|file_node| {
+        file_node.parts.iter().any(|&part_idx| {
+            tree.parts.get(part_idx).is_some_and(|part| {
+                !part.local_checksum.trim().is_empty()
+                    || part.local_length != 0
+                    || part.local_start != 0
+            })
+        })
+    })
+}
+
 pub(crate) struct TreeHashReadiness {
     pub(crate) ready_file_ids: HashSet<u64>,
     pub(crate) incomplete_files: Vec<String>,
@@ -697,17 +835,37 @@ pub(super) fn content_hash_baseline_ready(tree: &Tree) -> bool {
         return false;
     }
 
+    let enabled_file_indices = enabled_addon_file_indices(tree);
     tree.repositories
         .iter()
         .all(|repo| !repo.local_content_hash.trim().is_empty())
         && tree
             .mods
             .iter()
+            .filter(|addon| addon.enabled)
             .all(|addon| !addon.local_content_hash.trim().is_empty())
-        && tree
-            .files
-            .iter()
-            .all(|file| !file.local_content_hash.trim().is_empty())
+        && enabled_file_indices.iter().all(|&file_idx| {
+            tree.files
+                .get(file_idx)
+                .map(|file| !file.local_content_hash.trim().is_empty())
+                .unwrap_or(true)
+        })
+}
+
+/// File indices reachable from the tree's enabled addons. Disabled addons are
+/// out of scope for every readiness gate, so their files must not decide
+/// whether a baseline is complete.
+fn enabled_addon_file_indices(tree: &Tree) -> HashSet<usize> {
+    tree.mod_nodes
+        .iter()
+        .filter(|addon_node| {
+            tree.mods
+                .get(addon_node.mod_idx)
+                .map(|addon| addon.enabled)
+                .unwrap_or(false)
+        })
+        .flat_map(|addon_node| addon_node.files.iter().copied())
+        .collect()
 }
 
 #[cfg(test)]
@@ -954,8 +1112,8 @@ mod tests {
     }
 
     /// Single repo/addon/file/part tree with explicit checksum + content-hash
-    /// values for each level. Node graphs are intentionally omitted since the
-    /// checksum/content helpers only inspect the flat vectors.
+    /// values for each level, linked through the node graph so the enabled-addon
+    /// scoping in the content-hash helpers can walk it.
     #[allow(clippy::too_many_arguments)]
     fn checksum_tree(
         repo_tree: &str,
@@ -966,11 +1124,35 @@ mod tests {
         file_content: &str,
         part_tree: &str,
     ) -> Tree {
+        checksum_tree_with_enabled(
+            repo_tree,
+            repo_content,
+            mod_tree,
+            mod_content,
+            file_tree,
+            file_content,
+            part_tree,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn checksum_tree_with_enabled(
+        repo_tree: &str,
+        repo_content: &str,
+        mod_tree: &str,
+        mod_content: &str,
+        file_tree: &str,
+        file_content: &str,
+        part_tree: &str,
+        enabled: bool,
+    ) -> Tree {
         Tree {
             repositories: vec![repo(repo_tree, repo_content)],
             mods: vec![FoxyMod {
                 id: 1,
                 name: "@a".to_string(),
+                enabled,
                 local_checksum: mod_tree.to_string(),
                 local_content_hash: mod_content.to_string(),
                 ..Default::default()
@@ -987,6 +1169,18 @@ mod tests {
                 file_id: 10,
                 local_checksum: part_tree.to_string(),
                 ..Default::default()
+            }],
+            repo_nodes: vec![RepositoryNode {
+                repo_idx: 0,
+                mods: vec![0],
+            }],
+            mod_nodes: vec![ModNode {
+                mod_idx: 0,
+                files: vec![0],
+            }],
+            file_nodes: vec![FileNode {
+                file_idx: 0,
+                parts: vec![0],
             }],
             ..Default::default()
         }
@@ -1078,6 +1272,23 @@ mod tests {
         assert!(!content_hash_baseline_ready(&Tree::default()));
     }
 
+    /// A deselected optional addon is never downloaded, so it can never earn a
+    /// content hash; it must not hold the repository baseline back forever.
+    #[test]
+    fn content_hash_baseline_ready_ignores_disabled_addon() {
+        let tree = checksum_tree_with_enabled("R", "RC", "M", "", "F", "", "P", false);
+        assert!(content_hash_baseline_ready(&tree));
+    }
+
+    #[test]
+    fn enabled_addon_file_indices_skips_disabled_addons() {
+        let enabled = checksum_tree("R", "RC", "M", "MC", "F", "FC", "P");
+        assert_eq!(enabled_addon_file_indices(&enabled), HashSet::from([0]));
+
+        let disabled = checksum_tree_with_enabled("R", "RC", "M", "MC", "F", "FC", "P", false);
+        assert!(enabled_addon_file_indices(&disabled).is_empty());
+    }
+
     // ── collect_files_with_missing_local_tree_hashes ────────────────────
 
     /// `(file_id, file_checksum, [part_checksums])`.
@@ -1137,6 +1348,95 @@ mod tests {
             mods: repo_mod_indices,
         });
         tree
+    }
+
+    #[test]
+    fn hashable_missing_tree_hashes_skip_files_absent_on_disk() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let present = dir.path().join("present.pbo");
+        std::fs::write(&present, b"data").expect("write file");
+        let mut tree = node_tree(
+            "R",
+            vec![("M", vec![(10, "", vec![""]), (11, "", vec![""])])],
+        );
+        tree.files[0].local_path = present.to_string_lossy().to_string();
+        tree.files[1].local_path = dir.path().join("missing.pbo").to_string_lossy().to_string();
+        tree.file_id_to_index = HashMap::from([(10, 0), (11, 1)]);
+
+        assert_eq!(
+            collect_files_with_missing_local_tree_hashes(&tree),
+            HashSet::from([10, 11])
+        );
+        assert_eq!(
+            collect_hashable_files_with_missing_local_tree_hashes(&tree),
+            HashSet::from([10])
+        );
+    }
+
+    #[test]
+    fn hashable_missing_tree_hashes_keep_absent_file_with_stale_part_state() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut tree = node_tree("R", vec![("M", vec![(10, "", vec!["STALE", ""])])]);
+        tree.files[0].local_path = dir.path().join("missing.pbo").to_string_lossy().to_string();
+        tree.file_id_to_index = HashMap::from([(10, 0)]);
+
+        assert_eq!(
+            collect_hashable_files_with_missing_local_tree_hashes(&tree),
+            HashSet::from([10])
+        );
+    }
+
+    #[test]
+    fn targeted_init_baseline_keeps_processed_files() {
+        let tree = node_tree("R", vec![("M", vec![(10, "F", vec!["P"])])]);
+        let requested = HashSet::from([10]);
+        let processed = HashSet::from([10]);
+        assert_eq!(
+            collect_targeted_init_content_baseline_files(&tree, &requested, &processed),
+            HashSet::from([10])
+        );
+    }
+
+    #[test]
+    fn targeted_init_baseline_adds_skipped_synced_file_without_content_hash() {
+        let mut tree = node_tree(
+            "R",
+            vec![("M", vec![(10, "F", vec!["P"]), (11, "F", vec!["P"])])],
+        );
+        for file in &mut tree.files {
+            file.remote_checksum = "F".to_string();
+        }
+        tree.files[0].local_content_hash = "baseline".to_string();
+        let requested = HashSet::from([10, 11]);
+        let processed = HashSet::new();
+        assert_eq!(
+            collect_targeted_init_content_baseline_files(&tree, &requested, &processed),
+            HashSet::from([11])
+        );
+    }
+
+    #[test]
+    fn targeted_init_baseline_ignores_unsynced_and_unrequested_files() {
+        let mut tree = node_tree(
+            "R",
+            vec![(
+                "M",
+                vec![
+                    (10, "F", vec!["P"]),
+                    (11, "", vec![""]),
+                    (12, "F", vec!["P"]),
+                ],
+            )],
+        );
+        for file in &mut tree.files {
+            file.remote_checksum = "F".to_string();
+        }
+        let requested = HashSet::from([10, 11]);
+        let processed = HashSet::new();
+        assert_eq!(
+            collect_targeted_init_content_baseline_files(&tree, &requested, &processed),
+            HashSet::from([10])
+        );
     }
 
     #[test]

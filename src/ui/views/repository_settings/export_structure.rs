@@ -309,11 +309,11 @@ mod tests {
     fn repository_id_selection_accepts_normalized_path_match() {
         let candidates = vec![
             (1, "D:\\Repos\\Other".to_string()),
-            (2, "D:\\Repos\\TFR Main".to_string()),
+            (2, "D:\\Repos\\Main Repo".to_string()),
         ];
 
         assert_eq!(
-            select_repository_id_for_export(&candidates, "D:/Repos/TFR Main/"),
+            select_repository_id_for_export(&candidates, "D:/Repos/Main Repo/"),
             Some(2)
         );
     }
@@ -321,14 +321,14 @@ mod tests {
     #[test]
     fn repository_id_selection_falls_back_only_for_single_url_candidate() {
         assert_eq!(
-            select_repository_id_for_export(&[(7, "D:\\Repos\\TFR Main".to_string())], ""),
+            select_repository_id_for_export(&[(7, "D:\\Repos\\Main Repo".to_string())], ""),
             Some(7)
         );
         assert_eq!(
             select_repository_id_for_export(
                 &[
-                    (7, "D:\\Repos\\TFR Main".to_string()),
-                    (8, "E:\\Repos\\TFR Main".to_string())
+                    (7, "D:\\Repos\\Main Repo".to_string()),
+                    (8, "E:\\Repos\\Main Repo".to_string())
                 ],
                 ""
             ),

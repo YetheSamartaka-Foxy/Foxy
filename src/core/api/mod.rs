@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender as StdSender;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -28,14 +28,15 @@ use crate::core::models::pending_update::{
 use crate::core::models::recheck_level::RecheckLevel;
 use crate::core::models::repository::{FoxyRepository, load_repository_by_remote_url};
 use crate::core::tasks::calculate_hashes::{calculate_hashes, calculate_hashes_for_files};
-use crate::core::tasks::create_context::{create_context, create_context_with_recheck_level};
+use crate::core::tasks::create_context::create_context_with_recheck_level;
 use crate::core::tasks::download_files::DownloadModCompletion;
 use crate::core::tasks::init_database::{SQLITE_MAX_VARIABLES, read_chunk_ids};
 use crate::core::utils::app_paths;
 
 use flexi_logger::writers::LogWriter;
 use flexi_logger::{
-    Cleanup, Criterion, DeferredNow, Duplicate, FileSpec, Logger, Naming, Record, WriteMode,
+    Cleanup, Criterion, DeferredNow, Duplicate, FileSpec, LevelFilter, LogSpecBuilder,
+    LogSpecification, Logger, LoggerHandle, Naming, Record, WriteMode,
 };
 
 mod background_runtime;
@@ -52,6 +53,7 @@ pub use fs_watcher::spawn_repo_fs_watcher;
 pub(crate) use logging::send_progress_event;
 pub use logging::{
     activity_log_generation, activity_log_snapshot, logger_health, next_operation_id,
+    process_start_elapsed, set_extended_diagnostics, startup_operation_id,
 };
 pub(crate) use logging::{ensure_logger, ensure_logger_with_terminal};
 pub use quick_scan::{
@@ -59,8 +61,8 @@ pub use quick_scan::{
     recalculate_hashes_for_addon_by_name, spawn_quick_local_scan, spawn_quick_local_scan_instances,
 };
 pub use startup_diagnostics::{
-    StartupStoragePath, all_storage_devices_lines, log_startup_system_diagnostics,
-    startup_system_diagnostics_lines,
+    StartupDiagnosticsReport, StartupStoragePath, all_storage_devices_lines,
+    spawn_startup_system_diagnostics, spawn_storage_compat_check, startup_system_diagnostics_lines,
 };
 pub use sync_pipeline::spawn_repository_sync;
 pub use types::{

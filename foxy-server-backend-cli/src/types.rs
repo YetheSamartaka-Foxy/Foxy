@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Holds the checksum(s) for a hashed item, depending on generation mode.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Checksums {
     /// Placeholder before checksums are computed. Panics if accessed.
     #[default]
@@ -42,7 +42,7 @@ impl Checksums {
 }
 
 /// A single contiguous byte range within a file (PBO entry or whole file).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FilePart {
     pub path: String,
     pub checksums: Checksums,
@@ -51,7 +51,7 @@ pub struct FilePart {
 }
 
 /// A file within a mod folder, with its computed parts and checksum.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModFile {
     pub relative_path: String,
     pub checksums: Checksums,
@@ -61,7 +61,7 @@ pub struct ModFile {
 }
 
 /// A processed mod (addon folder) with its files and computed checksum.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessedMod {
     pub mod_name: String,
     pub checksums: Checksums,
@@ -73,10 +73,34 @@ pub struct ProcessedMod {
 
 // --- Config types (input JSON) ---
 
+/// The game a repository is published for. It selects the server launch
+/// line `create` prints and which manifest keys make sense; the mod folders
+/// are hashed the same way for every game.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum RepoGame {
+    /// Arma 3: `-mod=` line, Creator DLC codes, `.bikey` keys, client-side mods.
+    #[default]
+    Arma3,
+    /// Arma Reforger: `-addonsDir`/`-addons` line built from each mod's `.gproj` GUID.
+    Reforger,
+}
+
+impl RepoGame {
+    pub fn display_name(self) -> &'static str {
+        match self {
+            RepoGame::Arma3 => "Arma 3",
+            RepoGame::Reforger => "Arma Reforger",
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct RepoConfig {
     #[serde(rename = "repoName")]
     pub repo_name: String,
+    #[serde(default)]
+    pub game: RepoGame,
     #[serde(rename = "basePath")]
     pub base_path: String,
     #[serde(rename = "appUpdateUrl", default)]
@@ -97,6 +121,103 @@ pub struct RepoConfig {
     pub version: String,
     #[serde(default)]
     pub servers: Vec<ServerEntry>,
+    #[serde(rename = "dlcContent", default)]
+    pub dlc_content: Option<DlcContent>,
+    /// Launch scripts or server configs whose existing launch parameters are
+    /// rewritten with the generated line. Relative entries resolve from the
+    /// directory of the config file that lists them.
+    #[serde(rename = "modLineFiles", default)]
+    pub mod_line_files: Vec<String>,
+}
+
+/// Arma 3 DLC suggestions published in `repo.json` as `dlcContent`. Config
+/// authors may write either the object form (`{"gm": true}`) or a list of
+/// codes (`["gm", "spe"]`); both normalize to the object form on output.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct DlcContent {
+    pub csla: bool,
+    pub ef: bool,
+    pub gm: bool,
+    pub rf: bool,
+    pub spe: bool,
+    pub vn: bool,
+    pub ws: bool,
+}
+
+pub const DLC_CODES: [&str; 7] = ["csla", "ef", "gm", "rf", "spe", "vn", "ws"];
+
+impl DlcContent {
+    pub fn is_enabled(&self, code: &str) -> bool {
+        match code {
+            "csla" => self.csla,
+            "ef" => self.ef,
+            "gm" => self.gm,
+            "rf" => self.rf,
+            "spe" => self.spe,
+            "vn" => self.vn,
+            "ws" => self.ws,
+            _ => false,
+        }
+    }
+
+    fn flag_mut(&mut self, code: &str) -> Option<&mut bool> {
+        match code {
+            "csla" => Some(&mut self.csla),
+            "ef" => Some(&mut self.ef),
+            "gm" => Some(&mut self.gm),
+            "rf" => Some(&mut self.rf),
+            "spe" => Some(&mut self.spe),
+            "vn" => Some(&mut self.vn),
+            "ws" => Some(&mut self.ws),
+            _ => None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for DlcContent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Codes(Vec<String>),
+            Flags(std::collections::BTreeMap<String, bool>),
+        }
+
+        let mut dlc = DlcContent::default();
+        match Raw::deserialize(deserializer)? {
+            Raw::Codes(codes) => {
+                for code in codes {
+                    let normalized = code.trim().to_ascii_lowercase();
+                    match dlc.flag_mut(&normalized) {
+                        Some(flag) => *flag = true,
+                        None => return Err(unknown_dlc_code::<D>(&code)),
+                    }
+                }
+            }
+            Raw::Flags(flags) => {
+                for (code, value) in flags {
+                    let normalized = code.trim().to_ascii_lowercase();
+                    match dlc.flag_mut(&normalized) {
+                        Some(flag) => *flag = value,
+                        None => return Err(unknown_dlc_code::<D>(&code)),
+                    }
+                }
+            }
+        }
+
+        Ok(dlc)
+    }
+}
+
+fn unknown_dlc_code<'de, D: serde::Deserializer<'de>>(code: &str) -> D::Error {
+    serde::de::Error::custom(format!(
+        "unknown dlcContent code \"{}\": expected one of {}",
+        code,
+        DLC_CODES.join(", ")
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -134,6 +255,9 @@ pub struct RepoBasicAuthentication {
 pub struct RepoJson {
     #[serde(rename = "repoName")]
     pub repo_name: String,
+    /// Written for every game except Arma 3, whose manifests predate the key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub game: Option<RepoGame>,
     pub checksum: String,
     /// Present when FoxyMode or HybridMode is used. Indicates the Foxy protocol version.
     #[serde(rename = "foxyMode", skip_serializing_if = "Option::is_none")]
@@ -158,6 +282,8 @@ pub struct RepoJson {
     pub repo_basic_authentication: RepoBasicAuthentication,
     pub version: String,
     pub servers: Vec<ServerEntry>,
+    #[serde(rename = "dlcContent", skip_serializing_if = "Option::is_none")]
+    pub dlc_content: Option<DlcContent>,
 }
 
 #[derive(Debug, Serialize)]
@@ -412,6 +538,73 @@ mod tests {
         );
     }
 
+    // ── dlcContent deserialization ──────────────────────────────────────
+
+    #[test]
+    fn repo_config_without_dlc_content_is_none() {
+        let json = r#"{"repoName": "Test", "basePath": "/mods"}"#;
+        let config: RepoConfig = serde_json::from_str(json).unwrap();
+        assert!(config.dlc_content.is_none());
+    }
+
+    #[test]
+    fn dlc_content_object_form_sets_named_flags() {
+        let json = r#"{
+            "repoName": "Test",
+            "basePath": "/mods",
+            "dlcContent": { "gm": true, "spe": true, "ws": false }
+        }"#;
+        let config: RepoConfig = serde_json::from_str(json).unwrap();
+        let dlc = config.dlc_content.unwrap();
+        assert!(dlc.gm);
+        assert!(dlc.spe);
+        assert!(!dlc.ws);
+        assert!(!dlc.csla);
+    }
+
+    #[test]
+    fn dlc_content_array_form_sets_listed_codes() {
+        let json = r#"{
+            "repoName": "Test",
+            "basePath": "/mods",
+            "dlcContent": ["GM", " spe "]
+        }"#;
+        let config: RepoConfig = serde_json::from_str(json).unwrap();
+        let dlc = config.dlc_content.unwrap();
+        assert!(dlc.gm);
+        assert!(dlc.spe);
+        assert!(!dlc.vn);
+    }
+
+    #[test]
+    fn dlc_content_rejects_unknown_code() {
+        let json = r#"{
+            "repoName": "Test",
+            "basePath": "/mods",
+            "dlcContent": { "apex": true }
+        }"#;
+        let err = serde_json::from_str::<RepoConfig>(json)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("unknown dlcContent code"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn dlc_content_serializes_all_seven_flags() {
+        let dlc = DlcContent {
+            gm: true,
+            ..DlcContent::default()
+        };
+        let json = serde_json::to_string(&dlc).unwrap();
+        assert_eq!(
+            json,
+            r#"{"csla":false,"ef":false,"gm":true,"rf":false,"spe":false,"vn":false,"ws":false}"#
+        );
+    }
+
     // ── ServerEntry deserialization ──────────────────────────────────────
 
     #[test]
@@ -430,6 +623,7 @@ mod tests {
     fn repo_json_skips_none_foxy_mode() {
         let repo = RepoJson {
             repo_name: "Test".to_string(),
+            game: None,
             checksum: "CS".to_string(),
             foxy_mode: None,
             required_mods: vec![],
@@ -443,6 +637,7 @@ mod tests {
             repo_basic_authentication: RepoBasicAuthentication::default(),
             version: "3.2.0.0".to_string(),
             servers: vec![],
+            dlc_content: None,
         };
         let json = serde_json::to_string(&repo).unwrap();
         assert!(!json.contains("foxyMode"));
@@ -450,9 +645,38 @@ mod tests {
     }
 
     #[test]
+    fn repo_json_includes_dlc_content_when_present() {
+        let repo = RepoJson {
+            repo_name: "Test".to_string(),
+            game: None,
+            checksum: "CS".to_string(),
+            foxy_mode: None,
+            required_mods: vec![],
+            optional_mods: vec![],
+            icon_image_path: String::new(),
+            icon_image_checksum: String::new(),
+            repo_image_path: String::new(),
+            repo_image_checksum: String::new(),
+            app_update_url: None,
+            client_parameters: String::new(),
+            repo_basic_authentication: RepoBasicAuthentication::default(),
+            version: "3.2.0.0".to_string(),
+            servers: vec![],
+            dlc_content: Some(DlcContent {
+                spe: true,
+                ..DlcContent::default()
+            }),
+        };
+        let json = serde_json::to_string(&repo).unwrap();
+        assert!(json.contains(r#""dlcContent":{"csla":false"#));
+        assert!(json.contains(r#""spe":true"#));
+    }
+
+    #[test]
     fn repo_json_includes_foxy_mode_when_present() {
         let repo = RepoJson {
             repo_name: "Test".to_string(),
+            game: None,
             checksum: "CS".to_string(),
             foxy_mode: Some("FoxyModeV1".to_string()),
             required_mods: vec![],
@@ -466,9 +690,59 @@ mod tests {
             repo_basic_authentication: RepoBasicAuthentication::default(),
             version: "3.2.0.0".to_string(),
             servers: vec![],
+            dlc_content: None,
         };
         let json = serde_json::to_string(&repo).unwrap();
         assert!(json.contains("FoxyModeV1"));
         assert!(json.contains("appUpdateUrl"));
+    }
+
+    #[test]
+    fn repo_config_game_defaults_to_arma3_and_parses_reforger() {
+        let default: RepoConfig = serde_json::from_str(r#"{"repoName":"Test","basePath":"."}"#)
+            .expect("config without game parses");
+        assert_eq!(default.game, RepoGame::Arma3);
+
+        let reforger: RepoConfig =
+            serde_json::from_str(r#"{"repoName":"Test","basePath":".","game":"reforger"}"#)
+                .expect("reforger config parses");
+        assert_eq!(reforger.game, RepoGame::Reforger);
+
+        assert!(
+            serde_json::from_str::<RepoConfig>(
+                r#"{"repoName":"Test","basePath":".","game":"dayz"}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn repo_json_writes_game_only_when_set() {
+        let mut repo = RepoJson {
+            repo_name: "Test".to_string(),
+            game: None,
+            checksum: "CS".to_string(),
+            foxy_mode: None,
+            required_mods: vec![],
+            optional_mods: vec![],
+            icon_image_path: String::new(),
+            icon_image_checksum: String::new(),
+            repo_image_path: String::new(),
+            repo_image_checksum: String::new(),
+            app_update_url: None,
+            client_parameters: String::new(),
+            repo_basic_authentication: RepoBasicAuthentication::default(),
+            version: "3.2.0.0".to_string(),
+            servers: vec![],
+            dlc_content: None,
+        };
+        assert!(!serde_json::to_string(&repo).unwrap().contains("\"game\""));
+
+        repo.game = Some(RepoGame::Reforger);
+        assert!(
+            serde_json::to_string(&repo)
+                .unwrap()
+                .contains(r#""game":"reforger""#)
+        );
     }
 }

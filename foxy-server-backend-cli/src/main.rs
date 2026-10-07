@@ -1,12 +1,35 @@
+macro_rules! println {
+    ($($arg:tt)*) => {
+        if crate::output::json_mode() {
+            std::eprintln!($($arg)*);
+        } else {
+            std::println!($($arg)*);
+        }
+    };
+}
+
+mod artifacts;
+mod build_info;
 mod changelog_parser;
 mod cli;
 mod config;
 mod discover;
 mod hash;
-mod pbo;
+mod incremental;
+mod keys;
+mod mod_line;
+mod mod_line_files;
+mod operations;
+mod output;
+mod planner;
+mod published;
+mod report;
+mod space;
 mod srf;
+mod staging;
 mod types;
 mod update_manifest;
+mod verify;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -19,89 +42,345 @@ fn main() -> Result<()> {
         .format_timestamp(None)
         .init();
 
-    let cli = cli::Cli::parse();
+    let cli = match cli::Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(err) => {
+            if matches!(
+                err.kind(),
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+            ) || !std::env::args_os().any(|arg| arg == std::ffi::OsStr::new("--json"))
+            {
+                err.exit();
+            }
+            output::print_parse_error(&err.to_string());
+            std::process::exit(err.exit_code());
+        }
+    };
+    output::set_json_mode(cli.json);
+    let command_name = match &cli.command {
+        cli::Command::Create { .. } => "create",
+        cli::Command::CreateSpace { .. } => "create-space",
+        cli::Command::New { .. } => "new",
+        cli::Command::NewSpace { .. } => "new-space",
+        cli::Command::Validate { .. } => "validate",
+        cli::Command::Verify { .. } => "verify",
+        cli::Command::Diff { .. } => "diff",
+        cli::Command::AuditKeys { .. } => "audit-keys",
+        cli::Command::ExportReforgerConfig { .. } => "export-reforger-config",
+        cli::Command::SetupAppUpdater { .. } => "setup-app-updater",
+        cli::Command::NewAppUpdate { .. } => "new-app-update",
+    };
 
-    match cli.command {
-        cli::Command::Create {
-            config,
-            output,
-            app_update_url,
-            threads,
-            mode,
-        } => cmd_create(
-            &config,
-            &output,
-            app_update_url.as_deref(),
-            threads,
-            mode,
-            cli.no_progress,
-        ),
-        cli::Command::New { output } => cmd_new(&output),
-        cli::Command::SetupAppUpdater {
-            version,
-            windows_installer,
-            linux_installer,
-            linux_aarch64_installer,
-            changelog,
-            output,
-        } => cmd_setup_app_updater(
-            &version,
-            windows_installer.as_deref(),
-            linux_installer.as_deref(),
-            linux_aarch64_installer.as_deref(),
-            &changelog,
-            &output,
-        ),
-        cli::Command::NewAppUpdate {
-            version,
-            windows_installer,
-            linux_installer,
-            linux_aarch64_installer,
-            changelog,
-            output,
-        } => cmd_new_app_update(
-            &version,
-            windows_installer.as_deref(),
-            linux_installer.as_deref(),
-            linux_aarch64_installer.as_deref(),
-            &changelog,
-            &output,
-        ),
+    let result = (|| -> Result<()> {
+        match cli.command {
+            cli::Command::Create {
+                config,
+                output,
+                dry_run,
+                incremental,
+                atomic,
+                report,
+                app_update_url,
+                threads,
+                mode,
+                mod_line_prefix,
+                mod_line_include_optional,
+                prune_unused_optionals,
+                yes,
+                collect_keys,
+                keys_output,
+                additional_keys,
+            } => cmd_create(
+                &config,
+                &output,
+                CreateOptions {
+                    app_update_url: app_update_url.as_deref(),
+                    threads,
+                    mode,
+                    no_progress: cli.no_progress,
+                    mod_line: mod_line::ModLineOptions {
+                        prefix: &mod_line_prefix,
+                        include_optional: mod_line_include_optional,
+                    },
+                    prune_unused_optionals,
+                    dry_run,
+                    incremental,
+                    atomic,
+                    report,
+                    yes,
+                    keys: KeyCollectionRequest {
+                        enabled: collect_keys
+                            || keys_output.is_some()
+                            || !additional_keys.is_empty(),
+                        dest: keys_output,
+                        additional_sources: additional_keys,
+                    },
+                },
+            ),
+            cli::Command::CreateSpace {
+                config,
+                output,
+                layout,
+                pool_dir,
+                yes,
+                clean,
+                dry_run,
+                incremental,
+                atomic,
+                report,
+                only,
+                prune_unused_optionals,
+                app_update_url,
+                threads,
+                mode,
+                mod_line_prefix,
+                mod_line_include_optional,
+                collect_keys,
+                keys_output,
+                additional_keys,
+                per_repo_keys,
+            } => {
+                let options = space::CreateSpaceOptions {
+                    layout,
+                    pool_dir,
+                    yes,
+                    clean,
+                    dry_run,
+                    atomic,
+                    prune_unused_optionals,
+                    incremental,
+                    only,
+                    app_update_url: app_update_url.as_deref(),
+                    threads,
+                    mode,
+                    no_progress: cli.no_progress,
+                    mod_line: mod_line::ModLineOptions {
+                        prefix: &mod_line_prefix,
+                        include_optional: mod_line_include_optional,
+                    },
+                    keys: KeyCollectionRequest {
+                        enabled: collect_keys
+                            || keys_output.is_some()
+                            || !additional_keys.is_empty(),
+                        dest: keys_output,
+                        additional_sources: additional_keys,
+                    },
+                    per_repo_keys,
+                };
+                if atomic && (layout == cli::SpaceLayout::Link || options.keys.dest.is_some()) {
+                    anyhow::bail!(
+                        "--atomic requires copy or pool layout and an output-local keys folder"
+                    );
+                }
+                let before = (report && !dry_run)
+                    .then(|| report::snapshot(&output))
+                    .transpose()?;
+                let pending = if atomic && !dry_run {
+                    staging::publish(&output, |stage| {
+                        space::cmd_create_space(&config, stage, options)
+                    })?
+                } else {
+                    space::cmd_create_space(&config, &output, options)?
+                };
+                mod_line_files::apply_all(&pending)?;
+                if let Some(before) = before {
+                    report::print(&report::compare(&before, &report::snapshot(&output)?));
+                }
+                Ok(())
+            }
+            cli::Command::New { output, game } => cmd_new(&output, game),
+            cli::Command::NewSpace { output } => space::cmd_new_space(&output),
+            cli::Command::Validate {
+                config,
+                space,
+                output,
+            } => operations::validate(&config, space, output.as_deref()),
+            cli::Command::Verify { output } => verify::verify(&output),
+            cli::Command::Diff { old, new } => report::diff(&old, &new),
+            cli::Command::AuditKeys {
+                config,
+                space,
+                strict,
+                additional_keys,
+            } => operations::audit_keys(&config, space, strict, &additional_keys),
+            cli::Command::ExportReforgerConfig {
+                config,
+                output,
+                include_optional,
+            } => operations::export_reforger_config(&config, &output, include_optional),
+            cli::Command::SetupAppUpdater {
+                version,
+                windows_installer,
+                linux_installer,
+                linux_aarch64_installer,
+                changelog,
+                output,
+            } => cmd_setup_app_updater(
+                &version,
+                windows_installer.as_deref(),
+                linux_installer.as_deref(),
+                linux_aarch64_installer.as_deref(),
+                &changelog,
+                &output,
+            ),
+            cli::Command::NewAppUpdate {
+                version,
+                windows_installer,
+                linux_installer,
+                linux_aarch64_installer,
+                changelog,
+                output,
+            } => cmd_new_app_update(
+                &version,
+                windows_installer.as_deref(),
+                linux_installer.as_deref(),
+                linux_aarch64_installer.as_deref(),
+                &changelog,
+                &output,
+            ),
+        }
+    })();
+    if cli.json {
+        output::print_result(command_name, &result);
     }
+    result
+}
+
+/// Everything `create` needs beyond the config and output paths.
+struct CreateOptions<'a> {
+    app_update_url: Option<&'a str>,
+    threads: usize,
+    mode: GenerationMode,
+    no_progress: bool,
+    mod_line: mod_line::ModLineOptions<'a>,
+    prune_unused_optionals: bool,
+    dry_run: bool,
+    incremental: bool,
+    atomic: bool,
+    report: bool,
+    yes: bool,
+    keys: KeyCollectionRequest,
+}
+
+/// How `create` / `create-space` was asked to build the combined keys folder.
+pub(crate) struct KeyCollectionRequest {
+    pub enabled: bool,
+    pub dest: Option<std::path::PathBuf>,
+    pub additional_sources: Vec<std::path::PathBuf>,
 }
 
 fn cmd_create(
     config_path: &std::path::Path,
     output_dir: &std::path::Path,
-    app_update_url: Option<&str>,
-    threads: usize,
-    mode: GenerationMode,
-    no_progress: bool,
+    options: CreateOptions<'_>,
 ) -> Result<()> {
+    if options.dry_run {
+        let (config, mods) = config::load_config(config_path)?;
+        let mut plan = planner::create(
+            &mods,
+            output_dir,
+            options.mode,
+            options.prune_unused_optionals,
+            options.incremental,
+        )?;
+        if options.atomic && output_dir.exists() {
+            plan.add("replace-output", output_dir, 0);
+        }
+        let base = std::path::Path::new(&config.base_path);
+        plan.add_images(
+            &[
+                (&config.icon_image_path, base),
+                (&config.repo_image_path, base),
+            ],
+            output_dir,
+        )?;
+        if options.keys.enabled {
+            let dest = options
+                .keys
+                .dest
+                .clone()
+                .unwrap_or_else(|| output_dir.join("keys"));
+            plan.add_keys(
+                &mods,
+                &dest,
+                &options.keys.additional_sources,
+                options.prune_unused_optionals,
+            )?;
+        }
+        let launch_files = mod_line_files::resolve(&config, config_path);
+        mod_line_files::check(&launch_files, &mod_line::launch_flags(config.game))?;
+        for path in &launch_files {
+            plan.add("update-mod-line", path, 0);
+        }
+        plan.show();
+        return Ok(());
+    }
+    if options.atomic && options.keys.dest.is_some() {
+        anyhow::bail!("--atomic requires an output-local keys folder");
+    }
+    let before = options
+        .report
+        .then(|| report::snapshot(output_dir))
+        .transpose()?;
+    configure_thread_pool(options.threads)?;
+    let pending = if options.atomic {
+        staging::publish(output_dir, |stage| run_create(config_path, stage, options))?
+    } else {
+        run_create(config_path, output_dir, options)?
+    };
+    mod_line_files::apply_all(std::slice::from_ref(&pending))?;
+    if let Some(before) = before {
+        report::print(&report::compare(&before, &report::snapshot(output_dir)?));
+    }
+    Ok(())
+}
+
+fn run_create(
+    config_path: &std::path::Path,
+    output_dir: &std::path::Path,
+    options: CreateOptions<'_>,
+) -> Result<mod_line_files::PendingUpdate> {
+    let CreateOptions {
+        app_update_url,
+        threads,
+        mode,
+        no_progress,
+        mod_line: mod_line_options,
+        prune_unused_optionals,
+        incremental,
+        dry_run: _,
+        atomic: _,
+        report: _,
+        yes,
+        keys: key_collection,
+    } = options;
     let started = Instant::now();
 
-    let mode_label = match mode {
-        GenerationMode::Foxy => "FoxyMode (BLAKE3)",
-        GenerationMode::Swifty => "SwiftyMode (MD5, legacy)",
-        GenerationMode::Hybrid => "HybridMode (BLAKE3 + MD5)",
-    };
+    let mode_label = artifacts::mode_label(mode);
     println!("Mode: {}", mode_label);
-
-    // Configure rayon thread pool
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
-        .build_global()
-        .context("Failed to configure thread pool")?;
 
     println!("Loading config from: {}", config_path.display());
     let (config, resolved_mods) = config::load_config(config_path)?;
+    if prune_unused_optionals {
+        published::confirm_prune(
+            &published::published_optionals(output_dir, &resolved_mods)?,
+            yes,
+        )?;
+    }
 
     println!(
-        "Repository: {} ({} required, {} optional mods)",
+        "Repository: {} for {} ({} required, {} optional mods)",
         config.repo_name,
+        config.game.display_name(),
         resolved_mods.iter().filter(|m| m.is_required).count(),
         resolved_mods.iter().filter(|m| !m.is_required).count(),
     );
+    let warnings = mod_line::game_config_warnings(&config, &resolved_mods);
+    for warning in &warnings {
+        log::warn!("{}", warning);
+    }
+    let launch_files = mod_line_files::resolve(&config, config_path);
+    mod_line_files::check(&launch_files, &mod_line::launch_flags(config.game))?;
 
     for m in &resolved_mods {
         println!(
@@ -118,78 +397,57 @@ fn cmd_create(
     // Create output directory
     std::fs::create_dir_all(output_dir)
         .with_context(|| format!("Failed to create output dir: {}", output_dir.display()))?;
-
-    // Process all mods (copy + hash)
-    let progress = if no_progress {
-        ProgressBar::hidden()
-    } else {
-        let progress = ProgressBar::new(0);
-        progress.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} files ({per_sec})")
-                .unwrap_or_else(|_| ProgressStyle::default_bar())
-                .progress_chars("=> "),
-        );
-        progress
-    };
-
-    println!("Processing files with {} threads...", threads);
-    let processed_mods = hash::process_mods(&resolved_mods, output_dir, &progress, mode)?;
-    progress.finish_and_clear();
-
-    // --- Write output artifacts based on mode ---
-
-    let use_swifty = matches!(mode, GenerationMode::Swifty | GenerationMode::Hybrid);
-    let use_foxy = matches!(mode, GenerationMode::Foxy | GenerationMode::Hybrid);
-
-    // SwiftyMode artifacts: mod.srf + MD5 checksums in repo.json
-    if use_swifty {
-        println!("Writing mod.srf files...");
-        for m in &processed_mods {
-            srf::write_mod_srf(m, output_dir)?;
-        }
+    if prune_unused_optionals {
+        published::remove_published_optionals(output_dir, &resolved_mods)?;
     }
 
-    // Compute foxy repo checksum once (used by foxy_addons.json and repo.json in FoxyMode)
-    let foxy_repo_checksum = if use_foxy {
-        Some(hash::compute_foxy_repo_checksum(&processed_mods))
+    let progress = progress_bar(no_progress);
+    println!("Processing files with {} threads...", threads);
+    let processed_mods = hash::process_mods(
+        &resolved_mods,
+        Some(output_dir),
+        &progress,
+        mode,
+        prune_unused_optionals,
+        incremental,
+    )?;
+    progress.finish_and_clear();
+
+    println!("Writing mod manifests...");
+    artifacts::write_mod_manifests(&processed_mods, output_dir, mode)?;
+
+    println!("Writing repo.json...");
+    let repo_checksum = artifacts::write_repo_manifests(
+        &config,
+        &processed_mods,
+        output_dir,
+        mode,
+        app_update_url,
+    )?;
+
+    let key_report = if key_collection.enabled {
+        let dest = key_collection
+            .dest
+            .unwrap_or_else(|| output_dir.join("keys"));
+        println!("Collecting keys into: {}", dest.display());
+        let report = keys::collect_keys(
+            output_dir,
+            &processed_mods,
+            &keys::KeyCollectionOptions {
+                dest: &dest,
+                additional_sources: &key_collection.additional_sources,
+            },
+        )?;
+        for name in &report.conflicts {
+            log::warn!(
+                "Multiple different keys named {}; kept the first one found",
+                name
+            );
+        }
+        Some((dest, report))
     } else {
         None
     };
-
-    // FoxyMode artifacts: foxy_addon.json + foxy_addons.json
-    if use_foxy {
-        println!("Writing foxy_addon.json files...");
-        for m in &processed_mods {
-            srf::write_foxy_addon_json(m, output_dir)?;
-        }
-
-        println!("Writing foxy_addons.json...");
-        srf::write_foxy_addons_json(
-            &processed_mods,
-            foxy_repo_checksum.as_deref().unwrap(),
-            output_dir,
-        )?;
-    }
-
-    let repo_checksum = match mode {
-        GenerationMode::Foxy => foxy_repo_checksum.unwrap(),
-        GenerationMode::Swifty | GenerationMode::Hybrid => {
-            hash::compute_repo_checksum(&processed_mods)
-        }
-    };
-    let effective_app_update_url = app_update_url.or(config.app_update_url.as_deref());
-
-    // Write repo.json
-    println!("Writing repo.json...");
-    srf::write_repo_json(
-        &config,
-        &processed_mods,
-        &repo_checksum,
-        output_dir,
-        mode,
-        effective_app_update_url,
-    )?;
 
     // Summary
     let total_files: usize = processed_mods.iter().map(|m| m.files.len()).sum();
@@ -215,24 +473,75 @@ fn cmd_create(
     println!("  Checksum:   {}", repo_checksum);
     println!("  Output:     {}", output_dir.display());
 
-    if use_foxy {
-        println!("  Artifacts:  foxy_addon.json (per mod), foxy_addons.json, repo.json");
+    for line in artifacts::artifact_lines(mode) {
+        println!("  Artifacts:  {}", line);
     }
-    if use_swifty {
-        println!("  Artifacts:  mod.srf (per mod), repo.json");
+    if let Some((dest, report)) = &key_report {
+        println!("  Keys:       {} in {}", report.copied, dest.display());
+        if report.duplicates > 0 {
+            println!("              {} duplicate keys skipped", report.duplicates);
+        }
+        if !report.conflicts.is_empty() {
+            println!(
+                "              {} conflicting key names kept at first match: {}",
+                report.conflicts.len(),
+                report.conflicts.join(", ")
+            );
+        }
     }
 
-    Ok(())
+    let launch_params =
+        mod_line::build_launch_params(&config, &processed_mods, &resolved_mods, mod_line_options);
+    let server_line = mod_line::render_launch_params(&launch_params);
+    published::write_server_mod_line(output_dir, &server_line)?;
+    println!();
+    println!("Server mod line:");
+    println!("{server_line}");
+    output::set_details(serde_json::json!({
+        "output": output_dir,
+        "mods": processed_mods.len(),
+        "files": total_files,
+        "checksum": repo_checksum,
+        "serverLine": server_line,
+        "warnings": warnings,
+        "keyConflicts": key_report.as_ref().map(|(_, report)| report.conflicts.clone()).unwrap_or_default(),
+    }));
+
+    Ok(mod_line_files::PendingUpdate {
+        files: launch_files,
+        params: launch_params,
+    })
 }
 
-fn cmd_new(output: &std::path::Path) -> Result<()> {
+pub(crate) fn configure_thread_pool(threads: usize) -> Result<()> {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build_global()
+        .context("Failed to configure thread pool")
+}
+
+pub(crate) fn progress_bar(no_progress: bool) -> ProgressBar {
+    if no_progress {
+        return ProgressBar::hidden();
+    }
+    let progress = ProgressBar::new(0);
+    progress.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} files ({per_sec})")
+            .unwrap_or_else(|_| ProgressStyle::default_bar())
+            .progress_chars("=> "),
+    );
+    progress
+}
+
+fn cmd_new(output: &std::path::Path, game: types::RepoGame) -> Result<()> {
     if output.exists() {
         anyhow::bail!(
             "File already exists: {}. Remove it first or choose a different path.",
             output.display()
         );
     }
-    config::generate_template_config(output)?;
+    config::generate_template_config(output, game)?;
     println!("Config template written to: {}", output.display());
     println!("Edit this file, then run:");
     println!(
@@ -479,5 +788,131 @@ fn linux_platform_key_for_installer(path: &std::path::Path, fallback: &str) -> &
         "linux-aarch64"
     } else {
         "linux-x86_64"
+    }
+}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::*;
+
+    #[test]
+    fn create_publishes_selected_optional_without_parent_optionals() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("mods").join("@ace");
+        let selected = source.join("optionals").join("@ace_selected");
+        let unused = source.join("optionals").join("@ace_unused");
+        std::fs::create_dir_all(&selected).unwrap();
+        std::fs::create_dir_all(&unused).unwrap();
+        std::fs::write(source.join("main.pbo"), b"main").unwrap();
+        std::fs::write(selected.join("selected.pbo"), b"selected").unwrap();
+        std::fs::write(unused.join("unused.pbo"), b"unused").unwrap();
+        let config = dir.path().join("config.json");
+        let value = serde_json::json!({
+            "repoName": "ACE test",
+            "basePath": dir.path().join("mods"),
+            "requiredMods": [
+                {"modName": "@ace"},
+                {"modName": "@ace/optionals/@ace_selected"}
+            ]
+        });
+        std::fs::write(&config, serde_json::to_vec(&value).unwrap()).unwrap();
+        let output = dir.path().join("output");
+
+        run_create(
+            &config,
+            &output,
+            CreateOptions {
+                app_update_url: None,
+                threads: 1,
+                mode: GenerationMode::Foxy,
+                no_progress: true,
+                mod_line: mod_line::ModLineOptions {
+                    prefix: "mods",
+                    include_optional: false,
+                },
+                prune_unused_optionals: true,
+                dry_run: false,
+                incremental: false,
+                atomic: false,
+                report: false,
+                yes: true,
+                keys: KeyCollectionRequest {
+                    enabled: false,
+                    dest: None,
+                    additional_sources: vec![],
+                },
+            },
+        )
+        .unwrap();
+
+        assert!(!output.join("@ace").join("optionals").exists());
+        assert!(output.join("@ace_selected").join("selected.pbo").exists());
+        assert!(unused.join("unused.pbo").exists());
+        assert_eq!(
+            std::fs::read_to_string(output.join(published::SERVER_MOD_LINE_FILE)).unwrap(),
+            "-mod=mods/@ace;mods/@ace_selected;\n"
+        );
+        verify::verify(&output).unwrap();
+        std::fs::write(
+            output.join("@ace_selected").join("selected.pbo"),
+            b"changed",
+        )
+        .unwrap();
+        assert!(verify::verify(&output).is_err());
+    }
+
+    fn prune_options(yes: bool) -> CreateOptions<'static> {
+        CreateOptions {
+            app_update_url: None,
+            threads: 1,
+            mode: GenerationMode::Foxy,
+            no_progress: true,
+            mod_line: mod_line::ModLineOptions {
+                prefix: "",
+                include_optional: false,
+            },
+            prune_unused_optionals: true,
+            dry_run: false,
+            incremental: false,
+            atomic: false,
+            report: false,
+            yes,
+            keys: KeyCollectionRequest {
+                enabled: false,
+                dest: None,
+                additional_sources: vec![],
+            },
+        }
+    }
+
+    #[test]
+    fn prune_asks_for_yes_only_when_published_optionals_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("mods").join("@ace");
+        std::fs::create_dir_all(source.join("optionals")).unwrap();
+        std::fs::write(source.join("main.pbo"), b"main").unwrap();
+        std::fs::write(source.join("optionals").join("unused.pbo"), b"unused").unwrap();
+        let config = dir.path().join("config.json");
+        let value = serde_json::json!({
+            "repoName": "ACE test",
+            "basePath": dir.path().join("mods"),
+            "requiredMods": [{"modName": "@ace"}]
+        });
+        std::fs::write(&config, serde_json::to_vec(&value).unwrap()).unwrap();
+        let output = dir.path().join("output");
+
+        run_create(&config, &output, prune_options(false)).unwrap();
+        assert!(output.join("@ace").join("main.pbo").exists());
+        assert!(!output.join("@ace").join("optionals").exists());
+
+        let published = output.join("@ace").join("optionals");
+        std::fs::create_dir_all(&published).unwrap();
+        std::fs::write(published.join("old.pbo"), b"old").unwrap();
+        let err = run_create(&config, &output, prune_options(false)).unwrap_err();
+        assert!(err.to_string().contains("--yes"));
+        assert!(published.join("old.pbo").exists());
+
+        run_create(&config, &output, prune_options(true)).unwrap();
+        assert!(!published.exists());
     }
 }

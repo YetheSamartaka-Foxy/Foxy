@@ -1,7 +1,9 @@
 use super::{LaunchDispatchResult, spawn_launch_process};
 use crate::core::addon_metadata::load_addon_display_name_snapshot;
 use crate::core::arma3_missions::EditorMission;
-use crate::core::arma3_server_query::{ServerAddonQueryResult, query_server_addon_requirements};
+use crate::core::arma3_server_query::{
+    ServerAddonQueryResult, creator_dlc_by_app_id, query_server_addon_requirements,
+};
 use crate::core::steam::{self, SteamEnsureResult};
 use crate::ui::app::{
     Foxy, JoinPreflightQueryResult, PendingJoinPreflightQuery, PendingJoinStatusQuery,
@@ -18,6 +20,37 @@ const EDITOR_LAUNCH_COOLDOWN: Duration = Duration::from_secs(30);
 const JOIN_PREFLIGHT_CACHE_TTL: Duration = Duration::from_secs(60);
 
 impl Foxy {
+    fn activate_extra_files_before_launch(&mut self) {
+        let space_dir = crate::core::game::spaces::active_game_space_dir();
+        let game_dir = crate::core::game::registry()
+            .active()
+            .install_dir_from_settings(&self.settings_view_state)
+            .to_string();
+        match crate::core::game::extra_files::activate_for_launch(&space_dir, &game_dir) {
+            Ok(summary) => {
+                if let Some((name, reason)) = summary.failed.first() {
+                    warn!(
+                        "Extra-file activation had {} failure(s) before launch",
+                        summary.failed.len()
+                    );
+                    let message = self.t_fmt(
+                        "Could not apply extra file {name}: {error}",
+                        &[("name", name.clone()), ("error", reason.clone())],
+                    );
+                    self.show_error_toast(message);
+                }
+            }
+            Err(err) => {
+                warn!("Extra-file activation failed before launch: {}", err);
+                let message = self.t_fmt(
+                    "Could not apply extra files before launch: {error}",
+                    &[("error", err.clone())],
+                );
+                self.show_error_toast(message);
+            }
+        }
+    }
+
     fn enabled_external_addons_for_editor_warning(repo: &Repository) -> Vec<String> {
         let mut addons: Vec<String> = repo
             .external_addons
@@ -61,10 +94,22 @@ impl Foxy {
         launch_label: &str,
     ) -> LaunchDispatchResult {
         let Some(command) = self.create_launch_command(effective, server) else {
-            let arma3_directory = self.settings_view_state.arma3_directory.trim();
+            let module = crate::core::game::registry().active();
+            if !module.capabilities().repository_launch {
+                self.show_error_toast(self.t_fmt(
+                    "Launching from a repository is not supported for {game}.",
+                    &[("game", module.display_name().to_string())],
+                ));
+                return LaunchDispatchResult::Failed;
+            }
+            let game = module.display_name().to_string();
+            let install_dir = module
+                .install_dir_from_settings(&self.settings_view_state)
+                .trim()
+                .to_string();
             #[cfg(target_os = "linux")]
             {
-                let _ = arma3_directory;
+                let _ = install_dir;
                 self.show_error_toast(
                     self.t(
                         "Could not find the Steam client. Set the Steam directory in Settings or start it manually.",
@@ -73,20 +118,21 @@ impl Foxy {
             }
             #[cfg(not(target_os = "linux"))]
             {
-                if arma3_directory.is_empty() {
-                    self.show_error_toast(
-                        self.t("Arma 3 directory is not configured. Set it in Settings."),
-                    );
-                } else if !std::path::Path::new(arma3_directory).exists() {
-                    self.show_error_toast(
-                        self.t("Arma 3 directory does not exist. Check the path in Settings."),
-                    );
-                } else if !crate::core::steam::is_valid_arma3_dir(std::path::Path::new(
-                    arma3_directory,
-                )) {
-                    self.show_error_toast(
-                        self.t("Arma 3 executable not found at the configured path."),
-                    );
+                if install_dir.is_empty() {
+                    self.show_error_toast(self.t_fmt(
+                        "{game} directory is not configured. Set it in Game space settings.",
+                        &[("game", game)],
+                    ));
+                } else if !std::path::Path::new(&install_dir).exists() {
+                    self.show_error_toast(self.t_fmt(
+                        "{game} directory does not exist. Check the path in Game space settings.",
+                        &[("game", game)],
+                    ));
+                } else if !module.validate_install_dir(std::path::Path::new(&install_dir)) {
+                    self.show_error_toast(self.t_fmt(
+                        "{game} executable not found at the configured path.",
+                        &[("game", game)],
+                    ));
                 }
             }
             return LaunchDispatchResult::Failed;
@@ -95,21 +141,26 @@ impl Foxy {
         let executable = command.get_program().to_os_string();
         let args: Vec<OsString> = command.get_args().map(|arg| arg.to_os_string()).collect();
         let cwd: Option<PathBuf> = command.get_current_dir().map(Path::to_path_buf);
+        let game_name = crate::core::game::registry()
+            .active()
+            .display_name()
+            .to_string();
+        self.activate_extra_files_before_launch();
 
         if steam::is_steam_running() {
             return match spawn_launch_process(&executable, &args, cwd.as_deref()) {
-                Ok(child) => {
+                Ok(pid) => {
                     info!(
-                        "Launched Arma 3 for repository {} (pid={})",
-                        repo_name,
-                        child.id()
+                        "Launched {} for repository {} (pid={})",
+                        game_name, repo_name, pid
                     );
+                    self.mark_repository_launched(&effective.address, &effective.path);
                     LaunchDispatchResult::Launched
                 }
                 Err(err) => {
                     warn!(
-                        "Failed to launch Arma 3 for repository {}: {}",
-                        repo_name, err
+                        "Failed to launch {} for repository {}: {}",
+                        game_name, repo_name, err
                     );
                     self.show_error_toast(self.t("Failed to launch Arma 3."));
                     LaunchDispatchResult::Failed
@@ -122,6 +173,7 @@ impl Foxy {
             launch_label, repo_name
         );
 
+        self.mark_repository_launched(&effective.address, &effective.path);
         let steam_directory = self.settings_view_state.steam_directory.clone();
         let repo_name_owned = repo_name.to_string();
         let launch_label_owned = launch_label.to_string();
@@ -158,17 +210,16 @@ impl Foxy {
                 &args_for_thread,
                 cwd_for_thread.as_deref(),
             ) {
-                Ok(child) => {
+                Ok(pid) => {
                     info!(
-                        "Launched Arma 3 for repository {} (pid={})",
-                        repo_name_owned,
-                        child.id()
+                        "Launched {} for repository {} (pid={})",
+                        game_name, repo_name_owned, pid
                     );
                 }
                 Err(err) => {
                     warn!(
-                        "Failed to launch Arma 3 for repository {} after Steam preparation: {}",
-                        repo_name_owned, err
+                        "Failed to launch {} for repository {} after Steam preparation: {}",
+                        game_name, repo_name_owned, err
                     );
                 }
             }
@@ -290,7 +341,11 @@ impl Foxy {
                     "Join server status online for repository {} server {}:{}",
                     repo_name, server.address, server.port
                 );
-                if self.repo_check_server_addons_before_join(effective) {
+                let preflight_supported = crate::core::game::registry()
+                    .active()
+                    .capabilities()
+                    .join_addon_preflight;
+                if preflight_supported && self.repo_check_server_addons_before_join(effective) {
                     info!(
                         "Join addon preflight enabled for repository {} server {}:{}",
                         repo_name, server.address, server.port
@@ -491,13 +546,20 @@ impl Foxy {
         display_names: &crate::core::addon_metadata::AddonDisplayNameSnapshot,
     ) {
         Self::log_join_preflight_query_output(repo_name, server, result);
-        let addon_state = Self::build_join_preflight_state(
+        let mut addon_state = Self::build_join_preflight_state(
             effective,
             &self.repository_view_state.repositories,
             server,
             repo_name,
             &result.requirements,
             display_names,
+        );
+        Self::merge_join_preflight_dlc_changes(
+            &mut addon_state,
+            effective,
+            server,
+            repo_name,
+            result,
         );
         if let Some(preflight) = &addon_state {
             info!(
@@ -522,6 +584,64 @@ impl Foxy {
             );
         }
         self.present_join_preflight(ctx, effective, server, repo_name, addon_state);
+    }
+
+    /// Adds the Creator DLC differences to the join modal. Skipped when the
+    /// server's DLC list could not be decoded, since an unknown list must not
+    /// be read as "the server runs no DLCs".
+    fn merge_join_preflight_dlc_changes(
+        state: &mut Option<crate::ui::app::PendingJoinPreflightState>,
+        effective: &Repository,
+        server: &RepositoryServer,
+        repo_name: &str,
+        result: &ServerAddonQueryResult,
+    ) {
+        if !crate::core::game::registry()
+            .active()
+            .capabilities()
+            .creator_dlc
+        {
+            return;
+        }
+        let Some(server_app_ids) = result
+            .server_browser_protocol
+            .as_ref()
+            .and_then(|protocol| protocol.creator_dlc_app_ids.as_deref())
+        else {
+            info!(
+                "Join DLC preflight skipped for repository {} server {}:{}: server did not report a decodable Creator DLC list",
+                repo_name, server.address, server.port
+            );
+            return;
+        };
+        let unknown_app_ids = server_app_ids
+            .iter()
+            .filter(|app_id| creator_dlc_by_app_id(**app_id).is_none())
+            .collect::<Vec<_>>();
+        if !unknown_app_ids.is_empty() {
+            warn!(
+                "Join DLC preflight for repository {} server {}:{}: server runs unrecognized Creator DLC app IDs {:?}",
+                repo_name, server.address, server.port, unknown_app_ids
+            );
+        }
+        let (dlc_enable, dlc_disable) = Self::join_preflight_dlc_changes(effective, server_app_ids);
+        if dlc_enable.is_empty() && dlc_disable.is_empty() {
+            info!(
+                "Join DLC preflight for repository {} server {}:{}: Creator DLCs already match the server",
+                repo_name, server.address, server.port
+            );
+            return;
+        }
+        let state = state.get_or_insert_with(|| {
+            crate::ui::app::PendingJoinPreflightState::empty(
+                repo_name,
+                server.clone(),
+                effective.clone(),
+                false,
+            )
+        });
+        state.dlc_enable = dlc_enable;
+        state.dlc_disable = dlc_disable;
     }
 
     /// Single convergence point that decides whether to open the join preflight
@@ -560,19 +680,16 @@ impl Foxy {
                     steam_required && !steam_running
                 );
                 self.pending_join_preflight = Some(crate::ui::app::PendingJoinPreflightState {
-                    repo_name: repo_name.to_string(),
-                    server: server.clone(),
-                    original_repository: effective.clone(),
-                    suggestions: Vec::new(),
-                    ambiguous: Vec::new(),
-                    known_remote: Vec::new(),
-                    extra_enabled: Vec::new(),
-                    unavailable_enabled: Vec::new(),
                     ts3_required,
                     ts3_running,
                     steam_required,
                     steam_running,
-                    launch_only: false,
+                    ..crate::ui::app::PendingJoinPreflightState::empty(
+                        repo_name,
+                        server.clone(),
+                        effective.clone(),
+                        false,
+                    )
                 });
             }
             None => {
@@ -655,19 +772,15 @@ impl Foxy {
             );
             self.prelaunch_recheck_at = None;
             self.pending_join_preflight = Some(crate::ui::app::PendingJoinPreflightState {
-                repo_name: repo_name.to_string(),
-                server: RepositoryServer::default(),
-                original_repository: effective.clone(),
-                suggestions: Vec::new(),
-                ambiguous: Vec::new(),
-                known_remote: Vec::new(),
-                extra_enabled: Vec::new(),
                 unavailable_enabled,
-                ts3_required: false,
-                ts3_running: false,
                 steam_required,
                 steam_running,
-                launch_only: true,
+                ..crate::ui::app::PendingJoinPreflightState::empty(
+                    repo_name,
+                    RepositoryServer::default(),
+                    effective.clone(),
+                    true,
+                )
             });
             return;
         }
@@ -727,7 +840,7 @@ impl Foxy {
 
         if let Some(protocol) = &result.server_browser_protocol {
             info!(
-                "Join addon preflight Server Browser Protocol 3 for repository {} server {}:{}: version={}, difficulty={:?}, ai_level={:?}, dlc_flags={:?}, mods={}",
+                "Join addon preflight Server Browser Protocol 3 for repository {} server {}:{}: version={}, difficulty={:?}, ai_level={:?}, dlc_flags={:?}, official_dlc={:?}, creator_dlc_app_ids={:?}, mods={}",
                 repo_name,
                 server.address,
                 server.port,
@@ -735,6 +848,8 @@ impl Foxy {
                 protocol.difficulty,
                 protocol.ai_level,
                 protocol.dlc_flags,
+                protocol.official_dlc_names(),
+                protocol.creator_dlc_app_ids,
                 protocol.mods.len()
             );
             if !protocol.mods.is_empty() {
@@ -866,11 +981,12 @@ impl Foxy {
         let executable = command.get_program().to_os_string();
         let args: Vec<OsString> = command.get_args().map(|a| a.to_os_string()).collect();
         let cwd: Option<PathBuf> = command.get_current_dir().map(Path::to_path_buf);
+        self.activate_extra_files_before_launch();
 
         if steam::is_steam_running() {
             match spawn_launch_process(&executable, &args, cwd.as_deref()) {
-                Ok(child) => {
-                    info!("Launched Eden Editor (pid={})", child.id());
+                Ok(pid) => {
+                    info!("Launched Eden Editor (pid={})", pid);
                     self.handle_post_launch_window_behavior(ctx, "editor launch completed");
                 }
                 Err(err) => {
@@ -887,10 +1003,9 @@ impl Foxy {
         std::thread::spawn(
             move || match steam::ensure_steam_running(&steam_directory) {
                 Ok(_) => match spawn_launch_process(&executable, &args, cwd.as_deref()) {
-                    Ok(child) => info!(
+                    Ok(pid) => info!(
                         "Launched Eden Editor after Steam startup (pid={}) for repository {}",
-                        child.id(),
-                        repo_name_owned
+                        pid, repo_name_owned
                     ),
                     Err(err) => warn!("Failed to launch Eden Editor: {}", err),
                 },

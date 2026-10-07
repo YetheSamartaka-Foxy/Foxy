@@ -33,6 +33,20 @@ pub fn selected_creator_dlc_codes(repo: &Repository) -> Vec<&'static str> {
     codes
 }
 
+pub fn set_creator_dlc_enabled(repo: &mut Repository, code: &str, enabled: bool) {
+    let flag = match code {
+        "csla" => &mut repo.csla,
+        "ef" => &mut repo.ef,
+        "gm" => &mut repo.gm,
+        "rf" => &mut repo.rf,
+        "spe" => &mut repo.spe,
+        "vn" => &mut repo.vn,
+        "ws" => &mut repo.ws,
+        _ => return,
+    };
+    *flag = enabled;
+}
+
 pub fn split_additional_launch_params(params: &str) -> Vec<String> {
     let mut args = Vec::new();
     let mut current = String::new();
@@ -55,6 +69,37 @@ pub fn split_additional_launch_params(params: &str) -> Vec<String> {
     }
 
     args
+}
+
+/// Whether `params` already carries `token` as a standalone argument. Flags
+/// are case-insensitive for the games Foxy launches.
+pub fn has_launch_param_token(params: &str, token: &str) -> bool {
+    split_additional_launch_params(params)
+        .iter()
+        .any(|arg| arg.eq_ignore_ascii_case(token))
+}
+
+/// Add or remove a standalone flag in an additional-parameters string,
+/// keeping every other argument. Arguments containing whitespace are quoted
+/// again so the string splits back to the same argument list.
+pub fn set_launch_param_token(params: &str, token: &str, enabled: bool) -> String {
+    let mut args = split_additional_launch_params(params);
+    let present = args.iter().any(|arg| arg.eq_ignore_ascii_case(token));
+    if enabled && !present {
+        args.push(token.to_string());
+    } else if !enabled {
+        args.retain(|arg| !arg.eq_ignore_ascii_case(token));
+    }
+    args.iter()
+        .map(|arg| {
+            if arg.chars().any(char::is_whitespace) {
+                format!("\"{}\"", arg)
+            } else {
+                arg.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub fn apply_repo_client_parameters(repo: &mut Repository, params: &str) {
@@ -81,6 +126,18 @@ pub fn apply_repo_client_parameters(repo: &mut Repository, params: &str) {
     }
 
     repo.additional_params = additional.join(" ");
+}
+
+/// Locate the DLC list in a `repo.json`. Foxy publishes `dlcContent`; Swifty
+/// repositories carry the same information as `requiredDLCs` (casing varies
+/// between Swifty versions).
+pub fn repo_json_dlc_content_value(json: &Value) -> Option<&Value> {
+    if let Some(value) = json.get("dlcContent") {
+        return Some(value);
+    }
+    json.as_object()?
+        .iter()
+        .find_map(|(key, value)| key.eq_ignore_ascii_case("requiredDLCs").then_some(value))
 }
 
 pub fn apply_repo_dlc_content_from_repo_json(repo: &mut Repository, value: &Value) {
@@ -277,6 +334,9 @@ pub fn path_is_inside_onedrive(path: &str) -> bool {
 
 pub fn sanitize_settings_paths(settings: &mut SettingsViewState) {
     settings.arma3_directory = sanitize_user_path_value(&settings.arma3_directory);
+    settings.twwh3_directory = sanitize_user_path_value(&settings.twwh3_directory);
+    settings.reforger_directory = sanitize_user_path_value(&settings.reforger_directory);
+    settings.generic_directory = sanitize_user_path_value(&settings.generic_directory);
     settings.arma3_profiles_directory =
         sanitize_user_path_value(&settings.arma3_profiles_directory);
     settings.steam_directory = sanitize_user_path_value(&settings.steam_directory);
@@ -291,6 +351,24 @@ pub fn sanitize_settings_paths(settings: &mut SettingsViewState) {
             settings.arma3_directory
         );
         settings.arma3_directory.clear();
+    }
+    if path_is_inside_onedrive(&settings.twwh3_directory) {
+        log::warn!(
+            "Clearing Total War: WARHAMMER III directory because it is inside a OneDrive folder: {}",
+            settings.twwh3_directory
+        );
+        settings.twwh3_directory.clear();
+    }
+    if path_is_inside_onedrive(&settings.reforger_directory) {
+        log::warn!(
+            "Clearing Arma Reforger directory because it is inside a OneDrive folder: {}",
+            settings.reforger_directory
+        );
+        settings.reforger_directory.clear();
+    }
+    if path_is_inside_onedrive(&settings.generic_directory) {
+        log::warn!("Clearing generic game directory because it is inside a OneDrive folder");
+        settings.generic_directory.clear();
     }
     if path_is_inside_onedrive(&settings.arma3_profiles_directory) {
         log::warn!(
@@ -429,6 +507,13 @@ pub fn push_arma3_profile_launch_args(
 
 pub fn sanitize_repository_paths(repo: &mut Repository) {
     repo.path = sanitize_user_path_value(&repo.path);
+    // A repository instance is keyed by `(remote_url, local_path)`; stray
+    // whitespace around a configured address makes every DB lookup miss its own
+    // row, so repair it on load instead of carrying it into the key.
+    repo.address = repo.address.trim().to_string();
+    if let Some(entry_address) = repo.repository_space_entry_address.as_mut() {
+        *entry_address = entry_address.trim().to_string();
+    }
     repo.app_update_url = repo.app_update_url.trim().to_string();
     sanitize_addon_favorites(&mut repo.optional_addon_favorites);
     sanitize_addon_favorites(&mut repo.optional_addon_client_side);
@@ -486,6 +571,11 @@ pub fn normalize_loaded_repositories(repositories: &mut [Repository]) {
 pub fn sanitize_repository_space_paths(space: &mut RepositorySpace) {
     space.shared_path = sanitize_user_path_value(&space.shared_path);
     space.app_update_url = space.app_update_url.trim().to_string();
+    space.source_address = space.source_address.trim().to_string();
+    space.source_base_url = space.source_base_url.trim().to_string();
+    for entry in &mut space.entries {
+        entry.address = entry.address.trim().to_string();
+    }
 }
 
 pub fn sanitize_repository_spaces_paths(spaces: &mut [RepositorySpace]) {

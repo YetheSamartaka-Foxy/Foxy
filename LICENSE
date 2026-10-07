@@ -1,4 +1,4 @@
-# Foxy Community Source License 1.0.0
+# Foxy Community Source License 1.1.0
 
 Copyright (c) 2026 Yethe Samartaka
 
@@ -22,7 +22,7 @@ Inactivity Threshold: 24 consecutive months without a Meaningful Update.
 
 Maintainer Response Period: 90 days after a valid Community Continuation Request is opened.
 
-Continuation License: this Foxy Community Source License 1.0.0. A Community Continuation Event does not convert the Software to Apache-2.0, MIT, or any other license.
+Continuation License: this Foxy Community Source License 1.1.0. A Community Continuation Event does not convert the Software to Apache-2.0, MIT, or any other license.
 
 ## 2. Definitions
 
@@ -153,7 +153,7 @@ A Community Continuation Maintainer who does not respond to a Maintainer Return 
 
 The same succession and return process applies repeatedly across multiple maintainers. Each successor Project Steward and each Community Continuation Maintainer takes the Software subject to this license and must expect later succession, handback, shared maintenance, or another Community Continuation Event if the project again becomes inactive.
 
-A returning Project Steward cannot revoke permissions that already became available under this license after a Community Continuation Event. A return or handback restores project stewardship only by public agreement under this section. It does not convert the Software to another license and does not remove existing rights under this Foxy Community Source License 1.0.0.
+A returning Project Steward cannot revoke permissions that already became available under this license after a Community Continuation Event. A return or handback restores project stewardship only by public agreement under this section. It does not convert the Software to another license and does not remove existing rights under this Foxy Community Source License 1.1.0.
 
 ## 6. Restrictions
 
@@ -181,11 +181,21 @@ No Project Steward is required to provide private contact information. Official 
 
 ## 8. Contributions
 
-This license does not itself require the Project Steward to accept any Contribution Request.
+**Contribution** means code, documentation, tests, assets, designs, or other material You submit in a Contribution Request for possible inclusion in the Software, excluding material You clearly mark as not intended for inclusion.
 
-By submitting a Contribution Request, You agree that the project may require a separate contributor license agreement, developer certificate of origin, sign-off, or other contribution terms before accepting the contribution.
+**Acceptance.** Opening a pull request, pushing commits to a pull request, or committing to the Official Repository is Your acceptance of this Section 8 for the Contributions concerned. No signature, written form, commit sign-off, checkbox, or other confirmation is required. If You do not agree, do not submit. Commits that stay in Your own fork or local copy are not submitted. Each Contribution is governed by the version of this license published in the Official Repository when it is submitted. Contributions submitted before version 1.1.0 remain governed by the Foxy Contributor License Agreement 1.0.0.
 
-If a contribution is accepted into the Software, the contribution is distributed under this license unless the Project Steward states different terms through Official Issues or a written contribution agreement.
+**Copyright license.** You keep ownership of Your Contributions. You grant the Licensor and each Project Steward a worldwide, perpetual, irrevocable, non-exclusive, royalty-free, transferable license, with the right to sublicense through multiple tiers, to use, reproduce, modify, distribute, publicly display, and otherwise exploit Your Contributions, and to license them under this license, later versions of it, and separate commercial or other licenses chosen by the Project Steward, including after a Community Continuation Event or a change of stewardship under Section 5.
+
+**Patent license.** You grant the Licensor, each Project Steward, and recipients of the Software a worldwide, perpetual, irrevocable, non-exclusive, royalty-free patent license under patent claims You control that are necessarily infringed by Your Contribution alone or combined with the Software as submitted. This license terminates for anyone who initiates patent litigation alleging that a Contribution or the Software infringes a patent.
+
+**Moral rights.** To the extent moral rights cannot be waived or transferred, You consent to the modification, combination, translation, and relicensing of Your Contributions, and to attribution through project history, commit metadata, or release notes, and You will not assert those rights against uses permitted by this Section 8, to the extent applicable law allows.
+
+**Your promises.** You confirm that You have the right to submit each Contribution under this Section 8, that any third-party material in it is identified together with its source and license, and that any employer, client, school, or other organization that may own rights in it has authorized the submission.
+
+**No obligation.** No Project Steward must review, accept, merge, or maintain any Contribution. Contributions are voluntary and unpaid unless separately agreed in writing, and are provided as is, without warranty. The Project Steward may require additional written confirmation before accepting a Contribution.
+
+These terms are a separate contributor agreement for the purpose of any platform terms, such as the GitHub Terms of Service, that would otherwise license a Contribution only under the repository license, and they supersede those terms for Contributions to the Software. An accepted Contribution is distributed as part of the Software under this license.
 
 ## 9. Third-party components
 

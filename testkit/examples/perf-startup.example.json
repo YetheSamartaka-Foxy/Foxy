@@ -1,0 +1,34 @@
+{
+  "id": "perf-startup-example",
+  "kind": "perf",
+  "description": "Launch to sync verdict (O8): restart the app against an already-populated profile and read the SOL op=startup timeline.",
+  "build": "release",
+  "harness": "gui",
+  "timeout_s": 1800,
+  "tags": [
+    "startup"
+  ],
+  "notes": "config_seed copies a real Foxy configuration directory (repositories, spaces, warm database) into the isolated config directory once per run, so the case measures a populated profile instead of a bootstrap. The source is only read, and require_no_other_foxy is what keeps the copy from being torn by a running app.",
+  "config_seed": "C:/Users/<you>/AppData/Roaming/Foxy",
+  "repository": {
+    "name": "Example Repository",
+    "address": "http://repo.example.invalid/mody/Example/",
+    "path": "D:/Games/ExampleRepository",
+    "space_id": null
+  },
+  "operations": [
+    {
+      "op": "startup",
+      "wait_timeout_s": 600
+    }
+  ],
+  "repetitions": 3,
+  "warmup": false,
+  "thresholds": {},
+  "guards": {
+    "require_no_other_foxy": true,
+    "require_clean_worktree": false,
+    "fail_on_db_wipe": true,
+    "max_run_gb": 1
+  }
+}

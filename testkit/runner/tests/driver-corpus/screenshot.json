@@ -1,0 +1,13 @@
+{
+  "ok": true,
+  "command": "screenshot",
+  "view": "repository-list",
+  "elapsed_ms": 60,
+  "data": {
+    "screenshot_path": "<path>",
+    "width": 1536,
+    "height": 1152,
+    "scale_factor": 1.5
+  },
+  "errors": []
+}

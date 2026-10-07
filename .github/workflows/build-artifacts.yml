@@ -125,11 +125,34 @@ jobs:
         shell: pwsh
         run: cargo build --release --target x86_64-pc-windows-msvc
 
+      # steamworks-sys unpacks the redistributable into its own OUT_DIR only.
+      # The Workshop helper needs it beside the exe, and the installer packages
+      # from this directory, so stage it explicitly rather than relying on
+      # build-script ordering.
+      - name: Stage Steamworks redistributable
+        shell: pwsh
+        run: |
+          $release = "target/x86_64-pc-windows-msvc/release"
+          $dll = Get-ChildItem -Path "$release/build" -Recurse -Filter steam_api64.dll -ErrorAction SilentlyContinue |
+                 Select-Object -First 1
+          if (-not $dll) { throw "steam_api64.dll not found under $release/build" }
+          Copy-Item $dll.FullName "$release/steam_api64.dll" -Force
+          Write-Host "Staged $($dll.FullName)"
+
+      - name: Verify the packaged executable starts
+        shell: pwsh
+        run: |
+          $release = "target/x86_64-pc-windows-msvc/release"
+          & "$release/Foxy.exe" version
+          if ($LASTEXITCODE -ne 0) { throw "Foxy.exe failed to start (exit $LASTEXITCODE)" }
+
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v6
         with:
           name: Foxy-windows-${{ steps.vars.outputs.short_sha }}
-          path: target/x86_64-pc-windows-msvc/release/Foxy.exe
+          path: |
+            target/x86_64-pc-windows-msvc/release/Foxy.exe
+            target/x86_64-pc-windows-msvc/release/steam_api64.dll
           if-no-files-found: error
           retention-days: 30
 
@@ -217,17 +240,34 @@ jobs:
       - name: Build Linux release
         run: cargo build --release --target x86_64-unknown-linux-gnu
 
+      # The binary has a DT_NEEDED on libsteam_api.so and is built with an
+      # $ORIGIN rpath, so the library must sit beside it or the app will not
+      # start. There is no delay-load equivalent on Linux.
       - name: Prepare Linux artifact
         run: |
           mkdir -p dist
           cp target/x86_64-unknown-linux-gnu/release/Foxy dist/Foxy
           chmod +x dist/Foxy
+          SO=$(find target/x86_64-unknown-linux-gnu/release/build -name libsteam_api.so | head -n 1)
+          if [ -z "$SO" ]; then
+            echo "libsteam_api.so not found under the release build directory"
+            exit 1
+          fi
+          cp "$SO" dist/libsteam_api.so
+          echo "Staged $SO"
+
+      - name: Verify the packaged binary starts
+        run: |
+          cd dist
+          ./Foxy version
 
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v6
         with:
           name: Foxy-linux-${{ steps.vars.outputs.short_sha }}
-          path: dist/Foxy
+          path: |
+            dist/Foxy
+            dist/libsteam_api.so
           if-no-files-found: error
           retention-days: 30
 

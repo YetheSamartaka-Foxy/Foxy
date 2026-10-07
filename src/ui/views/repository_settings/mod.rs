@@ -477,7 +477,7 @@ impl Foxy {
                         .filter(|status| status.repo_index == repo_index)
                     {
                         ui.horizontal(|ui| {
-                            ui.spinner();
+                            ui.add(crate::ui::app::PacedSpinner::new());
                             ui.label(status.status_text.clone());
                         });
                         ui.separator();
@@ -501,12 +501,20 @@ impl Foxy {
                         let repo = &self.repository_view_state.repositories[repo_index];
                         if self.is_repository_db_wipe_pending(&repo.address) {
                             ui.horizontal(|ui| {
-                                ui.spinner();
+                                ui.add(crate::ui::app::PacedSpinner::new());
                                 if self.is_repository_force_redownload_pending(&repo.address) {
                                     ui.label(tr("Force redownload repository"));
                                 } else {
                                     ui.label(tr("Repository database wipe in progress"));
                                 }
+                            });
+                            ui.separator();
+                        } else if self.is_addon_force_redownload_pending_for_repo(&repo.path) {
+                            ui.horizontal(|ui| {
+                                ui.add(crate::ui::app::PacedSpinner::new());
+                                ui.label(tr(
+                                    "Checking repository connection before force redownload",
+                                ));
                             });
                             ui.separator();
                         }
@@ -664,12 +672,8 @@ impl Foxy {
             };
 
             egui::Window::new(title)
-                .frame(
-                    egui::Frame::window(&ui.ctx().global_style())
-                        .fill(self.color_card_bg())
-                        .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                        .corner_radius(egui::CornerRadius::same(10)),
-                )
+                .frame(self.modal_window_chrome(ui.ctx()))
+                .title_frame(self.modal_window_chrome(ui.ctx()))
                 .title_bar(true)
                 .collapsible(false)
                 .resizable(false)
@@ -823,12 +827,8 @@ impl Foxy {
         let mut confirm = false;
         let mut cancel = false;
         egui::Window::new(title)
-            .frame(
-                egui::Frame::window(&ui.ctx().global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ui.ctx()))
+            .title_frame(self.modal_window_chrome(ui.ctx()))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)
@@ -922,12 +922,8 @@ impl Foxy {
         let mut confirm = false;
         let mut cancel = false;
         egui::Window::new(title)
-            .frame(
-                egui::Frame::window(&ui.ctx().global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ui.ctx()))
+            .title_frame(self.modal_window_chrome(ui.ctx()))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)
@@ -1061,12 +1057,8 @@ impl Foxy {
             .filter(|state| state.repo_index == repo_index)
         {
             egui::Window::new(tr("Restore addon backup"))
-                .frame(
-                    egui::Frame::window(&ctx.global_style())
-                        .fill(self.color_card_bg())
-                        .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                        .corner_radius(CornerRadius::same(10)),
-                )
+                .frame(self.modal_window_chrome(ctx))
+                .title_frame(self.modal_window_chrome(ctx))
                 .title_bar(true)
                 .collapsible(false)
                 .resizable(false)
@@ -1180,8 +1172,8 @@ mod tests {
     #[test]
     fn normalize_local_path_for_compare_uses_windows_case_rules() {
         assert_eq!(
-            normalize_local_path_for_compare("C:\\Mods\\TFR\\"),
-            normalize_local_path_for_compare("c:/mods/tfr")
+            normalize_local_path_for_compare("C:\\Mods\\Alpha\\"),
+            normalize_local_path_for_compare("c:/mods/alpha")
         );
     }
 

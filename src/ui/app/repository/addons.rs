@@ -1,18 +1,31 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use log::{info, warn};
 
-use crate::core::utils::fs_safety::resolve_child_dir_case_insensitive;
+use crate::core::game::GameModule;
+
 use crate::ui::app::{
     AddonInventoryEntry, AddonInventoryViewCache, Foxy, RepositoryAddonListCache,
     RepositoryExternalAddonsListCache, RepositorySettingsAddonPreloadResult,
 };
 use crate::ui::types::{
     Repository, RepositoryProfile, RepositoryServer, UpdateSummaryNotice,
-    additional_folder_alias_key, sanitize_additional_folder_alias, selected_creator_dlc_codes,
-    split_additional_launch_params,
+    additional_folder_alias_key, sanitize_additional_folder_alias,
 };
+
+/// Upper bound on the addon size-walk workers. The walks are metadata-bound
+/// rather than CPU-bound, so more threads than this buy nothing and only add
+/// queue depth on a spinning disk.
+const ADDON_SIZE_SCAN_MAX_WORKERS: usize = 8;
+
+/// How often the UI thread rechecks an in-flight inventory worker while waiting
+/// to adopt its result. Waiting on a slow worker is still cheaper than racing it
+/// with a second scan; the recheck only exists so a worker that died without
+/// sending cannot wedge the wait.
+const ADDON_INVENTORY_ADOPT_POLL: Duration = Duration::from_millis(25);
 
 impl Foxy {
     pub(crate) fn invalidate_addon_inventory_cache(&mut self) {
@@ -52,21 +65,6 @@ impl Foxy {
         repo.external_addon_favorites = profile.external_addon_favorites.clone();
         repo.external_addon_client_side = profile.external_addon_client_side.clone();
         repo.additional_params = profile.additional_params.clone();
-    }
-
-    pub fn contains_addons_subfolder(folder: &Path) -> bool {
-        let entries = match std::fs::read_dir(folder) {
-            Ok(entries) => entries,
-            Err(_) => return false,
-        };
-
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if entry.path().is_dir() && name.eq_ignore_ascii_case("addons") {
-                return true;
-            }
-        }
-        false
     }
 
     pub(crate) fn normalize_origin_lookup_path(path: &str) -> String {
@@ -236,13 +234,24 @@ impl Foxy {
         matches
     }
 
+    /// Whether the active game has a client-side addon concept at all. Arma 3
+    /// servers report their addon list and tolerate extra client-only mods;
+    /// Reforger activates exactly the server's mod set on join, so no surface
+    /// may offer or honor a client-side marking there.
+    pub(crate) fn client_side_addons_supported() -> bool {
+        crate::core::game::registry()
+            .active()
+            .capabilities()
+            .client_side_addons
+    }
+
     pub(crate) fn addon_is_repo_defined_client_side(
         &self,
         addon_name: &str,
         absolute_path: &str,
     ) -> bool {
         let addon_name = addon_name.trim();
-        if addon_name.is_empty() {
+        if addon_name.is_empty() || !Self::client_side_addons_supported() {
             return false;
         }
 
@@ -284,7 +293,10 @@ impl Foxy {
         }
     }
 
-    pub fn discover_addons_in_path<P: AsRef<Path>>(root_path: P) -> Vec<(String, String)> {
+    pub fn discover_addons_in_path<P: AsRef<Path>>(
+        root_path: P,
+        module: &dyn GameModule,
+    ) -> Vec<(String, String)> {
         let mut results = Vec::new();
         let path = root_path.as_ref();
         if !path.is_dir() {
@@ -308,7 +320,7 @@ impl Foxy {
                 None => continue,
             };
 
-            if !Foxy::contains_addons_subfolder(&subfolder_path) {
+            if !module.is_addon_directory(&subfolder_path) {
                 continue;
             }
 
@@ -360,9 +372,15 @@ impl Foxy {
         additional_folder_aliases: &HashMap<String, String>,
         arma3_directory: &str,
         steam_directory: &str,
+        module: &dyn GameModule,
     ) -> Vec<AddonInventoryEntry> {
-        let mut discovered = Vec::new();
+        let mut discovered: Vec<(String, String, String)> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
+        // Every repository joined to a repository space shares one folder, so
+        // without these caches the same directory tree and the same origin
+        // lookup are repeated once per repository.
+        let mut scanned_by_path: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        let mut origins_by_addon_path: HashMap<String, Vec<String>> = HashMap::new();
         let additional_origin_by_folder =
             Self::additional_folder_origin_map_from(additional_folders, additional_folder_aliases);
 
@@ -371,10 +389,16 @@ impl Foxy {
             if repo_path.is_empty() {
                 continue;
             }
-            let scanned = Foxy::discover_addons_in_path(repo_path);
+            let scanned = scanned_by_path
+                .entry(Self::normalize_origin_lookup_path(repo_path))
+                .or_insert_with(|| Foxy::discover_addons_in_path(repo_path, module))
+                .clone();
             for (addon_name, absolute_path) in scanned {
-                let repo_origins =
-                    Self::addon_repo_origins_from(repositories, &addon_name, &absolute_path);
+                let repo_origins = origins_by_addon_path
+                    .entry(absolute_path.clone())
+                    .or_insert_with(|| {
+                        Self::addon_repo_origins_from(repositories, &addon_name, &absolute_path)
+                    });
                 if repo_origins.is_empty() {
                     continue;
                 }
@@ -384,14 +408,18 @@ impl Foxy {
                         [single] => single.clone(),
                         many => many.join(", "),
                     };
-                    let size_bytes = addon_directory_total_size(Path::new(&absolute_path)).ok();
-                    discovered.push((addon_name, absolute_path, origin, size_bytes));
+                    discovered.push((addon_name, absolute_path, origin));
                 }
             }
         }
 
-        let workshop_root =
-            Self::normalized_steam_workshop_root_path_for(arma3_directory, steam_directory);
+        let workshop_root = module
+            .capabilities()
+            .steam_workshop
+            .then(|| {
+                Self::normalized_steam_workshop_root_path_for(arma3_directory, steam_directory)
+            })
+            .flatten();
         for folder in additional_folders {
             let folder = folder.trim();
             if folder.is_empty() {
@@ -402,7 +430,10 @@ impl Foxy {
                 .get(&folder_key)
                 .cloned()
                 .unwrap_or_else(|| "Additional folders".to_string());
-            let scanned = Foxy::discover_addons_in_path(folder);
+            let scanned = scanned_by_path
+                .entry(folder_key)
+                .or_insert_with(|| Foxy::discover_addons_in_path(folder, module))
+                .clone();
             for (addon_name, absolute_path) in scanned {
                 if seen.insert(absolute_path.clone()) {
                     let origin = if Self::is_steam_workshop_path_with_root(
@@ -413,14 +444,16 @@ impl Foxy {
                     } else {
                         additional_origin.clone()
                     };
-                    let size_bytes = addon_directory_total_size(Path::new(&absolute_path)).ok();
-                    discovered.push((addon_name, absolute_path, origin, size_bytes));
+                    discovered.push((addon_name, absolute_path, origin));
                 }
             }
         }
 
-        let workshop_candidates =
-            Self::build_workshop_candidate_paths(arma3_directory.trim(), steam_directory.trim());
+        let workshop_candidates = if module.capabilities().steam_workshop {
+            Self::build_workshop_candidate_paths(arma3_directory.trim(), steam_directory.trim())
+        } else {
+            Vec::new()
+        };
 
         let mut scanned_roots: HashSet<PathBuf> = HashSet::new();
         for workshop_folder in &workshop_candidates {
@@ -430,30 +463,44 @@ impl Foxy {
             if !scanned_roots.insert(canonical) {
                 continue;
             }
-            let scanned = Foxy::discover_addons_in_path(workshop_folder);
+            let scanned = scanned_by_path
+                .entry(Self::normalize_origin_lookup_path(
+                    &workshop_folder.to_string_lossy(),
+                ))
+                .or_insert_with(|| Foxy::discover_addons_in_path(workshop_folder, module))
+                .clone();
             for (addon_name, absolute_path) in scanned {
                 if seen.insert(absolute_path.clone()) {
-                    let size_bytes = addon_directory_total_size(Path::new(&absolute_path)).ok();
-                    discovered.push((
-                        addon_name,
-                        absolute_path,
-                        "Steam Workshop".to_string(),
-                        size_bytes,
-                    ));
+                    discovered.push((addon_name, absolute_path, "Steam Workshop".to_string()));
                 }
             }
         }
 
         discovered.sort_by(|a, b| {
-            let (a_name, a_path, a_origin, _) = a;
-            let (b_name, b_path, b_origin, _) = b;
+            let (a_name, a_path, a_origin) = a;
+            let (b_name, b_path, b_origin) = b;
             a_name
                 .cmp(b_name)
                 .then(a_origin.cmp(b_origin))
                 .then(a_path.cmp(b_path))
         });
 
+        // The recursive size walk dominates the inventory build and every entry
+        // is an independent directory tree, so the walks run across workers
+        // instead of one folder after another.
+        let sizes = addon_directory_total_sizes(
+            &discovered
+                .iter()
+                .map(|(_, path, _)| path.clone())
+                .collect::<Vec<_>>(),
+        );
         discovered
+            .into_iter()
+            .zip(sizes)
+            .map(|((addon_name, absolute_path, origin), size_bytes)| {
+                (addon_name, absolute_path, origin, size_bytes)
+            })
+            .collect()
     }
 
     pub fn gather_all_addon_origins(&self) -> Vec<AddonInventoryEntry> {
@@ -463,12 +510,78 @@ impl Foxy {
             &self.settings_view_state.additional_folder_aliases,
             &self.settings_view_state.arma3_directory,
             &self.settings_view_state.steam_directory,
+            crate::core::game::registry().active(),
         )
+    }
+
+    /// Take the inventory an already running worker is building rather than
+    /// starting a second scan of the same folders on the UI thread.
+    ///
+    /// A worker spawned before the last `invalidate_addon_inventory_cache` is
+    /// scanning for a generation nobody wants any more, so it is left to finish
+    /// on its own rather than waited on.
+    fn adopt_pending_addon_inventory(&mut self) {
+        if self
+            .repository_settings_addon_preload_worker
+            .as_ref()
+            .is_none_or(|(generation, _)| *generation != self.addon_inventory_generation)
+        {
+            return;
+        }
+        let Some((_, worker)) = self.repository_settings_addon_preload_worker.take() else {
+            return;
+        };
+
+        let started_at = Instant::now();
+        let mut adopted = None;
+        loop {
+            match self
+                .repository_settings_addon_preload_rx
+                .recv_timeout(ADDON_INVENTORY_ADOPT_POLL)
+            {
+                Ok(result) => {
+                    adopted = Some(result);
+                    break;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if worker.is_finished() {
+                        adopted = self.repository_settings_addon_preload_rx.try_recv().ok();
+                        break;
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        if worker.join().is_err() {
+            warn!("Repository settings addon preload worker panicked");
+        }
+
+        let Some(result) = adopted else {
+            return;
+        };
+        if result.inventory_generation != self.addon_inventory_generation {
+            return;
+        }
+        info!(
+            "Adopted the background addon inventory after {:.2?} ({} addons)",
+            started_at.elapsed(),
+            result.addons.len()
+        );
+        self.cached_all_addons = Some(result.addons);
     }
 
     pub fn get_or_generate_all_addons(&mut self) -> &Vec<AddonInventoryEntry> {
         if self.cached_all_addons.is_none() {
+            self.adopt_pending_addon_inventory();
+        }
+        if self.cached_all_addons.is_none() {
+            let started_at = Instant::now();
             let new_data = self.gather_all_addon_origins();
+            info!(
+                "Built addon inventory on the UI thread in {:.2?} ({} addons)",
+                started_at.elapsed(),
+                new_data.len()
+            );
             self.cached_all_addons = Some(new_data);
         }
         self.cached_all_addons.as_ref().unwrap()
@@ -510,7 +623,36 @@ impl Foxy {
             return;
         }
 
-        if self.repository_settings_addon_preload_worker.is_some() {
+        self.start_addon_inventory_worker(repo_index);
+    }
+
+    /// Build the addon inventory in the background whenever the app is idle
+    /// and does not have one, so opening Repository Settings finds it ready
+    /// instead of paying for the whole folder walk between the click and the
+    /// first frame.
+    ///
+    /// Idle is the gate rather than "once at startup". The inventory is dropped
+    /// on an addon delete, a path change, a finished download or a game space
+    /// switch, and without a re-arm the next open would pay the walk again.
+    /// Idle keeps the scan off the disk while sync work is using it, and reads
+    /// the repository list only once a switch has finished installing it.
+    pub(in crate::ui::app) fn maybe_warm_addon_inventory(&mut self) {
+        if self.cached_all_addons.is_some()
+            || self.repository_settings_addon_preload_worker.is_some()
+            || self.repository_view_state.repositories.is_empty()
+        {
+            return;
+        }
+        if !self.startup_tasks_started || !self.startup_sync_settled() {
+            return;
+        }
+        self.start_addon_inventory_worker(self.selected_repository_for_settings.unwrap_or(0));
+    }
+
+    fn start_addon_inventory_worker(&mut self, repo_index: usize) {
+        if self.cached_all_addons.is_some()
+            || self.repository_settings_addon_preload_worker.is_some()
+        {
             return;
         }
 
@@ -519,43 +661,50 @@ impl Foxy {
         let additional_folder_aliases = self.settings_view_state.additional_folder_aliases.clone();
         let arma3_directory = self.settings_view_state.arma3_directory.clone();
         let steam_directory = self.settings_view_state.steam_directory.clone();
+        let module = crate::core::game::registry().active();
         let inventory_generation = self.addon_inventory_generation;
         let result_tx = self.repository_settings_addon_preload_tx.clone();
         let repaint_ctx = self.repaint_ctx.clone();
 
-        self.repository_settings_addon_preload_worker = Some(std::thread::spawn(move || {
-            let started_at = std::time::Instant::now();
-            let addons = Foxy::gather_all_addon_origins_from(
-                &repositories,
-                &additional_folders,
-                &additional_folder_aliases,
-                &arma3_directory,
-                &steam_directory,
-            );
-            info!(
-                "Preloaded addon inventory for repository settings in {:.2?} ({} addons)",
-                started_at.elapsed(),
-                addons.len()
-            );
-            if result_tx
-                .send(RepositorySettingsAddonPreloadResult {
-                    repo_index,
-                    inventory_generation,
-                    addons,
-                })
-                .is_err()
-            {
-                warn!("Failed to send repository settings addon preload result: UI channel closed");
-            }
-            Self::request_background_repaint(repaint_ctx.as_ref());
-        }));
+        self.repository_settings_addon_preload_worker = Some((
+            inventory_generation,
+            std::thread::spawn(move || {
+                let started_at = std::time::Instant::now();
+                let addons = Foxy::gather_all_addon_origins_from(
+                    &repositories,
+                    &additional_folders,
+                    &additional_folder_aliases,
+                    &arma3_directory,
+                    &steam_directory,
+                    module,
+                );
+                info!(
+                    "Preloaded addon inventory for repository settings in {:.2?} ({} addons)",
+                    started_at.elapsed(),
+                    addons.len()
+                );
+                if result_tx
+                    .send(RepositorySettingsAddonPreloadResult {
+                        repo_index,
+                        inventory_generation,
+                        addons,
+                    })
+                    .is_err()
+                {
+                    warn!(
+                        "Failed to send repository settings addon preload result: UI channel closed"
+                    );
+                }
+                Self::request_background_repaint(repaint_ctx.as_ref());
+            }),
+        ));
     }
 
     pub(crate) fn poll_repository_settings_addon_preload_results(&mut self) {
         loop {
             match self.repository_settings_addon_preload_rx.try_recv() {
                 Ok(result) => {
-                    if let Some(worker) = self.repository_settings_addon_preload_worker.take()
+                    if let Some((_, worker)) = self.repository_settings_addon_preload_worker.take()
                         && worker.join().is_err()
                     {
                         warn!("Repository settings addon preload worker panicked");
@@ -592,114 +741,32 @@ impl Foxy {
         repo: &Repository,
         server: Option<&RepositoryServer>,
     ) -> Option<std::process::Command> {
-        let arma3_directory = self.settings_view_state.arma3_directory.trim();
-
-        #[cfg(target_os = "windows")]
-        if arma3_directory.is_empty() {
-            log::warn!(
-                "Cannot create launch command: Arma 3 directory is not configured (raw value {:?})",
-                self.settings_view_state.arma3_directory
+        // Never build a launch for a module that does not declare the
+        // capability, and never for the read-only fallback module of a space
+        // whose game is not registered.
+        let Some(module) = crate::core::game::registry().active_module() else {
+            warn!(
+                "Repository launch is not supported: the active game space names an unknown game"
+            );
+            return None;
+        };
+        if !module.capabilities().repository_launch {
+            warn!(
+                "Repository launch is not supported for the active game space (game {})",
+                module.id()
             );
             return None;
         }
-
-        let arma3_dir_path = if arma3_directory.is_empty() {
-            std::path::Path::new(".")
-        } else {
-            std::path::Path::new(arma3_directory)
+        let plan = module
+            .build_repository_launch_plan(&self.settings_view_state, repo, server)
+            .ok()?;
+        let ctx = crate::core::game::GameLaunchCtx {
+            install_dir: module.install_dir_from_settings(&self.settings_view_state),
+            steam_directory: &self.settings_view_state.steam_directory,
+            settings: Some(&self.settings_view_state),
         };
-        #[cfg(target_os = "windows")]
-        if !arma3_dir_path.exists() {
-            log::warn!(
-                "Cannot create launch command: Arma 3 directory does not exist: {}",
-                arma3_directory
-            );
-            return None;
-        }
-
-        #[cfg(target_os = "windows")]
-        if !crate::core::steam::is_valid_arma3_dir(arma3_dir_path) {
-            log::warn!(
-                "Cannot create launch command: Arma 3 directory is not valid: {}",
-                arma3_directory
-            );
-            return None;
-        }
-
-        let mut args = Vec::new();
-
-        // Re-detect profiles at launch time so -name decisions reflect the
-        // current on-disk state, not a cached list.
-        let custom_profiles_dir = self.settings_view_state.arma3_profiles_directory.trim();
-        let custom_profiles_dir = if custom_profiles_dir.is_empty() {
-            None
-        } else {
-            Some(std::path::Path::new(custom_profiles_dir))
-        };
-        let detected_profiles =
-            crate::core::arma3_profiles::detect_all_profiles(custom_profiles_dir);
-        crate::ui::types::push_arma3_profile_launch_args(
-            &self.settings_view_state,
-            repo,
-            &detected_profiles,
-            &mut args,
-        );
-
-        if repo.skip_intro {
-            args.push("-skipIntro".to_string());
-        }
-        if repo.no_splash {
-            args.push("-noSplash".to_string());
-        }
-        if repo.world_empty {
-            args.push("-world=empty".to_string());
-        }
-        if repo.load_mission_to_memory {
-            args.push("-loadMissionToMemory".to_string());
-        }
-        if repo.enable_ht {
-            args.push("-enableHT".to_string());
-        }
-        if repo.huge_pages {
-            args.push("-hugePages".to_string());
-        }
-        if repo.no_logs {
-            args.push("-noLogs".to_string());
-        }
-
-        if !repo.additional_params.is_empty() {
-            args.extend(split_additional_launch_params(&repo.additional_params));
-        }
-
-        let resolved_addons = resolve_launch_mod_paths(repo, arma3_directory);
-        if !resolved_addons.is_empty() {
-            let mod_param = format!("-mod={}", resolved_addons.join(";"));
-            args.push(mod_param);
-        }
-
-        if let Some(server) = server {
-            args.push(format!("-connect={}", server.address));
-            args.push(format!("-port={}", server.port));
-            if !server.password.is_empty() {
-                args.push(format!("-password={}", server.password));
-            }
-        }
-
-        let steam_directory = self.settings_view_state.steam_directory.trim();
-        let Some(launch) =
-            crate::core::steam::arma3_launch_command(arma3_dir_path, steam_directory)
-        else {
-            log::warn!("Cannot create launch command: Steam launch command is unavailable");
-            return None;
-        };
-        let mut command = std::process::Command::new(launch.program);
-        command.args(launch.args);
-        command.args(&args);
-        if !arma3_directory.is_empty() && arma3_dir_path.exists() {
-            command.current_dir(arma3_directory);
-        }
-
-        Some(command)
+        let command = module.build_launch(&plan, &ctx).ok()?;
+        Some(command.into_process_command())
     }
 
     fn normalized_repo_url_for_index(&self, repo_index: usize) -> Option<String> {
@@ -920,150 +987,70 @@ impl Foxy {
     }
 }
 
-fn resolve_launch_mod_paths(repo: &Repository, arma3_directory: &str) -> Vec<String> {
-    let creator_dlc_codes = selected_creator_dlc_codes(repo);
-    let enabled_addons: Vec<String> = repo
-        .addons
-        .iter()
-        .map(|(addon, enabled)| (addon, *enabled))
-        .chain(
-            repo.optional_addons
-                .iter()
-                .map(|(addon, enabled)| (addon, *enabled)),
+/// Total size of every addon folder in `paths`, in the same order.
+///
+/// One `addon_directory_total_size` per entry, spread over workers: the walks
+/// touch disjoint trees and are metadata-bound, so they overlap rather than
+/// queue behind each other.
+fn addon_directory_total_sizes(paths: &[String]) -> Vec<Option<u64>> {
+    let mut sizes: Vec<Option<u64>> = vec![None; paths.len()];
+    if paths.is_empty() {
+        return sizes;
+    }
+
+    // Directory metadata on a rotational disk is one seek per entry; parallel
+    // walkers only make the head jump between addon folders.
+    let rotational = paths.iter().any(|path| {
+        matches!(
+            crate::core::tasks::calculate_hashes::detect_storage_class_for_path(path),
+            crate::core::tasks::calculate_hashes::HashStorageClass::Hdd
+                | crate::core::tasks::calculate_hashes::HashStorageClass::Removable
         )
-        .filter_map(|(addon, enabled)| if enabled { Some(addon.clone()) } else { None })
-        .collect();
-    let enabled_external_addons = repo
-        .external_addons
-        .iter()
-        .filter(|(_, enabled, _)| *enabled)
-        .collect::<Vec<_>>();
-
-    if creator_dlc_codes.is_empty()
-        && enabled_addons.is_empty()
-        && enabled_external_addons.is_empty()
-    {
-        return Vec::new();
-    }
-
-    let mut resolved_addons: Vec<String> = Vec::new();
-    let repo_path = repo.path.trim();
-
-    for creator_dlc_code in creator_dlc_codes {
-        resolved_addons.push(creator_dlc_code.to_string());
-    }
-
-    for addon in &enabled_addons {
-        if let Some(addon_path) =
-            resolve_child_dir_case_insensitive(std::path::Path::new(repo_path), addon)
-        {
-            resolved_addons.push(addon_path.to_string_lossy().to_string());
-        } else if let Some(arma3_addon_path) =
-            resolve_child_dir_case_insensitive(std::path::Path::new(arma3_directory), addon)
-        {
-            resolved_addons.push(arma3_addon_path.to_string_lossy().to_string());
-        } else {
-            log::error!(
-                "Addon not found in repository or Arma 3 directory: {}",
-                addon
-            );
+    });
+    let workers = if rotational {
+        1
+    } else {
+        std::thread::available_parallelism()
+            .map(std::num::NonZeroUsize::get)
+            .unwrap_or(1)
+            .clamp(1, ADDON_SIZE_SCAN_MAX_WORKERS)
+            .min(paths.len())
+    };
+    if workers <= 1 {
+        for (index, path) in paths.iter().enumerate() {
+            sizes[index] = addon_directory_total_size(Path::new(path)).ok();
         }
+        return sizes;
     }
 
-    for (addon, _, path) in enabled_external_addons {
-        if let Some(external_path) = resolve_external_launch_addon_path(addon, path) {
-            resolved_addons.push(external_path.to_string_lossy().to_string());
-        } else {
-            log::error!(
-                "External addon not found at configured path: addon={} path={}",
-                addon,
-                path
-            );
-        }
+    let cursor = AtomicUsize::new(0);
+    let partials: Vec<Vec<(usize, Option<u64>)>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                let cursor = &cursor;
+                scope.spawn(move || {
+                    let mut local = Vec::new();
+                    loop {
+                        let index = cursor.fetch_add(1, Ordering::Relaxed);
+                        let Some(path) = paths.get(index) else {
+                            break;
+                        };
+                        local.push((index, addon_directory_total_size(Path::new(path)).ok()));
+                    }
+                    local
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap_or_default())
+            .collect()
+    });
+
+    for (index, size) in partials.into_iter().flatten() {
+        sizes[index] = size;
     }
-
-    resolved_addons
-}
-
-fn resolve_external_launch_addon_path(addon: &str, path: &str) -> Option<std::path::PathBuf> {
-    let trimmed_path = path.trim();
-    if trimmed_path.is_empty() {
-        return None;
-    }
-
-    let base_path = std::path::Path::new(trimmed_path);
-    if let Some(nested_path) = resolve_child_dir_case_insensitive(base_path, addon) {
-        return Some(nested_path);
-    }
-
-    if base_path.is_dir() {
-        if workshop_id_from_launch_path(trimmed_path).is_some() {
-            return Some(base_path.to_path_buf());
-        }
-        let base_name = base_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default();
-        if base_name.trim_start().starts_with('@') {
-            return Some(base_path.to_path_buf());
-        }
-        let base_name = normalize_launch_addon_name(base_name);
-        let addon_key = normalize_launch_addon_name(addon);
-        if !base_name.is_empty() && base_name == addon_key {
-            return Some(base_path.to_path_buf());
-        }
-    }
-
-    None
-}
-
-fn workshop_id_from_launch_path(path: &str) -> Option<String> {
-    let normalized = path.trim().replace('\\', "/");
-    let parts = normalized
-        .split('/')
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
-
-    for window in parts.windows(4) {
-        if window[0].eq_ignore_ascii_case("workshop")
-            && window[1].eq_ignore_ascii_case("content")
-            && window[2] == "107410"
-            && window[3].chars().all(|ch| ch.is_ascii_digit())
-        {
-            return Some(window[3].to_string());
-        }
-    }
-
-    for pair in parts.windows(2) {
-        if pair[0] == "107410" && pair[1].chars().all(|ch| ch.is_ascii_digit()) {
-            return Some(pair[1].to_string());
-        }
-    }
-
-    None
-}
-
-fn normalize_launch_addon_name(name: &str) -> String {
-    name.trim()
-        .trim_matches('"')
-        .trim_matches('\'')
-        .chars()
-        .filter_map(|ch| {
-            if ch.is_whitespace() || matches!(ch, '-' | '_' | '.') {
-                Some('_')
-            } else if ch == '@' {
-                None
-            } else if ch.is_ascii() {
-                Some(ch.to_ascii_lowercase())
-            } else {
-                ch.to_lowercase().next()
-            }
-        })
-        .collect::<String>()
-        .split('_')
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join("_")
+    sizes
 }
 
 fn addon_directory_total_size(path: &Path) -> std::io::Result<u64> {
@@ -1094,81 +1081,194 @@ fn addon_directory_total_size(path: &Path) -> std::io::Result<u64> {
     }
     Ok(total)
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn external_launch_addon_resolves_repo_root_plus_addon_folder() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let addon_dir = dir.path().join("@burnem_redux");
-        std::fs::create_dir(&addon_dir).expect("addon dir");
-
-        let resolved =
-            resolve_external_launch_addon_path("@burnem_redux", &dir.path().to_string_lossy())
-                .expect("external addon path should resolve");
-
-        assert_eq!(resolved, addon_dir);
+    fn write_addon(root: &Path, addon: &str, files: &[(&str, usize)]) {
+        let addons_dir = root.join(addon).join("addons");
+        std::fs::create_dir_all(&addons_dir).expect("addon dir");
+        for (name, size) in files {
+            std::fs::write(addons_dir.join(name), vec![b'x'; *size]).expect("addon file");
+        }
     }
 
-    #[test]
-    fn external_launch_addon_rejects_repo_root_when_addon_folder_is_missing() {
-        let dir = tempfile::tempdir().expect("temp dir");
-
-        let resolved =
-            resolve_external_launch_addon_path("@burnem_redux", &dir.path().to_string_lossy());
-
-        assert!(resolved.is_none());
-    }
-
-    #[test]
-    fn external_launch_addon_accepts_direct_at_folder_with_display_name() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let addon_dir = dir.path().join("@burnem_redux");
-        std::fs::create_dir(&addon_dir).expect("addon dir");
-
-        let resolved =
-            resolve_external_launch_addon_path("Burn Em Redux", &addon_dir.to_string_lossy())
-                .expect("direct @addon path should resolve");
-
-        assert_eq!(resolved, addon_dir);
-    }
-
-    #[test]
-    fn external_launch_addon_accepts_direct_workshop_id_folder_with_display_name() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let addon_dir = dir
-            .path()
-            .join("steamapps")
-            .join("workshop")
-            .join("content")
-            .join("107410")
-            .join("463939057");
-        std::fs::create_dir_all(&addon_dir).expect("workshop addon dir");
-
-        let resolved = resolve_external_launch_addon_path("ACE", &addon_dir.to_string_lossy())
-            .expect("direct workshop ID folder path should resolve");
-
-        assert_eq!(resolved, addon_dir);
-    }
-
-    #[test]
-    fn launch_mod_paths_include_external_addons_without_repo_addons() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let addon_dir = dir.path().join("@client_mod");
-        std::fs::create_dir(&addon_dir).expect("addon dir");
-        let repo = Repository {
-            external_addons: vec![(
-                "@client_mod".to_string(),
-                true,
-                addon_dir.to_string_lossy().to_string(),
-            )],
+    fn repository_at(name: &str, path: &Path, addons: &[&str]) -> Repository {
+        Repository {
+            name: name.to_string(),
+            path: path.display().to_string(),
+            addons: addons
+                .iter()
+                .map(|addon| ((*addon).to_string(), true))
+                .collect(),
             ..Repository::default()
-        };
+        }
+    }
 
-        let resolved = resolve_launch_mod_paths(&repo, "");
+    #[test]
+    fn addon_directory_total_sizes_matches_the_serial_walk() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path();
+        let mut paths = Vec::new();
+        for index in 0..25 {
+            let addon = format!("@addon_{index}");
+            write_addon(root, &addon, &[("a.pbo", index + 1), ("b.pbo", 2 * index)]);
+            paths.push(root.join(&addon).display().to_string());
+        }
+        paths.push(root.join("@missing").display().to_string());
 
-        assert_eq!(resolved, vec![addon_dir.to_string_lossy().to_string()]);
+        let parallel = addon_directory_total_sizes(&paths);
+        let serial: Vec<Option<u64>> = paths
+            .iter()
+            .map(|path| addon_directory_total_size(Path::new(path)).ok())
+            .collect();
+
+        assert_eq!(parallel, serial);
+        assert_eq!(parallel[0], Some(1));
+        assert_eq!(parallel[3], Some(4 + 6));
+        assert_eq!(parallel.last().copied().flatten(), None);
+    }
+
+    #[test]
+    fn addon_directory_total_sizes_handles_an_empty_request() {
+        assert!(addon_directory_total_sizes(&[]).is_empty());
+    }
+
+    #[test]
+    fn reforger_inventory_and_launch_resolve_packed_addons_without_an_addons_subfolder() {
+        let root = tempfile::tempdir().expect("repo root");
+        let addon = root.path().join("@mod_01");
+        std::fs::create_dir(&addon).expect("addon dir");
+        std::fs::write(
+            addon.join("addon.gproj"),
+            "GameProject {\n ID \"ModOne\"\n GUID \"ABCDEF0123456789\"\n}\n",
+        )
+        .expect("project file");
+        std::fs::write(addon.join("data.pak"), b"packed addon").expect("packed data");
+        write_addon(root.path(), "@mod_02", &[("data.pbo", 10)]);
+        std::fs::create_dir(root.path().join("other")).expect("non-addon dir");
+        let repo = repository_at("MainRepo", root.path(), &["@mod_01"]);
+        let module = crate::core::game::reforger::ReforgerModule;
+        let inventory = Foxy::gather_all_addon_origins_from(
+            std::slice::from_ref(&repo),
+            &[],
+            &HashMap::new(),
+            "",
+            "",
+            &module,
+        );
+
+        assert_eq!(inventory.len(), 1);
+        assert_eq!(inventory[0].0, "@mod_01");
+        assert_eq!(inventory[0].2, "MainRepo");
+        assert_eq!(
+            Path::new(&inventory[0].1)
+                .canonicalize()
+                .expect("inventory path"),
+            addon.canonicalize().expect("addon path")
+        );
+        let plan = module
+            .build_repository_launch_plan(
+                &crate::ui::types::SettingsViewState::default(),
+                &repo,
+                None,
+            )
+            .expect("launch plan");
+        assert_eq!(plan.mods.len(), 1);
+        assert_eq!(plan.mods[0].id, "ABCDEF0123456789");
+        assert_eq!(plan.mods[0].path.as_deref(), addon.to_str());
+        assert_eq!(
+            crate::core::game::reforger::launch_addons_dirs(&plan.mods),
+            vec![root.path().display().to_string()],
+        );
+    }
+
+    #[test]
+    fn addon_discovery_uses_the_game_directory_format() {
+        let root = tempfile::tempdir().expect("root");
+        write_addon(root.path(), "@mod_01", &[("data.pbo", 10)]);
+        let packed = root.path().join("@mod_02");
+        std::fs::create_dir(&packed).expect("packed dir");
+        std::fs::write(packed.join("custom.gproj"), "GameProject {}").expect("project");
+        std::fs::create_dir(root.path().join("plain")).expect("plain dir");
+
+        let arma3 =
+            Foxy::discover_addons_in_path(root.path(), &crate::core::game::arma3::Arma3Module);
+        let reforger = Foxy::discover_addons_in_path(
+            root.path(),
+            &crate::core::game::reforger::ReforgerModule,
+        );
+        assert_eq!(arma3.len(), 1);
+        assert_eq!(arma3[0].0, "@mod_01");
+        assert_eq!(reforger.len(), 1);
+        assert_eq!(reforger[0].0, "@mod_02");
+        assert!(
+            Foxy::discover_addons_in_path(
+                root.path().join("missing"),
+                &crate::core::game::reforger::ReforgerModule,
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn addon_inventory_is_unchanged_when_repositories_share_a_folder() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path();
+        write_addon(root, "@shared", &[("a.pbo", 10)]);
+        write_addon(root, "@only_main", &[("a.pbo", 20)]);
+        write_addon(root, "@only_ww2", &[("a.pbo", 30)]);
+        // No `addons` subfolder, so it is not an addon folder at all.
+        std::fs::create_dir_all(root.join("@not_an_addon")).expect("plain dir");
+
+        let aliases = HashMap::new();
+        let main = repository_at("Main", root, &["@shared", "@only_main"]);
+        let ww2 = repository_at("WW2", root, &["@shared", "@only_ww2"]);
+
+        let module = crate::core::game::arma3::Arma3Module;
+        let one_repo = Foxy::gather_all_addon_origins_from(
+            std::slice::from_ref(&main),
+            &[],
+            &aliases,
+            "",
+            "",
+            &module,
+        );
+        let shared_folder = Foxy::gather_all_addon_origins_from(
+            &[main.clone(), ww2.clone(), main.clone()],
+            &[],
+            &aliases,
+            "",
+            "",
+            &module,
+        );
+
+        let names: Vec<&str> = one_repo
+            .iter()
+            .map(|(name, _, _, _)| name.as_str())
+            .collect();
+        assert_eq!(names, vec!["@only_main", "@shared"]);
+        assert_eq!(one_repo[0].3, Some(20));
+        assert_eq!(one_repo[1].2, "Main");
+
+        let names: Vec<&str> = shared_folder
+            .iter()
+            .map(|(name, _, _, _)| name.as_str())
+            .collect();
+        assert_eq!(names, vec!["@only_main", "@only_ww2", "@shared"]);
+        // The same folder scanned once per repository must still report every
+        // repository that lists the addon, and each path exactly once.
+        assert_eq!(shared_folder[2].2, "Main, WW2");
+        assert_eq!(shared_folder[2].3, Some(10));
+        assert_eq!(shared_folder[1].2, "WW2");
+
+        let mut paths: Vec<&str> = shared_folder
+            .iter()
+            .map(|(_, path, _, _)| path.as_str())
+            .collect();
+        let total = paths.len();
+        paths.sort_unstable();
+        paths.dedup();
+        assert_eq!(paths.len(), total);
     }
 }

@@ -1,8 +1,10 @@
 <!--
 Thanks for contributing to Foxy. Foxy is source-available under the
-Foxy Community Source License 1.0.0. Contributions are accepted under CLA.md.
+Foxy Community Source License 1.1.0.
 Please fill out the sections below and keep the pull request focused.
 -->
+
+> By opening this pull request or pushing commits to it, you accept the contribution terms in Section 8 of [`LICENSE`](../LICENSE) and confirm you have the right to submit this contribution under it. If your employer, client, or school may own your work, get their permission first.
 
 ## Summary
 
@@ -30,12 +32,3 @@ Describe how you verified the change (commands run, manual steps, platforms).
 - [ ] I ran `cargo clippy` and `cargo fmt`
 - [ ] I updated documentation where relevant
 - [ ] Any third-party material I added is clearly identified with its source and license
-
-## Contributor License Agreement (required)
-
-You cannot have your contribution merged until **both** boxes below are checked.
-
-- [ ] I have read and agree to the Foxy Contributor License Agreement in [`CLA.md`](../CLA.md), and I have the legal right to submit this contribution under it.
-- [ ] I have signed off **every** commit under the Developer Certificate of Origin using `git commit -s` (each commit has a `Signed-off-by` line).
-
-> If your employer, client, or school may own your work, confirm you have permission to contribute before checking these boxes.

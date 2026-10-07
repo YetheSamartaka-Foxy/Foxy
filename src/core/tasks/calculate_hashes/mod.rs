@@ -15,11 +15,11 @@ use crate::core::utils::content_hash::FlexHasher;
 use futures::stream::{self, StreamExt};
 use log::{debug, error, info, warn};
 use std::cmp::Reverse;
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::io::{BufRead, Read, Seek};
+use std::collections::{HashMap, HashSet};
+use std::io::{Read, Seek};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 use tokio::sync::broadcast::Sender;
 use tokio::sync::{Semaphore, watch};
@@ -39,13 +39,18 @@ const MAX_FILE_JOB_CONCURRENCY: usize = 256;
 const PERSIST_LOG_INTERVAL: usize = 25_000;
 
 mod context;
+mod direct_read;
 mod file_hashes;
+mod format_layout;
 mod part_hashes;
-mod pbo_layout;
 mod persistence;
+mod physical_order;
 mod pipeline;
 mod propagation;
 mod scheduling;
+mod segment_verified;
+mod storage_probe;
+mod verified_record;
 
 pub(crate) use context::RepositoryHashContext;
 pub(crate) use file_hashes::{
@@ -57,12 +62,19 @@ pub(crate) use file_hashes::{
 };
 pub use persistence::calculate_hash_from_items;
 pub(crate) use pipeline::{
-    HashCalculationResult, calculate_hashes, calculate_hashes_with_profile,
-    calculate_hashes_with_tree_and_profile_cancellable,
+    HashCalculationResult, calculate_hashes, calculate_hashes_with_tree_and_profile_cancellable,
 };
 pub(crate) use propagation::{
     finalize_repository_content_hashes_from_mods, finalize_repository_hashes_from_mods,
     finalize_repository_hashes_from_tree, pre_propagate_sibling_checksums,
     propagate_checksums_to_siblings,
 };
-pub(crate) use scheduling::{AddonHashMetrics, HashStorageClass, detect_storage_class_for_path};
+pub(crate) use scheduling::{
+    AddonHashMetrics, HashStorageClass, detect_storage_class_for_path,
+    invalidate_storage_class_cache,
+};
+pub(crate) use segment_verified::{
+    PatchedFileSegments, PatchedSegment, apply_segment_verified_files,
+};
+pub(crate) use storage_probe::STORAGE_READ_MEASUREMENT_UPSERT_SQL;
+pub(crate) use verified_record::{VerifiedHashRecordUse, forget_verified_hashes_under};

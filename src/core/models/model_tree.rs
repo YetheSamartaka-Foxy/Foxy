@@ -20,19 +20,27 @@ struct RawTreeData {
     parts: Vec<FoxyModFilePart>,
     repository_addons: Vec<(i64, i64)>,
     addon_files: Vec<(i64, i64)>,
-    file_part_pairs: Vec<(i64, i64)>,
 }
 
 /// Run `SELECT … WHERE col IN (…)` over `ids` in bind-variable-safe chunks,
-/// applying `suffix` (e.g. an ORDER BY) to each chunk. Returns all rows.
-async fn query_ids_in_chunks(
+/// applying `suffix` (e.g. an ORDER BY) to each chunk, and hand every row to
+/// `visit` as it arrives.
+///
+/// Streaming rather than returning rows is what keeps a large load from holding
+/// the raw rows and the structs built from them at the same time; the parts of
+/// a 141k-part repository are both representations of the same data, and only
+/// one of them is wanted.
+async fn for_each_id_chunk<F>(
     tx: &DbTxn<'_>,
     prefix: &str,
     suffix: &str,
     ids: &[i64],
     chunk_size: usize,
-) -> Result<Vec<DbRow>, DbErr> {
-    let mut out = Vec::new();
+    mut visit: F,
+) -> Result<(), DbErr>
+where
+    F: FnMut(&DbRow) -> Result<(), DbErr>,
+{
     let mut idx = 0;
     while idx < ids.len() {
         let end = (idx + chunk_size).min(ids.len());
@@ -40,10 +48,58 @@ async fn query_ids_in_chunks(
         let placeholders = vec!["?"; chunk.len()].join(", ");
         let sql = format!("{prefix}({placeholders}){suffix}");
         let chunk_params: Vec<DbValue> = chunk.iter().map(|id| DbValue::from(*id)).collect();
-        out.extend(tx.query_all(&sql, chunk_params).await?);
+        tx.query_each(&sql, chunk_params, &mut visit).await?;
         idx = end;
     }
+    Ok(())
+}
+
+/// Collect `SELECT … WHERE col IN (…)` rows through a per-row mapper.
+async fn map_id_chunks<T, F>(
+    tx: &DbTxn<'_>,
+    prefix: &str,
+    suffix: &str,
+    ids: &[i64],
+    chunk_size: usize,
+    map: F,
+) -> Result<Vec<T>, DbErr>
+where
+    F: Fn(&DbRow) -> Result<T, DbErr>,
+{
+    let mut out = Vec::new();
+    for_each_id_chunk(tx, prefix, suffix, ids, chunk_size, |row| {
+        out.push(map(row)?);
+        Ok(())
+    })
+    .await?;
     Ok(out)
+}
+
+fn sort_parts_for_tree_load(parts: &mut [FoxyModFilePart]) {
+    parts.sort_unstable_by_key(|part| (part.file_id, part.data_order, part.id));
+}
+
+/// Bucket part indices under the file each part belongs to.
+///
+/// `parts` arrives grouped by file and ascending in `data_order` within a file
+/// (`sort_parts_for_tree_load`, plus deferred rows attached in the same order),
+/// which is the order a file's bucket needs, so this is a scan. The pair list,
+/// part-id map and global re-sort it replaces produced the same buckets and cost
+/// more than the part rows they indexed.
+fn assign_parts_to_files(
+    parts: &[FoxyModFilePart],
+    file_id_to_index: &HashMap<u64, usize>,
+    file_nodes: &mut [FileNode],
+) {
+    for (index, part) in parts.iter().enumerate() {
+        if let Some(&file_index) = file_id_to_index.get(&part.file_id) {
+            file_nodes[file_index].parts.push(index);
+        }
+    }
+}
+
+fn deferred_part_synthetic_id(attached: usize) -> u64 {
+    u64::MAX - attached as u64
 }
 
 /// Runtime tree node types (link indices to children)
@@ -120,6 +176,12 @@ impl Tree {
         let remote_repository_url = remote_repository_url.to_string();
         let mod_name_filter = mod_name_filter.cloned();
         let file_id_filter = file_id_filter.cloned();
+        // Files with deferred rows take their parts from memory; the part
+        // stream may already have committed them, and reading them back costs
+        // more than attaching them.
+        let deferred_parts = context.deferred_parts_snapshot();
+        let deferred_file_ids: HashSet<i64> =
+            deferred_parts.iter().map(|row| row.file_id).collect();
 
         // Snapshot read: load every table in one consistent transaction (no write
         // permit, no retry) before assembling the tree in memory.
@@ -153,19 +215,15 @@ impl Tree {
 
                     let repo_ids: Vec<i64> = repositories.iter().map(|r| r.id as i64).collect();
 
-                    let repository_addons: Vec<(i64, i64)> = query_ids_in_chunks(
+                    let repository_addons: Vec<(i64, i64)> = map_id_chunks(
                         tx,
                         "SELECT repository_id, addon_id FROM repository_addons WHERE repository_id IN ",
                         "",
                         &repo_ids,
                         chunk_size,
+                        |row| Ok((row.get_i64("repository_id")?, row.get_i64("addon_id")?)),
                     )
-                    .await?
-                    .iter()
-                    .map(|row| {
-                        Ok::<_, DbErr>((row.get_i64("repository_id")?, row.get_i64("addon_id")?))
-                    })
-                    .collect::<Result<_, DbErr>>()?;
+                    .await?;
 
                     let linked_mod_ids: HashSet<i64> =
                         repository_addons.iter().map(|(_, addon_id)| *addon_id).collect();
@@ -175,7 +233,7 @@ impl Tree {
                     } else {
                         let mut ids: Vec<i64> = linked_mod_ids.iter().copied().collect();
                         ids.sort_unstable();
-                        query_ids_in_chunks(
+                        map_id_chunks(
                             tx,
                             &format!(
                                 "SELECT {} FROM addons WHERE id IN ",
@@ -184,11 +242,9 @@ impl Tree {
                             " ORDER BY data_order ASC, id ASC",
                             &ids,
                             chunk_size,
+                            FoxyMod::from_row,
                         )
                         .await?
-                        .iter()
-                        .map(FoxyMod::from_row)
-                        .collect::<Result<_, DbErr>>()?
                     };
 
                     let scoped_mod_ids: HashSet<i64> = if let Some(filter) =
@@ -204,20 +260,21 @@ impl Tree {
                             let mut ids: Vec<i64> =
                                 file_ids.iter().map(|id| *id as i64).collect();
                             ids.sort_unstable();
-                            let rows = query_ids_in_chunks(
+                            for_each_id_chunk(
                                 tx,
                                 "SELECT addon_id, file_id FROM addon_files WHERE file_id IN ",
                                 "",
                                 &ids,
                                 chunk_size,
+                                |row| {
+                                    let addon_id = row.get_i64("addon_id")?;
+                                    if linked_mod_ids.contains(&addon_id) {
+                                        scoped.insert(addon_id);
+                                    }
+                                    Ok(())
+                                },
                             )
                             .await?;
-                            for row in &rows {
-                                let addon_id = row.get_i64("addon_id")?;
-                                if linked_mod_ids.contains(&addon_id) {
-                                    scoped.insert(addon_id);
-                                }
-                            }
                         }
                         scoped
                     } else {
@@ -242,19 +299,15 @@ impl Tree {
                     } else {
                         let mut ids = addon_file_mod_ids;
                         ids.sort_unstable();
-                        query_ids_in_chunks(
+                        map_id_chunks(
                             tx,
                             "SELECT addon_id, file_id FROM addon_files WHERE addon_id IN ",
                             "",
                             &ids,
                             chunk_size,
+                            |row| Ok((row.get_i64("addon_id")?, row.get_i64("file_id")?)),
                         )
                         .await?
-                        .iter()
-                        .map(|row| {
-                            Ok::<_, DbErr>((row.get_i64("addon_id")?, row.get_i64("file_id")?))
-                        })
-                        .collect::<Result<_, DbErr>>()?
                     };
 
                     let file_ids: HashSet<i64> =
@@ -265,7 +318,7 @@ impl Tree {
                     } else {
                         let mut ids: Vec<i64> = file_ids.into_iter().collect();
                         ids.sort_unstable();
-                        query_ids_in_chunks(
+                        map_id_chunks(
                             tx,
                             &format!(
                                 "SELECT {} FROM files WHERE id IN ",
@@ -274,38 +327,34 @@ impl Tree {
                             " ORDER BY data_order ASC, id ASC",
                             &ids,
                             chunk_size,
+                            FoxyModFile::from_row,
                         )
                         .await?
-                        .iter()
-                        .map(FoxyModFile::from_row)
-                        .collect::<Result<_, DbErr>>()?
                     };
 
-                    // Load parts directly by file_id using the covering index
-                    // (idx_subfiles_file_id_data_order) instead of the two-step join
-                    // through file_subfiles. This eliminates an entire link-table scan
-                    // and lets the engine satisfy the query from the index alone.
+                    // Load parts directly by file_id. ORDER BY is applied in process:
+                    // the matching index does not pay for a ten-column ordered scan.
                     let mut parts: Vec<FoxyModFilePart> = Vec::new();
-                    let mut file_part_pairs: Vec<(i64, i64)> = Vec::new();
-                    if !files.is_empty() {
-                        let mut ids: Vec<i64> = files.iter().map(|f| f.id as i64).collect();
+                    let mut ids: Vec<i64> = files
+                        .iter()
+                        .map(|f| f.id as i64)
+                        .filter(|id| !deferred_file_ids.contains(id))
+                        .collect();
+                    if !ids.is_empty() {
                         ids.sort_unstable();
-                        let rows = query_ids_in_chunks(
+                        parts = map_id_chunks(
                             tx,
                             &format!(
                                 "SELECT {} FROM subfiles WHERE file_id IN ",
                                 modification_file_part::SUBFILE_COLUMNS
                             ),
-                            " ORDER BY file_id ASC, data_order ASC, id ASC",
+                            "",
                             &ids,
                             chunk_size,
+                            FoxyModFilePart::from_row,
                         )
                         .await?;
-                        for row in &rows {
-                            let part = FoxyModFilePart::from_row(row)?;
-                            file_part_pairs.push((part.file_id as i64, part.id as i64));
-                            parts.push(part);
-                        }
+                        sort_parts_for_tree_load(&mut parts);
                     }
 
                     Ok(RawTreeData {
@@ -315,7 +364,6 @@ impl Tree {
                         parts,
                         repository_addons,
                         addon_files,
-                        file_part_pairs,
                     })
                 })
             })
@@ -332,19 +380,21 @@ impl Tree {
             mut parts,
             mut repository_addons,
             mut addon_files,
-            mut file_part_pairs,
         } = raw;
 
-        let deferred_parts = context.deferred_parts_snapshot();
         if !deferred_parts.is_empty() {
             let file_ids: HashSet<i64> = files.iter().map(|file| file.id as i64).collect();
             let mut attached = 0usize;
-            for row in deferred_parts
+            // Attach in each file's part order: the persisted rows above are
+            // already sorted that way, and a file's parts are read positionally.
+            let mut deferred: Vec<_> = deferred_parts
                 .into_iter()
                 .filter(|row| file_ids.contains(&row.file_id))
-            {
+                .collect();
+            deferred.sort_by_key(|row| (row.file_id, row.data_order));
+            for row in deferred {
                 let file_id = row.file_id;
-                let synthetic_id = parts.len() as u64 + 1;
+                let synthetic_id = deferred_part_synthetic_id(attached);
                 parts.push(FoxyModFilePart {
                     id: synthetic_id,
                     file_id: file_id as u64,
@@ -357,7 +407,6 @@ impl Tree {
                     local_checksum: String::new(),
                     data_order: row.data_order,
                 });
-                file_part_pairs.push((file_id, synthetic_id as i64));
                 attached += 1;
             }
             if attached > 0 {
@@ -372,17 +421,12 @@ impl Tree {
             mods.iter().map(|m| (m.id as i64, m.data_order)).collect();
         let file_order: HashMap<i64, i64> =
             files.iter().map(|f| (f.id as i64, f.data_order)).collect();
-        let part_order: HashMap<i64, i64> =
-            parts.iter().map(|p| (p.id as i64, p.data_order)).collect();
 
         repository_addons
             .sort_by_key(|(_, mod_id)| mod_order.get(mod_id).cloned().unwrap_or_default());
 
         addon_files
             .sort_by_key(|(_, file_id)| file_order.get(file_id).cloned().unwrap_or_default());
-
-        file_part_pairs
-            .sort_by_key(|(_, part_id)| part_order.get(part_id).cloned().unwrap_or_default());
 
         let mut repo_id_to_index = HashMap::with_capacity(repositories.len());
         for (i, r) in repositories.iter().enumerate() {
@@ -397,11 +441,6 @@ impl Tree {
         let mut file_id_to_index = HashMap::with_capacity(files.len());
         for (i, f) in files.iter().enumerate() {
             file_id_to_index.insert(f.id, i);
-        }
-
-        let mut part_id_to_index = HashMap::with_capacity(parts.len());
-        for (i, p) in parts.iter().enumerate() {
-            part_id_to_index.insert(p.id, i);
         }
 
         let mut repo_nodes = Vec::with_capacity(repositories.len());
@@ -427,49 +466,23 @@ impl Tree {
             });
         }
 
-        {
-            let mut tmp_repo_mods: HashMap<usize, Vec<usize>> =
-                HashMap::with_capacity(repository_addons.len());
-            let mut tmp_mod_files: HashMap<usize, Vec<usize>> =
-                HashMap::with_capacity(addon_files.len());
-            let mut tmp_file_parts: HashMap<usize, Vec<usize>> =
-                HashMap::with_capacity(file_part_pairs.len());
-
-            for (repo_id, mod_id) in repository_addons {
-                if let (Some(&ridx), Some(&midx)) = (
-                    repo_id_to_index.get(&(repo_id as u64)),
-                    mod_id_to_index.get(&(mod_id as u64)),
-                ) {
-                    tmp_repo_mods.entry(ridx).or_default().push(midx);
-                }
-            }
-            for (mod_id, file_id) in addon_files {
-                if let (Some(&midx), Some(&fidx)) = (
-                    mod_id_to_index.get(&(mod_id as u64)),
-                    file_id_to_index.get(&(file_id as u64)),
-                ) {
-                    tmp_mod_files.entry(midx).or_default().push(fidx);
-                }
-            }
-            for (file_id, part_id) in file_part_pairs {
-                if let (Some(&fidx), Some(&pidx)) = (
-                    file_id_to_index.get(&(file_id as u64)),
-                    part_id_to_index.get(&(part_id as u64)),
-                ) {
-                    tmp_file_parts.entry(fidx).or_default().push(pidx);
-                }
-            }
-
-            for (ridx, mods) in tmp_repo_mods {
-                repo_nodes[ridx].mods = mods;
-            }
-            for (midx, files) in tmp_mod_files {
-                mod_nodes[midx].files = files;
-            }
-            for (fidx, parts) in tmp_file_parts {
-                file_nodes[fidx].parts = parts;
+        for (repo_id, mod_id) in repository_addons {
+            if let (Some(&ridx), Some(&midx)) = (
+                repo_id_to_index.get(&(repo_id as u64)),
+                mod_id_to_index.get(&(mod_id as u64)),
+            ) {
+                repo_nodes[ridx].mods.push(midx);
             }
         }
+        for (mod_id, file_id) in addon_files {
+            if let (Some(&midx), Some(&fidx)) = (
+                mod_id_to_index.get(&(mod_id as u64)),
+                file_id_to_index.get(&(file_id as u64)),
+            ) {
+                mod_nodes[midx].files.push(fidx);
+            }
+        }
+        assign_parts_to_files(&parts, &file_id_to_index, &mut file_nodes);
 
         let mut tree = Tree {
             repositories,
@@ -512,6 +525,40 @@ impl Tree {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn streamed_rows_load_once_from_memory() {
+        use crate::core::db::FoxyDb;
+        use crate::core::models::context::DeferredPartInsert;
+
+        let handle = crate::core::tasks::db_turso::build_test_database().await;
+        let db = FoxyDb::from_handle(handle.clone());
+        for sql in [
+            "INSERT INTO repositories (id, name, remote_url, local_path) VALUES (1, 'r', 'u/', 'p')",
+            "INSERT INTO addons (id, name, remote_path, local_path, enabled, required, data_order) VALUES (10, 'a', 'rp', 'lp', 1, 1, 0)",
+            "INSERT INTO repository_addons (repository_id, addon_id) VALUES (1, 10)",
+            "INSERT INTO files (id, name, remote_path, local_path, length, data_order) VALUES (100, 'f', 'frp', 'flp', 1, 0)",
+            "INSERT INTO addon_files (addon_id, file_id) VALUES (10, 100)",
+            "INSERT INTO subfiles (file_id, path, remote_length, remote_start, remote_checksum, data_order) \
+             VALUES (100, 'p0', 1, 0, 'c0', 0)",
+        ] {
+            db.execute(sql, Vec::new()).await.unwrap();
+        }
+        let context = Arc::new(FoxyContext::new(handle, reqwest::Client::new()));
+        context.buffer_deferred_parts(vec![DeferredPartInsert {
+            file_id: 100,
+            path: "p0".to_owned(),
+            remote_length: 1,
+            remote_start: 0,
+            remote_checksum: "c0".to_owned(),
+            data_order: 0,
+        }]);
+        context.set_deferred_parts_persisted(1);
+
+        let tree = Tree::load(context, "u/").await.unwrap();
+        assert_eq!(tree.parts.len(), 1);
+        assert!(!FoxyModFilePart::id_is_persisted_rowid(tree.parts[0].id));
+    }
 
     #[test]
     fn clean_file_projects_part_local_state_from_remote() {
@@ -571,5 +618,102 @@ mod tests {
         assert!(tree.parts[0].local_checksum.is_empty());
         assert_eq!(tree.parts[0].local_length, 0);
         assert_eq!(tree.parts[0].local_start, 0);
+    }
+
+    #[test]
+    fn part_reload_sort_matches_query_order() {
+        let mut parts = vec![
+            FoxyModFilePart {
+                id: 3,
+                file_id: 2,
+                data_order: 0,
+                ..Default::default()
+            },
+            FoxyModFilePart {
+                id: 1,
+                file_id: 1,
+                data_order: 1,
+                ..Default::default()
+            },
+            FoxyModFilePart {
+                id: 2,
+                file_id: 1,
+                data_order: 0,
+                ..Default::default()
+            },
+        ];
+        sort_parts_for_tree_load(&mut parts);
+        let keys: Vec<(u64, i64, u64)> = parts
+            .iter()
+            .map(|part| (part.file_id, part.data_order, part.id))
+            .collect();
+        assert_eq!(keys, vec![(1, 0, 2), (1, 1, 1), (2, 0, 3)]);
+    }
+
+    #[test]
+    fn deferred_part_synthetic_ids_are_outside_rowid_range() {
+        assert!(!FoxyModFilePart::id_is_persisted_rowid(
+            deferred_part_synthetic_id(0)
+        ));
+        assert!(!FoxyModFilePart::id_is_persisted_rowid(
+            deferred_part_synthetic_id(12)
+        ));
+        assert_ne!(deferred_part_synthetic_id(0), deferred_part_synthetic_id(1));
+    }
+
+    fn part(id: u64, file_id: u64, data_order: i64) -> FoxyModFilePart {
+        FoxyModFilePart {
+            id,
+            file_id,
+            data_order,
+            ..Default::default()
+        }
+    }
+
+    fn buckets(parts: &[FoxyModFilePart], file_ids: &[u64]) -> Vec<Vec<u64>> {
+        let index: HashMap<u64, usize> = file_ids
+            .iter()
+            .enumerate()
+            .map(|(index, id)| (*id, index))
+            .collect();
+        let mut nodes: Vec<FileNode> = (0..file_ids.len())
+            .map(|file_idx| FileNode {
+                file_idx,
+                parts: Vec::new(),
+            })
+            .collect();
+        assign_parts_to_files(parts, &index, &mut nodes);
+        nodes
+            .iter()
+            .map(|node| node.parts.iter().map(|i| parts[*i].id).collect())
+            .collect()
+    }
+
+    /// The order a bucket ends up in is the order the old pair-list build
+    /// produced: each file's parts ascending in `data_order`.
+    #[test]
+    fn file_buckets_hold_each_file_s_parts_in_part_order() {
+        let mut parts = vec![part(7, 2, 1), part(5, 1, 1), part(6, 2, 0), part(4, 1, 0)];
+        sort_parts_for_tree_load(&mut parts);
+        assert_eq!(buckets(&parts, &[1, 2]), vec![vec![4, 5], vec![6, 7]]);
+    }
+
+    #[test]
+    fn parts_of_an_unloaded_file_are_dropped_rather_than_misfiled() {
+        let parts = vec![part(1, 1, 0), part(2, 99, 0)];
+        assert_eq!(buckets(&parts, &[1]), vec![vec![1]]);
+    }
+
+    /// Deferred manifest rows carry synthetic ids outside the rowid range, so
+    /// they cannot be keyed by id; they are placed by position, after the
+    /// persisted rows of the same file.
+    #[test]
+    fn deferred_rows_append_to_their_file_s_bucket() {
+        let mut parts = vec![part(1, 1, 0), part(2, 1, 1)];
+        sort_parts_for_tree_load(&mut parts);
+        parts.push(part(deferred_part_synthetic_id(0), 1, 2));
+        let bucket = &buckets(&parts, &[1])[0];
+        assert_eq!(bucket.len(), 3);
+        assert_eq!(bucket[2], deferred_part_synthetic_id(0));
     }
 }

@@ -1,9 +1,11 @@
 use super::{
     AppUpdateMode, DownloadSummary, DownloadTelemetrySample, Repository, RepositoryProfile,
-    SettingsViewState, additional_folder_alias_key, apply_repo_client_parameters,
-    apply_repo_dlc_content_from_repo_json, merge_remote_addon_list, normalize_loaded_repository,
-    push_arma3_profile_launch_args, sanitize_external_addons, sanitize_settings_paths,
-    selected_creator_dlc_codes, split_additional_launch_params,
+    RepositorySpace, RepositorySpaceEntry, SettingsViewState, additional_folder_alias_key,
+    apply_repo_client_parameters, apply_repo_dlc_content_from_repo_json, has_launch_param_token,
+    merge_remote_addon_list, normalize_loaded_repository, push_arma3_profile_launch_args,
+    repo_json_dlc_content_value, sanitize_external_addons, sanitize_repository_space_paths,
+    sanitize_settings_paths, selected_creator_dlc_codes, set_launch_param_token,
+    split_additional_launch_params,
 };
 use crate::core::arma3_profiles::Arma3Profile;
 use serde_json::json;
@@ -406,6 +408,28 @@ fn push_arma3_profile_launch_args_ignores_vanilla_profiles_directory() {
 }
 
 #[test]
+fn launch_param_token_helpers_toggle_flags_case_insensitively() {
+    let params = r#"-maxFPS 120 "-profile=C:\My Games\Foxy" -Window"#;
+
+    assert!(has_launch_param_token(params, "-window"));
+    assert!(!has_launch_param_token(params, "-noFocus"));
+
+    let removed = set_launch_param_token(params, "-window", false);
+    assert_eq!(removed, r#"-maxFPS 120 "-profile=C:\My Games\Foxy""#);
+    assert!(!has_launch_param_token(&removed, "-window"));
+
+    let added = set_launch_param_token(&removed, "-noFocus", true);
+    assert_eq!(
+        split_additional_launch_params(&added),
+        vec!["-maxFPS", "120", r"-profile=C:\My Games\Foxy", "-noFocus"]
+    );
+    // Enabling an already present flag never duplicates it.
+    assert_eq!(set_launch_param_token(&added, "-NOFOCUS", true), added);
+    assert_eq!(set_launch_param_token("", "-window", true), "-window");
+    assert_eq!(set_launch_param_token("-window", "-window", false), "");
+}
+
+#[test]
 fn apply_repo_client_parameters_splits_basic_and_additional_params() {
     let mut repo = Repository {
         no_splash: true,
@@ -788,4 +812,95 @@ fn apply_repo_client_parameters_case_insensitive() {
     apply_repo_client_parameters(&mut repo, "-SKIPINTRO -NOSPLASH");
     assert!(repo.skip_intro);
     assert!(repo.no_splash);
+}
+
+// ── repo_json_dlc_content_value ────────────────────────────────────
+
+#[test]
+fn repo_json_dlc_content_value_prefers_dlc_content() {
+    let json = json!({"dlcContent": {"gm": true}, "requiredDLCs": ["ws"]});
+    assert_eq!(
+        repo_json_dlc_content_value(&json),
+        Some(&json!({"gm": true}))
+    );
+}
+
+#[test]
+fn repo_json_dlc_content_value_falls_back_to_swifty_required_dlcs() {
+    let json = json!({"requiredDLCs": ["ws"]});
+    assert_eq!(repo_json_dlc_content_value(&json), Some(&json!(["ws"])));
+}
+
+#[test]
+fn repo_json_dlc_content_value_matches_swifty_key_case_insensitively() {
+    let json = json!({"requiredDLCS": ["gm", "ws"]});
+    assert_eq!(
+        repo_json_dlc_content_value(&json),
+        Some(&json!(["gm", "ws"]))
+    );
+}
+
+#[test]
+fn repo_json_dlc_content_value_absent_returns_none() {
+    let json = json!({"repoName": "Main"});
+    assert!(repo_json_dlc_content_value(&json).is_none());
+}
+
+#[test]
+fn swifty_required_dlcs_enable_creator_dlc_flags() {
+    let json = json!({"requiredDLCS": ["ws"]});
+    let mut repo = Repository::default();
+    apply_repo_dlc_content_from_repo_json(&mut repo, repo_json_dlc_content_value(&json).unwrap());
+    assert!(repo.ws);
+    assert!(!repo.gm);
+}
+
+#[test]
+fn normalize_loaded_repository_trims_address_whitespace() {
+    let mut repo = Repository {
+        address: "  http://example.invalid/mody/DemoRepo/  ".to_string(),
+        repository_space_entry_address: Some(" http://example.invalid/mody/DemoRepo ".to_string()),
+        ..Repository::default()
+    };
+
+    normalize_loaded_repository(&mut repo);
+
+    assert_eq!(repo.address, "http://example.invalid/mody/DemoRepo/");
+    assert_eq!(
+        repo.repository_space_entry_address.as_deref(),
+        Some("http://example.invalid/mody/DemoRepo")
+    );
+}
+
+#[test]
+fn sanitize_repository_space_paths_trims_entry_addresses() {
+    let mut space = RepositorySpace {
+        id: "space-1".to_string(),
+        name: "Space".to_string(),
+        source_address: " http://example.invalid/space.json ".to_string(),
+        source_base_url: " http://example.invalid ".to_string(),
+        local_name_override: None,
+        collapsed: false,
+        shared_path: String::new(),
+        icon_image_path: String::new(),
+        icon_image_checksum: String::new(),
+        repo_image_path: String::new(),
+        repo_image_checksum: String::new(),
+        app_update_url: String::new(),
+        manifest_checksum: String::new(),
+        entries: vec![RepositorySpaceEntry {
+            name: "Entry".to_string(),
+            address: "  http://example.invalid/mody/Entry  ".to_string(),
+            required: false,
+        }],
+    };
+
+    sanitize_repository_space_paths(&mut space);
+
+    assert_eq!(space.source_address, "http://example.invalid/space.json");
+    assert_eq!(space.source_base_url, "http://example.invalid");
+    assert_eq!(
+        space.entries[0].address,
+        "http://example.invalid/mody/Entry"
+    );
 }

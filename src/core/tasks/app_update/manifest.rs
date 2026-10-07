@@ -141,7 +141,7 @@ mod tests {
 
     #[test]
     fn is_newer_minor_increment() {
-        assert!(is_newer("1.1.0", "1.0.9"));
+        assert!(is_newer("1.2.0", "1.0.9"));
     }
 
     #[test]

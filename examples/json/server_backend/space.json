@@ -1,0 +1,12 @@
+{
+  "name": "Example Repository Space",
+  "baseUrl": "https://example.com/repos/",
+  "appUpdateUrl": "https://example.com/foxy/",
+  "iconImagePath": "icon.png",
+  "repoImagePath": "space.png",
+  "repositories": [
+    { "config": "modern/config.json", "folder": "modern", "required": true },
+    { "config": "vietnam/config.json", "folder": "vietnam", "name": "Vietnam", "required": true },
+    { "config": "ww2/config.json", "folder": "ww2", "required": false, "address": "https://cdn.example.com/ww2/" }
+  ]
+}

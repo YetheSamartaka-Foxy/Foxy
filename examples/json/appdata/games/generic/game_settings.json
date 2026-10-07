@@ -1,0 +1,13 @@
+{
+  "active_update_sessions": [],
+  "additional_folder_aliases": {},
+  "additional_folders": [],
+  "check_steam_running_before_launch": true,
+  "cleanup_folders": [],
+  "generic_directory": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Example Game",
+  "generic_executable": "ExampleGame.exe",
+  "generic_steam_app_id": "480",
+  "generic_launch_template": "-mod=\"{mods_sep=;}\"",
+  "generic_mods_manifest": "foxy_mods.txt",
+  "update_summary_notices": []
+}

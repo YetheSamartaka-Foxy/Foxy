@@ -15,6 +15,7 @@ pub enum CliExecution {
     RunUi {
         debug_mode: bool,
         agent_gui: AgentGuiLaunchConfig,
+        debug_modals: Vec<crate::ui::app::debug_modals::DebugModal>,
     },
     Exit(i32),
 }
@@ -71,6 +72,7 @@ pub fn run_from_env() -> CliExecution {
                 enabled: args.agent_gui,
                 port: args.agent_port,
             },
+            debug_modals: args.debug_modals.clone(),
         };
     }
 
@@ -85,6 +87,29 @@ pub fn run_from_env() -> CliExecution {
                 return CliExecution::Exit(exit_codes::OPERATION_FAILED);
             }
         }
+    }
+
+    // Turso has no multi-process access, so a command that touches the database
+    // must own it outright. Claim it before dispatching rather than letting the
+    // open race a running GUI.
+    if command_uses_database(cli.command.as_ref(), cli.wipe_db)
+        && let crate::core::tasks::db_process_lock::LockOutcome::Busy { holder_pid } =
+            crate::core::tasks::db_process_lock::acquire_for_active_space()
+    {
+        let owner = holder_pid
+            .map(|pid| format!(" (PID {pid})"))
+            .unwrap_or_default();
+        emit_error(
+            &output,
+            CommandError {
+                action: "database-lock".to_string(),
+                message: format!(
+                    "the database for this game space is in use by another Foxy process{owner}; close it and retry"
+                ),
+                code: exit_codes::DATABASE_BUSY,
+            },
+        );
+        return CliExecution::Exit(exit_codes::DATABASE_BUSY);
     }
 
     // `--wipe-db` is a standalone, non-interactive maintenance operation: wipe
@@ -121,6 +146,29 @@ pub fn run_from_env() -> CliExecution {
             emit_error(&output, err.clone());
             CliExecution::Exit(err.code)
         }
+    }
+}
+
+/// Whether a dispatch will open the game space database, and so must hold the
+/// exclusive process claim.
+///
+/// The exemptions are the commands that deliberately run *alongside* a live GUI:
+/// `agent-gui` drives one over TCP, `steam-helper` is the Steamworks subprocess
+/// the GUI itself spawns, and `server` generates repository manifests from the
+/// filesystem. `version` and `ui` are handled before this point.
+fn command_uses_database(command: Option<&CliCommand>, wipe_db: bool) -> bool {
+    if wipe_db {
+        return true;
+    }
+    match command {
+        None => false,
+        Some(
+            CliCommand::AgentGui { .. }
+            | CliCommand::SteamHelper { .. }
+            | CliCommand::Server { .. }
+            | CliCommand::Version,
+        ) => false,
+        Some(_) => true,
     }
 }
 

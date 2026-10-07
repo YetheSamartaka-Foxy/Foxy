@@ -77,6 +77,10 @@ pub(super) enum RepositoryListSectionContextAction {
 pub(super) enum RepositorySpaceRowContextAction {
     ToggleCollapsed,
     CreateFolder,
+    QuickLocalCheck,
+    RemoteRecheck,
+    RefreshFromServer,
+    OpenSettings,
     Delete,
 }
 
@@ -110,13 +114,8 @@ pub(super) fn spawn_launch_process(
     executable: &OsString,
     args: &[OsString],
     cwd: Option<&Path>,
-) -> std::io::Result<std::process::Child> {
-    let mut cmd = std::process::Command::new(executable);
-    cmd.args(args);
-    if let Some(working_dir) = cwd {
-        cmd.current_dir(working_dir);
-    }
-    cmd.spawn()
+) -> std::io::Result<u32> {
+    crate::core::utils::deelevate::spawn_unelevated(executable, args, cwd)
 }
 
 pub(super) fn arma3_editor_display_name(raw: &str) -> String {

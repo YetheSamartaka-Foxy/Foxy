@@ -97,9 +97,31 @@ impl Foxy {
                 info!("Closed join addon preflight from Escape shortcut");
                 return;
             }
+            if self.storage_compat_notice.is_some() {
+                self.dismiss_storage_compat_notice();
+                info!("Closed storage check notice from Escape shortcut");
+                return;
+            }
             if self.pending_join_preflight_query.is_some() {
                 self.pending_join_preflight_query = None;
                 info!("Canceled join addon preflight query from Escape shortcut");
+                return;
+            }
+
+            if self.show_add_repository_modal {
+                self.show_add_repository_modal = false;
+                self.add_repository_input_error = None;
+                self.add_repository_input_name.clear();
+                self.add_repository_input_path.clear();
+                self.pending_repository_duplicate_add = None;
+                info!("Closed add repository modal from Escape shortcut");
+                return;
+            }
+            if self.show_add_profile_window || self.show_rename_profile_window {
+                self.show_add_profile_window = false;
+                self.show_rename_profile_window = false;
+                self.new_profile_name.clear();
+                info!("Closed profile modal from Escape shortcut");
                 return;
             }
 

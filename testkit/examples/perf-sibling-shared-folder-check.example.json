@@ -1,0 +1,96 @@
+{
+  "id": "perf-sibling-shared-folder-check",
+  "kind": "perf",
+  "description": "Two repositories publish the same addons into one folder. After the first one is downloaded, checking and updating the second must succeed without hashing anything: its tree checksums and content-hash baseline come from the synced sibling, so the quick scan is clean and the sync never ends in failed-empty-queue.",
+  "build": "release",
+  "harness": "gui",
+  "timeout_s": 3600,
+  "tags": [
+    "checker",
+    "sibling"
+  ],
+  "origin": {
+    "root": "${REPO_ROOT}\\testkit\\origin\\data\\sibling-synthetic",
+    "port": 8134
+  },
+  "repository": {
+    "name": "Sibling A",
+    "address": "http://127.0.0.1:8134/repo-a/",
+    "path": "H:\\FoxyTestKit\\sibling",
+    "space_id": null
+  },
+  "extra_repositories": [
+    {
+      "name": "Sibling B",
+      "address": "http://127.0.0.1:8134/repo-b/",
+      "path": "H:\\FoxyTestKit\\sibling",
+      "space_id": null
+    }
+  ],
+  "operations": [
+    {
+      "op": "download",
+      "setup_once": true,
+      "wait_timeout_s": 1800
+    },
+    {
+      "op": "remote-refresh",
+      "repository": "Sibling B",
+      "label": "sibling-recheck",
+      "wait_timeout_s": 1800,
+      "expect": [
+        {
+          "path": "breakdown.run_metrics.failed_pipelines",
+          "equals": 0
+        },
+        {
+          "path": "breakdown.run_metrics.hash_work_bytes",
+          "equals": 0
+        },
+        {
+          "path": "breakdown.run_metrics.tree_verify_runs",
+          "equals": 0
+        }
+      ]
+    },
+    {
+      "op": "download",
+      "repository": "Sibling B",
+      "label": "sibling-download",
+      "wait_timeout_s": 1800,
+      "expect": [
+        {
+          "path": "breakdown.run_metrics.failed_pipelines",
+          "equals": 0
+        },
+        {
+          "path": "breakdown.run_metrics.hash_work_bytes",
+          "equals": 0
+        },
+        {
+          "path": "breakdown.run_metrics.tree_verify_runs",
+          "equals": 0
+        }
+      ]
+    }
+  ],
+  "repetitions": 1,
+  "warmup": false,
+  "thresholds": {},
+  "guards": {
+    "require_storage_class": "ssd",
+    "require_no_other_foxy": true,
+    "require_clean_worktree": false,
+    "fail_on_db_wipe": true,
+    "max_run_gb": 1,
+    "expected_files": null,
+    "oracle_command": [
+      "${REPO_ROOT}\\target\\release\\foxy-testkit-oracle.exe",
+      "--repository-path",
+      "${REPOSITORY_PATH}",
+      "--repository-url",
+      "${REPOSITORY_URL}"
+    ]
+  },
+  "notes": "Regression case for the empty download queue on a sibling repository (September 2026 user log: TFR Sci-Fi and TFR Coldwar inside the shared TFR space). Both repositories are byte-identical copies of the synthetic-writes origin served under repo-a/ and repo-b/. Do not read download.* metrics from this case."
+}

@@ -119,23 +119,15 @@ impl Foxy {
         settings: SettingsViewState,
         stored_settings: Option<SettingsViewState>,
     ) -> Result<(), String> {
-        let settings_path = Self::get_settings_path();
-        if let Some(parent) = settings_path.parent() {
-            fs::create_dir_all(parent).map_err(|err| {
-                format!(
-                    "Failed to create settings.json parent directory {}: {}",
-                    parent.display(),
-                    err
-                )
-            })?;
-        }
-
         let settings_to_save = Self::prepare_settings_for_persistence(settings, stored_settings);
-        let json_string = serde_json::to_string_pretty(&settings_to_save)
+        let settings_value = serde_json::to_value(&settings_to_save)
             .map_err(|err| format!("Failed to serialize settings: {}", err))?;
 
-        crate::core::utils::fs_safety::atomic_write(&settings_path, json_string.as_bytes())
-            .map_err(|err| format!("Failed to write settings.json: {}", err))
+        crate::core::game::spaces::write_split_settings(
+            &settings_value,
+            &Self::get_app_settings_path(),
+            &Self::get_game_settings_path(),
+        )
     }
 
     fn prepare_repositories_for_persistence(
@@ -303,7 +295,7 @@ impl Foxy {
                             if !self.settings_dirty {
                                 self.settings_last_mutated_at = None;
                             }
-                            debug!("Saved settings.json");
+                            debug!("Saved app_settings.json and game_settings.json");
                         }
                         Err(err) => {
                             self.settings_dirty = true;

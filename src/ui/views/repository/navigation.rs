@@ -217,6 +217,10 @@ impl Foxy {
             || self.pending_mission_delete.is_some()
             || self.pending_mission_remove_dependencies.is_some()
             || self.repository_space_selector_state.is_some()
+            || self.pending_app_update_prompt
+            || self.pending_db_schema_wipe.is_some()
+            || self.db_lock_conflict.is_some()
+            || self.pending_renderer_fallback_notice
         {
             return;
         }

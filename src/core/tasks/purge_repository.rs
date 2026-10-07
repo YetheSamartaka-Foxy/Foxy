@@ -13,11 +13,7 @@ use crate::core::tasks::create_context::create_context;
 use crate::core::utils::format::{sanitize_log_path, sanitize_log_url};
 
 fn normalize_url(url: &str) -> String {
-    if url.ends_with('/') {
-        url.to_string()
-    } else {
-        format!("{}/", url)
-    }
+    crate::core::models::repository::normalize_repository_url(url)
 }
 
 fn normalize_path_for_compare(path: &Path) -> String {
@@ -163,18 +159,87 @@ async fn execute_sql(tx: &DbTxn<'_>, sql: &str, values: Vec<DbValue>) -> Result<
     Ok(())
 }
 
+/// Statements and rows a purge touched, for its `SOL op=db_purge` record.
+/// A delete that affects zero rows can still scan many, so the row count is
+/// the affected count, not the work model.
+#[derive(Default)]
+struct PurgeWork {
+    steps: std::sync::atomic::AtomicU64,
+}
+
+impl PurgeWork {
+    fn record(&self) {
+        use std::sync::atomic::Ordering;
+        self.steps.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn log_sol(
+        &self,
+        operation_id: Option<&str>,
+        kind: &str,
+        total: std::time::Duration,
+        txn: std::time::Duration,
+        checkpoint: std::time::Duration,
+        db_work: crate::core::tasks::init_database::SqlitePerfSnapshot,
+    ) {
+        use std::sync::atomic::Ordering;
+        info!(
+            "{}",
+            crate::core::utils::speed_of_light::sol_line(
+                "db_purge",
+                0,
+                total,
+                &crate::core::utils::speed_of_light::SolLight::SelfBaseline,
+                &[
+                    (
+                        "op_id",
+                        operation_id
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| crate::core::api::next_operation_id("purge")),
+                    ),
+                    ("kind", kind.to_string()),
+                    ("outcome", "completed".to_string()),
+                    ("steps", self.steps.load(Ordering::Relaxed).to_string()),
+                    ("rows_affected", db_work.rows_affected.to_string()),
+                    (
+                        "insert_rows_affected",
+                        db_work.insert_rows_affected.to_string(),
+                    ),
+                    (
+                        "update_rows_affected",
+                        db_work.update_rows_affected.to_string(),
+                    ),
+                    (
+                        "delete_rows_affected",
+                        db_work.delete_rows_affected.to_string(),
+                    ),
+                    (
+                        "other_rows_affected",
+                        db_work.other_rows_affected.to_string(),
+                    ),
+                    ("txn_s", format!("{:.3}", txn.as_secs_f64())),
+                    ("checkpoint_s", format!("{:.3}", checkpoint.as_secs_f64())),
+                    ("timer_scope", "action_wall".to_string()),
+                ],
+            )
+        );
+    }
+}
+
 /// Like [`execute_sql`] but times the statement and logs how long it took, so the
 /// purge transaction is no longer a silent multi-second black box in the logs
 /// (the force-redownload "~18s gap with nothing logged" report). Steps ≥50ms log
 /// at INFO; faster ones at DEBUG to avoid noise on small repos.
 async fn timed_step(
     tx: &DbTxn<'_>,
+    work: &PurgeWork,
     label: &str,
     sql: &str,
     values: Vec<DbValue>,
 ) -> Result<(), DbErr> {
     let started = Instant::now();
     let affected = tx.execute(sql, values).await?;
+    work.record();
     let elapsed = started.elapsed();
     if elapsed >= std::time::Duration::from_millis(50) {
         info!(
@@ -292,9 +357,12 @@ pub async fn purge_addon_by_local_path_with_context(
 
     let deleted_count = addon_ids.len();
     let db_purge_started_at = Instant::now();
+    let db_work_baseline = crate::core::tasks::init_database::sqlite_perf_snapshot();
+    let work = Arc::new(PurgeWork::default());
     // Exclusive: Turso (beta) hard-wedges this bulk delete when overlapped by a
     // read/write on another connection/runtime (see DB_EXCLUSIVE).
     db.transaction_exclusive("purge addon", |tx| {
+        let work = work.clone();
         let addon_ids = addon_ids.clone();
         Box::pin(async move {
             execute_sql(
@@ -372,6 +440,7 @@ pub async fn purge_addon_by_local_path_with_context(
 
             timed_step(
                 tx,
+                &work,
                 "delete download_target_file_part",
                 "DELETE FROM download_target_file_part
                  WHERE subfile_id IN (
@@ -387,6 +456,7 @@ pub async fn purge_addon_by_local_path_with_context(
             .await?;
             timed_step(
                 tx,
+                &work,
                 "delete subfiles",
                 "DELETE FROM subfiles
                  WHERE file_id IN (
@@ -398,6 +468,7 @@ pub async fn purge_addon_by_local_path_with_context(
             .await?;
             timed_step(
                 tx,
+                &work,
                 "delete download_patch_op",
                 "DELETE FROM download_patch_op
                  WHERE file_id IN (
@@ -409,6 +480,7 @@ pub async fn purge_addon_by_local_path_with_context(
             .await?;
             timed_step(
                 tx,
+                &work,
                 "delete download_patch_file",
                 "DELETE FROM download_patch_file
                  WHERE file_id IN (
@@ -420,6 +492,7 @@ pub async fn purge_addon_by_local_path_with_context(
             .await?;
             timed_step(
                 tx,
+                &work,
                 "delete download_target_file",
                 "DELETE FROM download_target_file
                  WHERE file_id IN (
@@ -461,6 +534,7 @@ pub async fn purge_addon_by_local_path_with_context(
             .await?;
             timed_step(
                 tx,
+                &work,
                 "delete files",
                 "DELETE FROM files
                  WHERE id IN (
@@ -488,11 +562,23 @@ pub async fn purge_addon_by_local_path_with_context(
         })
     })
     .await?;
+    let txn_elapsed = db_purge_started_at.elapsed();
+    let db_work =
+        crate::core::tasks::init_database::sqlite_perf_snapshot().delta_since(db_work_baseline);
 
+    let checkpoint_started = Instant::now();
     let _ = context
         .db()
         .execute("PRAGMA wal_checkpoint(PASSIVE)", params![])
         .await;
+    work.log_sol(
+        context.operation_id(),
+        "addon",
+        db_purge_started_at.elapsed(),
+        txn_elapsed,
+        checkpoint_started.elapsed(),
+        db_work,
+    );
     info!(
         "Addon purge completed for {} in {:.2}s (addons={})",
         sanitize_log_path(&target_path),
@@ -646,6 +732,8 @@ async fn purge_repository_internal(
         whole_wipe
     );
     let db_purge_started_at = Instant::now();
+    let db_work_baseline = crate::core::tasks::init_database::sqlite_perf_snapshot();
+    let work = Arc::new(PurgeWork::default());
     // Exclusive: a force-redownload purge holds this ~17s bulk-delete transaction
     // (66k+ subfiles) and Turso (beta) hard-wedges if any read/write on another
     // connection/runtime overlaps it - the production force-redownload hang. The
@@ -653,6 +741,7 @@ async fn purge_repository_internal(
     // workers and quick scans issue ungated reads on their own runtimes. See
     // DB_EXCLUSIVE and `repro_purge_wedge_under_concurrency`.
     db.transaction_exclusive("purge repository", |tx| {
+        let work = work.clone();
         let scoped_repo_ids = scoped_repo_ids.clone();
         Box::pin(async move {
             if whole_wipe {
@@ -679,7 +768,7 @@ async fn purge_repository_internal(
                 ] {
                     if table == "subfiles" {
                         // P0-a (after_turso_regression_analysis5.md): a 66k-row
-                        // `DELETE FROM subfiles` costs ~9s on TFR_40K even on a
+                        // `DELETE FROM subfiles` costs ~9s at that scale even on a
                         // freshly-compacted file - intrinsic Turso ~0.14ms/row over
                         // 4 B-trees. Since a whole wipe is dropping every repo, the
                         // table can be DROPped (O(1) page dealloc) and recreated
@@ -687,8 +776,14 @@ async fn purge_repository_internal(
                         // always in a consistent shape even if no rebuild follows;
                         // the deferred-index bulk load (P0-b) manages its own
                         // drop/rebuild around the subsequent insert.
-                        timed_step(tx, "drop subfiles", "DROP TABLE IF EXISTS subfiles", vec![])
-                            .await?;
+                        timed_step(
+                            tx,
+                            &work,
+                            "drop subfiles",
+                            "DROP TABLE IF EXISTS subfiles",
+                            vec![],
+                        )
+                        .await?;
                         execute_sql(
                             tx,
                             crate::core::tasks::db_turso::SUBFILES_CREATE_TABLE,
@@ -700,7 +795,7 @@ async fn purge_repository_internal(
                         }
                         continue;
                     }
-                    timed_step(tx, label, &format!("DELETE FROM {table}"), vec![]).await?;
+                    timed_step(tx, &work, label, &format!("DELETE FROM {table}"), vec![]).await?;
                 }
                 return Ok(());
             }
@@ -757,6 +852,7 @@ async fn purge_repository_internal(
             }
             timed_step(
                 tx,
+                &work,
                 "collect addon ids",
                 "INSERT OR IGNORE INTO temp.foxy_purge_addon_ids (addon_id)
                  SELECT repository_addons.addon_id
@@ -768,6 +864,7 @@ async fn purge_repository_internal(
             .await?;
             timed_step(
                 tx,
+                &work,
                 "collect orphan addon ids",
                 "INSERT OR IGNORE INTO temp.foxy_purge_orphan_addon_ids (addon_id)
                  SELECT addon_id
@@ -787,6 +884,7 @@ async fn purge_repository_internal(
             .await?;
             timed_step(
                 tx,
+                &work,
                 "collect orphan file ids",
                 "INSERT OR IGNORE INTO temp.foxy_purge_orphan_file_ids (file_id)
                  SELECT addon_files.file_id
@@ -808,6 +906,7 @@ async fn purge_repository_internal(
 
             timed_step(
                 tx,
+                &work,
                 "delete repositories",
                 "DELETE FROM repositories
                  WHERE id IN (SELECT id FROM temp.foxy_purge_repo_ids)",
@@ -816,6 +915,7 @@ async fn purge_repository_internal(
             .await?;
             timed_step(
                 tx,
+                &work,
                 "delete download_target_file_part",
                 "DELETE FROM download_target_file_part
                  WHERE subfile_id IN (
@@ -831,6 +931,7 @@ async fn purge_repository_internal(
             .await?;
             timed_step(
                 tx,
+                &work,
                 "delete subfiles",
                 "DELETE FROM subfiles
                  WHERE file_id IN (
@@ -842,6 +943,7 @@ async fn purge_repository_internal(
             .await?;
             timed_step(
                 tx,
+                &work,
                 "delete download_patch_op",
                 "DELETE FROM download_patch_op
                  WHERE file_id IN (
@@ -853,6 +955,7 @@ async fn purge_repository_internal(
             .await?;
             timed_step(
                 tx,
+                &work,
                 "delete download_patch_file",
                 "DELETE FROM download_patch_file
                  WHERE file_id IN (
@@ -864,6 +967,7 @@ async fn purge_repository_internal(
             .await?;
             timed_step(
                 tx,
+                &work,
                 "delete download_target_file",
                 "DELETE FROM download_target_file
                  WHERE file_id IN (
@@ -875,6 +979,7 @@ async fn purge_repository_internal(
             .await?;
             timed_step(
                 tx,
+                &work,
                 "delete addon_files",
                 "DELETE FROM addon_files
                  WHERE addon_id IN (
@@ -886,6 +991,7 @@ async fn purge_repository_internal(
             .await?;
             timed_step(
                 tx,
+                &work,
                 "delete addons",
                 "DELETE FROM addons
                  WHERE id IN (
@@ -897,6 +1003,7 @@ async fn purge_repository_internal(
             .await?;
             timed_step(
                 tx,
+                &work,
                 "delete files",
                 "DELETE FROM files
                  WHERE id IN (
@@ -913,6 +1020,8 @@ async fn purge_repository_internal(
     .await?;
 
     let txn_elapsed = db_purge_started_at.elapsed();
+    let db_work =
+        crate::core::tasks::init_database::sqlite_perf_snapshot().delta_since(db_work_baseline);
     info!(
         "Repository purge: DB transaction committed for {} in {:.2}s",
         sanitize_log_url(&normalized_url),
@@ -933,7 +1042,7 @@ async fn purge_repository_internal(
         );
     }
 
-    clear_pending_update_for_context(context, &normalized_url)
+    clear_pending_update_for_context(context.clone(), &normalized_url)
         .await
         .ok();
     info!(
@@ -942,6 +1051,14 @@ async fn purge_repository_internal(
         db_purge_started_at.elapsed().as_secs_f64(),
         txn_elapsed.as_secs_f64(),
         checkpoint_elapsed.as_secs_f64()
+    );
+    work.log_sol(
+        context.operation_id(),
+        "repository",
+        db_purge_started_at.elapsed(),
+        txn_elapsed,
+        checkpoint_elapsed,
+        db_work,
     );
 
     Ok(())
@@ -1621,8 +1738,16 @@ mod tests {
     }
 
     #[test]
-    fn normalize_url_empty() {
-        assert_eq!(normalize_url(""), "/");
+    fn normalize_url_empty_stays_empty() {
+        assert_eq!(normalize_url(""), "");
+    }
+
+    #[test]
+    fn normalize_url_trims_whitespace() {
+        assert_eq!(
+            normalize_url("  https://example.com/repo  "),
+            "https://example.com/repo/"
+        );
     }
 
     // ── normalize_path_for_compare ──────────────────────────────────────
@@ -1786,7 +1911,7 @@ mod tests {
     }
 
     /// Full-scale reproducer for the force-redownload purge hang. Seeds the
-    /// complete graph at the real TFR_40K scale (1515 files / 66,336 subfiles /
+    /// complete graph at a real large-repository scale (1515 files / 66,336 subfiles /
     /// parts) and runs the purge's exact statement sequence inside one
     /// transaction with per-statement timing, to pinpoint which delete wedges on
     /// Turso's beta planner. Run:

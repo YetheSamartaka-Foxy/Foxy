@@ -123,6 +123,40 @@ pub fn sanitize_installer_filename(raw: &str) -> Option<String> {
     Some(sanitized.to_string())
 }
 
+/// Whether this process can create files in `dir`, tested by actually writing a
+/// probe file. Windows ACLs and read-only mounts are not visible in metadata,
+/// so an attempted write is the only reliable answer.
+pub fn directory_is_writable(dir: &Path) -> bool {
+    let probe = dir.join(".foxy_write_test");
+    match fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&probe)
+    {
+        Ok(_) => {
+            let _ = fs::remove_file(probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Whether a directory that does not exist yet could be created here, tested on
+/// the nearest ancestor that does exist.
+pub fn destination_is_writable(dir: &Path) -> bool {
+    match nearest_existing_ancestor(dir) {
+        Some(existing) => directory_is_writable(&existing),
+        None => false,
+    }
+}
+
+fn nearest_existing_ancestor(dir: &Path) -> Option<PathBuf> {
+    dir.ancestors()
+        .find(|candidate| candidate.is_dir())
+        .map(Path::to_path_buf)
+}
+
 fn sibling_temp_path(path: &Path) -> std::path::PathBuf {
     let mut temp = path.as_os_str().to_os_string();
     temp.push(".foxy.atomic.tmp");
@@ -365,5 +399,26 @@ mod tests {
         let base = std::env::temp_dir().join("foxy_test_addon_no_base_dir");
         let _ = fs::remove_dir_all(&base);
         assert!(resolve_child_dir_case_insensitive(&base, "@addon").is_none());
+    }
+
+    #[test]
+    fn directory_is_writable_accepts_a_normal_directory() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        assert!(directory_is_writable(dir.path()));
+        assert!(!dir.path().join(".foxy_write_test").exists());
+    }
+
+    #[test]
+    fn directory_is_writable_rejects_a_missing_directory() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        assert!(!directory_is_writable(&dir.path().join("absent")));
+    }
+
+    #[test]
+    fn destination_is_writable_follows_the_nearest_existing_ancestor() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        assert!(destination_is_writable(
+            &dir.path().join("userconfig").join("nested")
+        ));
     }
 }

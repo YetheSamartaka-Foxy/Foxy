@@ -16,16 +16,19 @@ pub struct Ts3PluginInfo {
     pub file_hash: String,
 }
 
-/// Diagnostic result for a best-effort lookup of installed TeamSpeak plugin files.
+/// A detected repository TS3 plugin together with its verified state in the
+/// TeamSpeak 3 client.
+#[derive(Debug, Clone)]
+pub struct Ts3PluginStatus {
+    pub info: Ts3PluginInfo,
+    pub is_installed: bool,
+    pub is_up_to_date: bool,
+}
+
+/// Verdict of a best-effort lookup of installed TeamSpeak plugin files. The
+/// per-file diagnostics behind it are logged by the lookup itself.
 #[derive(Debug, Clone)]
 pub struct Ts3InstalledPluginLookup {
-    pub search_name: String,
-    pub expected_files: Vec<String>,
-    pub checked_dirs: Vec<PathBuf>,
-    pub existing_dirs: Vec<PathBuf>,
-    pub matched_files: Vec<PathBuf>,
-    pub missing_files: Vec<String>,
-    pub hash_mismatched_files: Vec<PathBuf>,
     pub is_installed: bool,
     pub is_up_to_date: bool,
 }
@@ -94,14 +97,29 @@ pub fn scan_repository_for_ts3_plugins(repo_path: &str) -> Vec<Ts3PluginInfo> {
     results
 }
 
+/// Normalized key used to collapse repository paths that point at the same
+/// folder (case, separator, and trailing-slash variants).
+fn repository_path_key(path: &str) -> String {
+    path.replace('\\', "/").trim_end_matches('/').to_lowercase()
+}
+
 /// Scan all repository paths and collect TS3 plugin info.
 pub fn scan_all_repositories_for_ts3_plugins(repo_paths: &[String]) -> Vec<Ts3PluginInfo> {
+    // Repositories joined to a game space share one folder, so the same path
+    // usually arrives once per repository; crawling it each time is pure waste.
+    let mut seen_paths = std::collections::HashSet::new();
+    let unique_paths = repo_paths
+        .iter()
+        .filter(|path| seen_paths.insert(repository_path_key(path)))
+        .collect::<Vec<_>>();
+
     info!(
-        "Starting TS3 plugin scan across repositories: repository_count={}",
-        repo_paths.len()
+        "Starting TS3 plugin scan across repositories: repository_count={} unique_paths={}",
+        repo_paths.len(),
+        unique_paths.len()
     );
     let mut all = Vec::new();
-    for path in repo_paths {
+    for path in unique_paths {
         all.extend(scan_repository_for_ts3_plugins(path));
     }
     let before_dedup = all.len();
@@ -114,6 +132,24 @@ pub fn scan_all_repositories_for_ts3_plugins(repo_paths: &[String]) -> Vec<Ts3Pl
         all.len()
     );
     all
+}
+
+/// Scan the given repository paths and verify every detected plugin against the
+/// files installed in the TeamSpeak 3 client.
+///
+/// Both halves read and hash files, so callers must run this on a worker thread.
+pub fn resolve_ts3_plugin_statuses(repo_paths: &[String]) -> Vec<Ts3PluginStatus> {
+    scan_all_repositories_for_ts3_plugins(repo_paths)
+        .into_iter()
+        .map(|info| {
+            let lookup = lookup_installed_teamspeak_plugin(&info.plugin_path);
+            Ts3PluginStatus {
+                info,
+                is_installed: lookup.is_installed,
+                is_up_to_date: lookup.is_up_to_date,
+            }
+        })
+        .collect()
 }
 
 fn collect_ts3_plugins_recursive(
@@ -250,13 +286,6 @@ pub fn lookup_installed_teamspeak_plugin(package_path: &Path) -> Ts3InstalledPlu
             sanitize_log_path(package_path)
         );
         return Ts3InstalledPluginLookup {
-            search_name,
-            expected_files: expected_file_names,
-            checked_dirs,
-            existing_dirs,
-            matched_files,
-            missing_files,
-            hash_mismatched_files,
             is_installed: false,
             is_up_to_date: false,
         };
@@ -324,13 +353,6 @@ pub fn lookup_installed_teamspeak_plugin(package_path: &Path) -> Ts3InstalledPlu
     );
 
     Ts3InstalledPluginLookup {
-        search_name,
-        expected_files: expected_file_names,
-        checked_dirs,
-        existing_dirs,
-        matched_files,
-        missing_files,
-        hash_mismatched_files,
         is_installed,
         is_up_to_date,
     }
@@ -757,6 +779,54 @@ pub fn detect_teamspeak_directory() -> Option<PathBuf> {
         .find(|dir| teamspeak_client_exe_in(dir).is_some())
 }
 
+/// The TeamSpeak 3 client directory Foxy would use: the configured one when
+/// it holds a client executable, otherwise the auto-detected install.
+pub fn resolve_teamspeak_directory(configured_dir: &str) -> Option<PathBuf> {
+    let configured_dir = configured_dir.trim();
+    if !configured_dir.is_empty() {
+        let dir = Path::new(configured_dir);
+        if teamspeak_client_exe_in(dir).is_some() {
+            return Some(dir.to_path_buf());
+        }
+    }
+    detect_teamspeak_directory()
+}
+
+/// The `Version` declared in the package's `package.ini`, if the archive has
+/// one. Only the ini is read, never the plugin payload.
+pub fn read_package_version(package_path: &Path) -> Option<String> {
+    let file = fs::File::open(package_path).ok()?;
+    let mut archive = ZipArchive::new(file).ok()?;
+    let ini_index = (0..archive.len()).find(|index| {
+        archive
+            .by_index(*index)
+            .ok()
+            .and_then(|entry| entry.enclosed_name())
+            .is_some_and(|name| {
+                name.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.eq_ignore_ascii_case("package.ini"))
+            })
+    })?;
+    let mut contents = String::new();
+    archive
+        .by_index(ini_index)
+        .ok()?
+        .read_to_string(&mut contents)
+        .ok()?;
+    parse_package_ini_version(&contents)
+}
+
+fn parse_package_ini_version(contents: &str) -> Option<String> {
+    contents.lines().find_map(|line| {
+        let (key, value) = line.split_once('=')?;
+        key.trim()
+            .eq_ignore_ascii_case("version")
+            .then(|| value.trim().trim_matches('"').to_string())
+            .filter(|value| !value.is_empty())
+    })
+}
+
 /// Launch the installed TeamSpeak 3 client (not connected to any server).
 ///
 /// Prefers the user-configured install directory; when that is unset or invalid
@@ -947,6 +1017,39 @@ mod tests {
     }
 
     #[test]
+    fn repository_path_key_collapses_separator_case_and_trailing_slash() {
+        assert_eq!(
+            repository_path_key("R:/Mods/MainRepo"),
+            repository_path_key("r:\\mods\\mainrepo\\")
+        );
+        assert_ne!(
+            repository_path_key("R:/Mods/MainRepo"),
+            repository_path_key("R:/Mods/OtherRepo")
+        );
+    }
+
+    #[test]
+    fn resolve_statuses_reports_not_installed_when_teamspeak_lacks_payload() {
+        let tmp = TempDir::new().unwrap();
+        let addon = tmp.path().join("@radio").join("teamspeak");
+        fs::create_dir_all(&addon).unwrap();
+        let package = addon.join("foxy_test_plugin.ts3_plugin");
+        // A payload name that cannot exist in a real TeamSpeak plugins folder,
+        // so the verdict does not depend on what the test machine has installed.
+        write_test_ts3_package(
+            &package,
+            &[("plugins/foxy_test_unmatched_marker.txt", b"x".as_slice())],
+        );
+
+        let statuses = resolve_ts3_plugin_statuses(&[tmp.path().to_str().unwrap().to_string()]);
+
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].info.addon_name, "@radio");
+        assert!(!statuses[0].is_installed);
+        assert!(!statuses[0].is_up_to_date);
+    }
+
+    #[test]
     fn scan_finds_deeply_nested_plugin() {
         let tmp = TempDir::new().unwrap();
         let deep = tmp.path().join("@addon").join("a").join("b");
@@ -969,6 +1072,55 @@ mod tests {
         assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
         // Ensure uppercase
         assert_eq!(hash, hash.to_uppercase());
+    }
+
+    #[test]
+    fn package_version_comes_from_package_ini() {
+        let tmp = TempDir::new().unwrap();
+        let package = tmp.path().join("task_force_radio.ts3_plugin");
+        write_test_ts3_package(
+            &package,
+            &[
+                (
+                    "package.ini",
+                    b"Name = Task Force Arrowhead Radio
+version = 1.0.334
+Author = x"
+                        .as_slice(),
+                ),
+                ("plugins/TFAR_win64.dll", b"dll content".as_slice()),
+            ],
+        );
+        assert_eq!(read_package_version(&package).as_deref(), Some("1.0.334"));
+
+        let no_ini = tmp.path().join("bare.ts3_plugin");
+        write_test_ts3_package(&no_ini, &[("plugins/x.dll", b"dll".as_slice())]);
+        assert_eq!(read_package_version(&no_ini), None);
+        assert_eq!(
+            read_package_version(&tmp.path().join("missing.ts3_plugin")),
+            None
+        );
+    }
+
+    #[test]
+    fn package_ini_version_parsing_tolerates_case_and_quotes() {
+        assert_eq!(
+            parse_package_ini_version(
+                "Name = a
+VERSION = \"2.1\"
+"
+            )
+            .as_deref(),
+            Some("2.1")
+        );
+        assert_eq!(
+            parse_package_ini_version(
+                "Version =   
+"
+            ),
+            None
+        );
+        assert_eq!(parse_package_ini_version("Name = a"), None);
     }
 
     #[test]

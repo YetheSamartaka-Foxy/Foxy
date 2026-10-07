@@ -1,8 +1,8 @@
 use super::arma3_editor_display_name;
 use crate::ui::app::{
-    Foxy, JoinPreflightAddonOrigin, JoinPreflightKnownRemoteAddon, JoinPreflightMatchConfidence,
-    PendingJoinPreflightState, PendingRepositoryDuplicateAddAction, RepositoryContextConfirmAction,
-    RepositorySpaceImportContinuation,
+    Foxy, JoinPreflightAddonOrigin, JoinPreflightDlcChange, JoinPreflightKnownRemoteAddon,
+    JoinPreflightMatchConfidence, PendingJoinPreflightState, PendingRepositoryDuplicateAddAction,
+    RepositoryContextConfirmAction, RepositorySpaceImportContinuation,
 };
 use crate::ui::types::{RepoState, RepositorySpaceBulkMode};
 use crate::ui::views::galley_cache;
@@ -29,10 +29,12 @@ impl Foxy {
         let mut pending_changed = false;
         let mut remote_download_request = None;
 
-        let has_addon_actions = !pending.suggestions.is_empty()
+        let has_addon_list_actions = !pending.suggestions.is_empty()
             || !pending.ambiguous.is_empty()
             || !pending.known_remote.is_empty()
             || !pending.extra_enabled.is_empty();
+        let has_dlc_changes = pending.has_dlc_changes();
+        let has_addon_actions = has_addon_list_actions || has_dlc_changes;
 
         let ts3_attention = pending.ts3_required && !pending.ts3_running;
         let steam_attention = pending.steam_required && !pending.steam_running;
@@ -70,9 +72,19 @@ impl Foxy {
             self.t("Steam is not running")
         } else if !has_addon_actions && ts3_attention {
             self.t("TeamSpeak 3 is not running")
-        } else if !has_addon_actions {
+        } else if !has_addon_actions && !pending.unavailable_enabled.is_empty() {
             // Opened solely to warn about enabled addons that can't be found.
             self.t("Some enabled addons are missing")
+        } else if !has_addon_actions {
+            // Every warning this modal opened for has cleared (the TeamSpeak/Steam
+            // re-check flipped it), so it now only waits for the user to proceed.
+            if pending.launch_only {
+                self.t("Ready to launch")
+            } else {
+                self.t("Ready to join")
+            }
+        } else if !has_addon_list_actions {
+            self.t("Match the server's Creator DLCs?")
         } else if pending.extra_enabled.is_empty()
             || !pending.suggestions.is_empty()
             || !pending.ambiguous.is_empty()
@@ -84,12 +96,8 @@ impl Foxy {
         };
 
         egui::Window::new(title)
-            .frame(
-                egui::Frame::window(&ctx.global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ctx))
+            .title_frame(self.modal_window_chrome(ctx))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)
@@ -112,6 +120,11 @@ impl Foxy {
                         }
                         if !pending.extra_enabled.is_empty() {
                             ui.label(self.t("Enabled additional/external addons"));
+                        }
+                        if has_dlc_changes {
+                            ui.label(self.t(
+                                "The server runs different Creator DLCs than this repository has enabled.",
+                            ));
                         }
                     });
 
@@ -145,6 +158,32 @@ impl Foxy {
                         if launch_steam_btn.clicked() {
                             launch_steam = true;
                         }
+                    });
+                }
+
+                if !has_addon_actions
+                    && pending.unavailable_enabled.is_empty()
+                    && !steam_attention
+                    && !ts3_attention
+                {
+                    ui.add_space(10.0);
+                    self.join_preflight_section(ui, |ui| {
+                        if pending.steam_required {
+                            ui.label(
+                                RichText::new(self.t("Steam is running"))
+                                    .strong()
+                                    .color(self.color_success()),
+                            );
+                        }
+                        if pending.ts3_required {
+                            ui.label(
+                                RichText::new(self.t("TeamSpeak 3 is running"))
+                                    .strong()
+                                    .color(self.color_success()),
+                            );
+                        }
+                        ui.add_space(4.0);
+                        ui.label(self.t("All pre-launch checks passed. You can continue."));
                     });
                 }
 
@@ -350,6 +389,16 @@ impl Foxy {
                     });
                 }
 
+                if !pending.dlc_enable.is_empty() {
+                    ui.add_space(10.0);
+                    pending_changed |= self.join_preflight_dlc_section(
+                        ui,
+                        self.t("Creator DLCs the server requires"),
+                        self.t("Ticked DLCs are enabled for this join."),
+                        &mut pending.dlc_enable,
+                    );
+                }
+
                 if !pending.extra_enabled.is_empty() {
                     ui.add_space(10.0);
                     self.join_preflight_section(ui, |ui| {
@@ -393,6 +442,16 @@ impl Foxy {
                                 }
                             });
                     });
+                }
+
+                if !pending.dlc_disable.is_empty() {
+                    ui.add_space(10.0);
+                    pending_changed |= self.join_preflight_dlc_section(
+                        ui,
+                        self.t("Enabled Creator DLCs the server does not use"),
+                        self.t("Ticked DLCs are disabled for this join."),
+                        &mut pending.dlc_disable,
+                    );
                 }
 
                 if !pending.unavailable_enabled.is_empty() {
@@ -456,17 +515,26 @@ impl Foxy {
                         .known_remote
                         .iter()
                         .any(|remote| remote.selected && !remote.available);
+                    let selected_dlc_changes = pending
+                        .dlc_enable
+                        .iter()
+                        .chain(&pending.dlc_disable)
+                        .any(|dlc| dlc.selected);
                     if !pending.suggestions.is_empty()
                         || selected_ambiguous_suggestions
                         || !pending.known_remote.is_empty()
                         || !pending.extra_enabled.is_empty()
+                        || has_dlc_changes
                     {
                         let has_selected_addons = selected_local_suggestions
                             || selected_ambiguous_suggestions
                             || selected_known_remote
-                            || has_extra_enabled;
+                            || has_extra_enabled
+                            || selected_dlc_changes;
                         let action_label = if selected_missing_known_remote {
                             self.t("Standalone download")
+                        } else if !has_addon_list_actions {
+                            self.t("Launch with selected DLC changes")
                         } else {
                             self.t("Launch with selected addons")
                         };
@@ -485,8 +553,10 @@ impl Foxy {
                     // With no addon actions this is a TeamSpeak/Steam-only modal,
                     // so the button just proceeds: "Launch" for a plain launch,
                     // "Join" for a server join, rather than "Launch without ...".
-                    let launch_without_label = if has_addon_actions {
+                    let launch_without_label = if has_addon_list_actions {
                         self.t("Launch without suggested addons")
+                    } else if has_dlc_changes {
+                        self.t("Launch without DLC changes")
                     } else if pending.launch_only {
                         self.t("Launch")
                     } else {
@@ -724,6 +794,42 @@ impl Foxy {
             });
     }
 
+    /// Renders one Creator DLC change list; returns whether a tick changed.
+    fn join_preflight_dlc_section(
+        &self,
+        ui: &mut Ui,
+        title: String,
+        hint: String,
+        changes: &mut [JoinPreflightDlcChange],
+    ) -> bool {
+        let mut changed = false;
+        self.join_preflight_section(ui, |ui| {
+            ui.label(RichText::new(title).strong());
+            ui.label(RichText::new(hint).color(self.color_text_dim()));
+            ui.add_space(6.0);
+            for dlc in changes.iter_mut() {
+                self.join_preflight_row(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        let checkbox = Self::ui_state_checkbox(ui, &mut dlc.selected, dlc.name);
+                        if checkbox.hovered() {
+                            ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                        }
+                        if checkbox.changed() {
+                            changed = true;
+                            info!(
+                                "Toggled join preflight Creator DLC {} to selected={}",
+                                dlc.code, dlc.selected
+                            );
+                        }
+                        self.join_preflight_badge(ui, self.t("Creator DLC"));
+                    });
+                });
+                ui.add_space(4.0);
+            }
+        });
+        changed
+    }
+
     fn join_preflight_row(&self, ui: &mut Ui, add_contents: impl FnOnce(&mut Ui)) {
         Frame::NONE
             .fill(self.color_main_bg())
@@ -779,12 +885,8 @@ impl Foxy {
         let mut confirm = false;
         let mut cancel = false;
         egui::Window::new(self.t("Confirm Deletion"))
-            .frame(
-                egui::Frame::window(&ctx.global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ctx))
+            .title_frame(self.modal_window_chrome(ctx))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)
@@ -857,12 +959,8 @@ impl Foxy {
         let mut confirm = false;
         let mut cancel = false;
         egui::Window::new(self.t("Confirm Dependency Removal"))
-            .frame(
-                egui::Frame::window(&ctx.global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ctx))
+            .title_frame(self.modal_window_chrome(ctx))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)
@@ -932,12 +1030,8 @@ impl Foxy {
         let mut confirm = false;
         let mut cancel = false;
         egui::Window::new(self.t("Duplicate mission"))
-            .frame(
-                egui::Frame::window(&ctx.global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ctx))
+            .title_frame(self.modal_window_chrome(ctx))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)
@@ -1022,12 +1116,8 @@ impl Foxy {
             self.t("Launch editor with external addons?")
         };
         egui::Window::new(title)
-            .frame(
-                egui::Frame::window(&ctx.global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ctx))
+            .title_frame(self.modal_window_chrome(ctx))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)
@@ -1146,12 +1236,8 @@ impl Foxy {
         let mut submit = false;
         let mut close = false;
         egui::Window::new(self.t("Add repository"))
-            .frame(
-                egui::Frame::window(&ctx.global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ctx))
+            .title_frame(self.modal_window_chrome(ctx))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)
@@ -1241,7 +1327,7 @@ impl Foxy {
                     // The address is checked against the server off the UI
                     // thread; show progress so the dialog doesn't look frozen.
                     if importing {
-                        ui.add(egui::Spinner::new());
+                        ui.add(crate::ui::app::PacedSpinner::new());
                     }
                 });
             });
@@ -1341,12 +1427,8 @@ impl Foxy {
             RepositorySpaceBulkMode::RecheckAll => self.t("Recheck all repositories"),
             RepositorySpaceBulkMode::UpdateAll => self.t("Update all repositories"),
         })
-        .frame(
-            egui::Frame::window(&ctx.global_style())
-                .fill(self.color_card_bg())
-                .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                .corner_radius(CornerRadius::same(10)),
-        )
+        .frame(self.modal_window_chrome(ctx))
+        .title_frame(self.modal_window_chrome(ctx))
         .title_bar(true)
         .collapsible(false)
         .resizable(false)
@@ -1505,12 +1587,8 @@ impl Foxy {
         let mut proceed = false;
         let mut cancel = false;
         egui::Window::new(self.t("Duplicate repository detected"))
-            .frame(
-                egui::Frame::window(&ctx.global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ctx))
+            .title_frame(self.modal_window_chrome(ctx))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)
@@ -1612,12 +1690,8 @@ impl Foxy {
         let mut confirm = false;
         let mut cancel = false;
         egui::Window::new(self.t("Confirm Repository Space Deletion"))
-            .frame(
-                egui::Frame::window(&ctx.global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ctx))
+            .title_frame(self.modal_window_chrome(ctx))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)
@@ -1680,12 +1754,8 @@ impl Foxy {
         let mut save = false;
         let mut cancel = false;
         egui::Window::new(title)
-            .frame(
-                egui::Frame::window(&ctx.global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ctx))
+            .title_frame(self.modal_window_chrome(ctx))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)
@@ -1772,12 +1842,8 @@ impl Foxy {
         let mut confirm = false;
         let mut cancel = false;
         egui::Window::new(self.t("Delete folder"))
-            .frame(
-                egui::Frame::window(&ctx.global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ctx))
+            .title_frame(self.modal_window_chrome(ctx))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)
@@ -1882,12 +1948,8 @@ impl Foxy {
         let mut confirm = false;
         let mut cancel = false;
         egui::Window::new(title)
-            .frame(
-                egui::Frame::window(&ctx.global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ctx))
+            .title_frame(self.modal_window_chrome(ctx))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)
@@ -1956,7 +2018,7 @@ impl Foxy {
                 self.delete_repository_by_index(idx, delete_local_files);
             }
             RepositoryContextConfirmAction::WipeRepositoryDb(idx) => {
-                self.wipe_repository_database_entries(idx);
+                self.wipe_repository_database_entries(idx, true);
             }
             RepositoryContextConfirmAction::ForceRedownload(idx) => {
                 self.force_redownload_repository(idx);

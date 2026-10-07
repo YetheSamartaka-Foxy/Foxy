@@ -70,6 +70,8 @@ impl Foxy {
             || self.show_wipe_repo_db_confirmation
             || self.pending_renderer_fallback_notice
             || self.pending_db_schema_wipe.is_some()
+            || self.db_lock_conflict.is_some()
+            || self.pending_app_update_prompt
             || self.show_add_profile_window
             || self.show_rename_profile_window
             || self.pending_profile_confirm_action.is_some()
@@ -180,15 +182,20 @@ impl Foxy {
                         &self.app_update_status,
                         crate::core::tasks::app_update::UpdateCheckStatus::Available(_)
                     ) {
-                        let update_btn = ui.add_sized(
-                            Vec2::new(footer_icon_button_size.x + 20.0, footer_icon_button_size.y),
+                        ui.add_space(4.0);
+                        let update_btn = ui.add(
                             Button::new(
                                 RichText::new(format!("\u{2B06} {}", self.t("Update")))
                                     .size(footer_text_size)
-                                    .color(self.color_primary_accent()),
+                                    .strong()
+                                    .color(crate::ui::palette::ON_STRONG_FILL),
                             )
-                            .frame(false),
+                            .fill(self.color_action_destructive())
+                            .stroke(egui::Stroke::new(1.0, self.color_error()))
+                            .corner_radius(egui::CornerRadius::same(6))
+                            .min_size(Vec2::new(0.0, footer_icon_button_size.y - 4.0)),
                         );
+                        ui.add_space(4.0);
                         if update_btn.hovered() {
                             ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                         }
@@ -235,6 +242,33 @@ impl Foxy {
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let toggle_button_size = self.activity_log_toggle_button_size();
+                        if let Some(tfr_logo) = &self.tfr_logo {
+                            let logo_size = Vec2::splat(toggle_button_size.y);
+                            let tfr_logo_button = ui.add(
+                                egui::Image::new(tfr_logo)
+                                    .fit_to_exact_size(logo_size)
+                                    .sense(Sense::click()),
+                            );
+                            let tfr_thanks =
+                                self.t("Special thanks to the Task Force Roddenberry community");
+                            tfr_logo_button.widget_info(|| {
+                                egui::WidgetInfo::labeled(
+                                    egui::WidgetType::Link,
+                                    true,
+                                    tfr_thanks.clone(),
+                                )
+                            });
+                            if tfr_logo_button.hovered() {
+                                ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                            }
+                            if tfr_logo_button.on_hover_text(tfr_thanks).clicked() {
+                                info!("Opening TFR website from footer logo");
+                                ui.ctx()
+                                    .open_url(egui::OpenUrl::new_tab("https://www.tfrod.cz/"));
+                            }
+                            ui.separator();
+                        }
+
                         let toggle_log_button = ui.add_sized(
                             toggle_button_size,
                             Button::new(

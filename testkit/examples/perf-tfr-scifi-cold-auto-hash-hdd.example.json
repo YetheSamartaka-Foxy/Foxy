@@ -1,0 +1,42 @@
+{
+  "id": "perf-tfr-scifi-cold-auto-hash-hdd",
+  "kind": "perf",
+  "description": "Accepted cold-device Auto hash baseline for the TFR Sci-Fi payload on HDD, with explicit eviction before each full integrity recheck.",
+  "build": "release",
+  "harness": "gui",
+  "timeout_s": 7200,
+  "tags": ["checker", "hash-profile", "baseline"],
+  "repository": {
+    "name": "TFR Sci-Fi Test",
+    "address": "${ENV:FOXY_TESTKIT_REPO_URL}",
+    "path": "${ENV:FOXY_TESTKIT_HDD_PAYLOAD}",
+    "space_id": null
+  },
+  "settings": { "hash_io_profile": "Auto" },
+  "operations": [
+    { "op": "download", "setup_once": true, "wait_timeout_s": 5400 },
+    { "op": "evict-cache" },
+    {
+      "op": "recheck-integrity",
+      "wait_timeout_s": 5400,
+      "expect_outcome": "completed",
+      "expect": [
+        { "path": "breakdown.run_metrics.failed_pipelines", "equals": 0 },
+        { "path": "breakdown.run_metrics.hash_work_bytes", "equals": 4331121846 },
+        { "path": "breakdown.run_metrics.hash_total_s", "min": 10 },
+        { "path": "breakdown.run_metrics.hash_profile_selected", "equals": "Conservative" }
+      ]
+    }
+  ],
+  "repetitions": 7,
+  "warmup": false,
+  "thresholds": {},
+  "guards": {
+    "require_storage_class": "hdd",
+    "require_no_other_foxy": true,
+    "require_clean_worktree": true,
+    "fail_on_db_wipe": true,
+    "max_run_gb": 5,
+    "expected_files": null
+  }
+}

@@ -8,7 +8,10 @@ use tokio::sync::broadcast;
 use tokio::sync::watch;
 
 use crate::core::api::{self, ModDiffSummary, SyncMode};
-use crate::ui::app::{AddonHashRecalcResult, Foxy};
+use crate::core::benchmarks::BenchmarkKind;
+use crate::core::tasks::create_web_client::create_web_client;
+use crate::core::tasks::remote_reachability::ensure_remote_repository_reachable;
+use crate::ui::app::{AddonForceRedownloadProbeResult, AddonHashRecalcResult, Foxy};
 use crate::ui::types::{DownloadSummary, RepoState, Repository, sanitize_user_path};
 
 impl Foxy {
@@ -48,7 +51,12 @@ impl Foxy {
             selected_mod_states_override,
             force_redownload,
             false,
+            false,
         );
+    }
+
+    pub(in crate::ui::app) fn start_core_sync_full_download_control(&mut self, repo_idx: usize) {
+        self.start_core_sync_internal(repo_idx, SyncMode::Download, None, false, false, true);
     }
 
     fn start_core_sync_internal(
@@ -58,9 +66,17 @@ impl Foxy {
         selected_mod_states_override: Option<Vec<(String, bool)>>,
         force_redownload: bool,
         prepare_download_plan: bool,
+        force_full_downloads: bool,
     ) {
+        let benchmark_arm = self.benchmark_armed.take();
         if self.syncing_repository.is_some() {
             warn!("Sync request ignored: another repository sync is already in progress");
+            return;
+        }
+        // A cancelled worker whose repository was deleted still owns the
+        // progress channel until it reports; starting now would orphan it.
+        if self.current_sync_mode.is_some() {
+            warn!("Sync request ignored: the previous sync worker is still winding down");
             return;
         }
         if self.is_direct_download_running() {
@@ -110,6 +126,24 @@ impl Foxy {
                 );
                 return;
             }
+            // Probed only for downloads, and only at start: a repository folder
+            // the account cannot write to used to fail file by file deep inside
+            // the transfer, with nothing but a log line to show for it.
+            if mode == SyncMode::Download {
+                let local_path = sanitize_user_path(&repo.path);
+                if !crate::core::utils::fs_safety::destination_is_writable(Path::new(&local_path)) {
+                    warn!(
+                        "Sync request ignored for repository {}: the local path is not writable",
+                        repo.name
+                    );
+                    let message = self.t_fmt(
+                        "Foxy cannot write to {path}. Choose a folder outside Program Files, or grant your account write access to it.",
+                        &[("path", local_path)],
+                    );
+                    self.show_error_toast(message);
+                    return;
+                }
+            }
             let recent_local_path_reset = self
                 .repo_db_reset_pending_recheck
                 .contains(&normalized_repo_url);
@@ -135,7 +169,7 @@ impl Foxy {
             self.direct_download_update_view = false;
             self.syncing_repository = Some(repo_idx);
             self.current_sync_mode = Some(mode);
-            if mode == SyncMode::Download {
+            if Self::sync_writes_repository_files(mode, prepare_download_plan) {
                 self.suppress_fs_watch_for_active_download();
             }
             if !preserve_completed_download {
@@ -147,6 +181,10 @@ impl Foxy {
             self.recheck_stage_percent = Self::initial_recheck_stage_label(mode).map(|_| 0.05);
             self.recheck_hash_counter = None;
             self.recheck_hash_part_counter = None;
+            self.recheck_hash_byte_counter = None;
+            self.recheck_progress_peak = None;
+            self.recheck_progress_floor = None;
+            self.recheck_hash_estimate = None;
             self.last_hash_progress_repaint = None;
             self.download_hash_sample_at = None;
             self.download_hash_sample_files = 0;
@@ -165,6 +203,13 @@ impl Foxy {
                 self.invalidate_update_modal_sort_cache();
             }
             if mode == SyncMode::Download {
+                if self
+                    .download_disk_space_shortfall
+                    .as_ref()
+                    .is_some_and(|(index, _)| *index == repo_idx)
+                {
+                    self.download_disk_space_shortfall = None;
+                }
                 self.set_repo_state_for_address(&repo.address, &repo.path, RepoState::Updating);
                 let instance_key = Self::repo_instance_key(&repo.address, &repo.path);
                 let current_pending_source: Vec<ModDiffSummary> = self
@@ -242,6 +287,7 @@ impl Foxy {
             }
             self.memory_diagnostics_last_logged_stage_key = None;
             self.sync_started_at = Some(Instant::now());
+            self.frame_cost_at_sync_start = Some(self.frame_cost.clone());
             self.capture_memory_diagnostics_snapshot(
                 format!("sync-start {:?} {}", mode, repo.name),
                 true,
@@ -260,6 +306,9 @@ impl Foxy {
                 };
             let rollback_temp_directory = (mode == SyncMode::Download)
                 .then(|| sanitize_user_path(&self.effective_temp_directory()));
+            // The stored selection always comes from the profile, never from a
+            // transient override such as a standalone addon download.
+            let persisted_addon_selection = Self::resolve_selected_mod_states(&repo, None);
             let selected_mod_states =
                 Self::resolve_selected_mod_states(&repo, selected_mod_states_override);
             let repository_space_shared_path = repo.repository_space_id.as_deref().and_then(|id| {
@@ -273,6 +322,11 @@ impl Foxy {
                                 != crate::core::utils::content_hash::normalize_path(&repo.path)
                     })
             });
+            // Only a run that rebuilds the queue consumes the watcher's "folder
+            // changed" mark; a plain recheck leaves it for the next Download.
+            let discard_prepared_queue = (mode == SyncMode::Download || prepare_download_plan)
+                && self.fs_changed_since_prepare.remove(&normalized_repo_url);
+            self.begin_benchmark_capture(benchmark_arm, repo_idx);
             self.backend_worker = Some(api::spawn_repository_sync(
                 repo.address.clone(),
                 sanitize_user_path(&repo.path),
@@ -287,12 +341,16 @@ impl Foxy {
                     rollback_temp_directory,
                     download_speed_limit_mbps,
                     recent_local_path_reset,
+                    discard_prepared_queue,
                     force_redownload,
+                    force_full_downloads,
                     allow_suspect_full_redownload: force_redownload,
                     download_pause_rx,
                     cancel_rx,
                     hash_algorithm_preference: repo.hash_algorithm_preference,
                     hash_io_profile: self.settings_view_state.hash_io_profile,
+                    trust_verified_hashes: self.settings_view_state.trust_verified_hashes,
+                    persisted_addon_selection: Some(persisted_addon_selection),
                 },
                 self.repaint_ctx.clone(),
             ));
@@ -308,10 +366,21 @@ impl Foxy {
         self.start_core_sync_with_selected_mod_states(repo_idx, mode, None, false);
     }
 
+    /// Whether a sync may write into the repository folder itself, so the
+    /// filesystem watcher must not read Foxy's own writes as user edits. A
+    /// download does; so does any run that builds the download plan (it cleans
+    /// unexpected files first), and a quick check may escalate into one.
+    pub(in crate::ui::app) fn sync_writes_repository_files(
+        mode: SyncMode,
+        prepare_download_plan: bool,
+    ) -> bool {
+        prepare_download_plan || matches!(mode, SyncMode::Download | SyncMode::QuickCheckOnly)
+    }
+
     pub(crate) fn prepare_update_confirmation(&mut self, repo_idx: usize) {
         self.update_modal_open = false;
         self.open_update_after_sync = true;
-        self.start_core_sync_internal(repo_idx, SyncMode::RecheckOnly, None, false, true);
+        self.start_core_sync_internal(repo_idx, SyncMode::RecheckOnly, None, false, true, false);
         if self.syncing_repository.is_none() {
             self.open_update_after_sync = false;
         }
@@ -325,7 +394,14 @@ impl Foxy {
     /// only refreshes status and leaves the queue ready for review.
     pub(crate) fn start_remote_recheck_with_plan(&mut self, repo_idx: usize) {
         self.open_update_after_sync = false;
-        self.start_core_sync_internal(repo_idx, SyncMode::RemoteRefreshOnly, None, false, true);
+        self.start_core_sync_internal(
+            repo_idx,
+            SyncMode::RemoteRefreshOnly,
+            None,
+            false,
+            true,
+            false,
+        );
     }
 
     pub fn standalone_download_addon(&mut self, repo_idx: usize, addon_name: &str) -> bool {
@@ -404,6 +480,7 @@ impl Foxy {
         self.clear_completed_repository_check_banner_for_repo_change(Some(repo_idx));
         self.update_modal_open = true;
         self.open_update_after_sync = false;
+        self.arm_benchmark(BenchmarkKind::AddonDownload, found_targets.clone());
         self.start_core_sync_with_selected_mod_states(
             repo_idx,
             SyncMode::Download,
@@ -464,6 +541,10 @@ impl Foxy {
         self.open_update_after_sync = false;
         self.needs_repaint = true;
 
+        self.arm_benchmark(
+            crate::core::benchmarks::BenchmarkKind::ForceRedownload,
+            Vec::new(),
+        );
         self.start_core_sync_with_selected_mod_states(repo_idx, SyncMode::Download, None, true);
     }
 
@@ -646,6 +727,11 @@ impl Foxy {
         }
     }
 
+    /// Force redownload of one addon. The local folder is removed only after a
+    /// background probe confirms the repository can serve `repo.json`; the
+    /// removal and the follow-up recheck happen in
+    /// [`Self::poll_addon_force_redownload_results`]. Returns `false` when the
+    /// request was rejected up front.
     pub fn force_redownload_addon(
         &mut self,
         repo_idx: usize,
@@ -719,35 +805,202 @@ impl Foxy {
             return false;
         }
 
-        if target_path.exists() {
-            if target_path.is_dir() {
-                if let Err(err) = fs::remove_dir_all(&target_path) {
-                    warn!(
-                        "Failed to remove addon directory for {} in {}: {}",
-                        addon_name, repo.name, err
-                    );
-                    return false;
-                }
-                info!(
-                    "Removed addon directory for {} in {} before recheck",
-                    addon_name, repo.name
-                );
+        if target_path.exists() && !target_path.is_dir() {
+            warn!(
+                "Addon force redownload ignored: target path is not a directory for {} in {}",
+                addon_name, repo.name
+            );
+            return false;
+        }
+
+        let pending_key = Self::normalize_path_for_addon_match(&target_path.to_string_lossy());
+        if !self.pending_addon_force_redownloads.insert(pending_key) {
+            warn!(
+                "Addon force redownload ignored: already checking the repository connection for {} in {}",
+                addon_name, repo.name
+            );
+            return false;
+        }
+
+        info!(
+            "Checking repository connection before force redownload of {} in {}",
+            addon_name, repo.name
+        );
+        self.needs_repaint = true;
+
+        let tx = self.addon_force_redownload_result_tx.clone();
+        let repaint_ctx = self.repaint_ctx.clone();
+        let result = AddonForceRedownloadProbeResult {
+            repo_address: repo.address.clone(),
+            repo_path: repo.path.clone(),
+            repo_name: repo.name.clone(),
+            addon_name: addon_name.to_string(),
+            target_path,
+            outcome: Ok(()),
+        };
+        std::thread::spawn(move || {
+            let outcome = match Runtime::new() {
+                Ok(rt) => rt.block_on(async {
+                    let client = create_web_client().await;
+                    ensure_remote_repository_reachable(&client, &result.repo_address).await
+                }),
+                Err(err) => Err(err.to_string()),
+            };
+            if tx
+                .send(AddonForceRedownloadProbeResult { outcome, ..result })
+                .is_ok()
+            {
+                Self::request_background_repaint(repaint_ctx.as_ref());
             } else {
+                warn!("Failed to report addon force redownload probe completion");
+            }
+        });
+        true
+    }
+
+    /// True while a force redownload of any addon under `repo_path` is still
+    /// waiting on its remote reachability probe.
+    pub fn is_addon_force_redownload_pending_for_repo(&self, repo_path: &str) -> bool {
+        if self.pending_addon_force_redownloads.is_empty() || repo_path.trim().is_empty() {
+            return false;
+        }
+        let prefix = format!(
+            "{}/",
+            Self::normalize_path_for_addon_match(repo_path.trim())
+        );
+        self.pending_addon_force_redownloads
+            .iter()
+            .any(|key| key.starts_with(&prefix))
+    }
+
+    pub(in crate::ui::app) fn poll_addon_force_redownload_results(&mut self) {
+        while let Ok(result) = self.addon_force_redownload_result_rx.try_recv() {
+            let pending_key =
+                Self::normalize_path_for_addon_match(&result.target_path.to_string_lossy());
+            self.pending_addon_force_redownloads.remove(&pending_key);
+            self.needs_repaint = true;
+            self.complete_addon_force_redownload(result);
+        }
+    }
+
+    fn complete_addon_force_redownload(&mut self, result: AddonForceRedownloadProbeResult) {
+        let AddonForceRedownloadProbeResult {
+            repo_address,
+            repo_path,
+            repo_name,
+            addon_name,
+            target_path,
+            outcome,
+        } = result;
+
+        if let Err(err) = outcome {
+            warn!(
+                "Addon force redownload cancelled for {} in {}, local files were not removed: {}",
+                addon_name, repo_name, err
+            );
+            let message = self.t_fmt(
+                "Force redownload of {name} cancelled: the repository is not reachable. Local files were not removed.",
+                &[("name", addon_name)],
+            );
+            self.show_error_toast(message);
+            return;
+        }
+
+        // The repository list may have changed while the probe was in flight.
+        let Some(repo_idx) = self
+            .repository_view_state
+            .repositories
+            .iter()
+            .position(|repo| repo.address == repo_address && repo.path == repo_path)
+        else {
+            warn!(
+                "Addon force redownload cancelled for {}: repository {} is no longer configured",
+                addon_name, repo_name
+            );
+            return;
+        };
+
+        if self.repository_sync_active() || self.is_direct_download_running() {
+            warn!(
+                "Addon force redownload cancelled for {} in {}: sync worker became active during the connection check",
+                addon_name, repo_name
+            );
+            self.show_error_toast(self.t("Operation cancelled"));
+            return;
+        }
+
+        if target_path.exists() {
+            if !target_path.is_dir() {
                 warn!(
                     "Addon force redownload ignored: target path is not a directory for {} in {}",
-                    addon_name, repo.name
+                    addon_name, repo_name
                 );
-                return false;
+                return;
             }
+            if let Err(err) = fs::remove_dir_all(&target_path) {
+                warn!(
+                    "Failed to remove addon directory for {} in {}: {}",
+                    addon_name, repo_name, err
+                );
+                self.show_error_toast(self.t_fmt(
+                    "Failed to remove addon {name}: {error}",
+                    &[("name", addon_name), ("error", err.to_string())],
+                ));
+                return;
+            }
+            info!(
+                "Removed addon directory for {} in {} before recheck",
+                addon_name, repo_name
+            );
         } else {
             info!(
                 "Addon directory already missing for {} in {}; continuing with recheck",
-                addon_name, repo.name
+                addon_name, repo_name
             );
         }
 
         self.update_modal_open = false;
+        self.arm_benchmark(
+            BenchmarkKind::AddonForceRedownload,
+            vec![addon_name.to_string()],
+        );
         self.prepare_update_confirmation(repo_idx);
-        self.syncing_repository.is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn watcher_is_suppressed_only_for_syncs_that_may_write_repository_files() {
+        assert!(Foxy::sync_writes_repository_files(
+            SyncMode::Download,
+            false
+        ));
+        assert!(Foxy::sync_writes_repository_files(
+            SyncMode::QuickCheckOnly,
+            false
+        ));
+        assert!(Foxy::sync_writes_repository_files(
+            SyncMode::RemoteRefreshOnly,
+            true
+        ));
+        assert!(Foxy::sync_writes_repository_files(
+            SyncMode::RecheckOnly,
+            true
+        ));
+        assert!(!Foxy::sync_writes_repository_files(
+            SyncMode::RemoteRefreshOnly,
+            false
+        ));
+        assert!(!Foxy::sync_writes_repository_files(
+            SyncMode::RecheckOnly,
+            false
+        ));
+        assert!(!Foxy::sync_writes_repository_files(
+            SyncMode::RecheckIntegrity,
+            false
+        ));
     }
 }

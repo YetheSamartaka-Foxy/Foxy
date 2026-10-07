@@ -1,7 +1,8 @@
 use super::super::*;
 use crate::core::db::DbValue;
 use crate::core::tasks::calculate_hashes::{
-    AddonHashMetrics, FileHashBatchResult, HashPhaseTimings, RepositoryHashContext,
+    AddonHashMetrics, FileHashBatchResult, HashPhaseTimings, PatchedFileSegments,
+    RepositoryHashContext, apply_segment_verified_files,
     calculate_hashes_for_files_in_tree_with_profile_and_sticky_auto,
     calculate_hashes_for_files_with_profile_and_sticky_auto,
 };
@@ -70,6 +71,7 @@ pub(super) async fn run_incremental_hash_batch(
     addon_hash_metrics: &mut Vec<AddonHashMetrics>,
     progress_percent: f32,
     clean_part_mark_downloaded_files: bool,
+    patched_segments: &[PatchedFileSegments],
 ) -> FileHashBatchResult {
     if file_ids.is_empty() {
         return FileHashBatchResult::default();
@@ -77,7 +79,7 @@ pub(super) async fn run_incremental_hash_batch(
 
     let already_verified_file_ids =
         collect_already_verified_file_ids(context.clone(), file_ids).await;
-    let file_ids_to_hash: HashSet<u64> = if already_verified_file_ids.is_empty() {
+    let mut file_ids_to_hash: HashSet<u64> = if already_verified_file_ids.is_empty() {
         file_ids.clone()
     } else {
         hashed_download_file_ids.extend(already_verified_file_ids.iter().copied());
@@ -114,6 +116,50 @@ pub(super) async fn run_incremental_hash_batch(
             repository_url, hash_tree_loads
         );
         *hash_context = Some(loaded);
+    }
+
+    // Delta-patched files carry their part checksums out of the apply; record
+    // those instead of re-reading the bytes that were just written. A file
+    // whose segments do not match the remote layout stays in the re-read set.
+    let mut segment_verified_file_ids: HashSet<u64> = HashSet::new();
+    let pending_segments: Vec<PatchedFileSegments> = patched_segments
+        .iter()
+        .filter(|segments| file_ids_to_hash.contains(&segments.file_id))
+        .cloned()
+        .collect();
+    if !pending_segments.is_empty()
+        && let Some(hash_context) = hash_context.as_mut()
+    {
+        let outcome = apply_segment_verified_files(
+            context.clone(),
+            &mut hash_context.tree,
+            &pending_segments,
+        )
+        .await;
+        if !outcome.rejected.is_empty() {
+            warn!(
+                "Segment-verified hash rejected for {} delta-patched files; re-reading them from disk",
+                outcome.rejected.len()
+            );
+        }
+        segment_verified_file_ids = outcome.accepted;
+        file_ids_to_hash.retain(|file_id| !segment_verified_file_ids.contains(file_id));
+        hashed_download_file_ids.extend(segment_verified_file_ids.iter().copied());
+    }
+    info!(
+        "Incremental hash sources: repo={} hash_source=segments files={} hash_source=reread files={}",
+        repository_url,
+        segment_verified_file_ids.len(),
+        file_ids_to_hash.len()
+    );
+    if file_ids_to_hash.is_empty() {
+        let mut processed_file_ids = already_verified_file_ids;
+        processed_file_ids.extend(segment_verified_file_ids.iter().copied());
+        return FileHashBatchResult {
+            requested_file_ids: file_ids.clone(),
+            processed_file_ids,
+            ..Default::default()
+        };
     }
 
     let incremental_hash_start = std::time::Instant::now();
@@ -195,16 +241,20 @@ pub(super) async fn run_incremental_hash_batch(
         );
     }
 
+    let mut hash_result = hash_result;
     if !hash_result.processed_file_ids.is_empty() {
         hashed_download_file_ids.extend(hash_result.processed_file_ids.iter().copied());
         addon_hash_metrics.extend(hash_result.addon_metrics.iter().cloned());
-    } else {
+    } else if segment_verified_file_ids.is_empty() {
         warn!(
             "Incremental hash returned no updates for repo={} files={}",
             repository_url,
             file_ids.len()
         );
     }
+    hash_result
+        .processed_file_ids
+        .extend(segment_verified_file_ids.iter().copied());
     hash_result
 }
 
@@ -355,6 +405,7 @@ pub(super) fn render_hash_total_summary(
 
 pub(super) struct SqlitePerfRunGuard {
     pub repository_url: String,
+    pub operation_id: String,
     pub mode: SyncMode,
     pub started_at: Instant,
     pub baseline: crate::core::tasks::init_database::SqlitePerfSnapshot,
@@ -367,15 +418,20 @@ impl Drop for SqlitePerfRunGuard {
         if self.final_report_logged {
             return;
         }
+        self.log_sol("early_exit");
         let delta = sqlite_perf_snapshot().delta_since(self.baseline);
+        let (conn_opened, conn_reused) = crate::core::tasks::db_turso::connection_counters();
         info!(
-            "SQLite sync metrics: repo={} mode={:?} lock_retries={} avg_backoff_ms={:.1} total_backoff_ms={} db_write_time_ms={:.1} elapsed_ms={}",
+            "SQLite sync metrics: repo={} mode={:?} lock_retries={} avg_backoff_ms={:.1} total_backoff_ms={} db_write_time_ms={:.1} write_gate={} conn_opened={} conn_reused={} elapsed_ms={}",
             self.repository_url,
             self.mode,
             delta.lock_retries,
             delta.avg_backoff_ms(),
             delta.lock_backoff_ms_total,
             delta.db_write_time_ms(),
+            *crate::core::tasks::init_database::DB_WRITE_GATE_PERMITS,
+            conn_opened,
+            conn_reused,
             self.started_at.elapsed().as_millis()
         );
         log_sqlite_write_metrics_since(
@@ -386,9 +442,15 @@ impl Drop for SqlitePerfRunGuard {
 }
 
 impl SqlitePerfRunGuard {
-    pub(super) fn start(repository_url: String, mode: SyncMode, started_at: Instant) -> Self {
+    pub(super) fn start(
+        repository_url: String,
+        operation_id: String,
+        mode: SyncMode,
+        started_at: Instant,
+    ) -> Self {
         Self {
             repository_url,
+            operation_id,
             mode,
             started_at,
             baseline: sqlite_perf_snapshot(),
@@ -399,6 +461,76 @@ impl SqlitePerfRunGuard {
 
     pub(super) fn mark_final_report_logged(&mut self) {
         self.final_report_logged = true;
+        self.log_sol("completed");
+    }
+
+    /// The `SOL op=db_persist` action record (conventions/SPEED_OF_LIGHT.md,
+    /// O7): the gated write windows this action opened, summed over every
+    /// category, against the action wall time. Window sums are not wall time
+    /// and are only comparable at the printed `write_gate`.
+    fn log_sol(&self, outcome: &str) {
+        let delta = sqlite_perf_snapshot().delta_since(self.baseline);
+        let categories = sqlite_write_metrics_snapshot()
+            .into_iter()
+            .map(|(label, metric)| {
+                metric.delta_since(
+                    self.write_metric_baseline
+                        .get(&label)
+                        .copied()
+                        .unwrap_or_default(),
+                )
+            })
+            .filter(|delta| delta.calls > 0)
+            .collect::<Vec<_>>();
+        let sum = |f: fn(&SqliteWriteMetricSnapshot) -> u64| categories.iter().map(f).sum::<u64>();
+        let permit_wait_ns: u64 = sum(|m| m.permit_wait_ns_total);
+        let (conn_opened, conn_reused) = crate::core::tasks::db_turso::connection_counters();
+        info!(
+            "{}",
+            crate::core::utils::speed_of_light::sol_line(
+                "db_persist",
+                0,
+                self.started_at.elapsed(),
+                &crate::core::utils::speed_of_light::SolLight::SelfBaseline,
+                &[
+                    ("op_id", self.operation_id.clone()),
+                    ("mode", format!("{:?}", self.mode)),
+                    ("outcome", outcome.to_string()),
+                    ("write_time_ms", format!("{:.1}", delta.db_write_time_ms())),
+                    ("rows_affected", delta.rows_affected.to_string()),
+                    (
+                        "insert_rows_affected",
+                        delta.insert_rows_affected.to_string(),
+                    ),
+                    (
+                        "update_rows_affected",
+                        delta.update_rows_affected.to_string(),
+                    ),
+                    (
+                        "delete_rows_affected",
+                        delta.delete_rows_affected.to_string(),
+                    ),
+                    ("other_rows_affected", delta.other_rows_affected.to_string(),),
+                    (
+                        "permit_wait_ms",
+                        format!("{:.1}", permit_wait_ns as f64 / 1e6)
+                    ),
+                    ("write_calls", sum(|m| m.calls).to_string()),
+                    ("write_committed", sum(|m| m.committed).to_string()),
+                    ("write_failed", sum(|m| m.failed).to_string()),
+                    ("lock_retries", delta.lock_retries.to_string()),
+                    ("backoff_ms", delta.lock_backoff_ms_total.to_string()),
+                    ("categories", categories.len().to_string()),
+                    (
+                        "write_gate",
+                        crate::core::tasks::init_database::DB_WRITE_GATE_PERMITS.to_string(),
+                    ),
+                    ("conn_opened", conn_opened.to_string()),
+                    ("conn_reused", conn_reused.to_string()),
+                    ("timer_scope", "action_wall".to_string()),
+                ],
+            )
+        );
     }
 
     pub(super) fn render_summary(&self) -> String {
@@ -416,23 +548,34 @@ impl SqlitePerfRunGuard {
                 (delta.calls > 0).then_some((label, delta))
             })
             .collect::<Vec<_>>();
-        categories.sort_by_key(|entry| std::cmp::Reverse(entry.1.total_time_ns_total));
+        categories.sort_by_key(|entry| std::cmp::Reverse(entry.1.txn_time_ns_total));
 
         let mut lines = Vec::new();
         lines.push("-- DATABASE METRICS SUMMARY --".to_owned());
+        let (conn_opened, conn_reused) = crate::core::tasks::db_turso::connection_counters();
         lines.push(format!(
-            "sqlite: mode={:?} lock_retries={} avg_backoff_ms={:.1} total_backoff_ms={} db_write_time_ms={:.1} elapsed_ms={}",
+            "sqlite: mode={:?} lock_retries={} avg_backoff_ms={:.1} total_backoff_ms={} db_write_time_ms={:.1} write_gate={} conn_opened={} conn_reused={} elapsed_ms={}",
             self.mode,
             delta.lock_retries,
             delta.avg_backoff_ms(),
             delta.lock_backoff_ms_total,
             delta.db_write_time_ms(),
+            *crate::core::tasks::init_database::DB_WRITE_GATE_PERMITS,
+            conn_opened,
+            conn_reused,
             self.started_at.elapsed().as_millis()
         ));
-        lines.push(format!("write_categories={}", categories.len()));
+        // `txn_ms` below is the gated transaction window, which grows with the
+        // gate size because Turso's waiters block inside `conn.execute`; the gate
+        // is printed so the numbers are never read without it.
+        lines.push(format!(
+            "write_categories={} write_gate={}",
+            categories.len(),
+            *crate::core::tasks::init_database::DB_WRITE_GATE_PERMITS
+        ));
         for (label, metric) in categories.into_iter().take(12) {
             lines.push(format!(
-                "  {:<32} calls={} committed={} failed={} retries={} backoff_ms={} permit_wait_ms={:.1} total_ms={:.1}",
+                "  {:<32} calls={} committed={} failed={} retries={} backoff_ms={} permit_wait_ms={:.1} txn_ms={:.1}",
                 label,
                 metric.calls,
                 metric.committed,
@@ -440,7 +583,7 @@ impl SqlitePerfRunGuard {
                 metric.lock_retries,
                 metric.lock_backoff_ms_total,
                 metric.permit_wait_ms(),
-                metric.total_time_ms()
+                metric.txn_time_ms()
             ));
         }
         lines.push("-- END DATABASE METRICS --".to_owned());

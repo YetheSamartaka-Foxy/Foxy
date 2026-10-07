@@ -67,7 +67,9 @@ impl Foxy {
         });
     }
 
-    pub fn wipe_repository_database_entries(&mut self, repo_idx: usize) {
+    /// `forget_hash_record` also drops the folder's verified-hash record, so the
+    /// next check reads every file; the user wipe does, a measurement may not.
+    pub fn wipe_repository_database_entries(&mut self, repo_idx: usize, forget_hash_record: bool) {
         if self.repository_sync_active() || self.is_direct_download_running() {
             warn!("Repository database wipe ignored: sync worker is currently active");
             return;
@@ -97,6 +99,7 @@ impl Foxy {
             &normalized_url,
             &repo.path,
             &repo.name,
+            forget_hash_record,
         );
     }
 
@@ -237,6 +240,7 @@ impl Foxy {
         repository_url: &str,
         local_path: &str,
         repo_name: &str,
+        forget_hash_record: bool,
     ) {
         let normalized_url = Self::normalize_repo_url(repository_url);
 
@@ -274,6 +278,9 @@ impl Foxy {
         let repaint_ctx = self.repaint_ctx.clone();
         std::thread::spawn(move || {
             let started_at = Instant::now();
+            if forget_hash_record {
+                crate::core::tasks::calculate_hashes::forget_verified_hashes_under(&thread_path);
+            }
             let purge_result = match Runtime::new() {
                 Ok(rt) => rt
                     .block_on(purge_repository_db_only_by_url_and_path(
@@ -643,6 +650,11 @@ impl Foxy {
             return false;
         }
 
+        // The worker would otherwise keep hashing or downloading into a folder
+        // nobody tracks any more, contending with the next sync for the disk.
+        if self.syncing_repository == Some(repo_idx) {
+            self.cancel_sync();
+        }
         let removed = self.repository_view_state.repositories.remove(repo_idx);
         let removed_visual_folder_key = Self::repo_instance_key(&removed.address, &removed.path);
         let mut visual_folders_changed = false;
@@ -706,6 +718,15 @@ impl Foxy {
         if self.download_finished_repo == Some(repo_idx) {
             self.download_finished_repo = None;
         }
+        self.download_disk_space_shortfall =
+            self.download_disk_space_shortfall
+                .take()
+                .and_then(|(index, shortfall)| match index {
+                    index if index == repo_idx => None,
+                    index if index > repo_idx => Some((index - 1, shortfall)),
+                    index => Some((index, shortfall)),
+                });
+        self.update_modal_disk_space_probe = None;
 
         if let Some(action) = self.pending_repository_space_bulk_action.as_mut() {
             action.entries.retain_mut(|entry| {

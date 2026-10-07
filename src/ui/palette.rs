@@ -49,6 +49,9 @@ pub const ACTION_INFO: Color32 = Color32::from_rgb(50, 50, 200);
 /// Red action color used by destructive/pending update actions
 pub const ACTION_DESTRUCTIVE: Color32 = Color32::from_rgb(200, 50, 50);
 
+/// Text and glyphs drawn on a saturated accent or destructive fill, in every theme
+pub const ON_STRONG_FILL: Color32 = Color32::WHITE;
+
 /// Green used to indicate enabled checkbox states
 pub const CHECKBOX_ENABLED: Color32 = Color32::from_rgb(70, 170, 70);
 
@@ -70,6 +73,28 @@ pub const CHECKBOX_ENABLED_HOVER_LIGHT: Color32 = Color32::from_rgb(45, 165, 45)
 pub const CHECKBOX_ENABLED_ACTIVE_LIGHT: Color32 = Color32::from_rgb(30, 125, 30);
 pub const CHECKBOX_ENABLED_BORDER_LIGHT: Color32 = Color32::from_rgb(24, 100, 24);
 pub const CHECKBOX_ENABLED_LABEL_LIGHT: Color32 = Color32::from_rgb(0, 105, 0);
+
+/// Chart series of the Benchmarks tab (a single record, or record A of a
+/// comparison), indexed by series slot.
+pub const BENCHMARK_SERIES: [Color32; 6] = [
+    Color32::from_rgb(86, 156, 214),
+    Color32::from_rgb(232, 145, 56),
+    Color32::from_rgb(104, 190, 120),
+    Color32::from_rgb(214, 96, 110),
+    Color32::from_rgb(170, 130, 220),
+    Color32::from_rgb(210, 190, 80),
+];
+/// Muted partners of `BENCHMARK_SERIES` for record B of a comparison.
+pub const BENCHMARK_SERIES_B: [Color32; 6] = [
+    Color32::from_rgb(150, 190, 225),
+    Color32::from_rgb(240, 190, 130),
+    Color32::from_rgb(165, 215, 175),
+    Color32::from_rgb(230, 160, 170),
+    Color32::from_rgb(205, 185, 235),
+    Color32::from_rgb(225, 215, 150),
+];
+pub const BENCHMARK_CHART_GRID: Color32 = Color32::from_gray(66);
+pub const BENCHMARK_CHART_AXIS: Color32 = Color32::from_gray(96);
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Default)]
 pub struct RgbColor {

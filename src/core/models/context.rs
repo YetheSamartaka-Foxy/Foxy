@@ -1,8 +1,8 @@
 use crate::core::db::{DbHandle, FoxyDb};
 use crate::core::models::recheck_level::RecheckLevel;
 use reqwest::Client;
-use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// A brand-new `subfiles` row staged for the deferred background insert on the
@@ -27,8 +27,13 @@ pub(crate) struct FoxyContext {
     pub(crate) queue_download_targets: bool,
     pub(crate) patch_plan_metadata_refresh: bool,
     pub(crate) force_download_targets: bool,
+    pub(crate) force_full_downloads: bool,
     pub(crate) target_local_path: Option<String>,
     pub(crate) repository_space_shared_path: Option<String>,
+    /// Opaque id of the user action this context serves (a sync pipeline, a
+    /// quick-scan sweep), stamped as `op_id` on every SOL line the action
+    /// emits so a saved benchmark can keep only the records it owns.
+    pub(crate) operation_id: Option<Arc<str>>,
     /// Set by the metadata rebuild when the `subfiles` table is globally empty at
     /// rebuild start (the post-whole-wipe force-redownload / first-download case),
     /// so the per-mod part insert can use a plain `INSERT` into an index-deferred
@@ -50,6 +55,38 @@ pub(crate) struct FoxyContext {
     /// was true. The metadata fan-out clears `fresh_subfiles_load` before the hash
     /// bootstrap flushes local state, so the buffer needs its own durable marker.
     pub(crate) deferred_part_inserts_fresh_load: Arc<AtomicBool>,
+    /// How many leading rows of `deferred_part_inserts` are already committed to
+    /// `subfiles`. The buffer keeps them for the in-memory tree; every flush
+    /// skips them.
+    deferred_parts_persisted: Arc<AtomicUsize>,
+    /// Set by the metadata rebuild when it writes each group of fetched
+    /// manifests' part rows and addon links as the manifests arrive, instead of
+    /// leaving every part row to the flush after the fetch.
+    stream_part_inserts: Arc<AtomicBool>,
+    /// Held while one group is applied and written, so the rows it appends to
+    /// the deferred buffer form one contiguous range.
+    part_stream_lock: Arc<tokio::sync::Mutex<()>>,
+    pending_addon_file_links: Arc<Mutex<Vec<(i64, i64)>>>,
+    pending_download_targets: Arc<Mutex<Vec<PendingDownloadTarget>>>,
+    pending_patch_clear_ids: Arc<Mutex<Vec<i64>>>,
+    /// Content fingerprints the hash pass computed while each file was still
+    /// in the page cache, keyed by file id, for the content-hash refresh that
+    /// follows in the same operation to consume instead of re-sampling the
+    /// file from a cold disk.
+    fresh_file_content_hashes: Arc<Mutex<HashMap<u64, String>>>,
+    /// The verified-hash record this operation refreshes, and may restore from.
+    pub(crate) verified_hash_record:
+        Option<crate::core::tasks::calculate_hashes::VerifiedHashRecordUse>,
+    /// Where mod manifests are kept for revalidation, when this operation keeps them.
+    pub(crate) manifest_cache: Option<Arc<crate::core::utils::manifest_cache::ManifestCache>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct PendingDownloadTarget {
+    pub(crate) file_id: i64,
+    pub(crate) download_remote_url: String,
+    pub(crate) download_local_path: String,
+    pub(crate) size: i64,
 }
 
 /// Constructor
@@ -63,13 +100,44 @@ impl FoxyContext {
             queue_download_targets: true,
             patch_plan_metadata_refresh: false,
             force_download_targets: false,
+            force_full_downloads: false,
             target_local_path: None,
             repository_space_shared_path: None,
+            operation_id: None,
             fresh_subfiles_load: Arc::new(AtomicBool::new(false)),
             defer_part_inserts: Arc::new(AtomicBool::new(false)),
             deferred_part_inserts: Arc::new(Mutex::new(Vec::new())),
             deferred_part_inserts_fresh_load: Arc::new(AtomicBool::new(false)),
+            deferred_parts_persisted: Arc::new(AtomicUsize::new(0)),
+            stream_part_inserts: Arc::new(AtomicBool::new(false)),
+            part_stream_lock: Arc::new(tokio::sync::Mutex::new(())),
+            pending_addon_file_links: Arc::new(Mutex::new(Vec::new())),
+            pending_download_targets: Arc::new(Mutex::new(Vec::new())),
+            pending_patch_clear_ids: Arc::new(Mutex::new(Vec::new())),
+            fresh_file_content_hashes: Arc::new(Mutex::new(HashMap::new())),
+            verified_hash_record: None,
+            manifest_cache: None,
         }
+    }
+
+    /// Record fingerprints computed by a hash pass for the refresh that follows.
+    /// A later pass over the same file replaces the earlier value.
+    pub(crate) fn record_fresh_file_content_hashes(
+        &self,
+        hashes: impl IntoIterator<Item = (u64, String)>,
+    ) {
+        if let Ok(mut fresh) = self.fresh_file_content_hashes.lock() {
+            fresh.extend(hashes);
+        }
+    }
+
+    /// Take the fingerprint a hash pass recorded for `file_id`, if any. Taking
+    /// it means a second refresh in the same operation samples the disk again.
+    pub(crate) fn take_fresh_file_content_hash(&self, file_id: u64) -> Option<String> {
+        self.fresh_file_content_hashes
+            .lock()
+            .ok()
+            .and_then(|mut fresh| fresh.remove(&file_id))
     }
 
     /// Enable/disable the deferred part-insert path for the current sync (set by the
@@ -97,13 +165,54 @@ impl FoxyContext {
         }
     }
 
-    /// Drain every staged part row (clears the buffer). Returns them for the
-    /// background flush; empty when nothing was deferred.
+    /// Drain every staged part row (clears the buffer), including rows already
+    /// committed by the part stream.
     pub(crate) fn take_deferred_parts(&self) -> Vec<DeferredPartInsert> {
-        self.deferred_part_inserts
+        let rows = self
+            .deferred_part_inserts
             .lock()
             .map(|mut buffer| std::mem::take(&mut *buffer))
+            .unwrap_or_default();
+        self.deferred_parts_persisted.store(0, Ordering::Relaxed);
+        rows
+    }
+
+    /// Drain the buffer and return only the rows no stream has committed yet,
+    /// with how many were already committed.
+    pub(crate) fn take_unpersisted_deferred_parts(&self) -> (Vec<DeferredPartInsert>, usize) {
+        let persisted = self.deferred_parts_persisted.load(Ordering::Relaxed);
+        let mut rows = self.take_deferred_parts();
+        let persisted = persisted.min(rows.len());
+        rows.drain(..persisted);
+        (rows, persisted)
+    }
+
+    pub(crate) fn deferred_parts_persisted(&self) -> usize {
+        self.deferred_parts_persisted.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn set_deferred_parts_persisted(&self, rows: usize) {
+        self.deferred_parts_persisted.store(rows, Ordering::Relaxed);
+    }
+
+    /// Copies of the staged rows from `start` on.
+    pub(crate) fn deferred_parts_from(&self, start: usize) -> Vec<DeferredPartInsert> {
+        self.deferred_part_inserts
+            .lock()
+            .map(|buffer| buffer.get(start..).map(<[_]>::to_vec).unwrap_or_default())
             .unwrap_or_default()
+    }
+
+    pub(crate) fn set_stream_part_inserts(&self, value: bool) {
+        self.stream_part_inserts.store(value, Ordering::Relaxed);
+    }
+
+    pub(crate) fn should_stream_part_inserts(&self) -> bool {
+        self.stream_part_inserts.load(Ordering::Relaxed)
+    }
+
+    pub(crate) async fn lock_part_stream(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.part_stream_lock.lock().await
     }
 
     pub(crate) fn deferred_part_count(&self) -> usize {
@@ -142,6 +251,60 @@ impl FoxyContext {
             .store(value, Ordering::Relaxed);
     }
 
+    pub(crate) fn buffer_addon_file_links(&self, links: impl IntoIterator<Item = (i64, i64)>) {
+        let mut links = links.into_iter().peekable();
+        if links.peek().is_none() {
+            return;
+        }
+        if let Ok(mut buffer) = self.pending_addon_file_links.lock() {
+            buffer.extend(links);
+        }
+    }
+
+    pub(crate) fn take_pending_addon_file_links(&self) -> Vec<(i64, i64)> {
+        self.pending_addon_file_links
+            .lock()
+            .map(|mut buffer| std::mem::take(&mut *buffer))
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn buffer_download_targets(
+        &self,
+        rows: impl IntoIterator<Item = PendingDownloadTarget>,
+    ) {
+        let mut rows = rows.into_iter().peekable();
+        if rows.peek().is_none() {
+            return;
+        }
+        if let Ok(mut buffer) = self.pending_download_targets.lock() {
+            buffer.extend(rows);
+        }
+    }
+
+    pub(crate) fn take_pending_download_targets(&self) -> Vec<PendingDownloadTarget> {
+        self.pending_download_targets
+            .lock()
+            .map(|mut buffer| std::mem::take(&mut *buffer))
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn buffer_patch_clear_ids(&self, file_ids: impl IntoIterator<Item = i64>) {
+        let mut file_ids = file_ids.into_iter().peekable();
+        if file_ids.peek().is_none() {
+            return;
+        }
+        if let Ok(mut buffer) = self.pending_patch_clear_ids.lock() {
+            buffer.extend(file_ids);
+        }
+    }
+
+    pub(crate) fn take_pending_patch_clear_ids(&self) -> Vec<i64> {
+        self.pending_patch_clear_ids
+            .lock()
+            .map(|mut buffer| std::mem::take(&mut *buffer))
+            .unwrap_or_default()
+    }
+
     pub(crate) fn with_forced_mod_refreshes(
         mut self,
         forced_mod_refreshes: HashSet<String>,
@@ -165,6 +328,11 @@ impl FoxyContext {
         self
     }
 
+    pub(crate) fn with_force_full_downloads(mut self, enabled: bool) -> Self {
+        self.force_full_downloads = enabled;
+        self
+    }
+
     pub(crate) fn with_target_local_path(mut self, local_path: impl Into<String>) -> Self {
         self.target_local_path = Some(local_path.into());
         self
@@ -173,6 +341,31 @@ impl FoxyContext {
     pub(crate) fn with_repository_space_shared_path(mut self, shared_path: Option<String>) -> Self {
         self.repository_space_shared_path = shared_path;
         self
+    }
+
+    pub(crate) fn with_verified_hash_record(
+        mut self,
+        record: crate::core::tasks::calculate_hashes::VerifiedHashRecordUse,
+    ) -> Self {
+        self.verified_hash_record = Some(record);
+        self
+    }
+
+    pub(crate) fn with_manifest_cache(
+        mut self,
+        cache: crate::core::utils::manifest_cache::ManifestCache,
+    ) -> Self {
+        self.manifest_cache = Some(Arc::new(cache));
+        self
+    }
+
+    pub(crate) fn with_operation_id(mut self, operation_id: impl Into<Arc<str>>) -> Self {
+        self.operation_id = Some(operation_id.into());
+        self
+    }
+
+    pub(crate) fn operation_id(&self) -> Option<&str> {
+        self.operation_id.as_deref()
     }
 
     /// Storage-neutral DB handle for the seam (plan.md §5.1). Converted call

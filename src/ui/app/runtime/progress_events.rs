@@ -126,6 +126,10 @@ impl Foxy {
                                         result.repository_name
                                     );
                                     self.repository_view_state.selected_repository = Some(repo_idx);
+                                    self.arm_benchmark(
+                                        crate::core::benchmarks::BenchmarkKind::ForceRedownload,
+                                        Vec::new(),
+                                    );
                                     self.start_core_sync_with_selected_mod_states(
                                         repo_idx,
                                         SyncMode::Download,
@@ -167,9 +171,13 @@ impl Foxy {
             match self.database_wipe_rx.try_recv() {
                 Ok(Ok(())) => {
                     self.show_success_toast(self.t("Database wiped successfully"));
+                    if std::mem::take(&mut self.recheck_all_after_database_wipe) {
+                        self.queue_recheck_all_repositories();
+                    }
                     self.needs_repaint = true;
                 }
                 Ok(Err(err)) => {
+                    self.recheck_all_after_database_wipe = false;
                     self.show_error_toast(self.t("Failed to wipe database") + &format!(": {err}"));
                     self.needs_repaint = true;
                 }
@@ -180,6 +188,43 @@ impl Foxy {
                 }
             }
         }
+    }
+
+    /// A failed download (including a force redownload that stopped before
+    /// touching local files) has no modal left open to show the error, so it is
+    /// surfaced as a toast plus the selected repository's completion banner.
+    fn report_download_failure(
+        &mut self,
+        repo_index: Option<usize>,
+        message: &str,
+        elapsed: Option<Duration>,
+    ) {
+        let repo_name = repo_index
+            .and_then(|idx| self.repository_view_state.repositories.get(idx))
+            .map(|repo| repo.name.clone())
+            .unwrap_or_default();
+        let toast = match self
+            .download_disk_space_shortfall
+            .as_ref()
+            .filter(|(index, _)| Some(*index) == repo_index)
+        {
+            Some((_, shortfall)) => self.disk_space_shortfall_toast(&repo_name, shortfall),
+            None => self.t_fmt("Update failed for {name}", &[("name", repo_name)]),
+        };
+        self.show_error_toast(toast);
+        if repo_index.is_some() && repo_index == self.repository_view_state.selected_repository {
+            self.completed_repository_check_banner =
+                repo_index.map(|repo_index| RepositoryCheckCompletionState {
+                    repo_index,
+                    mode: SyncMode::Download,
+                    success: false,
+                    had_updates: false,
+                    update_count: 0,
+                    elapsed,
+                    error_message: Some(message.to_string()),
+                });
+        }
+        self.needs_repaint = true;
     }
 
     pub(in crate::ui::app) fn poll_addon_delete_results(&mut self) {
@@ -280,6 +325,7 @@ impl Foxy {
 
             let Some(evt) = evt else { continue };
             processed_events += 1;
+            self.benchmark_observe_event(&evt);
 
             match &evt {
                 ProgressEvent::Diff { mods } => {
@@ -336,6 +382,13 @@ impl Foxy {
                         if !preserve_completed_download {
                             self.set_mod_diff_cache(mods.clone());
                         }
+                    }
+                    self.needs_repaint = true;
+                }
+                ProgressEvent::DiskSpaceShortfall(shortfall) => {
+                    if let Some(repo_index) = self.syncing_repository {
+                        self.download_disk_space_shortfall = Some((repo_index, shortfall.clone()));
+                        self.update_modal_disk_space_probe = None;
                     }
                     self.needs_repaint = true;
                 }
@@ -465,6 +518,13 @@ impl Foxy {
                         self.needs_repaint = true;
                     }
                 }
+                ProgressEvent::HashEstimate {
+                    remaining_bytes,
+                    bytes_per_sec,
+                } => {
+                    self.recheck_hash_estimate = Some((*remaining_bytes, *bytes_per_sec));
+                    self.needs_repaint = true;
+                }
                 ProgressEvent::HashSummary {
                     cumulative_hash_ms,
                     after_download_hash_ms,
@@ -563,6 +623,7 @@ impl Foxy {
                         .saturating_add(merged_bytes_done.saturating_sub(prev_bytes_done));
                     self.recheck_hash_counter = None;
                     self.recheck_hash_part_counter = None;
+                    self.recheck_hash_byte_counter = None;
                     self.update_download_speed();
                     self.needs_repaint = true;
                 }
@@ -571,12 +632,16 @@ impl Foxy {
                     total_files,
                     checked_parts,
                     total_parts,
+                    checked_bytes,
+                    total_bytes,
                 } if self.current_sync_mode == Some(SyncMode::Download) => {
                     if self.download_transfer_progress_active() {
                         continue;
                     }
                     self.recheck_hash_counter = Some((*checked_files, *total_files));
                     self.recheck_hash_part_counter = Some((*checked_parts, *total_parts));
+                    self.recheck_hash_byte_counter =
+                        (*total_bytes > 0).then_some((*checked_bytes, *total_bytes));
                     self.needs_repaint = true;
                 }
                 ProgressEvent::RecheckHashProgress {
@@ -584,6 +649,8 @@ impl Foxy {
                     total_files,
                     checked_parts,
                     total_parts,
+                    checked_bytes,
+                    total_bytes,
                 } if matches!(
                     self.current_sync_mode,
                     Some(
@@ -594,8 +661,18 @@ impl Foxy {
                     )
                 ) =>
                 {
+                    if self.recheck_progress_floor.is_none() {
+                        self.recheck_progress_floor =
+                            Some(self.recheck_progress_fraction().unwrap_or(0.0));
+                    }
                     self.recheck_hash_counter = Some((*checked_files, *total_files));
                     self.recheck_hash_part_counter = Some((*checked_parts, *total_parts));
+                    self.recheck_hash_byte_counter =
+                        (*total_bytes > 0).then_some((*checked_bytes, *total_bytes));
+                    if let Some(fraction) = self.floored_recheck_hash_fraction() {
+                        self.recheck_progress_peak =
+                            Some(self.recheck_progress_peak.unwrap_or(0.0).max(fraction));
+                    }
                     // Throttle repaints for hash progress to avoid overwhelming
                     // the renderer during heavy operations (thousands of events).
                     let now = Instant::now();
@@ -652,7 +729,12 @@ impl Foxy {
                     let had_updates = last_mode != Some(SyncMode::Download) && update_count > 0;
                     self.syncing_repository = None;
                     self.current_sync_mode = None;
-                    if last_mode == Some(SyncMode::Download) {
+                    // A sync is what first writes a repository's addon rows, and
+                    // the watcher indexes those only when it starts.
+                    if finished_successfully {
+                        self.mark_fs_watch_index_dirty();
+                    }
+                    if self.fs_watch_suppressed_for_active_sync() {
                         self.suppress_fs_watch_after_download();
                     }
                     self.refresh_repository_space_bulk_current_repo();
@@ -665,6 +747,9 @@ impl Foxy {
                             self.update_modal_open = false;
                         } else if finished_successfully {
                             self.invalidate_addon_inventory_cache();
+                            if let Some(idx) = last_repo {
+                                self.mark_repository_updated(idx);
+                            }
                             self.download_progress = Some(("Finished".to_string(), 1.0));
                             self.download_finished = true;
                             self.download_finished_repo = last_repo;
@@ -750,8 +835,20 @@ impl Foxy {
                                 self.check_ts3_plugin_updates_for_repo(repo_idx);
                             }
                         } else {
+                            self.download_progress = None;
                             self.download_finished = false;
                             self.download_finished_repo = None;
+                            if let ProgressEvent::Failed(message) = &evt {
+                                let message = self
+                                    .download_disk_space_shortfall
+                                    .as_ref()
+                                    .filter(|(repo_index, _)| Some(*repo_index) == last_repo)
+                                    .map(|(_, shortfall)| {
+                                        self.disk_space_shortfall_message(shortfall)
+                                    })
+                                    .unwrap_or_else(|| message.clone());
+                                self.report_download_failure(last_repo, &message, sync_elapsed);
+                            }
                         }
                     }
                     if last_mode == Some(SyncMode::RecheckOnly)
@@ -833,7 +930,10 @@ impl Foxy {
                             self.open_update_after_sync = false;
                         }
                     } else if last_mode == Some(SyncMode::Download) {
-                        self.completed_repository_check_banner = None;
+                        // A failed download just set its own failure banner.
+                        if !matches!(evt, ProgressEvent::Failed(_)) {
+                            self.completed_repository_check_banner = None;
+                        }
                         self.update_ready_repo = if finished_successfully || update_count == 0 {
                             None
                         } else {
@@ -949,6 +1049,17 @@ impl Foxy {
                                 "Total repository sync duration: {:.2}s",
                                 start_time.elapsed().as_secs_f64()
                             );
+                            if let Some(frames_at_start) = self.frame_cost_at_sync_start.take() {
+                                info!(
+                                    "UI frame cost during sync: mode={:?} {}",
+                                    last_mode,
+                                    super::frame_cost::describe(
+                                        &frames_at_start,
+                                        &self.frame_cost,
+                                        start_time.elapsed()
+                                    )
+                                );
+                            }
                             self.sync_started_at = None;
                         }
                         self.capture_memory_diagnostics_snapshot(
@@ -961,6 +1072,7 @@ impl Foxy {
                             true,
                         );
                     }
+                    self.benchmark_finish_capture(&evt, last_mode, update_count);
                     self.record_repository_space_bulk_completion(
                         last_repo,
                         last_mode,
@@ -999,6 +1111,10 @@ impl Foxy {
                     self.recheck_stage_percent = None;
                     self.recheck_hash_counter = None;
                     self.recheck_hash_part_counter = None;
+                    self.recheck_hash_byte_counter = None;
+                    self.recheck_progress_peak = None;
+                    self.recheck_progress_floor = None;
+                    self.recheck_hash_estimate = None;
                     self.memory_diagnostics_last_logged_stage_key = None;
                     if self.syncing_repository.is_none() && !self.deferred_fs_scan.is_empty() {
                         let repo_urls: Vec<String> = self.deferred_fs_scan.drain().collect();
@@ -1036,6 +1152,7 @@ impl Foxy {
                             }
                             self.recheck_hash_counter = None;
                             self.recheck_hash_part_counter = None;
+                            self.recheck_hash_byte_counter = None;
                         } else if label == "Hashing..." {
                             if self.hash_stage_started_at.is_none() {
                                 self.hash_stage_started_at = Some(now);
@@ -1088,6 +1205,8 @@ impl Foxy {
                         if !Self::stage_label_uses_hash_counter(label) {
                             self.recheck_hash_counter = None;
                             self.recheck_hash_part_counter = None;
+                            self.recheck_hash_byte_counter = None;
+                            self.recheck_hash_estimate = None;
                         }
                         self.needs_repaint = true;
                     }

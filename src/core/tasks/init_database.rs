@@ -1,7 +1,7 @@
 //! Database lifecycle + write instrumentation.
 //!
-//! After the Turso cutover (plan.md §7 Phase 4) the engine itself is built and
-//! bootstrapped in [`crate::core::tasks::db_turso`]; this module keeps the
+//! The Turso engine itself is built and bootstrapped in
+//! [`crate::core::tasks::db_turso`]; this module keeps the
 //! process-wide `init_database()` entry point (delegating to Turso), the
 //! filesystem wipe markers, and the write-path instrumentation (perf counters,
 //! write permits, lock-retry helpers) that the bulk write paths and sync
@@ -12,19 +12,18 @@ use log::info;
 use once_cell::sync::Lazy;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use tokio::sync::OnceCell;
 use tokio::sync::Semaphore;
 
-use crate::core::utils::app_paths;
 use crate::core::utils::format::sanitize_log_path;
 
 /// Legacy SQLite-era bind budget for SQL shapes that do not use tuned chunk helpers.
 pub(crate) const SQLITE_MAX_VARIABLES: usize = 999;
 /// Raw SQL bulk operations (not a query builder) can use a higher bind-variable
-/// ceiling. Turso accepts far more (≥250k, plan.md §11); the historical SQLite
+/// ceiling. Turso accepts far more than 250k; the historical SQLite
 /// 3.32+ limit of 32,766 is kept as a conservative, well-tested chunking bound.
 const SQLITE_BULK_VARIABLE_LIMIT: usize = 32_766;
 const SQLITE_WRITE_PERMITS_CAP: usize = 8;
@@ -34,6 +33,13 @@ pub(crate) struct SqlitePerfSnapshot {
     pub(crate) lock_retries: u64,
     pub(crate) lock_backoff_ms_total: u64,
     pub(crate) db_write_time_ns_total: u64,
+    /// Rows changed by every write statement the seam ran (the engine's own
+    /// count), so a persistence record has a work model beside its windows.
+    pub(crate) rows_affected: u64,
+    pub(crate) insert_rows_affected: u64,
+    pub(crate) update_rows_affected: u64,
+    pub(crate) delete_rows_affected: u64,
+    pub(crate) other_rows_affected: u64,
 }
 
 impl SqlitePerfSnapshot {
@@ -46,6 +52,19 @@ impl SqlitePerfSnapshot {
             db_write_time_ns_total: self
                 .db_write_time_ns_total
                 .saturating_sub(baseline.db_write_time_ns_total),
+            rows_affected: self.rows_affected.saturating_sub(baseline.rows_affected),
+            insert_rows_affected: self
+                .insert_rows_affected
+                .saturating_sub(baseline.insert_rows_affected),
+            update_rows_affected: self
+                .update_rows_affected
+                .saturating_sub(baseline.update_rows_affected),
+            delete_rows_affected: self
+                .delete_rows_affected
+                .saturating_sub(baseline.delete_rows_affected),
+            other_rows_affected: self
+                .other_rows_affected
+                .saturating_sub(baseline.other_rows_affected),
         }
     }
 
@@ -56,6 +75,11 @@ impl SqlitePerfSnapshot {
         self.lock_backoff_ms_total as f64 / self.lock_retries as f64
     }
 
+    /// Aggregate of every category's gated transaction window. Like
+    /// [`SqliteWriteMetricSnapshot::txn_time_ms`] it grows with the write gate,
+    /// because Turso's waiters block inside `conn.execute` rather than on the
+    /// gate: the same refresh reports ~300 ms at gate 1 and ~2 180 ms at gate 8.
+    /// Never compare it across gate sizes; the logs carry `write_gate=` for that.
     pub(crate) fn db_write_time_ms(self) -> f64 {
         self.db_write_time_ns_total as f64 / 1_000_000.0
     }
@@ -66,6 +90,11 @@ struct SqlitePerfCounters {
     lock_retries: AtomicU64,
     lock_backoff_ms_total: AtomicU64,
     db_write_time_ns_total: AtomicU64,
+    rows_affected: AtomicU64,
+    insert_rows_affected: AtomicU64,
+    update_rows_affected: AtomicU64,
+    delete_rows_affected: AtomicU64,
+    other_rows_affected: AtomicU64,
 }
 
 impl SqlitePerfCounters {
@@ -74,6 +103,11 @@ impl SqlitePerfCounters {
             lock_retries: self.lock_retries.load(Ordering::Relaxed),
             lock_backoff_ms_total: self.lock_backoff_ms_total.load(Ordering::Relaxed),
             db_write_time_ns_total: self.db_write_time_ns_total.load(Ordering::Relaxed),
+            rows_affected: self.rows_affected.load(Ordering::Relaxed),
+            insert_rows_affected: self.insert_rows_affected.load(Ordering::Relaxed),
+            update_rows_affected: self.update_rows_affected.load(Ordering::Relaxed),
+            delete_rows_affected: self.delete_rows_affected.load(Ordering::Relaxed),
+            other_rows_affected: self.other_rows_affected.load(Ordering::Relaxed),
         }
     }
 
@@ -84,6 +118,18 @@ impl SqlitePerfCounters {
             .fetch_add(backoff_ms, Ordering::Relaxed);
     }
 
+    fn record_rows_affected(&self, kind: SqliteStatementKind, rows: u64) {
+        let counter = match kind {
+            SqliteStatementKind::Insert => &self.insert_rows_affected,
+            SqliteStatementKind::Update => &self.update_rows_affected,
+            SqliteStatementKind::Delete => &self.delete_rows_affected,
+            SqliteStatementKind::Other => &self.other_rows_affected,
+            SqliteStatementKind::Ignored => return,
+        };
+        self.rows_affected.fetch_add(rows, Ordering::Relaxed);
+        counter.fetch_add(rows, Ordering::Relaxed);
+    }
+
     fn record_db_write_time(&self, elapsed: Duration) {
         let elapsed_ns = elapsed.as_nanos().min(u128::from(u64::MAX)) as u64;
         self.db_write_time_ns_total
@@ -92,6 +138,69 @@ impl SqlitePerfCounters {
 }
 
 static SQLITE_PERF_COUNTERS: Lazy<SqlitePerfCounters> = Lazy::new(SqlitePerfCounters::default);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SqliteStatementKind {
+    Insert,
+    Update,
+    Delete,
+    Other,
+    Ignored,
+}
+
+fn sqlite_statement_kind(sql: &str) -> SqliteStatementKind {
+    match crate::core::utils::profiling::statement_verb(sql) {
+        "INSERT" | "REPLACE" => SqliteStatementKind::Insert,
+        "UPDATE" => SqliteStatementKind::Update,
+        "DELETE" => SqliteStatementKind::Delete,
+        "BEGIN" | "COMMIT" | "ROLLBACK" | "PRAGMA" | "SELECT" => SqliteStatementKind::Ignored,
+        _ => SqliteStatementKind::Other,
+    }
+}
+
+#[cfg(test)]
+mod statement_kind_tests {
+    use super::{SqliteStatementKind, sqlite_statement_kind};
+
+    #[test]
+    fn classifies_affected_row_statement_kinds() {
+        assert_eq!(
+            sqlite_statement_kind("  INSERT OR IGNORE INTO t VALUES (1)"),
+            SqliteStatementKind::Insert
+        );
+        assert_eq!(
+            sqlite_statement_kind("REPLACE INTO t VALUES (1)"),
+            SqliteStatementKind::Insert
+        );
+        assert_eq!(
+            sqlite_statement_kind("\nUPDATE t SET value = 1"),
+            SqliteStatementKind::Update
+        );
+        assert_eq!(
+            sqlite_statement_kind("DELETE FROM t"),
+            SqliteStatementKind::Delete
+        );
+        assert_eq!(
+            sqlite_statement_kind("CREATE TABLE t (id INTEGER)"),
+            SqliteStatementKind::Other
+        );
+        assert_eq!(
+            sqlite_statement_kind("COMMIT"),
+            SqliteStatementKind::Ignored
+        );
+        assert_eq!(
+            sqlite_statement_kind(
+                "WITH v(id, value) AS (VALUES (1, 2)) UPDATE t SET value = v.value FROM v"
+            ),
+            SqliteStatementKind::Update
+        );
+    }
+}
+
+/// Credit rows a write statement changed to the process-wide counters.
+pub(crate) fn record_sqlite_rows_affected(sql: &str, rows: u64) {
+    SQLITE_PERF_COUNTERS.record_rows_affected(sqlite_statement_kind(sql), rows);
+}
 static SQLITE_WRITE_METRICS: Lazy<Mutex<HashMap<String, SqliteWriteMetricSnapshot>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
@@ -103,7 +212,7 @@ pub(crate) struct SqliteWriteMetricSnapshot {
     pub(crate) lock_retries: u64,
     pub(crate) lock_backoff_ms_total: u64,
     pub(crate) permit_wait_ns_total: u64,
-    pub(crate) total_time_ns_total: u64,
+    pub(crate) txn_time_ns_total: u64,
 }
 
 impl SqliteWriteMetricSnapshot {
@@ -119,14 +228,24 @@ impl SqliteWriteMetricSnapshot {
             permit_wait_ns_total: self
                 .permit_wait_ns_total
                 .saturating_sub(baseline.permit_wait_ns_total),
-            total_time_ns_total: self
-                .total_time_ns_total
-                .saturating_sub(baseline.total_time_ns_total),
+            txn_time_ns_total: self
+                .txn_time_ns_total
+                .saturating_sub(baseline.txn_time_ns_total),
         }
     }
 
-    pub(crate) fn total_time_ms(self) -> f64 {
-        self.total_time_ns_total as f64 / 1_000_000.0
+    /// Time inside the gated transaction window (after the write permit, through
+    /// COMMIT), summed over the category's calls.
+    ///
+    /// This is **not** the cost of the work. Turso has one internal writer, so
+    /// past a gate size of 1 the waiters block inside `conn.execute` and that
+    /// wait lands here rather than in `permit_wait_ms`. The same 3 738-row
+    /// `addon_files insert` measures ~72 ms at gate 1, ~130 ms at gate 2,
+    /// ~260-380 ms at gate 4 and 570-1 150 ms at gate 8 on one frozen case. Read
+    /// it against the gate size the run reports, and treat gate 1 as the
+    /// uncontended reference.
+    pub(crate) fn txn_time_ms(self) -> f64 {
+        self.txn_time_ns_total as f64 / 1_000_000.0
     }
 
     pub(crate) fn permit_wait_ms(self) -> f64 {
@@ -144,8 +263,8 @@ fn sqlite_write_permits() -> usize {
         .clamp(1, SQLITE_WRITE_PERMITS_CAP)
 }
 
-/// Default write-permit count. On the Turso/MVCC storage layer (Stage B, plan.md
-/// §5.2/§5.3) the write path no longer acquires the permit at all - the value
+/// Default write-permit count. On the Turso/MVCC storage layer the write path
+/// no longer acquires the permit at all - the value
 /// only feeds the metadata-rebuild fan-out ceilings (`mod_task_limit` /
 /// `part_task_limit`), so default it to CPU count to widen concurrent-writer
 /// fan-out.
@@ -161,14 +280,40 @@ pub(crate) static DB_WRITE_PERMITS: Lazy<usize> = Lazy::new(sqlite_write_permits
 pub(crate) static DB_WRITE_SEMAPHORE: Lazy<std::sync::Arc<Semaphore>> =
     Lazy::new(|| std::sync::Arc::new(Semaphore::new(*DB_WRITE_PERMITS)));
 
-/// Permits for the Turso **write-serialization gate** (`DB_WRITE_GATE`). Defaults
-/// to **1** - single-writer serialization that matches Turso's one internal
-/// writer. Overridable via `FOXY_DB_WRITE_GATE` for sweeps (see
-/// `after_turso_regression_analysis2.md`).
+/// Permits for the Turso **write-serialization gate** (`DB_WRITE_GATE`).
+///
+/// Defaults to `min(4, cpus)`. It was 1 - single-writer serialization matching
+/// Turso's one internal writer (`after_turso_regression_analysis2.md`) - until a
+/// gate sweep showed the serialization costs more than the convoy it avoids on
+/// the metadata rebuild: on a 96-mod / 433k-part repository the refresh went from
+/// a 2.032 s median (range 1.958-2.096, n=10) at gate 1 to 1.659 s (1.610-1.766,
+/// n=10) at gate 4, an 18% improvement with disjoint ranges and zero lock
+/// retries or write failures at any gate size.
+///
+/// The win is confined to write-heavy work. On a real 4 GB download the gate
+/// waits total ~0.5 s of a ~68 s run and the difference is not separable from
+/// server variance (n=4, overlapping ranges), and on a file-count-heavy download
+/// it is ~2% of the median while removing a long tail. Nothing regressed, so the
+/// default takes the metadata-rebuild win.
+///
+/// Capped at 4 rather than `SQLITE_WRITE_PERMITS_CAP` because the sweep showed
+/// the curve flat from 4 to 8 while `db_write_time_ms` keeps climbing - above 4
+/// the waiters simply queue *inside* `conn.execute` instead of on this gate,
+/// which is the convoy the gate exists to avoid. Overridable via
+/// `FOXY_DB_WRITE_GATE` for sweeps.
 fn db_write_gate_permits() -> usize {
     env_usize("FOXY_DB_WRITE_GATE")
-        .unwrap_or(1)
+        .unwrap_or_else(default_db_write_gate)
         .clamp(1, SQLITE_WRITE_PERMITS_CAP)
+}
+
+/// Concurrent committers to allow by default: 4, or fewer on a small machine so
+/// a 2-core host does not oversubscribe its cores with write transactions.
+fn default_db_write_gate() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(4)
 }
 
 /// Serializes the seam's write transactions (`transaction` / `execute_retry` /
@@ -183,8 +328,9 @@ fn db_write_gate_permits() -> usize {
 /// `after_turso_regression_analysis2.md` convoy (87-row and 18 008-row batches
 /// both ~24s). Gating at 1 lets the writer run flat-out back-to-back instead.
 /// Reads (`read_transaction`, `query_*`) are intentionally NOT gated.
+pub(crate) static DB_WRITE_GATE_PERMITS: Lazy<usize> = Lazy::new(db_write_gate_permits);
 pub(crate) static DB_WRITE_GATE: Lazy<std::sync::Arc<Semaphore>> =
-    Lazy::new(|| std::sync::Arc::new(Semaphore::new(db_write_gate_permits())));
+    Lazy::new(|| std::sync::Arc::new(Semaphore::new(*DB_WRITE_GATE_PERMITS)));
 
 /// Acquire the write-serialization gate, returning the held permit and the time
 /// spent waiting for it. The permit is released when dropped; callers hold it for
@@ -332,7 +478,7 @@ fn record_sqlite_write_metrics(
     metric.lock_retries += retry_delta.lock_retries;
     metric.lock_backoff_ms_total += retry_delta.lock_backoff_ms_total;
     metric.permit_wait_ns_total += duration_ns(permit_wait);
-    metric.total_time_ns_total += duration_ns(elapsed);
+    metric.txn_time_ns_total += duration_ns(elapsed);
 }
 
 pub(crate) fn sqlite_write_metrics_snapshot() -> BTreeMap<String, SqliteWriteMetricSnapshot> {
@@ -359,16 +505,17 @@ pub(crate) fn log_sqlite_write_metrics_since(
             (delta.calls > 0).then_some((label, delta))
         })
         .collect::<Vec<_>>();
-    deltas.sort_by_key(|entry| std::cmp::Reverse(entry.1.total_time_ns_total));
+    deltas.sort_by_key(|entry| std::cmp::Reverse(entry.1.txn_time_ns_total));
 
     info!(
-        "SQLite write category summary: context={} categories={}",
+        "SQLite write category summary: context={} categories={} write_gate={}",
         context,
-        deltas.len()
+        deltas.len(),
+        *DB_WRITE_GATE_PERMITS
     );
     for (label, metric) in deltas.into_iter().take(12) {
         info!(
-            "SQLite write category metrics: context={} label={} calls={} committed={} failed={} retries={} backoff_ms={} permit_wait_ms={:.1} total_ms={:.1}",
+            "SQLite write category metrics: context={} label={} calls={} committed={} failed={} retries={} backoff_ms={} permit_wait_ms={:.1} txn_ms={:.1} write_gate={}",
             context,
             label,
             metric.calls,
@@ -377,13 +524,14 @@ pub(crate) fn log_sqlite_write_metrics_since(
             metric.lock_retries,
             metric.lock_backoff_ms_total,
             metric.permit_wait_ms(),
-            metric.total_time_ms()
+            metric.txn_time_ms(),
+            *DB_WRITE_GATE_PERMITS
         );
     }
 }
 
 /// Maximum number of bind variables for raw SQL bulk operations. Turso accepts
-/// far more than SQLite (≥250k, plan.md §11), but the conservative SQLite-era
+/// far more than SQLite, but the conservative SQLite-era
 /// 32,766 ceiling is kept as a well-tested chunking bound.
 ///
 /// Overridable via `FOXY_DB_VAR_LIMIT` so the bulk-statement chunk size can be
@@ -432,25 +580,23 @@ pub(crate) fn bulk_write_rows_for(params_per_row: usize) -> usize {
         .max(1)
 }
 
-/// Process-wide database handle. Builds/bootstraps the Turso engine via
-/// [`crate::core::tasks::db_turso`] and runs the post-init addon-display-name
-/// backfill exactly once (plan.md §5.1).
+/// Process-wide database handle for the active game space. Builds/bootstraps
+/// the Turso engine via [`crate::core::tasks::db_turso`] and runs the
+/// post-init maintenance passes (content-hash baseline retirement, addon
+/// display-name backfill) once per database file, so a runtime game-space
+/// switch maintains the newly opened space's database too.
 pub(crate) async fn init_database() -> crate::core::db::DbHandle {
-    static BACKFILLED: OnceCell<()> = OnceCell::const_new();
-    static CONTENT_HASH_FORMAT_CHECKED: OnceCell<()> = OnceCell::const_new();
+    static MAINTAINED_DB_PATHS: tokio::sync::Mutex<Option<std::collections::HashSet<PathBuf>>> =
+        tokio::sync::Mutex::const_new(None);
 
-    let db = crate::core::tasks::db_turso::init_turso_database().await;
-    CONTENT_HASH_FORMAT_CHECKED
-        .get_or_init(|| async {
-            retire_stale_content_hash_baselines(&db).await;
-        })
-        .await;
-    BACKFILLED
-        .get_or_init(|| async {
-            let backfill_db = crate::core::db::FoxyDb::from_turso(db.clone());
-            crate::core::addon_metadata::backfill_missing_addon_display_names(&backfill_db).await;
-        })
-        .await;
+    let (path, db) = crate::core::tasks::db_turso::init_turso_database_with_path().await;
+    let mut maintained = MAINTAINED_DB_PATHS.lock().await;
+    let maintained = maintained.get_or_insert_with(std::collections::HashSet::new);
+    if maintained.insert(path) {
+        retire_stale_content_hash_baselines(&db).await;
+        let backfill_db = crate::core::db::FoxyDb::from_turso(db.clone());
+        crate::core::addon_metadata::backfill_missing_addon_display_names(&backfill_db).await;
+    }
     db
 }
 
@@ -501,8 +647,8 @@ async fn retire_stale_content_hash_baselines(db: &crate::core::db::DbHandle) {
 }
 
 pub fn wipe_database_sync() {
-    let base_dir = app_paths::foxy_data_dir();
-    let marker_path = base_dir.join(".wipe_database_on_next_start");
+    let base_dir = crate::core::game::spaces::active_game_space_dir();
+    let marker_path = base_dir.join(crate::core::tasks::db_turso::WIPE_MARKER_FILE_NAME);
 
     info!("Marking database for wipe on next startup...");
 
@@ -512,11 +658,25 @@ pub fn wipe_database_sync() {
     }
 }
 
+/// Release the cached database handle from the UI thread.
+///
+/// A runtime game-space switch must not leave the previous space's
+/// `database.db` open: the slot only swaps on the next database access, so a
+/// space that is switched away from and then removed would hit `remove_dir_all`
+/// against a live handle and half-delete its workspace on Windows.
+pub fn close_active_database_sync() {
+    let Some(runtime) = crate::core::api::background_runtime() else {
+        log::warn!("No background runtime available to release the database handle");
+        return;
+    };
+    runtime.block_on(crate::core::tasks::db_turso::close_active_database());
+}
+
 /// Check for wipe marker and delete database files if present.
 /// Call this BEFORE init_database() to ensure files aren't locked.
 pub fn check_and_wipe_database() {
-    let base_dir = app_paths::foxy_data_dir();
-    let marker_path = base_dir.join(".wipe_database_on_next_start");
+    let base_dir = crate::core::game::spaces::active_game_space_dir();
+    let marker_path = base_dir.join(crate::core::tasks::db_turso::WIPE_MARKER_FILE_NAME);
 
     if !marker_path.exists() {
         return;
@@ -524,18 +684,7 @@ pub fn check_and_wipe_database() {
 
     info!("Wipe marker found, deleting database files...");
 
-    let db_artifacts = [
-        "database.db",
-        "database.db-wal",
-        "database.db-shm",
-        "database.db.compacting",
-        "database.db.compacting-wal",
-        "database.db.compacting-shm",
-        "database.db.bak",
-        "database.db.bak-wal",
-        "database.db.bak-shm",
-    ];
-    for name in db_artifacts {
+    for name in crate::core::tasks::db_turso::DATABASE_ARTIFACT_FILE_NAMES {
         let path = base_dir.join(name);
         if path.exists() {
             match fs::remove_file(&path) {
@@ -549,7 +698,7 @@ pub fn check_and_wipe_database() {
             let name = entry.file_name();
             if name
                 .to_string_lossy()
-                .starts_with("database.db.rebuild-backup-")
+                .starts_with(crate::core::tasks::db_turso::DATABASE_REBUILD_BACKUP_PREFIX)
             {
                 let path = entry.path();
                 match fs::remove_file(&path) {
@@ -569,11 +718,15 @@ pub fn check_and_wipe_database() {
 }
 
 /// Wipe the database by dropping all tables and re-applying the bootstrap schema
-/// on the live Turso handle (plan.md §5.1). Works while the app is running
-/// because it reuses the existing engine handle.
+/// on the live Turso handle. Works while the app is running because it reuses
+/// the existing engine handle.
 pub async fn wipe_database_live() -> Result<(), String> {
-    let db = crate::core::tasks::db_turso::init_turso_database().await;
+    let (path, db) = crate::core::tasks::db_turso::init_turso_database_with_path().await;
     crate::core::tasks::db_turso::wipe_and_rebuild_live(&db)
         .await
-        .map_err(|e| format!("Failed to wipe Turso database: {e}"))
+        .map_err(|e| format!("Failed to wipe Turso database: {e}"))?;
+    // The tables were dropped and recreated from the bootstrap schema, so any
+    // incompatibility recorded for this file is now stale.
+    crate::core::tasks::db_schema_check::probe_database(&path, &db).await;
+    Ok(())
 }

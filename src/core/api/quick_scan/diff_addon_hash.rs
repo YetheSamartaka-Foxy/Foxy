@@ -26,6 +26,8 @@ struct AddonHashWork {
     path_key: String,
     local_path: String,
     fingerprint: AddonRootFingerprint,
+    /// Content hash produced by the same walk that built `fingerprint`.
+    content_hash: Option<String>,
 }
 
 pub(super) struct AddonHashResult {
@@ -41,6 +43,9 @@ pub(super) struct AddonHashResult {
     pub addon_hash_calculated: usize,
     pub persistent_cache_entry_count: usize,
     pub enabled_addons: usize,
+    /// Directory entries enumerated and stat-ed by the fingerprint walks of
+    /// this scan (files plus directories), the work unit of O4.
+    pub entries_walked: u64,
     pub phase1_addon_content_mismatch_count: usize,
     pub missing_addon_path_samples: Vec<String>,
 }
@@ -57,6 +62,7 @@ pub(super) async fn resolve_addon_hashes(
     let mut addon_hash_hits_shared_memory = 0usize;
     let mut addon_hash_hits_persistent = 0usize;
     let mut addon_hash_calculated = 0usize;
+    let mut entries_walked = 0u64;
     let persistent_cache_entry_count = if let Some(shared) = shared_cache {
         match shared.lock() {
             Ok(guard) => guard.persistent_addon_hash_by_path.len(),
@@ -119,7 +125,8 @@ pub(super) async fn resolve_addon_hashes(
         fingerprint_candidates.push((path_key, m.local_path.clone()));
     }
 
-    let mut fingerprint_by_key: HashMap<String, (AddonRootFingerprint, Duration)> = HashMap::new();
+    let mut fingerprint_by_key: HashMap<String, (AddonRootFingerprint, Option<String>, Duration)> =
+        HashMap::new();
     if !fingerprint_candidates.is_empty() {
         let fingerprint_concurrency = std::thread::available_parallelism()
             .map(|n| n.get())
@@ -127,30 +134,37 @@ pub(super) async fn resolve_addon_hashes(
             .max(1)
             .min(fingerprint_candidates.len());
         let semaphore = Arc::new(Semaphore::new(fingerprint_concurrency));
-        let mut join_set: JoinSet<(String, AddonRootFingerprint, Duration)> = JoinSet::new();
+        let mut join_set: JoinSet<(String, AddonRootFingerprint, Option<String>, Duration)> =
+            JoinSet::new();
         for (path_key, local_path) in fingerprint_candidates.iter().cloned() {
             let sem = semaphore.clone();
             join_set.spawn(async move {
                 let _permit = sem.acquire_owned().await.ok();
                 let started = Instant::now();
-                let fingerprint =
+                let probe =
                     tokio::task::spawn_blocking(move || addon_root_fingerprint(&local_path))
                         .await
-                        .unwrap_or_default();
-                (path_key, fingerprint, started.elapsed())
+                        .ok();
+                let (fingerprint, content_hash) = match probe {
+                    Some(probe) => (probe.fingerprint, probe.content_hash),
+                    None => (AddonRootFingerprint::default(), None),
+                };
+                (path_key, fingerprint, content_hash, started.elapsed())
             });
         }
         while let Some(joined) = join_set.join_next().await {
-            if let Ok((path_key, fingerprint, elapsed)) = joined {
-                fingerprint_by_key.insert(path_key, (fingerprint, elapsed));
+            if let Ok((path_key, fingerprint, content_hash, elapsed)) = joined {
+                fingerprint_by_key.insert(path_key, (fingerprint, content_hash, elapsed));
             }
         }
     }
 
     for (path_key, local_path) in fingerprint_candidates {
-        let Some((fingerprint, walk_elapsed)) = fingerprint_by_key.remove(&path_key) else {
+        let Some((fingerprint, content_hash, walk_elapsed)) = fingerprint_by_key.remove(&path_key)
+        else {
             continue;
         };
+        entries_walked += fingerprint.relevant_file_count + fingerprint.relevant_dir_count;
 
         if !fingerprint.exists || !fingerprint.is_dir {
             if missing_addon_path_samples.len() < MISSING_ADDON_PATH_SAMPLE_LIMIT {
@@ -229,6 +243,7 @@ pub(super) async fn resolve_addon_hashes(
             path_key,
             local_path,
             fingerprint,
+            content_hash,
         });
     }
 
@@ -247,21 +262,29 @@ pub(super) async fn resolve_addon_hashes(
             join_set.spawn(async move {
                 let _permit = sem.acquire_owned().await.ok();
                 let started = Instant::now();
-                let state = match tokio::task::spawn_blocking({
-                    let local_path = work.local_path.clone();
-                    let fingerprint = work.fingerprint.clone();
-                    move || probe_addon_folder_state_with_fingerprint(&local_path, &fingerprint)
-                })
-                .await
-                {
-                    Ok(s) => s,
-                    Err(err) => {
-                        warn!(
-                            "Addon folder probe task panicked for {}: {}",
-                            work.local_path, err
-                        );
-                        Default::default()
-                    }
+                // The fingerprint walk already produced this addon's content
+                // hash; only a folder that could not be walked needs a retry.
+                let state = match work.content_hash.clone() {
+                    Some(content_hash) => AddonFolderState {
+                        exists: true,
+                        content_hash,
+                    },
+                    None => match tokio::task::spawn_blocking({
+                        let local_path = work.local_path.clone();
+                        let fingerprint = work.fingerprint.clone();
+                        move || probe_addon_folder_state_with_fingerprint(&local_path, &fingerprint)
+                    })
+                    .await
+                    {
+                        Ok(s) => s,
+                        Err(err) => {
+                            warn!(
+                                "Addon folder probe task panicked for {}: {}",
+                                work.local_path, err
+                            );
+                            Default::default()
+                        }
+                    },
                 };
                 (work, state, started.elapsed())
             });
@@ -397,6 +420,7 @@ pub(super) async fn resolve_addon_hashes(
         addon_hash_calculated,
         persistent_cache_entry_count,
         enabled_addons,
+        entries_walked,
         phase1_addon_content_mismatch_count,
         missing_addon_path_samples,
     }
@@ -427,7 +451,7 @@ mod tests {
         std::fs::write(addon_path.join("file.txt"), b"fresh content").expect("write addon file");
         let local_path = addon_path.to_string_lossy().to_string();
         let path_key = normalize_path_for_match(&local_path);
-        let fingerprint = addon_root_fingerprint(&local_path);
+        let fingerprint = addon_root_fingerprint(&local_path).fingerprint;
 
         let mut shared = QuickScanSharedCache::default();
         shared.persistent_addon_hash_by_path.insert(

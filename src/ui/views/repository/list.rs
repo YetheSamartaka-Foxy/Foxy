@@ -1,9 +1,11 @@
+use crate::core::api::SyncMode;
 use crate::ui::app::{
     Foxy, RepositoryContextConfirmAction, RepositoryListContextAction, RepositoryListRow,
     RepositoryListSection,
 };
 use crate::ui::i18n::{tr, tr_fmt};
 use crate::ui::search_filter::MultiEntryFilter;
+use crate::ui::types::{FoxyView, RepositorySettingsTab};
 use crate::ui::views::galley_cache;
 use crate::ui::views::repository::RepositoryListSectionContextAction;
 use eframe::egui::{self, Align, Button, Margin, RichText, ScrollArea, TextEdit, Ui, Vec2};
@@ -306,6 +308,25 @@ impl Foxy {
             .resizable(false)
             .frame(sidepanel_frame)
             .show(ui, |ui| {
+                self.render_game_space_header(ui);
+
+                // Games without repository sync get no repository controls at
+                // all rather than buttons that lead nowhere.
+                if !crate::core::game::registry()
+                    .active()
+                    .capabilities()
+                    .repository_sync
+                {
+                    ui.label(
+                        RichText::new(self.t(
+                            "This game does not use Foxy repositories. Manage its mods from the game space tools.",
+                        ))
+                        .italics()
+                        .color(self.color_text_dim()),
+                    );
+                    return;
+                }
+
                 let add_repository_font_size = self
                     .settings_view_state
                     .font_sizes
@@ -577,6 +598,30 @@ impl Foxy {
                                 warn!("Failed to open repository local path from context menu");
                                 self.show_error_toast(self.t("Failed to open repository local path."));
                             }
+                        }
+                        RepositoryListContextAction::QuickLocalCheck => {
+                            info!("Quick local check requested from repository list context menu");
+                            self.arm_benchmark(
+                                crate::core::benchmarks::BenchmarkKind::QuickCheck,
+                                Vec::new(),
+                            );
+                            self.start_core_sync(repo_idx, SyncMode::QuickCheckOnly);
+                        }
+                        RepositoryListContextAction::RemoteRecheck => {
+                            info!("Remote data recheck requested from repository list context menu");
+                            self.arm_benchmark(
+                                crate::core::benchmarks::BenchmarkKind::Recheck,
+                                Vec::new(),
+                            );
+                            self.start_remote_recheck_with_plan(repo_idx);
+                        }
+                        RepositoryListContextAction::OpenSettings => {
+                            self.selected_repository_for_settings = Some(repo_idx);
+                            self.current_repository_settings_tab =
+                                RepositorySettingsTab::Configuration;
+                            self.last_view = self.current_view;
+                            self.current_view = FoxyView::RepositorySettings;
+                            self.preload_repository_settings_addon_caches(repo_idx);
                         }
                         RepositoryListContextAction::Delete => {
                             self.repository_view_state.selected_repository = Some(repo_idx);

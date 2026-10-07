@@ -3,11 +3,13 @@ mod app_general;
 mod app_paths;
 mod application;
 mod backup;
+mod benchmarks;
 mod customization;
+mod game_space;
 mod profile_manager;
 mod scheduling;
 mod tools;
-mod ts3_plugins;
+pub(crate) mod ts3_plugins;
 
 pub use profile_manager::Arma3ProfileAction;
 
@@ -64,14 +66,15 @@ impl Foxy {
 
                 ui.separator();
 
+                // Game-space specific settings (game paths, search folders,
+                // TS3 plugins) live in the game space settings view.
                 let tabs = [
                     "Application",
-                    "Additional search folders",
+                    "Benchmarks",
                     "Cleanup",
                     "Direct download",
                     "Backup Manager",
                     "Scheduling",
-                    "TS3 Plugin",
                     "Customization",
                 ];
                 let selected = tabs
@@ -117,16 +120,13 @@ impl Foxy {
                             "Application" => self.render_application_settings(ui),
                             "Scheduling" => self.render_scheduling_settings(ui),
                             "Backup Manager" => self.render_backup_manager_settings(ui),
-                            "Additional search folders" => {
-                                self.render_additional_search_folders(ui)
-                            }
                             "Cleanup" => self.render_cleanup_settings(ui),
                             "Direct download" => self.render_direct_download_settings(ui),
-                            "TS3 Plugin" | "TS3 Plugins" => self.render_ts3_plugins_settings(ui),
                             "Customization" => {
                                 self.render_customization_settings(ui, card_size.y - 30.0)
                             }
-                            _ => {}
+                            "Benchmarks" => self.render_benchmarks_settings(ui, card_size.y - 30.0),
+                            _ => self.render_application_settings(ui),
                         }
                     });
                 ui.painter().rect_stroke(
@@ -142,11 +142,19 @@ impl Foxy {
     }
 }
 
-pub(super) fn render_wrapped_info_row(ui: &mut Ui, horizontal_padding: f32, text: RichText) {
+pub(crate) fn render_wrapped_info_row(ui: &mut Ui, horizontal_padding: f32, text: RichText) {
     ui.horizontal(|ui| {
         ui.add_space(horizontal_padding);
-        let width = (ui.available_width() - horizontal_padding).max(0.0);
-        ui.add_sized(Vec2::new(width, 0.0), Label::new(text).wrap());
+        let width = (ui.available_width() - 2.0 * horizontal_padding).max(0.0);
+        ui.allocate_ui_with_layout(
+            Vec2::new(width, 0.0),
+            Layout::left_to_right(Align::Min),
+            |ui| {
+                ui.set_max_width(width);
+                ui.add(Label::new(text).wrap());
+            },
+        );
+        ui.add_space(horizontal_padding);
     });
 }
 

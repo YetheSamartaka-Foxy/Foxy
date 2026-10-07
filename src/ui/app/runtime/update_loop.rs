@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use eframe::egui::{
@@ -7,8 +8,28 @@ use eframe::egui::{
 use log::{error, info, warn};
 
 use crate::core::api::SyncMode;
+use crate::ui::app::debug_modals::DebugModal;
+use crate::ui::app::runtime::frame_cost::{FrameSection, SectionTimer};
 use crate::ui::app::{Foxy, FoxyView};
 use crate::ui::tray::{TrayEvent, TrayManager};
+
+/// Frames kept for the stall percentiles: a few seconds at a probe-driven
+/// repaint rate.
+const FRAME_INTERVAL_WINDOW: usize = 240;
+
+/// How soon a frame follows a state change the UI flagged with `needs_repaint`.
+const STATE_CHANGE_REPAINT_DELAY: Duration = Duration::from_millis(16);
+
+/// `(p50, p95, max)` of the recent frame intervals in milliseconds.
+pub(crate) fn frame_interval_stats(intervals: &VecDeque<f32>) -> Option<(f32, f32, f32)> {
+    if intervals.is_empty() {
+        return None;
+    }
+    let mut sorted: Vec<f32> = intervals.iter().copied().collect();
+    sorted.sort_by(f32::total_cmp);
+    let at = |pct: usize| sorted[((sorted.len() - 1) * pct) / 100];
+    Some((at(50), at(95), sorted[sorted.len() - 1]))
+}
 
 impl Foxy {
     fn handle_tray_events(&mut self, ctx: &egui::Context) {
@@ -70,18 +91,34 @@ impl Foxy {
     }
 
     /// Update the smoothed frames-per-second estimate that backs the optional
-    /// on-screen FPS counter and the non-visual agent GUI probe. While either
-    /// probe is enabled the UI is kept repainting continuously so the readout
-    /// stays live; otherwise this resets the running average.
+    /// on-screen FPS counter and the agent GUI `fps` probe. While the counter
+    /// is shown, or for a short window after each `fps` read, the UI is kept
+    /// repainting continuously so the readout stays live; otherwise this
+    /// resets the running average and the UI repaints only when it needs to.
     fn update_fps_estimate(&mut self, ctx: &egui::Context) {
-        let agent_gui_probe = self.agent_gui.is_some();
+        let now = Instant::now();
+        let agent_gui_probe = self
+            .agent_gui
+            .as_ref()
+            .is_some_and(|runtime| runtime.fps_probe_active(now));
         if !self.settings_view_state.show_fps_counter && !agent_gui_probe {
             self.fps_ema = 0.0;
+            self.frame_intervals_ms.clear();
+            return;
+        }
+        if let Some(runtime) = self.agent_gui.as_mut()
+            && std::mem::take(&mut runtime.fps_probe_warming)
+        {
+            ctx.request_repaint();
             return;
         }
 
         let dt = ctx.input(|i| i.stable_dt);
         if dt > 0.0 {
+            if self.frame_intervals_ms.len() >= FRAME_INTERVAL_WINDOW {
+                self.frame_intervals_ms.pop_front();
+            }
+            self.frame_intervals_ms.push_back(dt * 1000.0);
             let instant_fps = 1.0 / dt;
             self.fps_ema = if self.fps_ema <= 0.0 {
                 instant_fps
@@ -182,16 +219,26 @@ impl Foxy {
 
     pub fn update(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
         const CLOSE_FORCE_EXIT_TIMEOUT: Duration = Duration::from_secs(2);
+        let repaint_causes = ui.ctx().repaint_causes();
+        self.frame_cost.begin_frame(
+            crate::core::utils::thread_cpu::current_thread_cpu(),
+            repaint_causes.iter().map(|cause| (cause.file, cause.line)),
+        );
+        let polls = SectionTimer::start(FrameSection::Polls);
         let ctx = ui.ctx().clone();
         self.repaint_ctx = Some(ctx.clone());
 
+        super::keyboard_focus::repair_lost_keyboard_focus();
         self.apply_runtime_palette_visuals(&ctx);
         self.apply_runtime_ui_scale(&ctx);
         self.invalidate_galley_caches_on_font_atlas_change(&ctx);
-        self.handle_global_accessibility_shortcuts(&ctx);
         self.log_display_metrics_if_changed(&ctx);
         self.update_fps_estimate(&ctx);
         self.poll_agent_gui(&ctx);
+        // After `poll_agent_gui`: the driver pushes injected key events into the
+        // current frame's `InputState`, which egui rebuilds from RawInput next
+        // frame, so a handler running before it never sees them.
+        self.handle_global_accessibility_shortcuts(&ctx);
 
         if self.close_requested_at.is_none() && ctx.input(|i| i.viewport().close_requested()) {
             self.persist_window_state_if_changed(&ctx);
@@ -220,37 +267,67 @@ impl Foxy {
             return;
         }
 
+        self.poll_persistence_results();
+        self.process_pending_game_space_switch(&ctx);
+
         if self.startup_frame_rendered && !self.startup_tasks_started {
             self.startup_tasks_started = true;
+            self.begin_startup_sync_tracking(self.startup_first_frame_at.unwrap_or_default());
             if !self.settings_view_state.debug_mode {
                 self.restore_pending_updates();
-                if self.settings_view_state.auto_quick_scan_on_launch {
+                // `Foxy::new` already starts this plan when the database is
+                // safe to open; only launches that skipped it start one here.
+                if self.settings_view_state.auto_quick_scan_on_launch
+                    && self.startup_quick_scan_filter_worker.is_none()
+                    && self.startup_quick_scan_filter_rx.is_none()
+                {
                     self.start_quick_local_scan();
                 }
                 self.start_fs_watcher();
             }
             self.queue_startup_rechecks();
+            self.start_startup_ts3_plugin_scan();
+            self.start_repository_space_freshness_probe();
             self.maybe_auto_fill_app_update_url_from_metadata();
-            if self.settings_view_state.app_update_auto_check && self.app_update_source_configured()
+            // A real check would overwrite the seeded preview status.
+            if !self.previewing_debug_modal(DebugModal::AppUpdate)
+                && self.settings_view_state.app_update_auto_check
+                && self.app_update_source_configured()
             {
+                self.app_update_prompt_armed = true;
                 self.start_update_check();
             }
         }
 
+        if self.startup_tasks_started {
+            self.maybe_recheck_app_update();
+            self.maybe_recheck_repository_spaces();
+        }
+        self.poll_repository_space_freshness_results(&ctx);
+        self.poll_startup_diagnostics();
+        self.poll_mission_scan();
         self.poll_restore_pending_updates();
         self.poll_startup_quick_scan_filter_results();
+        if self.startup_tasks_started {
+            self.refresh_fs_watcher_if_stale();
+        }
         self.poll_fs_watch_results();
         self.poll_quick_scan_progress();
         self.poll_quick_scan_results();
         self.poll_repository_db_wipe_results();
         self.poll_database_wipe_result();
         self.poll_addon_delete_results();
+        self.poll_addon_force_redownload_results();
         self.poll_addon_backup_results();
         self.poll_repository_settings_addon_preload_results();
+        self.maybe_warm_addon_inventory();
         self.poll_repository_addon_size_load_results();
         self.poll_persistence_results();
         self.poll_backend_progress();
         self.poll_finished_backend_worker();
+        self.poll_benchmark_save_results();
+        self.tick_benchmark_capture(&ctx);
+        self.poll_benchmark_export_screenshot(&ctx);
         self.poll_join_preflight_results(&ctx);
         // Drain any pending repo.json metadata refreshes queued by sync completion.
         if !self.pending_repo_metadata_refresh.is_empty() {
@@ -260,12 +337,14 @@ impl Foxy {
             }
         }
         self.poll_direct_download_progress();
+        self.poll_workshop_task();
         self.poll_app_update_events();
         self.poll_image_results(&ctx);
         self.poll_repo_metadata_results(&ctx);
         self.poll_repository_space_import_results(&ctx);
         self.poll_addon_hash_recalc_results();
         self.poll_cached_update_load_results();
+        self.poll_ts3_plugin_scan();
         self.maybe_dispatch_persistence_requests(false);
         self.process_startup_rechecks();
         self.maybe_log_startup_repository_layout();
@@ -274,6 +353,7 @@ impl Foxy {
         self.process_scheduled_jobs(&ctx);
         self.process_addon_hash_recalc_queue();
         self.maybe_sample_memory_diagnostics();
+        self.maybe_emit_startup_sol();
         self.handle_tray_events(&ctx);
 
         while let Ok((address, port, status)) = self.server_updates.try_recv() {
@@ -292,7 +372,9 @@ impl Foxy {
         self.poll_pending_join_status(&ctx);
 
         if self.needs_repaint {
-            ctx.request_repaint();
+            // One 60 Hz frame later, not at once: while progress events keep
+            // arriving, an immediate repaint chains frames at the display rate.
+            crate::ui::app::request_frame_after(&ctx, STATE_CHANGE_REPAINT_DELAY);
             self.needs_repaint = false;
         } else if let Some(repaint_interval) = self.next_visible_repaint_interval() {
             ctx.request_repaint_after(repaint_interval);
@@ -334,12 +416,16 @@ impl Foxy {
             self.render_memory_diagnostics_window(&ctx);
         }
 
+        polls.stop(&mut self.frame_cost);
         let panel_frame = Frame {
             fill: ctx.global_style().visuals.window_fill(),
             ..Default::default()
         };
         CentralPanel::default().frame(panel_frame).show(ui, |ui| {
+            let main_view = SectionTimer::start(FrameSection::MainView);
             self.render_main_view(ui, frame);
+            main_view.stop(&mut self.frame_cost);
+            let content = SectionTimer::start(FrameSection::Content);
             ui.push_id(
                 (
                     "main_content_area",
@@ -380,11 +466,18 @@ impl Foxy {
                             FoxyView::SwiftyMigration => {
                                 self.render_swifty_migration_view(ui, frame);
                             }
+                            FoxyView::GameSpaces => {
+                                self.render_game_spaces_view(ui, frame);
+                            }
+                            FoxyView::GameSpaceSettings => {
+                                self.render_game_space_settings_view(ui, frame);
+                            }
                             FoxyView::None => {}
                         }
                     }
                 },
             );
+            content.stop(&mut self.frame_cost);
             let can_use_custom_resize = !self.main_view_state.use_window_decorations
                 && ctx.input(|i| {
                     let viewport = i.viewport();
@@ -397,13 +490,27 @@ impl Foxy {
             }
         });
 
+        if self.pending_low_space_notice {
+            self.pending_low_space_notice = false;
+            self.show_error_toast(self.t(
+                "A drive Foxy writes to is nearly full. Downloads and database writes can fail part-way through. Free up space before syncing.",
+            ));
+        }
+
+        let overlays = SectionTimer::start(FrameSection::Overlays);
         self.render_ui_toast(&ctx);
         self.render_renderer_fallback_notice(&ctx);
+        self.render_storage_compat_notice(&ctx);
+        self.render_db_lock_conflict_prompt(&ctx);
         self.render_db_schema_wipe_prompt(&ctx);
+        self.render_app_update_prompt(&ctx);
+        self.render_benchmark_save_prompt(&ctx);
         self.render_scheduled_post_action_overlay(&ctx);
+        overlays.stop(&mut self.frame_cost);
 
         if !self.startup_frame_rendered {
             self.startup_frame_rendered = true;
+            self.startup_first_frame_at = Some(crate::core::api::process_start_elapsed());
             ctx.request_repaint();
         }
     }
@@ -450,12 +557,8 @@ impl Foxy {
         }
 
         egui::Window::new(self.t("Renderer changed"))
-            .frame(
-                egui::Frame::window(&ctx.global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(eframe::egui::CornerRadius::same(10)),
-            )
+            .frame(self.modal_window_chrome(ctx))
+            .title_frame(self.modal_window_chrome(ctx))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)
@@ -493,103 +596,71 @@ impl Foxy {
             });
     }
 
-    /// Blocking startup prompt shown when the local database schema is older
-    /// than the schema this binary ships. Offers a primary "wipe and continue"
-    /// action and a secondary "keep my data at my own risk" dismissal.
-    fn render_db_schema_wipe_prompt(&mut self, ctx: &egui::Context) {
-        let Some(prompt) = self.pending_db_schema_wipe else {
+    /// Claim this game space's database for the process, returning the owning
+    /// PID slot when another Foxy already holds it.
+    pub(crate) fn claim_active_space_database(&self) -> Option<Option<u32>> {
+        match crate::core::tasks::db_process_lock::acquire_for_active_space() {
+            crate::core::tasks::db_process_lock::LockOutcome::Acquired => None,
+            crate::core::tasks::db_process_lock::LockOutcome::Busy { holder_pid } => {
+                Some(holder_pid)
+            }
+            crate::core::tasks::db_process_lock::LockOutcome::Unavailable(reason) => {
+                warn!(
+                    "Could not verify exclusive database access ({}); continuing",
+                    reason
+                );
+                None
+            }
+        }
+    }
+
+    /// Terminal prompt shown when another Foxy process owns this game space's
+    /// database. There is no safe "continue anyway": Turso does not support two
+    /// processes on one file, so the only action is to close this window.
+    fn render_db_lock_conflict_prompt(&mut self, ctx: &egui::Context) {
+        let Some(holder_pid) = self.db_lock_conflict else {
             return;
         };
-        if crate::core::tasks::db_schema_version::is_current() {
-            self.pending_db_schema_wipe = None;
-            return;
-        }
+        let mut close_clicked = false;
 
-        // A wipe must not race an in-flight sync (it drops the tables the sync
-        // is writing). Mirror the settings wipe dialog's guard.
-        let sync_active = self.repository_sync_active();
-        let mut wipe_clicked = false;
-        let mut dismiss_clicked = false;
-
-        egui::Window::new(self.t("Database update required"))
-            .frame(
-                egui::Frame::window(&ctx.global_style())
-                    .fill(self.color_card_bg())
-                    .stroke(egui::Stroke::new(1.0, self.color_text_normal()))
-                    .corner_radius(eframe::egui::CornerRadius::same(10)),
-            )
+        egui::Window::new(self.t("Foxy is already running"))
+            .frame(self.modal_window_chrome(ctx))
+            .title_frame(self.modal_window_chrome(ctx))
             .title_bar(true)
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .default_width(540.0)
+            .default_width(520.0)
             .show(ctx, |ui| {
                 ui.label(self.t(
-                    "This version of Foxy uses a newer database format than the data stored on this computer. The local database must be wiped and rebuilt before it can be used reliably.",
+                    "Another Foxy process is already using this game space's database. Only one Foxy can use a game space at a time, so this window cannot continue.",
                 ));
+                if let Some(pid) = holder_pid {
+                    ui.add_space(4.0);
+                    ui.label(self.t_fmt(
+                        "The database is held by process {pid}.",
+                        &[("pid", pid.to_string())],
+                    ));
+                }
                 ui.add_space(8.0);
                 ui.label(self.t(
-                    "Wiping clears cached repository data only - your downloaded mods and files on disk are not touched. Foxy rebuilds the cache automatically the next time it checks each repository.",
+                    "Switch to the Foxy window that is already open, or close it and start Foxy again.",
                 ));
                 ui.add_space(16.0);
 
                 ui.vertical_centered(|ui| {
-                    let wipe_btn = ui.add_enabled(
-                        !sync_active,
-                        egui::Button::new(self.t("Wipe database and continue")),
-                    );
-                    if wipe_btn.hovered() && !sync_active {
+                    let close_btn = ui.button(self.t("Close this window"));
+                    if close_btn.hovered() {
                         ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                     }
-                    if wipe_btn.clicked() {
-                        wipe_clicked = true;
-                    }
-                    if sync_active {
-                        ui.add_space(4.0);
-                        ui.label(self.t("Finish the current sync before wiping the database."));
-                    }
-
-                    ui.add_space(10.0);
-                    let dismiss_btn = ui.button(self.t("Continue without wiping (at my own risk)"));
-                    if dismiss_btn.hovered() {
-                        ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
-                    }
-                    if dismiss_btn.clicked() {
-                        dismiss_clicked = true;
+                    if close_btn.clicked() {
+                        close_clicked = true;
                     }
                 });
             });
 
-        if wipe_clicked {
-            warn!(
-                "Database schema wipe confirmed (stored={} target={})",
-                prompt.stored_version, prompt.target_version
-            );
-            self.pending_db_schema_wipe = None;
-            // Wipe on a background thread so the UI draw loop is never blocked.
-            std::thread::spawn(|| match tokio::runtime::Runtime::new() {
-                Ok(rt) => {
-                    if let Err(e) =
-                        rt.block_on(crate::core::tasks::init_database::wipe_database_live())
-                    {
-                        error!("Failed to wipe database for schema upgrade: {}", e);
-                    } else {
-                        crate::core::tasks::db_schema_version::mark_wiped();
-                        info!("Database schema wipe completed");
-                    }
-                }
-                Err(e) => error!("Failed to create runtime for schema wipe: {}", e),
-            });
-            // Clear in-memory caches that mirror the now-empty database.
-            self.clear_mod_diff_cache();
-            self.repo_states.clear();
-            self.update_ready_repo = None;
-        } else if dismiss_clicked {
-            crate::core::tasks::db_schema_version::mark_dismissed(
-                prompt.stored_version,
-                prompt.target_version,
-            );
-            self.pending_db_schema_wipe = None;
+        if close_clicked {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
     }
 
@@ -741,5 +812,26 @@ impl eframe::App for Foxy {
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         Foxy::update(self, ui, frame);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_interval_stats_report_percentiles_and_the_worst_frame() {
+        let mut intervals = VecDeque::new();
+        assert_eq!(frame_interval_stats(&intervals), None);
+        for value in [16.0, 17.0, 16.5, 16.2, 16.8, 16.4, 16.6, 16.1, 16.9, 250.0] {
+            intervals.push_back(value);
+        }
+        let (p50, p95, max) = frame_interval_stats(&intervals).unwrap();
+        assert!((16.0..=17.0).contains(&p50));
+        assert!((16.0..=17.0).contains(&p95));
+        assert_eq!(max, 250.0);
+        intervals.push_back(300.0);
+        let (_, _, max) = frame_interval_stats(&intervals).unwrap();
+        assert_eq!(max, 300.0);
     }
 }

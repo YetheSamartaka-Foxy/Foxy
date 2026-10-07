@@ -3,15 +3,32 @@ use std::path::Path;
 
 use crate::types::DiscoveredFile;
 
+/// Manifest this tool writes into a mod folder; skipped on discovery so a
+/// folder published in place (or a previous output reused as a source) does
+/// not hash its own manifest.
+const GENERATED_MOD_MANIFEST: &str = "foxy_addon.json";
+
 /// Recursively discover all files within a mod directory.
 /// Preserves traversal order so generated checksums align with legacy-style manifests.
 pub fn discover_files(mod_source: &Path) -> Result<Vec<DiscoveredFile>> {
+    discover_files_with_pruning(mod_source, false)
+}
+
+pub fn discover_files_with_pruning(
+    mod_source: &Path,
+    prune_unused_optionals: bool,
+) -> Result<Vec<DiscoveredFile>> {
     let mut files = Vec::new();
-    walk_dir(mod_source, mod_source, &mut files)?;
+    walk_dir(mod_source, mod_source, &mut files, prune_unused_optionals)?;
     Ok(files)
 }
 
-fn walk_dir(root: &Path, current: &Path, files: &mut Vec<DiscoveredFile>) -> Result<()> {
+fn walk_dir(
+    root: &Path,
+    current: &Path,
+    files: &mut Vec<DiscoveredFile>,
+    prune_unused_optionals: bool,
+) -> Result<()> {
     let entries = std::fs::read_dir(current)
         .with_context(|| format!("Failed to read directory: {}", current.display()))?;
 
@@ -22,7 +39,16 @@ fn walk_dir(root: &Path, current: &Path, files: &mut Vec<DiscoveredFile>) -> Res
             .with_context(|| format!("Failed to read metadata: {}", path.display()))?;
 
         if metadata.is_dir() {
-            walk_dir(root, &path, files)?;
+            if prune_unused_optionals
+                && current == root
+                && entry
+                    .file_name()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case("optionals")
+            {
+                continue;
+            }
+            walk_dir(root, &path, files, prune_unused_optionals)?;
         } else if metadata.is_file() {
             if path
                 .extension()
@@ -38,6 +64,10 @@ fn walk_dir(root: &Path, current: &Path, files: &mut Vec<DiscoveredFile>) -> Res
                 .to_str()
                 .unwrap_or("")
                 .to_string();
+
+            if relative == GENERATED_MOD_MANIFEST {
+                continue;
+            }
 
             if !relative.is_empty() {
                 files.push(DiscoveredFile {
@@ -90,6 +120,29 @@ mod tests {
     }
 
     #[test]
+    fn pruning_skips_root_optionals_and_keeps_nested_content() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("Optionals")).unwrap();
+        std::fs::create_dir_all(dir.path().join("addons").join("optionals")).unwrap();
+        std::fs::write(dir.path().join("Optionals").join("unused.pbo"), b"unused").unwrap();
+        std::fs::write(
+            dir.path()
+                .join("addons")
+                .join("optionals")
+                .join("needed.pbo"),
+            b"needed",
+        )
+        .unwrap();
+
+        let files = discover_files_with_pruning(dir.path(), true).unwrap();
+        let paths: Vec<_> = files
+            .iter()
+            .map(|file| file.relative_path.replace('\\', "/"))
+            .collect();
+        assert_eq!(paths, vec!["addons/optionals/needed.pbo"]);
+    }
+
+    #[test]
     fn discover_files_excludes_srf_files() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("mod.srf"), b"srf data").unwrap();
@@ -99,6 +152,23 @@ mod tests {
         let files = discover_files(dir.path()).unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].relative_path, "data.pbo");
+    }
+
+    #[test]
+    fn discover_files_excludes_generated_mod_manifest_at_root_only() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("foxy_addon.json"), b"{}").unwrap();
+        let nested = dir.path().join("addons");
+        fs::create_dir(&nested).unwrap();
+        fs::write(nested.join("foxy_addon.json"), b"{}").unwrap();
+        fs::write(dir.path().join("data.pbo"), b"pbo data").unwrap();
+
+        let files = discover_files(dir.path()).unwrap();
+        let mut names: Vec<&str> = files.iter().map(|f| f.relative_path.as_str()).collect();
+        names.sort();
+        assert_eq!(names.len(), 2);
+        assert!(names[0].ends_with("foxy_addon.json"));
+        assert_eq!(names[1], "data.pbo");
     }
 
     #[test]

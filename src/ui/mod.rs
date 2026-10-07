@@ -1,6 +1,7 @@
 pub mod app;
 pub mod context_menu;
 pub mod fonts;
+pub mod game_logos;
 pub mod i18n;
 pub mod launcher;
 pub mod memory;
