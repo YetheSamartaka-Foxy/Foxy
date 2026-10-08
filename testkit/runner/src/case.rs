@@ -87,6 +87,18 @@ pub fn validate(case: &Value) -> Result<()> {
             case["operations"].is_array(),
             "Perf case requires operations"
         );
+        for operation in case["operations"].as_array().into_iter().flatten() {
+            if operation["op"].as_str() == Some("origin-switch") {
+                ensure!(
+                    operation["root"].is_string(),
+                    "origin-switch requires a root directory"
+                );
+                ensure!(
+                    case["origin"]["root"].is_string(),
+                    "origin-switch requires a case origin"
+                );
+            }
+        }
     }
     let oracle = &case["guards"]["oracle_command"];
     if !oracle.is_null()
@@ -117,6 +129,15 @@ mod tests {
         );
         assert_ne!(hash(&json!([1, 2])).unwrap(), hash(&json!([2, 1])).unwrap());
     }
+    #[test]
+    fn origin_switch_requires_a_root_and_a_case_origin() {
+        let case = |origin: Value, switch: Value| json!({"id":"a","kind":"perf","repository":{},"origin":origin,"operations":[switch]});
+        let switch = json!({"op":"origin-switch","root":"v2"});
+        assert!(validate(&case(json!({"root":"v1","port":8140}), switch.clone())).is_ok());
+        assert!(validate(&case(Value::Null, switch)).is_err());
+        assert!(validate(&case(json!({"root":"v1"}), json!({"op":"origin-switch"}))).is_err());
+    }
+
     #[test]
     fn rejects_legacy_oracle() {
         assert!(

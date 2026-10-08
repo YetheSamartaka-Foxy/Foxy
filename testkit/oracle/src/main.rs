@@ -20,6 +20,31 @@ struct Args {
     structure_only: bool,
     #[arg(long, default_value_t = 25, value_parser = clap::value_parser!(u32).range(1..))]
     max_problems: u32,
+    /// Verify only these published mods (repeatable); every one must be published
+    #[arg(long = "mod")]
+    mods: Vec<String>,
+}
+
+fn select_mods(published: Vec<Mod>, wanted: &[String]) -> Result<Vec<Mod>> {
+    if wanted.is_empty() {
+        return Ok(published);
+    }
+    for name in wanted {
+        if !published
+            .iter()
+            .any(|item| item.name.eq_ignore_ascii_case(name))
+        {
+            bail!("mod {name} is not published by the repository");
+        }
+    }
+    Ok(published
+        .into_iter()
+        .filter(|item| {
+            wanted
+                .iter()
+                .any(|name| item.name.eq_ignore_ascii_case(name))
+        })
+        .collect())
 }
 
 #[derive(Deserialize)]
@@ -167,6 +192,7 @@ fn run(args: Args) -> Result<Report> {
         Ok(mods) if !mods.is_empty() => mods,
         _ => fetch_index("repo.json").context("fetch repository mod list")?,
     };
+    let mods = select_mods(mods, &args.mods)?;
     let mut report = Report {
         mode: if args.structure_only {
             "structure"
@@ -315,5 +341,17 @@ mod tests {
             safe_join(Path::new("root"), "mod/path").unwrap(),
             Path::new("root").join("mod").join("path")
         );
+    }
+
+    #[test]
+    fn mod_filter_keeps_named_mods_and_rejects_unpublished_ones() {
+        let published = || vec![Mod { name: "@a".into() }, Mod { name: "@B".into() }];
+        let names = |mods: Vec<Mod>| mods.into_iter().map(|m| m.name).collect::<Vec<_>>();
+        assert_eq!(names(select_mods(published(), &[]).unwrap()), ["@a", "@B"]);
+        assert_eq!(
+            names(select_mods(published(), &["@b".into()]).unwrap()),
+            ["@B"]
+        );
+        assert!(select_mods(published(), &["@c".into()]).is_err());
     }
 }

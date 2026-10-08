@@ -207,7 +207,13 @@ It compares **part** checksums. A manifest's per-file `checksum` is a rollup
 over that file's parts, so a whole-file digest will mismatch every file and mean
 nothing; the per-part `checksum` values are plain BLAKE3 over the byte range.
 `--structure-only` degrades it to a presence-and-length check - do not read that
-as a content pass.
+as a content pass. `--mod <name>` (repeatable) verifies only those published
+mods, for a payload that syncs a subset of a repository; a name the repository
+does not publish is an error. The oracle does not look for extra local files.
+
+`origin-switch` (see `testkit/CASE_FORMAT.md`) republishes a case origin in
+place, which is how `perf-server-republish-delta-ssd` reproduces a server update
+over a clean install whose part state is only derived from file checksums.
 
 ## Rules that keep the numbers worth having
 

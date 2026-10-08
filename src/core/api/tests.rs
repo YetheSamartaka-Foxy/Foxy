@@ -746,6 +746,98 @@ async fn content_hash_refresh_does_not_bless_addon_with_missing_manifest_file() 
     );
 }
 
+#[tokio::test]
+async fn content_hash_refresh_records_baseline_for_pending_addon_missing_new_files() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db = build_db().await;
+    let fdb = FoxyDb::from_turso(db.clone());
+
+    let context = Arc::new(FoxyContext::new(db.clone(), reqwest::Client::new()));
+
+    let repo_url = "https://example.invalid/repo/";
+    let repo_root = temp.path().join("repo");
+    let addon_dir = repo_root.join("@addon");
+    std::fs::create_dir_all(&addon_dir).expect("create addon dir");
+    let present_file = addon_dir.join("present.pbo");
+    let added_file = addon_dir.join("added.pbo");
+    std::fs::write(&present_file, b"present file").expect("write present file");
+
+    seed_repository(
+        &fdb,
+        1,
+        "Repo",
+        repo_url,
+        &repo_root.to_string_lossy(),
+        "REPO_LOCAL",
+        "REPO_REMOTE",
+        "",
+    )
+    .await;
+    seed_addon(
+        &fdb,
+        11,
+        "@addon",
+        "https://example.invalid/repo/@addon/",
+        &addon_dir.to_string_lossy(),
+        "MOD_LOCAL",
+        "MOD_REMOTE",
+        "",
+        true,
+    )
+    .await;
+    seed_repository_addon(&fdb, 1, 11).await;
+    seed_file(
+        &fdb,
+        21,
+        "present.pbo",
+        "https://example.invalid/repo/@addon/present.pbo",
+        &present_file.to_string_lossy(),
+        "PRESENT_REMOTE",
+        "PRESENT_REMOTE",
+        "",
+        12,
+        0,
+    )
+    .await;
+    seed_file(
+        &fdb,
+        22,
+        "added.pbo",
+        "https://example.invalid/repo/@addon/added.pbo",
+        &added_file.to_string_lossy(),
+        "",
+        "ADDED_REMOTE",
+        "",
+        12,
+        1,
+    )
+    .await;
+    seed_addon_file(&fdb, 11, 21).await;
+    seed_addon_file(&fdb, 11, 22).await;
+
+    assert!(
+        refresh_content_hashes_for_repository(context.clone(), repo_url, None).await,
+        "content hash refresh should complete"
+    );
+
+    let (_, _, addon_content) = checksums(&fdb, "addons", 11).await;
+    assert!(
+        !addon_content.is_empty(),
+        "a file the pending update adds is reported by its tree checksum, so the addon keeps a baseline"
+    );
+
+    let diff = quick_local_change_diff(
+        context, repo_url, None, None, None, false, true, false, None,
+    )
+    .await;
+    let addon = diff
+        .iter()
+        .find(|m| m.name == "@addon")
+        .expect("pending addon is reported");
+    assert!(addon.needs_update);
+    assert!(addon.files.iter().any(|f| f.name == "added.pbo"));
+}
+
 // ---------------------------------------------------------------------------
 // Quick scan eligibility tests
 // ---------------------------------------------------------------------------
