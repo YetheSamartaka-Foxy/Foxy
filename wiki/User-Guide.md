@@ -451,7 +451,7 @@ Options:
 - **Check Now** - check right away.
 - **Browse All Versions** - opens the Version Browser to upgrade, reinstall, or downgrade to any published release.
 
-When an update is available, Foxy shows a prompt at startup (it asks again on every launch until the update is installed) and a red update badge in the footer. Downloads are verified with a BLAKE3 hash before installation.
+When an update is available, Foxy shows a prompt at startup (it asks again on every launch until the update is installed) and a red update badge in the footer. Downloads are verified with a BLAKE3 or SHA-256 hash before installation. GitHub updates use an attached checksum file when available, or GitHub's SHA-256 asset digest. An installer without a supported hash cannot be installed through the updater.
 
 ---
 

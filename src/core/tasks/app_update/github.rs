@@ -134,11 +134,13 @@ pub async fn github_releases_to_manifest(releases: &[GitHubRelease]) -> Result<U
             };
 
             if let Some(key) = platform_key {
-                let checksum = checksums.get(&asset.name);
+                let checksum = installer_checksum(asset, &checksums);
                 let installer_hash = checksum
+                    .as_ref()
                     .map(|checksum| checksum.hash.clone())
                     .unwrap_or_default();
                 let installer_hash_algorithm = checksum
+                    .as_ref()
                     .map(|checksum| checksum.algorithm.clone())
                     .unwrap_or_else(default_installer_hash_algorithm);
 
@@ -184,6 +186,24 @@ pub async fn github_releases_to_manifest(releases: &[GitHubRelease]) -> Result<U
         schema_version: 1,
         latest,
         versions,
+    })
+}
+
+fn installer_checksum(
+    asset: &GitHubAsset,
+    checksums: &HashMap<String, InstallerChecksum>,
+) -> Option<InstallerChecksum> {
+    if let Some(checksum) = checksums.get(&asset.name) {
+        return Some(checksum.clone());
+    }
+
+    let (algorithm, hash) = asset.digest.as_deref()?.split_once(':')?;
+    if algorithm != "sha256" || hash.len() != 64 || !hash.bytes().all(|ch| ch.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(InstallerChecksum {
+        hash: hash.to_ascii_lowercase(),
+        algorithm: algorithm.to_string(),
     })
 }
 
@@ -373,4 +393,105 @@ fn parse_markdown_changelog(body: &str) -> Vec<ChangelogSection> {
     }
 
     sections
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn asset_with_digest(digest: Option<String>) -> GitHubAsset {
+        GitHubAsset {
+            name: "Foxy-1.2.0-setup.exe".to_string(),
+            size: 1234,
+            browser_download_url: "https://repo.example.invalid:8080/Foxy-1.2.0-setup.exe"
+                .to_string(),
+            digest,
+        }
+    }
+
+    #[tokio::test]
+    async fn manifest_uses_github_digest_without_checksum_assets() {
+        let hash = "ab".repeat(32);
+        let release: GitHubRelease = serde_json::from_value(serde_json::json!({
+            "tag_name": "v1.2.0",
+            "body": null,
+            "prerelease": false,
+            "draft": false,
+            "published_at": null,
+            "assets": [{
+                "name": "Foxy-1.2.0-setup.exe",
+                "size": 1234,
+                "browser_download_url": "https://repo.example.invalid:8080/Foxy-1.2.0-setup.exe",
+                "digest": format!("sha256:{hash}")
+            }, {
+                "name": "Foxy-1.2.0-linux-x86_64-installer.sh",
+                "size": 5678,
+                "browser_download_url": "https://repo.example.invalid:8080/Foxy-1.2.0-linux-x86_64-installer.sh",
+                "digest": format!("sha256:{hash}")
+            }]
+        }))
+        .unwrap();
+
+        let manifest = github_releases_to_manifest(&[release]).await.unwrap();
+        assert_eq!(manifest.latest, "1.2.0");
+        assert_eq!(manifest.versions.len(), 1);
+        let platforms = &manifest.versions[0].platforms;
+        assert_eq!(platforms.len(), 2);
+        for (platform, size) in [("windows-x86_64", 1234), ("linux-x86_64", 5678)] {
+            let entry = &platforms[platform];
+            assert_eq!(entry.installer_hash, hash);
+            assert_eq!(entry.installer_hash_algorithm, "sha256");
+            assert_eq!(entry.installer_size, size);
+        }
+    }
+
+    #[test]
+    fn checksum_sidecar_takes_precedence_over_github_digest() {
+        let asset = asset_with_digest(Some(format!("sha256:{}", "ab".repeat(32))));
+        let checksum = InstallerChecksum {
+            hash: "cd".repeat(32),
+            algorithm: "blake3".to_string(),
+        };
+        let checksums = HashMap::from([(asset.name.clone(), checksum.clone())]);
+        assert_eq!(installer_checksum(&asset, &checksums), Some(checksum));
+    }
+
+    #[test]
+    fn github_digest_normalizes_hex_case() {
+        let asset = asset_with_digest(Some(format!("sha256:{}", "AB".repeat(32))));
+        assert_eq!(
+            installer_checksum(&asset, &HashMap::new()),
+            Some(InstallerChecksum {
+                hash: "ab".repeat(32),
+                algorithm: "sha256".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn github_digest_rejects_missing_malformed_and_unsupported_values() {
+        for digest in [
+            None,
+            Some(String::new()),
+            Some("sha256".to_string()),
+            Some(format!("md5:{}", "ab".repeat(32))),
+            Some(format!("sha256:{}", "ab".repeat(31))),
+            Some(format!("sha256:{}", "ab".repeat(33))),
+            Some(format!("sha256:{}", "zz".repeat(32))),
+        ] {
+            let asset = asset_with_digest(digest);
+            assert_eq!(installer_checksum(&asset, &HashMap::new()), None);
+        }
+    }
+
+    #[test]
+    fn github_asset_accepts_absent_and_null_digests() {
+        for json in [
+            r#"{"name":"Foxy.exe","size":1234,"browser_download_url":"https://repo.example.invalid:8080/Foxy.exe"}"#,
+            r#"{"name":"Foxy.exe","size":1234,"browser_download_url":"https://repo.example.invalid:8080/Foxy.exe","digest":null}"#,
+        ] {
+            let asset: GitHubAsset = serde_json::from_str(json).unwrap();
+            assert!(asset.digest.is_none());
+        }
+    }
 }
