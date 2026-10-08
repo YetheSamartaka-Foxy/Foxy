@@ -403,6 +403,17 @@ Important rule: remote recheck must not fetch every `mod.srf`,
 `foxy_addon.json`, or part list merely because the user clicked recheck. The
 repository-level checksum decides whether deeper remote fetches are needed.
 
+The repository checksum alone never proves the stored remote graph is current.
+Both skips (clean early exit and "remote graph unchanged") also require every
+addon `checkSum` in the addon list already fetched with `repo.json`
+(`foxy_addons.json`) to equal the stored `addons.remote_checksum`; a
+difference forces a metadata rebuild scoped to the changed addons. Repositories
+sharing a folder make this reachable: a sibling's download can bring the local
+files to the new version first, so `repo_json.checksum == local_checksum` holds
+while the stored file rows still describe the old manifest, and every later
+recheck would skip again and leave the stale rows (old lengths and checksums)
+deciding pending state and download sizes forever.
+
 "DB graph incomplete" uses the same definition as Layer 0: enabled addons with
 file rows but no part rows at all, and no deferred part rows buffered in the
 running process, is an incomplete graph even when every file carries a remote
@@ -1355,6 +1366,16 @@ The logs should make it possible to answer:
 - Do not walk an addon folder twice to produce two digests of the same metadata.
 - Do not let one repository's remote probe gate every other repository's startup
   verdict.
+- Do not upsert or prune part rows without carrying local part state across a
+  re-key (Regression Guardrail 1).
+- Do not give up on a delta plan silently; every skip logs its reason, and a
+  zero-length part is never a reason (Regression Guardrail 3).
+- Do not clear a sibling's pending update or mark it synced from propagation
+  (Regression Guardrail 4).
+- Do not skip a remote refresh on the repository checksum while a published
+  addon checksum differs from the stored one (Layer 1, Regression Guardrail 5).
+- Do not add a verification trigger that stays true after the read it
+  schedules (Regression Guardrail 7).
 
 ## Diagnosing False Redownloads
 
@@ -1367,6 +1388,98 @@ When a user reports "Foxy wants to redownload addons that are already present," 
 - **Non-convergent re-bootstrap (genuinely missing files).** `local_tree_hash_file_is_incomplete` in `quick_scan/readiness.rs` returns false for missing files, so they enter `ready_file_ids`, get sent to `calculate_hashes_for_files` every recheck, can't be hashed, `local_checksum` stays empty, and bootstrap repeats forever. Wasted work, not a false flag.
 
 To confirm a *real* wrong-flag bug (addons flagged while physically present at the folder), capture a diagnostics export taken while the files are present-on-disk-yet-flagged; the bug would live in hashing/readiness convergence, not in sibling logic.
+
+- **Lost part state after a manifest update.** Updated files are planned as full downloads (`Delta plan skipped ... no local part metadata available`, or `File queued for download ... changed_parts=N/N (100.00%)` with `local_checksum=` empty on most `Part mismatch` lines). See Regression Guardrails 1 and 2.
+- **Empty PBO entries.** A file with only a few percent of changed bytes is still downloaded whole, with no `Delta plan built` or `Delta plan skipped` line for it at all. The manifest has `"length":0` parts. See Regression Guardrail 3.
+- **Stale sibling metadata.** A download fails with `Download size mismatch ... expected X bytes, received Y` while the server's manifest already says `Y`, and every recheck of that repository logs `Up-to-date` or `remote graph unchanged`. See Regression Guardrail 5.
+
+## Regression Guardrails
+
+Each rule below comes from a real user-visible regression in hashing, delta
+patching, or pending state. Each one is cheap to break while optimizing, and
+the breakage is invisible on a fresh install: it needs a populated database
+that has lived through a server republish. Keep every rule, and keep the test
+that guards it.
+
+1. **Part identity is positional, so a manifest update re-keys rows.** A part
+   row's key is `part_storage_path(display_path, data_order)`. Inserting or
+   removing one entry shifts the key of every later part, and the stale rows
+   are pruned. Any code that upserts or prunes part rows must carry local part
+   state across that re-key (Part stage step 2), including the state a clean
+   file only has implicitly (`files.local_checksum == files.remote_checksum`).
+   Losing it does not fail loudly: the next update silently becomes a full
+   download of every changed file. Guarded by
+   `manifest_update_of_a_clean_file_keeps_a_delta_plan_possible` and the
+   `carried_state_*` tests in `remote_file_parts/batch.rs`.
+2. **Damaged part state must recover once, and only once.** A tree hash gives
+   every part that fits inside the local file a local checksum (read at the
+   entry's local span, else at the remote one); only parts past the end of
+   the file stay empty. So an outdated file present on disk with an unhashed
+   part that fits inside it has lost state, and quick scan re-reads it once
+   (invariant 6). Never widen this to "any part lacks state": a file the
+   update grew keeps its tail parts empty after every hash and would be
+   re-read on every launch. Never narrow it to "every part lacks state": a
+   file whose first rows kept their key would never recover. Guarded by
+   `partly_lost_part_state_is_recovered_and_a_grown_file_is_not_reread`.
+3. **Zero-length parts are normal.** PBOs carry empty entries (often
+   obfuscation entries such as `*.*`), with the digest of no bytes as their
+   checksum. The planner keeps them as ops that transfer nothing, so the
+   ordered checksum rollups still match; transfer and apply skip them; the
+   final rollup and the patched segments put them back in `data_order` place.
+   Any early return in `plan_file_patch` that is not logged is a regression
+   waiting to happen: every "give up on this file" path must log
+   `Delta plan skipped ... reason`. Guarded by
+   `plan_file_patch_keeps_empty_entries_and_patches_the_rest` and the
+   empty-entry tests in `delta_patch/tests.rs`.
+4. **Sibling propagation settles only shared addons.** After a sync,
+   propagation copies verified state to repositories sharing the same local
+   addon paths. It must never clear a sibling's pending update or mark the
+   sibling synced: the sibling can have outdated addons of its own. The UI
+   queues a quick scan for each propagated sibling instead (post-download
+   step 8). Guarded by `shared_addon_propagation_keeps_sibling_quick_scan_clean`.
+5. **A clean repository rollup does not prove the stored remote graph is
+   current.** See Layer 1: the skip gates also compare the published addon
+   checksums with the stored ones. Guarded by
+   `addon_list_checksum_change_is_detected_against_stored_checksums`; the
+   live reproduction is a remote refresh of a repository whose shared addon a
+   sibling already downloaded.
+6. **The update summary must describe the same work the plan does.** Pending
+   update rows rebuilt from download targets carry each file's changed-part
+   count and whether it is new (`attach_part_change_details`). A summary of
+   whole-file rows with zero parts reads as "no delta patching" even when the
+   plan patches. Guarded by `part_change_details_count_unmatched_parts_and_flag_new_files`.
+7. **A correctness fix must not add per-launch disk reads.** Every recovery
+   or verification trigger needs a convergence argument: after the one read
+   it schedules, the same trigger must be false. Check it on a seeded live
+   profile over at least two consecutive startups (`tree_verify_runs` and
+   `hash_work_bytes` must be 0 on the second). A deep scan or tree verify
+   that repeats on every launch is a regression even when the result is
+   correct.
+8. **Estimates are user-facing correctness.** `planned_transfer_bytes`,
+   `patch_files` and the per-file rows are what the user decides on. A change
+   that leaves downloads correct but inflates the estimate (for example to
+   the full size because a plan was skipped) is a regression.
+
+Diagnostic lines to grep first in a user log for these cases:
+`Carried local part state across manifest update`, `Delta plan skipped`,
+`Delta plan built`, `File queued for download` (its `changed_parts` and
+`changed_bytes`), `Download-target pending estimate applied` (its
+`new_files`, `changed_parts`, `patch_files` and `planned_transfer_bytes`),
+`addon checksums differ from the remote addon list`, `Up-to-date: Repository`,
+`remote graph unchanged`, `Quick scan triggering targeted tree-hash verify`,
+`Delta patch fallback`, and `Download size mismatch`. Also check the build
+line (`Foxy app version ... commit=`): a fix only shows in a log produced by
+a build that contains it.
+
+Regression lanes (developer machine, SSD, `foxy-testkit`; see
+`skills/foxy-testkit/SKILL.md`): a republish lane (`origin-switch` between two
+generated versions of the same repository over a clean install) for part
+carry-over, empty entries, and patch savings; the sibling shared-folder lane
+for propagation; a delta-patch lane and a clean-check lane for patch
+and quick-scan cost; and a seeded live-profile startup with a remote refresh
+for recovery convergence and stale sibling metadata. Compare patched file
+counts, downloaded bytes, `tree_verify_runs`, `hash_work_bytes`, and the
+oracle result against the previous run, not only pass or fail.
 
 ## Current Implementation Notes
 
@@ -1433,6 +1546,19 @@ A change touching this system is not complete unless these cases are considered:
 12. Cancel during patch/download restores touched files.
 13. Pending update cache is stale but local repo is clean.
 14. Sibling repository shares already verified local addon files.
+15. Server republishes changed addons over a clean install whose part state is
+    only derived (entries inserted or removed, so part keys shift): the update
+    patches instead of downloading whole files.
+16. A database left with partly lost part state recovers it with one read, and
+    the next startup reads nothing.
+17. A PBO with zero-length entries patches.
+18. A sync settles shared addons in siblings, and each sibling keeps or
+    rediscovers its own pending addons.
+19. A sibling download brings a shared addon to the new version before this
+    repository refreshed its metadata: the next recheck rebuilds that addon's
+    metadata and ends clean, with nothing to download.
+20. The pending update summary shows changed parts and new files for patched
+    and fully downloaded files alike.
 
 For code changes, validate with the normal repo checks:
 

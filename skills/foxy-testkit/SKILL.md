@@ -215,6 +215,34 @@ does not publish is an error. The oracle does not look for extra local files.
 place, which is how `perf-server-republish-delta-ssd` reproduces a server update
 over a clean install whose part state is only derived from file checksums.
 
+## Sync regression lanes
+
+A change to part rows, quick scan triggers, delta planning, sibling
+propagation, the remote refresh gates, or pending update summaries must keep
+the rules in `conventions/SYNC_ALGO_CONVENTION.md` "Regression Guardrails".
+The unit tests named there catch the logic; these SSD lanes catch what only a
+populated database shows. Run them sequentially and read the numbers against
+the previous run of the same lane, not just the verdict:
+
+- the republish lane (`origin-switch` between two generated versions of one
+  repository): patched file count, downloaded bytes, `delta_savings_percent`
+  per transition, `tree_verify_runs` 0 on each refresh, a clean oracle;
+- `perf-sibling-shared-folder-check`: the second repository comes up clean
+  with `hash_work_bytes` and `tree_verify_runs` 0;
+- a delta-patch lane and a clean-check lane: identical bytes and patched files,
+  timings in the usual band;
+- a seeded live profile (`config_seed`, read-only, never a `download` op
+  against the real repository folder) with a startup and a `remote-refresh`
+  of the affected repository: the first startup may schedule a one-time
+  recovery read, the next must read nothing, and the logged
+  `Download-target pending estimate applied` line must show sensible
+  `patch_files`, `changed_parts` and `planned_transfer_bytes`.
+
+Cases that point at real repositories, servers or profiles stay under the
+git-ignored `testkit/cases/` or `.local/`; a live-profile run copies the whole
+profile (often over a gigabyte), so delete the run's `config/` copy once the
+numbers are read.
+
 ## Rules that keep the numbers worth having
 
 - One process, one case, sequentially. Two perf cases at once measure each other.
