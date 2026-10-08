@@ -1,9 +1,11 @@
-use super::apply::{RunPart, RunStop, apply_patch_to_temp_file, copy_run_blocking};
+use super::apply::{
+    RunPart, RunStop, apply_patch_to_temp_file, copy_run_blocking, validate_runtime_ops,
+};
 use super::planning::{plan_savings_meet_threshold, validate_plan_coverage};
 use super::types::{
     PatchArtifact, PatchOpType, PatchOperationArtifact, checksum_matches,
-    compute_tree_checksum_from_segment_checksums, normalize_checksum, sampled_copy_op_indices,
-    should_abort_copy_fallback,
+    compute_tree_checksum_from_segment_checksums, is_empty_content_checksum, normalize_checksum,
+    sampled_copy_op_indices, segment_checksums_with_empty_ops, should_abort_copy_fallback,
 };
 use crate::core::models::context::FoxyContext;
 use crate::core::models::download_patch_file::DownloadPatchFile;
@@ -930,4 +932,76 @@ async fn blob_download_rejects_a_chunked_op_with_a_wrong_checksum() {
             .contains("checksum mismatch after chunked download")
     );
     assert_eq!(ops[0].downloaded_bytes, 0);
+}
+
+const EMPTY_BLAKE3: &str = "AF1349B9F5F9A1A6A0404DEA36DCC9499BCB25C9ADC112B7CC9A93CAE41F3262";
+const EMPTY_MD5: &str = "D41D8CD98F00B204E9800998ECF8427E";
+
+#[test]
+fn only_a_digest_of_no_bytes_counts_as_empty_content() {
+    assert!(is_empty_content_checksum(EMPTY_BLAKE3));
+    assert!(is_empty_content_checksum(
+        &EMPTY_BLAKE3.to_ascii_lowercase()
+    ));
+    assert!(is_empty_content_checksum(EMPTY_MD5));
+    assert!(!is_empty_content_checksum(&"A".repeat(64)));
+    assert!(!is_empty_content_checksum(""));
+}
+
+#[test]
+fn runtime_ops_accept_an_empty_entry_but_not_a_zero_length_op_with_content() {
+    let insert = |order, dest_start, length, checksum: &str| {
+        patch_op(
+            order,
+            PatchOpType::InsertRemote,
+            dest_start,
+            length,
+            checksum.to_string(),
+            None,
+            Some(0),
+        )
+    };
+    let ops = vec![
+        insert(0, 0, 10, "AA"),
+        insert(1, 10, 0, EMPTY_BLAKE3),
+        insert(2, 10, 5, "BB"),
+    ];
+    assert!(validate_runtime_ops(&ops, 15).is_ok());
+
+    let ops = vec![insert(0, 0, 10, "AA"), insert(1, 10, 0, "CC")];
+    assert!(validate_runtime_ops(&ops, 10).is_err());
+}
+
+/// The apply only sees ops that carry bytes; the file rollup must still match
+/// the plan's, which counts every empty entry in its place.
+#[test]
+fn applied_checksums_roll_up_with_empty_entries_in_plan_order() {
+    let insert = |order, dest_start, length, checksum: &str| {
+        patch_op(
+            order,
+            PatchOpType::InsertRemote,
+            dest_start,
+            length,
+            checksum.to_string(),
+            None,
+            Some(0),
+        )
+    };
+    let plan_ops = vec![
+        insert(0, 0, 10, "AA"),
+        insert(1, 10, 0, EMPTY_BLAKE3),
+        insert(2, 10, 0, EMPTY_BLAKE3),
+        insert(3, 10, 5, "BB"),
+    ];
+    let applied = vec!["AA".to_string(), "BB".to_string()];
+
+    let rolled = segment_checksums_with_empty_ops(&plan_ops, &applied);
+
+    assert_eq!(rolled, vec!["AA", EMPTY_BLAKE3, EMPTY_BLAKE3, "BB"]);
+    assert_eq!(
+        compute_tree_checksum_from_segment_checksums(rolled.iter().copied()),
+        compute_tree_checksum_from_segment_checksums(
+            plan_ops.iter().map(|op| op.target_checksum.as_str())
+        )
+    );
 }

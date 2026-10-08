@@ -176,11 +176,14 @@ to a full-file download.
    computed from the disk state the fingerprint describes, clean or not.
 6. A file is tree-verified again only when its current fingerprint differs from
    the stored one (disk drift), its `local_checksum` is empty (a hash that
-   never ran or failed), or it is outdated, present on disk, none of its parts carries local
-   state, and its first remote part fits inside the local file (the delta
-   planner would have nothing to copy from, so one local read replaces a full
-   download; a plain file shorter than its only part hashes to no part state
-   and is not re-read). A tree mismatch with an
+   never ran or failed), or it is outdated, present on disk, and some part
+   without local state fits inside the local file. A tree hash gives every
+   part that fits a local checksum (read at the entry's local span, else at the
+   remote one), so such a part is state a manifest update lost and the delta
+   planner cannot copy from; one local read replaces a full download. A file
+   whose unhashed parts all lie past its end (a plain file shorter than its
+   only part, or an outdated file the update grew) hashes to the same state
+   again and is not re-read. A tree mismatch with an
    unchanged fingerprint and known part state is reported from the stored
    checksums with no disk read. Patch preflight and per-op checksum
    verification still catch a stale local part hash and degrade that file to a
@@ -889,7 +892,10 @@ A plan is valid only if:
 2. Old local part metadata contains non-empty local checksums and lengths.
 3. New remote parts are sorted by `data_order`.
 4. Operations cover byte range `0..file.length` exactly with no gaps.
-5. Each op has non-zero length.
+5. Each op has non-zero length, except an empty entry (a zero-length part
+   whose checksum is the digest of no bytes): it stays in the plan in its
+   `data_order` place so the checksum rollups match, and transfer and apply
+   skip it. An empty entry never forces a full download.
 6. Copy ops point inside the current local file.
 7. Insert ops define non-overlapping patch blob offsets.
 8. Planned download bytes are less than full file bytes.
@@ -1010,7 +1016,9 @@ After patch or full download succeeds:
    files/addons/repository. Repository content hash may be refreshed only from a
    full tree or equivalent complete addon content state.
 8. Propagate matching local tree/content checksums to sibling repositories that
-   share the same local paths.
+   share the same local paths. Propagation settles only the shared addons, so
+   it never clears a sibling's pending update or marks it synced; the sibling
+   gets its own quick scan once the sync ends.
 9. Emit a final diff.
 10. If final diff is clean, clear pending update payload.
 

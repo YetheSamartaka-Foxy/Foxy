@@ -477,8 +477,8 @@ async fn shared_addon_propagation_keeps_sibling_quick_scan_clean() {
     assert!(!repo_b_content.is_empty());
 
     assert!(
-        !pending_update_exists(&fdb, repo_b_url, "").await,
-        "sibling pending update should be cleared after propagation"
+        pending_update_exists(&fdb, repo_b_url, "").await,
+        "propagation must leave the sibling's pending update to its own quick scan, since it can hold addons the source does not share"
     );
 }
 
