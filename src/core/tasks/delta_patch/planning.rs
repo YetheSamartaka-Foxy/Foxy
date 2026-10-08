@@ -16,7 +16,7 @@ use tokio::fs::{self, OpenOptions};
 use super::types::{
     PATCH_MIN_SAVINGS_PERCENT, PATCH_SCHEMA_VERSION, PATCH_STATUS_PLANNED, PatchArtifact,
     PatchOpType, PatchOperationArtifact, PlannedPatch, checksum_matches, expected_remote_end,
-    infer_repository_url, normalize_checksum,
+    infer_repository_url, is_empty_content_checksum, normalize_checksum,
 };
 fn patch_paths_for_file(file_id: u64) -> (PathBuf, PathBuf) {
     let base = app_paths::foxy_large_payload_dir();
@@ -43,8 +43,11 @@ pub(super) fn validate_plan_coverage(
 
     let mut cursor = 0_u64;
     for op in ops {
-        if op.length == 0 {
-            return Err(anyhow!("patch plan op {} has zero length", op.data_order));
+        if op.length == 0 && !is_empty_content_checksum(&op.target_checksum) {
+            return Err(anyhow!(
+                "zero-length patch plan op {} expects content",
+                op.data_order
+            ));
         }
 
         if op.dest_start != cursor {
@@ -155,11 +158,20 @@ pub(crate) fn plan_file_patch(
     let mut insert_ops = 0usize;
 
     for new_part in &new_parts_sorted {
-        // Skip zero-length parts early - validate_plan_coverage would reject
-        // them anyway, but catching them here avoids producing a broken plan
-        // that falls through to a confusing validation error.
+        // An empty PBO entry moves no bytes but keeps its place in the file's
+        // checksum rollup, so it stays in the plan as an op nothing transfers.
         if new_part.remote_length == 0 {
-            return Ok(None);
+            operations.push(PatchOperationArtifact {
+                data_order: new_part.data_order,
+                op_type: PatchOpType::InsertRemote.as_str().to_string(),
+                dest_start: new_part.remote_start,
+                length: 0,
+                target_checksum: normalize_checksum(&new_part.remote_checksum),
+                source_start: None,
+                source_checksum: None,
+                blob_offset: Some(blob_offset),
+            });
+            continue;
         }
         let mut matched_idx = None;
         let mut matched_via_path = false;
@@ -568,7 +580,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_plan_coverage_zero_length_op_errors() {
+    fn validate_plan_coverage_zero_length_op_with_content_errors() {
         let ops = vec![PatchOperationArtifact {
             data_order: 0,
             op_type: PatchOpType::CopyLocal.as_str().to_string(),
@@ -581,7 +593,80 @@ mod tests {
         }];
         let result = validate_plan_coverage(&ops, 0);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("zero length"));
+        assert!(result.unwrap_err().to_string().contains("expects content"));
+    }
+
+    #[test]
+    fn validate_plan_coverage_accepts_an_empty_entry_between_ops() {
+        let op = |data_order, dest_start, length, checksum: &str| PatchOperationArtifact {
+            data_order,
+            op_type: PatchOpType::InsertRemote.as_str().to_string(),
+            dest_start,
+            length,
+            target_checksum: checksum.to_string(),
+            source_start: None,
+            source_checksum: None,
+            blob_offset: Some(0),
+        };
+        let ops = vec![
+            op(0, 0, 10, "A"),
+            op(1, 10, 0, EMPTY_BLAKE3),
+            op(2, 10, 5, "B"),
+        ];
+        assert!(validate_plan_coverage(&ops, 15).is_ok());
+    }
+
+    const EMPTY_BLAKE3: &str = "AF1349B9F5F9A1A6A0404DEA36DCC9499BCB25C9ADC112B7CC9A93CAE41F3262";
+
+    #[test]
+    fn plan_file_patch_keeps_empty_entries_and_patches_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let local_path = dir.path().join("file.pbo");
+        std::fs::write(&local_path, vec![0u8; 20]).unwrap();
+        let file = FoxyModFile {
+            id: 10,
+            local_path: local_path.to_string_lossy().to_string(),
+            remote_path: "https://example.invalid/file.pbo".to_string(),
+            local_checksum: "OLD".to_string(),
+            remote_checksum: "NEW".to_string(),
+            length: 20,
+            ..Default::default()
+        };
+        let part =
+            |data_order, path: &str, start, length, remote: &str, local: &str| FoxyModFilePart {
+                id: data_order as u64 + 1,
+                file_id: 10,
+                path: path.to_string(),
+                remote_checksum: remote.to_string(),
+                remote_length: length,
+                remote_start: start,
+                local_checksum: local.to_string(),
+                local_length: if local.is_empty() { 0 } else { length },
+                local_start: start,
+                data_order,
+            };
+        let old_parts = vec![
+            part(0, "$$HEADER$$", 0, 10, "H1", "H1"),
+            part(1, "a", 10, 10, "AA", "AA"),
+        ];
+        let new_parts = vec![
+            part(0, "$$HEADER$$", 0, 10, "H2", ""),
+            part(1, "*.*", 10, 0, EMPTY_BLAKE3, ""),
+            part(2, "a", 10, 10, "AA", ""),
+        ];
+
+        let plan = plan_file_patch(&file, &new_parts, &old_parts)
+            .unwrap()
+            .expect("an empty entry must not stop the rest of the file from patching");
+
+        assert_eq!(plan.planned_download_bytes, 10);
+        assert_eq!(plan.planned_copy_bytes, 10);
+        let ops = &plan.artifact.operations;
+        assert_eq!(ops.len(), 3);
+        assert_eq!((ops[1].dest_start, ops[1].length), (10, 0));
+        assert_eq!(ops[1].target_checksum, EMPTY_BLAKE3);
+        assert_eq!(ops[2].op_type, PatchOpType::CopyLocal.as_str());
+        assert_eq!(ops[2].source_start, Some(10));
     }
 
     // ── plan_savings_meet_threshold ─────────────────────────────────────

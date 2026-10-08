@@ -1,7 +1,6 @@
 use super::persistence::{calculate_compound_content_hash, persist_repository_checksums};
 use super::*;
 use crate::core::db::{FoxyDb, params};
-use crate::core::models::pending_update::clear_pending_update_for_context;
 
 /// Lightweight pre-propagation: before running expensive hashing for a repository,
 /// copy `local_checksum` values from sibling files/parts that share the same
@@ -745,15 +744,8 @@ pub(crate) async fn propagate_checksums_to_siblings(
         );
     }
 
-    for url in &sibling_urls {
-        if let Err(err) = clear_pending_update_for_context(context.clone(), url).await {
-            warn!(
-                "Failed to clear sibling pending updates after propagation for repo={}: {}",
-                url, err
-            );
-        }
-    }
-
+    // A sibling's pending update can still hold addons the source repository
+    // does not share, so it is left for the sibling's own quick scan to settle.
     sibling_urls
 }
 

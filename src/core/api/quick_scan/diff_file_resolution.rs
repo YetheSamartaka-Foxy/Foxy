@@ -2,7 +2,7 @@ use super::super::fs_watcher::normalize_path_for_match;
 use super::super::*;
 use super::content_hash::calculate_fast_file_content_hash;
 use super::db_helpers::{
-    PartChangeStats, load_changed_part_stats_by_file_ids, load_first_part_end_by_file_ids,
+    PartChangeStats, load_changed_part_stats_by_file_ids, load_first_unhashed_part_end_by_file_ids,
     load_patch_download_bytes_by_file_ids, refresh_files_by_ids,
 };
 use super::diff_addon_hash::AddonHashResult;
@@ -64,8 +64,9 @@ fn addon_needs_update_from_file_diff(has_expected_file_diffs: bool) -> bool {
 /// never recorded), a tree hash that never ran, or a part layout no hash ever
 /// described justify re-reading the file; a tree mismatch with an unchanged
 /// fingerprint is a confirmed pending update whose stored part state is still a
-/// true description of the local file. Without any part state the delta
-/// planner has nothing to copy from, so one local read beats a full download.
+/// true description of the local file. Parts a manifest update left without
+/// local state give the delta planner nothing to copy from, so one local read
+/// beats a full download.
 /// An outdated file whose size differs is fingerprinted only when its last tree
 /// hash stored a fingerprint to compare with; an unchanged one is then not read
 /// again on every scan, and a file with no baseline costs no sample reads.
@@ -82,21 +83,25 @@ fn file_needs_tree_verify(
     exists && (file_content_mismatch || local_checksum_missing || part_state_missing)
 }
 
-fn part_state_missing(stats: PartChangeStats) -> bool {
-    stats.total_parts > 0 && stats.missing_local_checksums == stats.total_parts
+fn part_state_incomplete(stats: PartChangeStats) -> bool {
+    stats.total_parts > 0 && stats.missing_local_checksums > 0
 }
 
-/// A hash of the current local file can give it part state only when its first
-/// remote part fits inside it. A file shorter than that (a plain single-part
-/// file the update grew) hashes to no part state at all, so re-reading it on
-/// every scan would buy nothing.
-fn first_part_readable(first_part_end: u64, local_length: u64) -> bool {
-    first_part_end <= local_length
+/// A tree hash gives every part that fits inside the local file a local
+/// checksum, read at the entry's local span or else at the remote one, so a
+/// part left without one after a hash lies past the end of the file. An
+/// unhashed part that does fit is state a manifest update lost, and one read
+/// restores it; a file whose unhashed parts all lie past its end (an outdated
+/// file the update grew) would hash to the same state again, so re-reading it
+/// on every scan would buy nothing.
+fn unhashed_part_readable(first_unhashed_part_end: u64, local_length: u64) -> bool {
+    first_unhashed_part_end <= local_length
 }
 
-/// Outdated files present on disk whose parts carry no local state but could
-/// get some from one tree hash. The first-part lookup runs only for them, so a
-/// scan of files that are absent or already described costs no extra query.
+/// Outdated files present on disk whose part state a tree hash would extend.
+/// The unhashed-part lookup runs only for files with some part lacking local
+/// state, so a scan of files that are absent or fully described costs no extra
+/// query.
 async fn files_with_recoverable_part_state(
     db: &FoxyDb,
     files_by_id: &HashMap<i64, FoxyModFile>,
@@ -105,7 +110,7 @@ async fn files_with_recoverable_part_state(
 ) -> HashSet<u64> {
     let local_lengths: HashMap<i64, u64> = part_stats_by_file_id
         .iter()
-        .filter(|(_, stats)| part_state_missing(**stats))
+        .filter(|(_, stats)| part_state_incomplete(**stats))
         .filter_map(|(file_id, _)| {
             let file = files_by_id.get(file_id)?;
             if file.local_checksum == file.remote_checksum {
@@ -119,13 +124,13 @@ async fn files_with_recoverable_part_state(
         return HashSet::new();
     }
     let file_ids: Vec<i64> = local_lengths.keys().copied().collect();
-    load_first_part_end_by_file_ids(db, &file_ids, chunk_size)
+    load_first_unhashed_part_end_by_file_ids(db, &file_ids, chunk_size)
         .await
         .into_iter()
-        .filter(|(file_id, first_part_end)| {
+        .filter(|(file_id, first_unhashed_part_end)| {
             local_lengths
                 .get(file_id)
-                .is_some_and(|length| first_part_readable(*first_part_end, *length))
+                .is_some_and(|length| unhashed_part_readable(*first_unhashed_part_end, *length))
         })
         .map(|(file_id, _)| file_id as u64)
         .collect()
@@ -756,22 +761,81 @@ mod tests {
     }
 
     #[test]
-    fn part_state_is_missing_only_when_no_part_has_local_state() {
+    fn part_state_is_incomplete_when_any_part_lacks_local_state() {
         let stats = |total_parts, missing_local_checksums| PartChangeStats {
             total_parts,
             missing_local_checksums,
             ..PartChangeStats::default()
         };
-        assert!(part_state_missing(stats(3, 3)));
-        assert!(!part_state_missing(stats(3, 2)));
-        assert!(!part_state_missing(stats(0, 0)));
+        assert!(part_state_incomplete(stats(3, 3)));
+        assert!(part_state_incomplete(stats(3, 1)));
+        assert!(!part_state_incomplete(stats(3, 0)));
+        assert!(!part_state_incomplete(stats(0, 0)));
+    }
+
+    /// Part rows a manifest update re-keyed lose their local state while the
+    /// rows that kept their key do not, so a partly described file must still
+    /// be recovered; a file whose unhashed parts all lie past its end has
+    /// already been hashed as far as it can be.
+    #[tokio::test]
+    async fn partly_lost_part_state_is_recovered_and_a_grown_file_is_not_reread() {
+        let dir = tempfile::tempdir().unwrap();
+        let damaged_path = dir.path().join("damaged.pbo");
+        let grown_path = dir.path().join("grown.pbo");
+        std::fs::write(&damaged_path, vec![0u8; 100]).unwrap();
+        std::fs::write(&grown_path, vec![0u8; 50]).unwrap();
+
+        let db = FoxyDb::from_turso(crate::core::tasks::db_turso::build_test_database().await);
+        let mut files_by_id = HashMap::new();
+        for (id, path, length) in [(1i64, &damaged_path, 100i64), (2, &grown_path, 80)] {
+            let local_path = path.to_string_lossy().to_string();
+            db.execute(
+                "INSERT INTO files (id, name, remote_path, local_path, local_checksum, remote_checksum, local_content_hash, length, data_order) \
+                 VALUES (?, ?, ?, ?, 'OLD', 'NEW', '', ?, 0)",
+                crate::core::db::params![id, format!("f{id}"), format!("https://example.invalid/f{id}"), local_path.clone(), length],
+            )
+            .await
+            .unwrap();
+            files_by_id.insert(
+                id,
+                FoxyModFile {
+                    id: id as u64,
+                    local_path,
+                    local_checksum: "OLD".to_string(),
+                    remote_checksum: "NEW".to_string(),
+                    length: length as u64,
+                    ..Default::default()
+                },
+            );
+        }
+        let parts: [(i64, i64, i64, i64, &str); 5] = [
+            (1, 1, 0, 10, "H"),
+            (2, 1, 10, 30, ""),
+            (3, 1, 40, 60, ""),
+            (4, 2, 0, 30, "X"),
+            (5, 2, 30, 50, ""),
+        ];
+        for (id, file_id, start, length, local) in parts {
+            db.execute(
+                "INSERT INTO subfiles (id, file_id, path, local_length, local_start, remote_length, remote_start, local_checksum, remote_checksum, data_order) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'R', ?)",
+                crate::core::db::params![id, file_id, format!("p{id}"), if local.is_empty() { 0 } else { length }, start, length, start, local, id],
+            )
+            .await
+            .unwrap();
+        }
+
+        let stats = load_changed_part_stats_by_file_ids(&db, &[1, 2], 100).await;
+        let recoverable = files_with_recoverable_part_state(&db, &files_by_id, &stats, 100).await;
+
+        assert_eq!(recoverable, HashSet::from([1u64]));
     }
 
     #[test]
-    fn first_part_must_fit_inside_the_local_file() {
-        assert!(first_part_readable(400, 1000));
-        assert!(first_part_readable(1000, 1000));
-        assert!(!first_part_readable(4008, 908));
+    fn an_unhashed_part_must_fit_inside_the_local_file() {
+        assert!(unhashed_part_readable(400, 1000));
+        assert!(unhashed_part_readable(1000, 1000));
+        assert!(!unhashed_part_readable(4008, 908));
     }
 
     #[test]

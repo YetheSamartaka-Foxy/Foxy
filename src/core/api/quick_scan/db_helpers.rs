@@ -336,9 +336,9 @@ pub(super) async fn load_changed_part_stats_by_file_ids(
     result
 }
 
-/// End offset of each file's first remote part, for the few files whose part
-/// state is being considered for recovery.
-pub(super) async fn load_first_part_end_by_file_ids(
+/// Lowest end offset among each file's parts that carry no local state, for
+/// the few files whose part state is being considered for recovery.
+pub(super) async fn load_first_unhashed_part_end_by_file_ids(
     db: &FoxyDb,
     file_ids: &[i64],
     chunk_size: usize,
@@ -348,7 +348,8 @@ pub(super) async fn load_first_part_end_by_file_ids(
         let placeholders = vec!["?"; chunk.len()].join(",");
         let sql = format!(
             "SELECT file_id, MIN(remote_start + remote_length) AS first_part_end \
-             FROM subfiles WHERE file_id IN ({placeholders}) GROUP BY file_id"
+             FROM subfiles WHERE file_id IN ({placeholders}) \
+             AND (local_checksum IS NULL OR local_checksum = '') GROUP BY file_id"
         );
         let values: Vec<DbValue> = chunk.iter().copied().map(DbValue::from).collect();
         match db.query_all(&sql, values).await {

@@ -166,6 +166,35 @@ pub(super) fn checksum_matches(expected: &str, actual: &str) -> bool {
     expected.trim().eq_ignore_ascii_case(actual.trim())
 }
 
+/// Whether `checksum` is its algorithm's digest of no bytes, the only content a
+/// zero-length part can have.
+pub(super) fn is_empty_content_checksum(checksum: &str) -> bool {
+    !checksum.trim().is_empty()
+        && checksum_matches(
+            checksum,
+            &FlexHasher::from_checksum(checksum).finalize_hex(),
+        )
+}
+
+/// Segment checksums of every op in plan order, taking the applied checksum of
+/// each op with bytes from `applied` (in order) and the target checksum of each
+/// zero-length op, which nothing reads or writes.
+pub(super) fn segment_checksums_with_empty_ops<'a>(
+    ops: &'a [DownloadPatchOp],
+    applied: &'a [String],
+) -> Vec<&'a str> {
+    let mut applied = applied.iter();
+    ops.iter()
+        .map(|op| {
+            if op.length == 0 {
+                op.target_checksum.as_str()
+            } else {
+                applied.next().map(String::as_str).unwrap_or_default()
+            }
+        })
+        .collect()
+}
+
 pub(super) fn compute_tree_checksum_from_segment_checksums<'a, I>(checksums: I) -> String
 where
     I: IntoIterator<Item = &'a str>,

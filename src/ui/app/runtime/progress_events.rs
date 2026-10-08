@@ -393,42 +393,9 @@ impl Foxy {
                     self.needs_repaint = true;
                 }
                 ProgressEvent::SiblingPropagation { repo_urls } => {
-                    for repo_url in repo_urls {
-                        let normalized_url = Self::normalize_repo_url(repo_url);
-                        self.pending_quick_scan_urls.remove(&normalized_url);
-                        self.pending_quick_scan_prevalidated_urls
-                            .remove(&normalized_url);
-                        self.pending_quick_scan_force_fresh_addon_hash_urls
-                            .remove(&normalized_url);
-                        self.quick_scan_pending.remove(&normalized_url);
-                        self.deferred_fs_scan.remove(&normalized_url);
-
-                        // Propagation can touch every folder instance of the URL,
-                        // so refresh each instance's status independently.
-                        let instances: Vec<(usize, String, String)> = self
-                            .repository_view_state
-                            .repositories
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, repo)| {
-                                Self::normalize_repo_url(&repo.address) == normalized_url
-                            })
-                            .map(|(idx, repo)| (idx, repo.address.clone(), repo.path.clone()))
-                            .collect();
-                        for (repo_idx, repo_address, repo_path) in instances {
-                            self.clear_pending_update_cache_for_url(&repo_address, &repo_path);
-                            if self.update_ready_repo == Some(repo_idx) {
-                                self.update_ready_repo = None;
-                                self.clear_mod_diff_cache();
-                                self.update_modal_open = false;
-                            }
-                            self.set_repo_state_for_address(
-                                &repo_address,
-                                &repo_path,
-                                RepoState::Synced,
-                            );
-                        }
-                    }
+                    // Propagation settles only the addons a sibling shares with the
+                    // synced repository; its own quick scan decides what is left.
+                    self.queue_quick_scan_for_urls(repo_urls.clone());
                     self.needs_repaint = true;
                 }
                 ProgressEvent::DownloadPlan {

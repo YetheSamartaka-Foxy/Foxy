@@ -14,7 +14,8 @@ use tokio::sync::watch;
 use super::transfer::{download_range_to_output, hash_file_segment, wait_for_download_resume};
 use super::types::{
     APPLY_BATCH_BYTES, ApplyBatch, ApplySegment, PatchArtifact, PatchOpType, RUN_COPY_BUFFER_SIZE,
-    checksum_matches, coalesce_apply_segments, plan_apply_batches, should_abort_copy_fallback,
+    checksum_matches, coalesce_apply_segments, is_empty_content_checksum, plan_apply_batches,
+    should_abort_copy_fallback,
 };
 pub(super) fn validate_runtime_ops(
     ops: &[DownloadPatchOp],
@@ -32,8 +33,11 @@ pub(super) fn validate_runtime_ops(
 
     let mut cursor = 0_u64;
     for op in ops {
-        if op.length == 0 {
-            return Err(anyhow!("patch op {} has zero length", op.data_order));
+        if op.length == 0 && !is_empty_content_checksum(&op.target_checksum) {
+            return Err(anyhow!(
+                "zero-length patch op {} expects content",
+                op.data_order
+            ));
         }
         if op.dest_start != cursor {
             return Err(anyhow!(

@@ -30,6 +30,7 @@ use super::types::{
     PATCH_STATUS_APPLYING, PATCH_STATUS_DONE, PATCH_STATUS_DOWNLOADING, PATCH_STATUS_FALLBACK_FULL,
     PATCH_STATUS_PLANNED, PATCH_STATUS_READY, PatchOpType, PatchRequestBudget, checksum_matches,
     compute_tree_checksum_from_segment_checksums, keep_patch_artifacts_for_diagnostics,
+    segment_checksums_with_empty_ops,
 };
 /// A cancelled attempt is not a failed plan: leave the plan `planned` so the
 /// next download patches instead of fetching the whole file.
@@ -171,7 +172,7 @@ pub(crate) async fn try_patch_first(
         return Ok(None);
     }
 
-    let mut patch_ops = match fetch_download_patch_ops_for_file(context.clone(), file_id).await {
+    let plan_ops = match fetch_download_patch_ops_for_file(context.clone(), file_id).await {
         Ok(ops) => ops,
         Err(err) => {
             mark_patch_fallback(
@@ -183,6 +184,13 @@ pub(crate) async fn try_patch_first(
             return Ok(None);
         }
     };
+    // Zero-length ops only hold their place in the checksum rollups; transfer
+    // and apply see the ops that carry bytes.
+    let mut patch_ops: Vec<_> = plan_ops
+        .iter()
+        .filter(|op| op.length > 0)
+        .cloned()
+        .collect();
 
     let insert_ops = patch_ops
         .iter()
@@ -217,7 +225,7 @@ pub(crate) async fn try_patch_first(
         patch_file.patch_blob_path
     );
 
-    if let Err(err) = validate_runtime_ops(&patch_ops, artifact.new_file_expected_size) {
+    if let Err(err) = validate_runtime_ops(&plan_ops, artifact.new_file_expected_size) {
         mark_patch_fallback(
             context,
             &patch_file,
@@ -228,7 +236,7 @@ pub(crate) async fn try_patch_first(
     }
 
     let planned_tree_checksum = compute_tree_checksum_from_segment_checksums(
-        patch_ops.iter().map(|op| op.target_checksum.as_str()),
+        plan_ops.iter().map(|op| op.target_checksum.as_str()),
     );
     if !checksum_matches(&artifact.new_file_remote_checksum, &planned_tree_checksum) {
         mark_patch_fallback(
@@ -453,8 +461,9 @@ pub(crate) async fn try_patch_first(
     let target_path = PathBuf::from(&artifact.local_target_path);
     // Compute tree checksum from segment checksums collected during apply -
     // avoids re-reading the entire output file from disk.
+    let plan_segment_checksums = segment_checksums_with_empty_ops(&plan_ops, &segment_checksums);
     let final_tree_checksum =
-        compute_tree_checksum_from_segment_checksums(segment_checksums.iter().map(|s| s.as_str()));
+        compute_tree_checksum_from_segment_checksums(plan_segment_checksums.iter().copied());
 
     if !checksum_matches(&artifact.new_file_remote_checksum, &final_tree_checksum) {
         let output_file_md5 = compute_file_integrity_hash(&target_path).await.ok();
@@ -591,13 +600,13 @@ pub(crate) async fn try_patch_first(
     patch_telemetry.success();
     Ok(Some(PatchedFileSegments {
         file_id: patch_file.file_id,
-        parts: patch_ops
+        parts: plan_ops
             .iter()
-            .zip(segment_checksums)
+            .zip(plan_segment_checksums)
             .map(|(op, checksum)| PatchedSegment {
                 dest_start: op.dest_start,
                 length: op.length,
-                checksum,
+                checksum: checksum.to_string(),
             })
             .collect(),
         content_hash,
