@@ -192,8 +192,10 @@ async fn repository_has_linked_addons(context: Arc<FoxyContext>, repository_id: 
     }
 }
 
-fn collect_remote_addon_names(data: &Value) -> Option<HashSet<String>> {
-    let mut names = HashSet::new();
+/// Published addons by lowercase name with the `checkSum` the addon list
+/// gives for each (empty when it gives none).
+fn collect_remote_addon_checksums(data: &Value) -> Option<HashMap<String, String>> {
+    let mut checksums = HashMap::new();
     let mut saw_mod_list = false;
 
     for key in ["requiredMods", "optionalMods"] {
@@ -209,21 +211,44 @@ fn collect_remote_addon_names(data: &Value) -> Option<HashSet<String>> {
             if mod_name.is_empty() || !crate::core::utils::fs_safety::is_safe_child_path(mod_name) {
                 continue;
             }
-            names.insert(mod_name.to_lowercase());
+            let checksum = mod_data
+                .get("checkSum")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            checksums.insert(mod_name.to_lowercase(), checksum);
         }
     }
 
-    saw_mod_list.then_some(names)
+    saw_mod_list.then_some(checksums)
 }
 
-async fn repository_linked_addon_names(
+/// Whether every addon checksum the remote addon list publishes is the one
+/// stored for that addon. The stored value is copied from the same list, so
+/// a difference means the addon's manifest changed since it was last read,
+/// even when the repository checksum already reads as clean: a sibling sync
+/// can bring the local files up to the new version first.
+fn remote_addon_checksums_match(
+    remote: &HashMap<String, String>,
+    stored: &HashMap<String, String>,
+) -> bool {
+    remote.iter().all(|(name, checksum)| {
+        checksum.is_empty()
+            || stored
+                .get(name)
+                .is_some_and(|stored| stored.trim().eq_ignore_ascii_case(checksum))
+    })
+}
+
+async fn repository_linked_addon_checksums(
     context: Arc<FoxyContext>,
     repository_id: i64,
-) -> Option<HashSet<String>> {
+) -> Option<HashMap<String, String>> {
     let rows = match context
         .db()
         .query_all(
-            r#"SELECT a.name AS name
+            r#"SELECT a.name AS name, a.remote_checksum AS remote_checksum
                FROM repository_addons ra
                JOIN addons a ON a.id = ra.addon_id
                WHERE ra.repository_id = ?"#,
@@ -243,9 +268,11 @@ async fn repository_linked_addon_names(
 
     Some(
         rows.into_iter()
-            .filter_map(|row| row.get_string("name").ok())
-            .map(|name| name.trim().to_lowercase())
-            .filter(|name| !name.is_empty())
+            .filter_map(|row| {
+                let name = row.get_string("name").ok()?.trim().to_lowercase();
+                let checksum = row.get_string("remote_checksum").unwrap_or_default();
+                (!name.is_empty()).then_some((name, checksum))
+            })
             .collect(),
     )
 }
@@ -709,13 +736,29 @@ pub(crate) async fn remote_repository(
     let has_remote_state =
         repository_has_remote_state(context.clone(), repository.id as i64, enabled_overrides).await;
     let remote_mods_data = foxy_addons_data.as_ref().unwrap_or(&data);
-    let remote_addon_names = collect_remote_addon_names(remote_mods_data);
-    let linked_addon_names =
-        repository_linked_addon_names(context.clone(), repository.id as i64).await;
+    let remote_addon_checksums = collect_remote_addon_checksums(remote_mods_data);
+    let linked_addon_checksums =
+        repository_linked_addon_checksums(context.clone(), repository.id as i64).await;
+    let remote_addon_names: Option<HashSet<String>> = remote_addon_checksums
+        .as_ref()
+        .map(|checksums| checksums.keys().cloned().collect());
+    let linked_addon_names: Option<HashSet<String>> = linked_addon_checksums
+        .as_ref()
+        .map(|checksums| checksums.keys().cloned().collect());
     let remote_addon_links_match = remote_addon_names
         .as_ref()
         .zip(linked_addon_names.as_ref())
         .is_none_or(|(remote, linked)| remote == linked);
+    let remote_addon_versions_match = remote_addon_checksums
+        .as_ref()
+        .zip(linked_addon_checksums.as_ref())
+        .is_none_or(|(remote, stored)| remote_addon_checksums_match(remote, stored));
+    if remote_addon_links_match && !remote_addon_versions_match {
+        info!(
+            "Repository {} addon checksums differ from the remote addon list; forcing metadata rebuild",
+            repository.remote_url
+        );
+    }
     let repository_space_paths_match =
         repository_addon_paths_match_space_layout(context.clone(), &repository).await;
     if !remote_addon_links_match
@@ -774,7 +817,10 @@ pub(crate) async fn remote_repository(
         has_linked_addons,
         has_remote_state,
         context.recheck_level,
-        force_refresh || !remote_addon_links_match || !repository_space_paths_match,
+        force_refresh
+            || !remote_addon_links_match
+            || !remote_addon_versions_match
+            || !repository_space_paths_match,
     ) {
         info!("Up-to-date: Repository {}.", repository.remote_url.clone());
         log_remote_refresh_sol(
@@ -797,7 +843,7 @@ pub(crate) async fn remote_repository(
         &remote_checksum,
         previous_remote_checksum.as_deref(),
         local_path_unchanged,
-        remote_graph_complete && remote_addon_links_match,
+        remote_graph_complete && remote_addon_links_match && remote_addon_versions_match,
         context.recheck_level,
         force_refresh || !repository_space_paths_match,
     ) {
@@ -1425,7 +1471,7 @@ mod tests {
     }
 
     #[test]
-    fn collect_remote_addon_names_deduplicates_required_and_optional() {
+    fn collect_remote_addon_checksums_deduplicates_required_and_optional() {
         let data = serde_json::json!({
             "requiredMods": [
                 { "modName": "@ace" },
@@ -1438,18 +1484,42 @@ mod tests {
             ]
         });
 
-        let names = collect_remote_addon_names(&data).expect("mod list should be present");
+        let names = collect_remote_addon_checksums(&data).expect("mod list should be present");
 
         assert_eq!(names.len(), 2);
-        assert!(names.contains("@ace"));
-        assert!(names.contains("@cba_a3"));
+        assert!(names.contains_key("@ace"));
+        assert!(names.contains_key("@cba_a3"));
     }
 
     #[test]
-    fn collect_remote_addon_names_none_without_mod_lists() {
+    fn addon_list_checksum_change_is_detected_against_stored_checksums() {
+        let data = serde_json::json!({
+            "requiredMods": [
+                { "modName": "@Mod_01", "checkSum": "NEW" },
+                { "modName": "@mod_02", "checkSum": "same" },
+                { "modName": "@mod_03" }
+            ]
+        });
+        let remote = collect_remote_addon_checksums(&data).expect("mod list should be present");
+        let stored = |first: &str| {
+            HashMap::from([
+                ("@mod_01".to_string(), first.to_string()),
+                ("@mod_02".to_string(), "SAME".to_string()),
+                ("@mod_03".to_string(), "ANY".to_string()),
+            ])
+        };
+
+        assert_eq!(remote.get("@mod_01").map(String::as_str), Some("NEW"));
+        assert!(remote_addon_checksums_match(&remote, &stored("NEW")));
+        assert!(!remote_addon_checksums_match(&remote, &stored("OLD")));
+        assert!(!remote_addon_checksums_match(&remote, &HashMap::new()));
+    }
+
+    #[test]
+    fn collect_remote_addon_checksums_none_without_mod_lists() {
         let data = serde_json::json!({ "checksum": "abc" });
 
-        assert!(collect_remote_addon_names(&data).is_none());
+        assert!(collect_remote_addon_checksums(&data).is_none());
     }
 
     #[test]
