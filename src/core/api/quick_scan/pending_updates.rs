@@ -1,7 +1,9 @@
 use super::super::*;
 use super::db_helpers::load_patch_download_bytes_by_file_ids;
 use crate::core::db::{DbValue, FoxyDb, params};
-use crate::core::models::download_target_file::fetch_all_download_targets_with_mod_and_name;
+use crate::core::models::download_target_file::{
+    attach_part_change_details, fetch_all_download_targets_with_mod_and_name,
+};
 use crate::core::models::modification::ADDON_COLUMNS;
 use crate::core::models::modification_file::FILE_COLUMNS;
 use crate::core::models::modification_file_part::{
@@ -624,14 +626,20 @@ pub(crate) async fn apply_download_target_estimates_to_pending_updates(
         return None;
     }
 
+    attach_part_change_details(context.clone(), &mut targets).await;
     let (patchable_file_ids, planned_bytes, full_bytes) =
         apply_download_plan_bytes(context, &mut targets).await;
     let mods = build_download_estimate_diffs(&targets);
     info!(
-        "Download-target pending estimate applied for repo={}: mods={} files={} dropped_targets={} patch_files={} planned_transfer_bytes={} full_bytes={}",
+        "Download-target pending estimate applied for repo={}: mods={} files={} new_files={} changed_parts={} dropped_targets={} patch_files={} planned_transfer_bytes={} full_bytes={}",
         repo_url,
         mods.len(),
         targets.len(),
+        targets.iter().filter(|target| target.new_file).count(),
+        targets
+            .iter()
+            .map(|target| target.changed_parts)
+            .sum::<usize>(),
         pre_filter_targets.saturating_sub(targets.len()),
         patchable_file_ids.len(),
         planned_bytes,

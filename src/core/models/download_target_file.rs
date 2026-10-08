@@ -54,6 +54,73 @@ pub(crate) struct DownloadTargetWithModName {
     pub download: DownloadTargetFile,
     pub mod_id: u64,
     pub mod_name: String,
+    /// Parts whose local state does not match the remote, for the update
+    /// summary; filled by [`attach_part_change_details`].
+    pub changed_parts: usize,
+    /// The target has no local copy yet; filled by [`attach_part_change_details`].
+    pub new_file: bool,
+}
+
+/// Fill each target's changed-part count and whether it is a new file, so an
+/// update summary built from download targets describes the same changes the
+/// quick scan reported rather than whole-file rows.
+pub(crate) async fn attach_part_change_details(
+    context: Arc<FoxyContext>,
+    targets: &mut [DownloadTargetWithModName],
+) {
+    if targets.is_empty() {
+        return;
+    }
+    let file_ids: Vec<i64> = targets
+        .iter()
+        .map(|target| target.download.file_id as i64)
+        .collect();
+    let mut changed_by_file: std::collections::HashMap<u64, usize> =
+        std::collections::HashMap::new();
+    let db = context.db();
+    for chunk in file_ids.chunks(500) {
+        let placeholders = vec!["?"; chunk.len()].join(",");
+        let sql = format!(
+            "SELECT file_id, COUNT(*) AS changed_parts FROM subfiles \
+             WHERE file_id IN ({placeholders}) \
+             AND COALESCE(local_checksum, '') != remote_checksum GROUP BY file_id"
+        );
+        let values: Vec<DbValue> = chunk.iter().copied().map(DbValue::from).collect();
+        match db.query_all(&sql, values).await {
+            Ok(rows) => {
+                for row in rows {
+                    if let (Ok(file_id), Ok(changed)) =
+                        (row.get_i64("file_id"), row.get_i64("changed_parts"))
+                    {
+                        changed_by_file.insert(file_id as u64, changed.max(0) as usize);
+                    }
+                }
+            }
+            Err(err) => {
+                log::warn!("Failed to load changed part counts for download targets: {err}");
+                return;
+            }
+        }
+    }
+    let local_paths: Vec<String> = targets
+        .iter()
+        .map(|target| target.download.download_local_path.to_string())
+        .collect();
+    let present = tokio::task::spawn_blocking(move || {
+        local_paths
+            .iter()
+            .map(|path| std::fs::metadata(path).is_ok_and(|meta| meta.is_file()))
+            .collect::<Vec<bool>>()
+    })
+    .await
+    .unwrap_or_default();
+    for (idx, target) in targets.iter_mut().enumerate() {
+        target.changed_parts = changed_by_file
+            .get(&target.download.file_id)
+            .copied()
+            .unwrap_or(0);
+        target.new_file = present.get(idx).is_some_and(|present| !present);
+    }
 }
 
 pub(crate) async fn save_download_target_file(
@@ -266,6 +333,8 @@ pub(crate) async fn fetch_all_download_targets_with_mod_and_name(
             },
             mod_id: if mod_id < 0 { u64::MAX } else { mod_id as u64 },
             mod_name,
+            changed_parts: 0,
+            new_file: false,
         });
     }
 
@@ -287,5 +356,60 @@ mod tests {
         );
         // A full chunk stays under the bind-variable budget (3 binds per row).
         assert!(batch_size * 3 < 32_766);
+    }
+
+    #[tokio::test]
+    async fn part_change_details_count_unmatched_parts_and_flag_new_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let present = dir.path().join("present.pbo");
+        std::fs::write(&present, b"old").unwrap();
+        let absent = dir.path().join("absent.pbo");
+        let db = crate::core::tasks::db_turso::build_test_database().await;
+        let context = Arc::new(FoxyContext::new(db, reqwest::Client::new()));
+        let parts: [(i64, i64, &str, &str); 5] = [
+            (1, 1, "A", "A"),
+            (2, 1, "", "B"),
+            (3, 1, "X", "C"),
+            (4, 2, "", "D"),
+            (5, 2, "", "E"),
+        ];
+        for file_id in [1i64, 2] {
+            context
+                .db()
+                .execute(
+                    "INSERT INTO files (id, name, remote_path, local_path, local_checksum, remote_checksum, local_content_hash, length, data_order) \
+                     VALUES (?, ?, '', '', 'OLD', 'NEW', '', 1, 0)",
+                    params![file_id, format!("f{file_id}")],
+                )
+                .await
+                .unwrap();
+        }
+        for (id, file_id, local, remote) in parts {
+            context
+                .db()
+                .execute(
+                    "INSERT INTO subfiles (id, file_id, path, local_length, local_start, remote_length, remote_start, local_checksum, remote_checksum, data_order) \n                     VALUES (?, ?, ?, 0, 0, 1, 0, ?, ?, ?)",
+                    params![id, file_id, format!("p{id}"), local, remote, id],
+                )
+                .await
+                .unwrap();
+        }
+        let target = |file_id: u64, path: &std::path::Path| DownloadTargetWithModName {
+            download: DownloadTargetFile {
+                file_id,
+                download_local_path: Arc::from(path.to_string_lossy().as_ref()),
+                ..Default::default()
+            },
+            mod_id: 1,
+            mod_name: "@mod_01".to_string(),
+            changed_parts: 0,
+            new_file: false,
+        };
+        let mut targets = vec![target(1, &present), target(2, &absent)];
+
+        attach_part_change_details(context, &mut targets).await;
+
+        assert_eq!((targets[0].changed_parts, targets[0].new_file), (2, false));
+        assert_eq!((targets[1].changed_parts, targets[1].new_file), (2, true));
     }
 }

@@ -21,7 +21,9 @@ use super::hashing::{
 use super::summary::{PipelineSummary, StageEntry};
 use crate::core::api::FileDiffKind;
 use crate::core::db::{DbValue, FoxyDb, params};
-use crate::core::models::download_target_file::fetch_all_download_targets_with_mod_and_name;
+use crate::core::models::download_target_file::{
+    attach_part_change_details, fetch_all_download_targets_with_mod_and_name,
+};
 use crate::core::models::modification::ADDON_COLUMNS;
 use crate::core::models::pending_update::fetch_pending_update_for_context;
 use crate::core::models::repository::load_repository_by_remote_url_and_local_path;
@@ -2671,6 +2673,7 @@ async fn run_repository_pipeline(
             match fetch_all_download_targets_with_mod_and_name(context.clone()).await {
                 Ok(mut targets) => {
                     targets.retain(|target| download_file_ids.contains(&target.download.file_id));
+                    attach_part_change_details(context.clone(), &mut targets).await;
                     let (patchable_file_ids, planned_bytes, full_bytes) =
                         apply_download_plan_bytes(context.clone(), &mut targets).await;
                     mods = build_download_estimate_diffs(&targets);

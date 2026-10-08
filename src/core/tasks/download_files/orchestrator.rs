@@ -5,8 +5,8 @@ use crate::core::models::context::FoxyContext;
 use crate::core::models::download_patch_file::load_download_patch_file;
 use crate::core::models::download_target_file::{
     DownloadProgressUpdate, DownloadTargetFile, DownloadTargetWithModName,
-    fetch_all_download_targets_with_mod_and_name, save_download_target_file,
-    update_download_target_progress_batch,
+    attach_part_change_details, fetch_all_download_targets_with_mod_and_name,
+    save_download_target_file, update_download_target_progress_batch,
 };
 use crate::core::utils::app_paths::foxy_large_payload_dir;
 use crate::core::utils::format::sanitize_log_path;
@@ -169,8 +169,12 @@ pub(crate) fn build_download_estimate_diffs(
             name: download_display_name(target.download.download_local_path.as_ref()),
             needs_update: true,
             total_bytes: estimate,
-            changed_parts: 0,
-            change_kind: FileDiffKind::Modified,
+            changed_parts: target.changed_parts,
+            change_kind: if target.new_file {
+                FileDiffKind::Added
+            } else {
+                FileDiffKind::Modified
+            },
         });
     }
 
@@ -949,6 +953,7 @@ pub(crate) async fn download_files(
             (HashSet::new(), full_bytes, full_bytes)
         } else {
             let _phase = metrics.phase("load_patch_plans");
+            attach_part_change_details(context.clone(), &mut targets).await;
             apply_download_plan_bytes(context.clone(), &mut targets).await
         };
     info!(
@@ -1880,7 +1885,7 @@ mod tests {
     }
 
     #[test]
-    fn download_estimate_diffs_use_expected_transfer_bytes() {
+    fn download_estimate_diffs_use_expected_transfer_bytes_and_part_details() {
         let targets = vec![
             DownloadTargetWithModName {
                 download: DownloadTargetFile {
@@ -1894,6 +1899,8 @@ mod tests {
                 },
                 mod_id: 10,
                 mod_name: "@optre".to_owned(),
+                changed_parts: 3,
+                new_file: false,
             },
             DownloadTargetWithModName {
                 download: DownloadTargetFile {
@@ -1907,6 +1914,8 @@ mod tests {
                 },
                 mod_id: 10,
                 mod_name: "@optre".to_owned(),
+                changed_parts: 7,
+                new_file: true,
             },
         ];
 
@@ -1919,5 +1928,9 @@ mod tests {
         assert_eq!(mods[0].files[0].name, "a.pbo");
         assert_eq!(mods[0].files[0].total_bytes, 250);
         assert_eq!(mods[0].files[1].total_bytes, 2_000);
+        assert_eq!(mods[0].files[0].changed_parts, 3);
+        assert_eq!(mods[0].files[0].change_kind, FileDiffKind::Modified);
+        assert_eq!(mods[0].files[1].changed_parts, 7);
+        assert_eq!(mods[0].files[1].change_kind, FileDiffKind::Added);
     }
 }
