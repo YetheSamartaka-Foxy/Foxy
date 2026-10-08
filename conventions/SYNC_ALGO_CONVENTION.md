@@ -175,11 +175,16 @@ to a full-file download.
 5. `local_content_hash` is valid for any entity whose tree checksum was
    computed from the disk state the fingerprint describes, clean or not.
 6. A file is tree-verified again only when its current fingerprint differs from
-   the stored one (disk drift) or its `local_checksum` is empty (a hash that
-   never ran or failed). A tree mismatch with an unchanged fingerprint is
-   reported from the stored checksums with no disk read. Patch preflight and
-   per-op checksum verification still catch a stale local part hash and degrade
-   that file to a range download, never to a wrong file.
+   the stored one (disk drift), its `local_checksum` is empty (a hash that
+   never ran or failed), or it is outdated, present on disk, none of its parts carries local
+   state, and its first remote part fits inside the local file (the delta
+   planner would have nothing to copy from, so one local read replaces a full
+   download; a plain file shorter than its only part hashes to no part state
+   and is not re-read). A tree mismatch with an
+   unchanged fingerprint and known part state is reported from the stored
+   checksums with no disk read. Patch preflight and per-op checksum
+   verification still catch a stale local part hash and degrade that file to a
+   range download, never to a wrong file.
 7. Quick scan must never read part ranges. It can read addon folders and file
    metadata/content samples only.
 8. Tree hash verification must be targeted to suspicious files whenever
@@ -425,7 +430,10 @@ Algorithm:
    - load expected file rows for only that addon
    - detect missing expected files
    - detect size mismatches
-   - compute fast file content hashes only for expected files in that addon
+   - compute fast file content hashes only for expected files in that addon,
+     including a file whose size differs when its last tree hash stored a
+     fingerprint, so an outdated file whose fingerprint still matches is not
+     read again
    - detect unexpected local files under the addon folder
 6. For each suspicious file, add the file ID to `files_needing_tree_verify`.
 7. If `auto_tree_verify_on_mismatch` is enabled, run targeted tree hash
@@ -815,6 +823,13 @@ Part stage:
 1. Load and upsert current manifest parts only for files that reached the part
    stage.
 2. Preserve existing local part checksums unless remote part metadata changed.
+   A clean file stores no part local checksums (its part state is derived from
+   `files.local_checksum == files.remote_checksum`), so when its remote
+   checksum changes the batch first writes that derived state onto the rows
+   that keep their key. A row whose key changed because the manifest inserted
+   or removed an entry before it takes the local state of the unclaimed old row
+   with the same part path. Without this the delta planner finds no local part
+   metadata and every updated file falls back to a full download.
 3. Upsert file parts through `FilePartEntity`/`FoxyModFilePart`; do not
    recreate the removed `file_subfiles` junction table.
 4. Delete stale `subfiles` rows no longer present in the manifest for those
@@ -1297,6 +1312,11 @@ The logs should make it possible to answer:
 - Do not compare `local_content_hash` to remote checksums.
 - Do not clear or withhold the content hash of a tree-mismatched file or addon;
   that forces a full re-hash of every outdated file on every scan.
+- Withhold an addon content baseline only for a missing file whose tree state
+  says it is verified (`local_checksum == remote_checksum`). A missing file a
+  pending update adds is already reported by its tree checksum; withholding
+  for it deep-scans every pending addon in every sibling repository on every
+  scan.
 - Do not run an unscoped content-hash refresh after a targeted hash pass.
 - Do not sample a file for its content hash in the same operation that just
   tree-hashed it; consume the fingerprint the hash pass recorded.

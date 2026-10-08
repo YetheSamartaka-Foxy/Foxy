@@ -1,15 +1,16 @@
 use super::super::fs_watcher::normalize_path_for_match;
 use super::super::*;
+use super::content_hash::calculate_fast_file_content_hash;
 use super::db_helpers::{
-    PartChangeStats, load_changed_part_stats_by_file_ids, load_patch_download_bytes_by_file_ids,
-    refresh_files_by_ids,
+    PartChangeStats, load_changed_part_stats_by_file_ids, load_first_part_end_by_file_ids,
+    load_patch_download_bytes_by_file_ids, refresh_files_by_ids,
 };
 use super::diff_addon_hash::AddonHashResult;
 use super::file_state::{LocalFileState, resolve_local_file_state};
 use super::shared_cache::QuickScanSharedCache;
 use super::unexpected_files::collect_unexpected_local_files_for_mod;
 use crate::core::api::FileDiffKind;
-use crate::core::db::DbValue;
+use crate::core::db::{DbValue, FoxyDb};
 
 pub(super) struct DiffComputeResult {
     pub diffs: Vec<ModDiffSummary>,
@@ -60,15 +61,74 @@ fn addon_needs_update_from_file_diff(has_expected_file_diffs: bool) -> bool {
 
 /// Whether a mismatched file must be tree-hashed again before it is reported.
 /// Only disk drift (the stored content fingerprint no longer matches, or was
-/// never recorded) or a tree hash that never ran justify re-reading the file;
-/// a tree mismatch with an unchanged fingerprint is a confirmed pending update
-/// whose stored part state is still a true description of the local file.
+/// never recorded), a tree hash that never ran, or a part layout no hash ever
+/// described justify re-reading the file; a tree mismatch with an unchanged
+/// fingerprint is a confirmed pending update whose stored part state is still a
+/// true description of the local file. Without any part state the delta
+/// planner has nothing to copy from, so one local read beats a full download.
+/// An outdated file whose size differs is fingerprinted only when its last tree
+/// hash stored a fingerprint to compare with; an unchanged one is then not read
+/// again on every scan, and a file with no baseline costs no sample reads.
+fn fingerprint_resized_file(exists: bool, stored_content_hash: &str) -> bool {
+    exists && !stored_content_hash.is_empty()
+}
+
 fn file_needs_tree_verify(
     exists: bool,
     local_checksum_missing: bool,
     file_content_mismatch: bool,
+    part_state_missing: bool,
 ) -> bool {
-    exists && (file_content_mismatch || local_checksum_missing)
+    exists && (file_content_mismatch || local_checksum_missing || part_state_missing)
+}
+
+fn part_state_missing(stats: PartChangeStats) -> bool {
+    stats.total_parts > 0 && stats.missing_local_checksums == stats.total_parts
+}
+
+/// A hash of the current local file can give it part state only when its first
+/// remote part fits inside it. A file shorter than that (a plain single-part
+/// file the update grew) hashes to no part state at all, so re-reading it on
+/// every scan would buy nothing.
+fn first_part_readable(first_part_end: u64, local_length: u64) -> bool {
+    first_part_end <= local_length
+}
+
+/// Outdated files present on disk whose parts carry no local state but could
+/// get some from one tree hash. The first-part lookup runs only for them, so a
+/// scan of files that are absent or already described costs no extra query.
+async fn files_with_recoverable_part_state(
+    db: &FoxyDb,
+    files_by_id: &HashMap<i64, FoxyModFile>,
+    part_stats_by_file_id: &HashMap<i64, PartChangeStats>,
+    chunk_size: usize,
+) -> HashSet<u64> {
+    let local_lengths: HashMap<i64, u64> = part_stats_by_file_id
+        .iter()
+        .filter(|(_, stats)| part_state_missing(**stats))
+        .filter_map(|(file_id, _)| {
+            let file = files_by_id.get(file_id)?;
+            if file.local_checksum == file.remote_checksum {
+                return None;
+            }
+            let meta = crate::core::utils::profiling::fs::metadata(&file.local_path).ok()?;
+            meta.is_file().then_some((*file_id, meta.len()))
+        })
+        .collect();
+    if local_lengths.is_empty() {
+        return HashSet::new();
+    }
+    let file_ids: Vec<i64> = local_lengths.keys().copied().collect();
+    load_first_part_end_by_file_ids(db, &file_ids, chunk_size)
+        .await
+        .into_iter()
+        .filter(|(file_id, first_part_end)| {
+            local_lengths
+                .get(file_id)
+                .is_some_and(|length| first_part_readable(*first_part_end, *length))
+        })
+        .map(|(file_id, _)| file_id as u64)
+        .collect()
 }
 
 fn is_stale_tree_only_file_diff(
@@ -202,6 +262,13 @@ pub(super) async fn compute_file_diffs(
     } else {
         load_changed_part_stats_by_file_ids(&db, &stats_file_ids, chunk_size).await
     };
+    let recoverable_part_state_file_ids = files_with_recoverable_part_state(
+        &db,
+        &files_by_id,
+        &changed_part_stats_by_file_id,
+        chunk_size,
+    )
+    .await;
     let tree_part_stats_load_elapsed = tree_part_stats_started.elapsed();
 
     let mut local_file_state_cache: HashMap<String, LocalFileState> = HashMap::new();
@@ -315,6 +382,13 @@ pub(super) async fn compute_file_diffs(
                 let size_ok = exists && file_state.length == f.length;
                 let content_hash = if size_ok {
                     file_state.content_hash.clone()
+                } else if fingerprint_resized_file(exists, &f.local_content_hash) {
+                    let path = f.local_path.clone();
+                    tokio::task::spawn_blocking(move || calculate_fast_file_content_hash(&path))
+                        .await
+                        .ok()
+                        .and_then(Result::ok)
+                        .unwrap_or_default()
                 } else {
                     String::new()
                 };
@@ -361,17 +435,18 @@ pub(super) async fn compute_file_diffs(
                     if file_tree_mismatch {
                         checksum_mismatch_files += 1;
                     }
-                    if file_needs_tree_verify(
-                        exists,
-                        f.local_checksum.trim().is_empty(),
-                        file_content_mismatch,
-                    ) {
-                        files_needing_tree_verify.insert(f.id);
-                    }
                     let part_stats = changed_part_stats_by_file_id
                         .get(&(f.id as i64))
                         .copied()
                         .unwrap_or_default();
+                    if file_needs_tree_verify(
+                        exists,
+                        f.local_checksum.trim().is_empty(),
+                        file_content_mismatch,
+                        file_tree_mismatch && recoverable_part_state_file_ids.contains(&f.id),
+                    ) {
+                        files_needing_tree_verify.insert(f.id);
+                    }
                     let inferred_patch_bytes = inferred_patch_bytes_from_part_stats(
                         part_stats,
                         f.length,
@@ -441,6 +516,9 @@ pub(super) async fn compute_file_diffs(
                     .get(&(f.id as i64))
                     .copied()
                     .unwrap_or_default();
+                if recoverable_part_state_file_ids.contains(&f.id) {
+                    files_needing_tree_verify.insert(f.id);
+                }
                 let inferred_patch_bytes =
                     inferred_patch_bytes_from_part_stats(part_stats, f.length, file_tree_mismatch);
                 let patch_hint = patch_download_bytes_by_file_id.get(&(f.id as i64)).copied();
@@ -647,22 +725,53 @@ mod tests {
     fn outdated_file_with_unchanged_fingerprint_is_not_reverified() {
         // Tree mismatch, stored fingerprint equals the current one: reported from
         // stored checksums, no disk read.
-        assert!(!file_needs_tree_verify(true, false, false));
+        assert!(!file_needs_tree_verify(true, false, false, false));
     }
 
     #[test]
     fn outdated_file_with_drifted_fingerprint_is_reverified() {
-        assert!(file_needs_tree_verify(true, false, true));
+        assert!(file_needs_tree_verify(true, false, true, false));
     }
 
     #[test]
     fn file_without_local_tree_hash_is_reverified() {
-        assert!(file_needs_tree_verify(true, true, false));
+        assert!(file_needs_tree_verify(true, true, false, false));
+    }
+
+    #[test]
+    fn outdated_file_without_any_part_state_is_reverified() {
+        assert!(file_needs_tree_verify(true, false, false, true));
+    }
+
+    #[test]
+    fn resized_file_is_fingerprinted_only_against_a_stored_fingerprint() {
+        assert!(fingerprint_resized_file(true, "STORED"));
+        assert!(!fingerprint_resized_file(true, ""));
+        assert!(!fingerprint_resized_file(false, "STORED"));
     }
 
     #[test]
     fn missing_file_is_never_tree_verified() {
-        assert!(!file_needs_tree_verify(false, true, true));
+        assert!(!file_needs_tree_verify(false, true, true, true));
+    }
+
+    #[test]
+    fn part_state_is_missing_only_when_no_part_has_local_state() {
+        let stats = |total_parts, missing_local_checksums| PartChangeStats {
+            total_parts,
+            missing_local_checksums,
+            ..PartChangeStats::default()
+        };
+        assert!(part_state_missing(stats(3, 3)));
+        assert!(!part_state_missing(stats(3, 2)));
+        assert!(!part_state_missing(stats(0, 0)));
+    }
+
+    #[test]
+    fn first_part_must_fit_inside_the_local_file() {
+        assert!(first_part_readable(400, 1000));
+        assert!(first_part_readable(1000, 1000));
+        assert!(!first_part_readable(4008, 908));
     }
 
     #[test]

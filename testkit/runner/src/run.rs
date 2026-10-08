@@ -1178,6 +1178,20 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                         evicted_pending = true;
                         continue;
                     }
+                    "origin-switch" => {
+                        let root = operation["root"]
+                            .as_str()
+                            .context("origin-switch requires a root directory")?;
+                        _origin
+                            .as_ref()
+                            .context("origin-switch requires a case origin")?
+                            .set_root(Path::new(root))?;
+                        let touched = crate::origin::server::touch_manifests(Path::new(root))?;
+                        eprintln!(
+                            "origin-switch: serving {root} ({touched} manifests republished)"
+                        );
+                        continue;
+                    }
                     _ => {}
                 }
                 let burst_before = _origin.as_ref().map(|origin| origin.burst_snapshot());

@@ -287,6 +287,18 @@ pub(crate) async fn refresh_content_hashes_for_file_ids(
     .await
 }
 
+fn baseline_would_mask_missing_file(
+    present: bool,
+    local_checksum: &str,
+    remote_checksum: &str,
+) -> bool {
+    !present
+        && crate::core::models::modification_file_part::FoxyModFilePart::file_checksums_are_clean(
+            local_checksum,
+            remote_checksum,
+        )
+}
+
 fn local_file_present(local_path: &str) -> bool {
     let local_path = local_path.trim();
     !local_path.is_empty()
@@ -532,24 +544,27 @@ async fn refresh_content_hashes_for_tree_started(
 
         // A folder content hash computed over a folder that is *missing* manifest
         // files still matches a baseline recorded from the same incomplete state,
-        // permanently masking the missing files from the quick scan (which then
-        // reports the addon clean and never schedules the files for download).
-        // Refuse to bless an addon whose expected files are not all present on
-        // disk - leaving its content hash empty forces the quick scan to deep-scan
-        // it and surface the missing files for re-download. A sampled file's
-        // content hash is only empty when it could not be read from disk (a
-        // present file, even 0 bytes, hashes to a non-empty value); a file outside
-        // the sample scope is present when its stored hash says so or a stat does.
-        let all_expected_files_present = addon_node.files.iter().all(|&file_idx| {
-            tree.files
-                .get(file_idx)
-                .map(|f| match file_content_hash_by_id.get(&f.id) {
+        // permanently masking a missing file whose tree state says it is verified
+        // (the quick scan then reports the addon clean and never schedules it).
+        // Refuse to bless such an addon - leaving its content hash empty forces
+        // the quick scan to deep-scan it and surface the file for re-download. A
+        // missing file whose tree checksum already differs from remote (a file a
+        // pending update adds) is reported by the tree layer either way, and
+        // withholding for it would deep-scan every pending addon on every scan.
+        // A sampled file's content hash is only empty when it could not be read
+        // from disk (a present file, even 0 bytes, hashes to a non-empty value); a
+        // file outside the sample scope is present when its stored hash says so or
+        // a stat does.
+        let masks_missing_file = addon_node.files.iter().any(|&file_idx| {
+            tree.files.get(file_idx).is_none_or(|f| {
+                let present = match file_content_hash_by_id.get(&f.id) {
                     Some(hash) => !hash.is_empty(),
                     None => !f.local_content_hash.is_empty() || local_file_present(&f.local_path),
-                })
-                .unwrap_or(false)
+                };
+                baseline_would_mask_missing_file(present, &f.local_checksum, &f.remote_checksum)
+            })
         });
-        let addon_content_hash = if all_expected_files_present {
+        let addon_content_hash = if !masks_missing_file {
             addon_content_hash
         } else {
             addons_with_missing_expected_files += 1;

@@ -286,6 +286,128 @@ fn stale_subfile_ids(
     stale
 }
 
+/// Local state a rebuilt part row must keep so the delta planner can still
+/// copy the bytes already on disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CarriedPartLocalState {
+    id: u64,
+    local_checksum: String,
+    local_length: u64,
+    local_start: u64,
+}
+
+/// Carry the local state of one file's previous part rows onto its rebuilt rows.
+///
+/// `old_parts` must already carry the derived clean state of the previous file.
+/// A clean file stores no part local checksums, so once its remote checksum
+/// changes that state is lost unless `materialize_existing` writes it onto the
+/// rows that keep their key. A row whose key changed (the manifest inserted or
+/// removed an entry before it) takes the state of an unclaimed old row with the
+/// same part path.
+fn carried_part_local_state(
+    old_parts: &[FoxyModFilePart],
+    current_parts: &[&FoxyModFilePart],
+    materialize_existing: bool,
+) -> Vec<CarriedPartLocalState> {
+    let has_local = |part: &FoxyModFilePart| !part.local_checksum.trim().is_empty();
+    let old_by_key: HashMap<&str, usize> = old_parts
+        .iter()
+        .enumerate()
+        .map(|(idx, part)| (part.path.as_str(), idx))
+        .collect();
+    let mut claimed = vec![false; old_parts.len()];
+    let mut carried = Vec::new();
+    let mut rekeyed = Vec::new();
+
+    for current in current_parts {
+        let Some(&idx) = old_by_key.get(current.path.as_str()) else {
+            rekeyed.push(*current);
+            continue;
+        };
+        claimed[idx] = true;
+        let old = &old_parts[idx];
+        if materialize_existing
+            && has_local(old)
+            && (current.local_checksum != old.local_checksum
+                || current.local_length != old.local_length
+                || current.local_start != old.local_start)
+        {
+            carried.push(CarriedPartLocalState {
+                id: current.id,
+                local_checksum: old.local_checksum.clone(),
+                local_length: old.local_length,
+                local_start: old.local_start,
+            });
+        }
+    }
+
+    let mut unclaimed_by_display_path: HashMap<&str, Vec<usize>> = HashMap::new();
+    let mut unclaimed: Vec<usize> = (0..old_parts.len())
+        .filter(|idx| !claimed[*idx] && has_local(&old_parts[*idx]))
+        .collect();
+    unclaimed.sort_by_key(|idx| old_parts[*idx].data_order);
+    for idx in unclaimed {
+        unclaimed_by_display_path
+            .entry(part_display_path(&old_parts[idx].path))
+            .or_default()
+            .push(idx);
+    }
+    rekeyed.sort_by_key(|part| part.data_order);
+    for current in rekeyed {
+        if has_local(current) {
+            continue;
+        }
+        let Some(candidates) = unclaimed_by_display_path.get_mut(part_display_path(&current.path))
+        else {
+            continue;
+        };
+        if candidates.is_empty() {
+            continue;
+        }
+        let old = &old_parts[candidates.remove(0)];
+        carried.push(CarriedPartLocalState {
+            id: current.id,
+            local_checksum: old.local_checksum.clone(),
+            local_length: old.local_length,
+            local_start: old.local_start,
+        });
+    }
+    carried
+}
+
+async fn persist_carried_part_local_state(db: &FoxyDb, states: Vec<CarriedPartLocalState>) {
+    let chunk_size = crate::core::tasks::init_database::bulk_write_rows_for(4);
+    let states = Arc::new(states);
+    if let Err(e) = db
+        .transaction("carry part local state", |txn| {
+            let states = states.clone();
+            Box::pin(async move {
+                for chunk in states.chunks(chunk_size) {
+                    let values_rows = vec!["(?, ?, ?, ?)"; chunk.len()].join(", ");
+                    let sql = format!(
+                        "WITH v(id, local_checksum, local_length, local_start) AS (VALUES {values_rows}) \
+                         UPDATE subfiles SET local_checksum = v.local_checksum, \
+                         local_length = v.local_length, local_start = v.local_start \
+                         FROM v WHERE subfiles.id = v.id"
+                    );
+                    let mut values: Vec<DbValue> = Vec::with_capacity(chunk.len() * 4);
+                    for state in chunk {
+                        values.push((state.id as i64).into());
+                        values.push(state.local_checksum.clone().into());
+                        values.push((state.local_length as i64).into());
+                        values.push((state.local_start as i64).into());
+                    }
+                    txn.execute(&sql, values).await?;
+                }
+                Ok(())
+            })
+        })
+        .await
+    {
+        warn!("Failed to carry part local state across manifest update: {}", e);
+    }
+}
+
 /// Batch version that handles all files of a mod in a handful of queries instead of per-file round trips.
 pub(crate) async fn remote_file_parts_batch(
     context: Arc<FoxyContext>,
@@ -390,6 +512,7 @@ pub(crate) async fn remote_file_parts_batch(
         old_parts_by_file.entry(*file_id).or_default().push(part);
     }
     let mut upsert_models: Vec<PartUpsertRow> = Vec::new();
+    let mut files_with_new_part_rows: HashSet<i64> = HashSet::new();
 
     for part in &all_part_rows {
         let needs_upsert = match existing_parts.get(&(part.file_id, part.path.clone())) {
@@ -399,7 +522,10 @@ pub(crate) async fn remote_file_parts_batch(
                     || existing.remote_start != part.start as u64
                     || existing.remote_checksum != part.remote_checksum
             }
-            None => true,
+            None => {
+                files_with_new_part_rows.insert(part.file_id);
+                true
+            }
         };
 
         if needs_upsert {
@@ -493,7 +619,7 @@ pub(crate) async fn remote_file_parts_batch(
     // empty: the target build below falls to the file-level (no-parts) branch,
     // producing the same file-level download targets, and the deferred parts are
     // inserted in the background before the hasher needs them.
-    let refreshed_parts: HashMap<(i64, String), FoxyModFilePart> =
+    let mut refreshed_parts: HashMap<(i64, String), FoxyModFilePart> =
         if !has_part_upserts || defer_parts {
             existing_parts
         } else {
@@ -551,6 +677,73 @@ pub(crate) async fn remote_file_parts_batch(
             "Pruned {} stale subfile rows after manifest update",
             stale_subfile_ids.len()
         );
+    }
+
+    let materialize_file_ids: HashSet<i64> = previous_file_by_id
+        .iter()
+        .filter(|(file_id, previous)| {
+            FoxyModFilePart::file_checksums_are_clean(
+                &previous.local_checksum,
+                &previous.remote_checksum,
+            ) && file_by_id
+                .get(*file_id)
+                .is_some_and(|file| file.remote_checksum != previous.remote_checksum)
+        })
+        .map(|(file_id, _)| *file_id)
+        .collect();
+    let carry_file_ids: HashSet<i64> = materialize_file_ids
+        .iter()
+        .chain(files_with_new_part_rows.iter())
+        .copied()
+        .filter(|file_id| old_parts_by_file.contains_key(file_id))
+        .collect();
+    let mut current_parts_by_file: HashMap<i64, Vec<&FoxyModFilePart>> = HashMap::new();
+    if !carry_file_ids.is_empty() {
+        for ((file_id, _path), part) in &refreshed_parts {
+            if carry_file_ids.contains(file_id)
+                && desired_part_ids_by_file
+                    .get(file_id)
+                    .is_some_and(|desired| desired.contains(&(part.id as i64)))
+            {
+                current_parts_by_file
+                    .entry(*file_id)
+                    .or_default()
+                    .push(part);
+            }
+        }
+    }
+    let mut carried_states = Vec::new();
+    let mut carried_files = 0usize;
+    for (file_id, current_parts) in &current_parts_by_file {
+        let Some(old_parts) = old_parts_by_file.get(file_id) else {
+            continue;
+        };
+        let materialize_existing = materialize_file_ids.contains(file_id);
+        let carried = carried_part_local_state(old_parts, current_parts, materialize_existing);
+        if !carried.is_empty() {
+            carried_files += 1;
+            carried_states.extend(carried);
+        }
+    }
+    drop(current_parts_by_file);
+    if !carried_states.is_empty() {
+        let by_id: HashMap<u64, &CarriedPartLocalState> = carried_states
+            .iter()
+            .map(|state| (state.id, state))
+            .collect();
+        for part in refreshed_parts.values_mut() {
+            if let Some(state) = by_id.get(&part.id) {
+                part.local_checksum = state.local_checksum.clone();
+                part.local_length = state.local_length;
+                part.local_start = state.local_start;
+            }
+        }
+        info!(
+            "Carried local part state across manifest update: files={} parts={}",
+            carried_files,
+            carried_states.len()
+        );
+        persist_carried_part_local_state(&db, carried_states).await;
     }
 
     let prepare_download_work = should_prepare_download_work(
@@ -1915,5 +2108,273 @@ mod tests {
         let manifest_paths: HashMap<i64, Vec<String>> = HashMap::new();
 
         assert!(stale_subfile_ids(&refreshed_parts, &desired, &manifest_paths).is_empty());
+    }
+
+    fn manifest_part(
+        id: u64,
+        display_path: &str,
+        order: i64,
+        start: u64,
+        length: u64,
+        checksum: &str,
+    ) -> FoxyModFilePart {
+        FoxyModFilePart {
+            id,
+            file_id: 10,
+            path: part_storage_path(display_path, order),
+            remote_start: start,
+            remote_length: length,
+            remote_checksum: checksum.to_owned(),
+            data_order: order,
+            ..FoxyModFilePart::default()
+        }
+    }
+
+    fn with_local(
+        mut part: FoxyModFilePart,
+        start: u64,
+        length: u64,
+        checksum: &str,
+    ) -> FoxyModFilePart {
+        part.local_start = start;
+        part.local_length = length;
+        part.local_checksum = checksum.to_owned();
+        part
+    }
+
+    fn clean_old_parts(parts: Vec<FoxyModFilePart>) -> Vec<FoxyModFilePart> {
+        parts
+            .into_iter()
+            .map(|part| part.with_derived_clean_local_state("OLD", "OLD"))
+            .collect()
+    }
+
+    #[test]
+    fn carried_state_materializes_clean_parts_that_keep_their_key() {
+        let old = clean_old_parts(vec![
+            manifest_part(1, "$$HEADER$$", 0, 0, 100, "H1"),
+            manifest_part(2, "config.bin", 1, 100, 50, "C1"),
+        ]);
+        let header = manifest_part(1, "$$HEADER$$", 0, 0, 100, "H2");
+        let config = manifest_part(2, "config.bin", 1, 100, 50, "C1");
+
+        let carried = carried_part_local_state(&old, &[&header, &config], true);
+
+        assert_eq!(
+            carried,
+            vec![
+                CarriedPartLocalState {
+                    id: 1,
+                    local_checksum: "H1".to_owned(),
+                    local_length: 100,
+                    local_start: 0,
+                },
+                CarriedPartLocalState {
+                    id: 2,
+                    local_checksum: "C1".to_owned(),
+                    local_length: 50,
+                    local_start: 100,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn carried_state_follows_part_path_when_an_inserted_entry_shifts_the_keys() {
+        let old = clean_old_parts(vec![
+            manifest_part(1, "$$HEADER$$", 0, 0, 100, "H1"),
+            manifest_part(2, "config.bin", 1, 100, 50, "C1"),
+            manifest_part(3, "$$END$$", 2, 150, 21, "E1"),
+        ]);
+        let header = manifest_part(1, "$$HEADER$$", 0, 0, 120, "H2");
+        let added = manifest_part(4, "added.sqf", 1, 120, 10, "A2");
+        let config = manifest_part(5, "config.bin", 2, 130, 50, "C1");
+        let end = manifest_part(6, "$$END$$", 3, 180, 21, "E2");
+
+        let carried = carried_part_local_state(&old, &[&end, &config, &added, &header], true);
+
+        let by_id: HashMap<u64, &CarriedPartLocalState> =
+            carried.iter().map(|state| (state.id, state)).collect();
+        assert_eq!(by_id.len(), 3);
+        assert_eq!(by_id[&1].local_checksum, "H1");
+        assert_eq!(
+            (
+                by_id[&5].local_checksum.as_str(),
+                by_id[&5].local_start,
+                by_id[&5].local_length
+            ),
+            ("C1", 100, 50)
+        );
+        assert_eq!(
+            (by_id[&6].local_checksum.as_str(), by_id[&6].local_start),
+            ("E1", 150)
+        );
+        assert!(!by_id.contains_key(&4));
+    }
+
+    #[test]
+    fn carried_state_leaves_stored_local_state_of_a_dirty_file_alone() {
+        let old = vec![with_local(
+            manifest_part(1, "config.bin", 0, 0, 50, "C1"),
+            0,
+            48,
+            "LOCAL",
+        )];
+        let current = with_local(
+            manifest_part(1, "config.bin", 0, 0, 50, "C2"),
+            0,
+            48,
+            "LOCAL",
+        );
+
+        assert!(carried_part_local_state(&old, &[&current], false).is_empty());
+    }
+
+    #[test]
+    fn carried_state_gives_a_rekeyed_row_the_stored_state_of_a_dirty_file() {
+        let old = vec![with_local(
+            manifest_part(1, "config.bin", 0, 0, 50, "C1"),
+            0,
+            48,
+            "LOCAL",
+        )];
+        let moved = manifest_part(2, "config.bin", 1, 10, 50, "C2");
+
+        assert_eq!(
+            carried_part_local_state(&old, &[&moved], false),
+            vec![CarriedPartLocalState {
+                id: 2,
+                local_checksum: "LOCAL".to_owned(),
+                local_length: 48,
+                local_start: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn carried_state_skips_parts_without_any_local_state() {
+        let old = vec![manifest_part(1, "config.bin", 0, 0, 50, "C1")];
+        let moved = manifest_part(2, "config.bin", 1, 10, 50, "C2");
+        let kept = manifest_part(1, "config.bin", 0, 0, 50, "C2");
+
+        assert!(carried_part_local_state(&old, &[&moved], true).is_empty());
+        assert!(carried_part_local_state(&old, &[&kept], true).is_empty());
+    }
+
+    #[tokio::test]
+    async fn manifest_update_of_a_clean_file_keeps_a_delta_plan_possible() {
+        let dir = tempfile::tempdir().unwrap();
+        let local_path = dir.path().join("f.pbo");
+        let mut bytes = vec![b'H'; 4];
+        bytes.extend(vec![b'B'; 1000]);
+        bytes.extend(vec![b'E'; 2]);
+        std::fs::write(&local_path, &bytes).unwrap();
+        let local_path = local_path.to_string_lossy().replace('\\', "/");
+
+        let handle = crate::core::tasks::db_turso::build_test_database().await;
+        let db = FoxyDb::from_handle(handle.clone());
+        db.execute(
+            "INSERT INTO files (id, name, remote_path, local_path, remote_checksum, \
+             local_checksum, length, data_order) VALUES (1, 'f.pbo', 'remote/f.pbo', ?, \
+             'OLD', 'OLD', 1006, 0)",
+            vec![local_path.clone().into()],
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO subfiles (file_id, path, local_length, local_start, remote_length, \
+             remote_start, local_checksum, remote_checksum, data_order) VALUES \
+             (1, ?, 0, 0, 4, 0, '', 'H1', 0), (1, ?, 0, 0, 1000, 4, '', 'B1', 1), \
+             (1, ?, 0, 0, 2, 1004, '', 'E1', 2)",
+            vec![
+                part_storage_path("$$HEADER$$", 0).into(),
+                part_storage_path("body.bin", 1).into(),
+                part_storage_path("$$END$$", 2).into(),
+            ],
+        )
+        .await
+        .unwrap();
+
+        let previous = FoxyModFile {
+            id: 1,
+            name: "f.pbo".to_owned(),
+            remote_path: "remote/f.pbo".to_owned(),
+            local_path: local_path.clone(),
+            remote_checksum: "OLD".to_owned(),
+            local_checksum: "OLD".to_owned(),
+            length: 1006,
+            ..FoxyModFile::default()
+        };
+        let file = FoxyModFile {
+            remote_checksum: "NEW".to_owned(),
+            length: 1032,
+            ..previous.clone()
+        };
+        let new_part = |path: &str, start: i64, length: i64, checksum: &str, order: i64| {
+            super::super::types::FilePartData {
+                path: path.to_owned(),
+                checksum: checksum.to_owned(),
+                start,
+                length,
+                data_order: order,
+            }
+        };
+        let context = Arc::new(FoxyContext::new(handle, reqwest::Client::new()));
+        remote_file_parts_batch(
+            context,
+            vec![FilePartsPayload {
+                file: file.clone(),
+                previous_file: Some(previous),
+                parts: vec![
+                    new_part("$$HEADER$$", 0, 10, "H2", 0),
+                    new_part("added.sqf", 10, 20, "A2", 1),
+                    new_part("body.bin", 30, 1000, "B1", 2),
+                    new_part("$$END$$", 1030, 2, "E2", 3),
+                ],
+            }],
+        )
+        .await;
+
+        let parts: Vec<FoxyModFilePart> = load_parts_by_file_ids(&db, &[1])
+            .await
+            .unwrap()
+            .into_values()
+            .collect();
+        assert_eq!(parts.len(), 4);
+        let body = parts
+            .iter()
+            .find(|part| part_display_path(&part.path) == "body.bin")
+            .unwrap();
+        assert_eq!(
+            (
+                body.local_checksum.as_str(),
+                body.local_start,
+                body.local_length
+            ),
+            ("B1", 4, 1000)
+        );
+
+        let plan = plan_file_patch(&file, &parts, &parts).unwrap().unwrap();
+        assert_eq!(plan.planned_copy_bytes, 1000);
+        assert_eq!(plan.planned_download_bytes, 32);
+    }
+
+    #[test]
+    fn carried_state_claims_each_old_part_once_for_duplicate_paths() {
+        let old = clean_old_parts(vec![
+            manifest_part(1, "dup.paa", 0, 0, 10, "D1"),
+            manifest_part(2, "dup.paa", 1, 10, 10, "D2"),
+        ]);
+        let first = manifest_part(3, "dup.paa", 2, 0, 10, "N1");
+        let second = manifest_part(4, "dup.paa", 3, 10, 10, "N2");
+        let third = manifest_part(5, "dup.paa", 4, 20, 10, "N3");
+
+        let carried = carried_part_local_state(&old, &[&third, &second, &first], true);
+
+        let by_id: HashMap<u64, &str> = carried
+            .iter()
+            .map(|state| (state.id, state.local_checksum.as_str()))
+            .collect();
+        assert_eq!(by_id, HashMap::from([(3, "D1"), (4, "D2")]));
     }
 }

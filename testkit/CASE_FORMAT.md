@@ -104,8 +104,13 @@ no unallowlisted WARN or ERROR entries.
 
 Supported operations are `startup`, `ui-walk`, `switch-game-space`,
 `remote-refresh`, `quick-check`, `recheck`, `recheck-integrity`,
-`force-redownload`, `download`, `download-full-files`, `wipe-db`, `mutate`, `restore`, and
-`evict-cache`. Each operation may contain `wait_timeout_s`,
+`force-redownload`, `download`, `download-full-files`, `wipe-db`, `mutate`, `restore`,
+`evict-cache`, and `origin-switch`. `origin-switch` makes the running case origin serve the operation's `root`
+from the next request on, on the same listener and port, which models a server
+republishing the repository in place. Every `.json` manifest under the new root gets a fresh
+modification time, as a regenerated repository has, because the origin answers
+conditional requests from `Last-Modified` alone; switching back to the first root restores the published
+state for the next iteration. It is not ledgered and cannot be `setup_once`. Each operation may contain `wait_timeout_s`,
 `expect`, `label`, and `repository`. `repository` names the fixture repository
 the operation acts on (the CLI `--repo-name`, or the GUI row with that name);
 it defaults to the case `repository`. `extra_repositories` is what puts a

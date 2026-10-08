@@ -9,10 +9,10 @@ use hyper_util::rt::TokioIo;
 use serde_json::{Value, json};
 use std::{
     net::SocketAddr,
-    path::Path,
+    path::{Path, PathBuf},
     pin::Pin,
     sync::{
-        Arc,
+        Arc, RwLock,
         atomic::{AtomicU64, Ordering},
         mpsc,
     },
@@ -189,10 +189,36 @@ impl Body for TruncatedBody {
 
 pub struct Origin {
     address: SocketAddr,
+    root: Arc<RwLock<PathBuf>>,
     burst: Arc<BurstStats>,
     impairment: Impairment,
     shutdown: Option<oneshot::Sender<()>>,
     thread: Option<thread::JoinHandle<()>>,
+}
+
+/// Give every manifest under `root` a fresh modification time, as a server that
+/// regenerates its repository does. The origin answers conditional requests from
+/// `Last-Modified` alone, so a switched-in root whose manifests are older than the
+/// ones a client cached would otherwise be served as 304 and never seen.
+pub fn touch_manifests(root: &Path) -> Result<usize> {
+    let now = std::time::SystemTime::now();
+    let mut touched = 0;
+    for entry in walkdir::WalkDir::new(root) {
+        let entry = entry?;
+        if entry.file_type().is_file() && entry.path().extension().is_some_and(|ext| ext == "json")
+        {
+            std::fs::File::options()
+                .write(true)
+                .open(entry.path())?
+                .set_modified(now)?;
+            touched += 1;
+        }
+    }
+    Ok(touched)
+}
+
+fn current_root(root: &RwLock<PathBuf>) -> PathBuf {
+    root.read().map(|root| root.clone()).unwrap_or_default()
 }
 
 impl Origin {
@@ -223,7 +249,8 @@ impl Origin {
             impairment.burst_after_bytes == 0 || impairment.truncate_first_responses == 0,
             "Origin burst and truncation cannot share a response"
         );
-        let root = root.to_owned();
+        let root = Arc::new(RwLock::new(root.to_owned()));
+        let thread_root = Arc::clone(&root);
         let burst = Arc::new(BurstStats::default());
         let thread_burst = Arc::clone(&burst);
         let configured_impairment = impairment.clone();
@@ -246,7 +273,6 @@ impl Origin {
                     Err(error) => { let _ = ready_tx.send(Err(error)); return; }
                 };
                 let _ = ready_tx.send(listener.local_addr());
-                let service = ServeDir::new(root);
                 let truncated_responses = Arc::new(AtomicU64::new(0));
                 let mut connections = JoinSet::new();
                 loop {
@@ -255,13 +281,13 @@ impl Origin {
                         Some(_) = connections.join_next(), if !connections.is_empty() => {},
                         accepted = listener.accept() => {
                             let Ok((stream, _)) = accepted else { break };
-                            let service = service.clone();
                             let impairment = impairment.clone();
                             let truncated_responses = Arc::clone(&truncated_responses);
                             let burst_stats = Arc::clone(&thread_burst);
+                            let thread_root = Arc::clone(&thread_root);
                             connections.spawn(async move {
                                 let service = service_fn(move |mut request: hyper::Request<hyper::body::Incoming>| {
-                                    let service = service.clone();
+                                    let service = ServeDir::new(current_root(&thread_root));
                                     let impairment = impairment.clone();
                                     let truncated_responses = Arc::clone(&truncated_responses);
                                     let burst_stats = Arc::clone(&burst_stats);
@@ -349,11 +375,23 @@ impl Origin {
         let address = ready_rx.recv().context("Origin startup thread exited")??;
         Ok(Self {
             address,
+            root,
             burst,
             impairment: configured_impairment,
             shutdown: Some(shutdown_tx),
             thread: Some(thread),
         })
+    }
+
+    /// Serve `root` from the next request on, on the same listener: a server
+    /// republishing the repository in place. Open keep-alive connections stay.
+    pub fn set_root(&self, root: &Path) -> Result<()> {
+        ensure!(root.is_dir(), "Origin root must be an existing directory");
+        *self
+            .root
+            .write()
+            .map_err(|_| anyhow::anyhow!("origin root lock poisoned"))? = root.to_owned();
+        Ok(())
     }
 
     pub fn url(&self) -> String {
@@ -550,6 +588,44 @@ mod tests {
         assert_eq!(impairment.truncate_first_responses, 1);
         assert_eq!(impairment.truncate_after_bytes, 4);
         assert_eq!(impairment.truncate_path_suffix.as_deref(), Some(".bin"));
+        Ok(())
+    }
+
+    #[test]
+    fn set_root_republishes_on_the_same_listener_and_connection() -> Result<()> {
+        let first = tempfile::tempdir()?;
+        let second = tempfile::tempdir()?;
+        std::fs::write(first.path().join("v.txt"), b"one")?;
+        std::fs::write(second.path().join("v.txt"), b"two")?;
+        let origin = Origin::start(first.path(), 0)?;
+        let client = reqwest::blocking::Client::new();
+        let url = format!("{}v.txt", origin.url());
+        assert_eq!(client.get(&url).send()?.text()?, "one");
+        origin.set_root(second.path())?;
+        assert_eq!(client.get(&url).send()?.text()?, "two");
+        assert!(origin.set_root(&second.path().join("missing")).is_err());
+        assert_eq!(client.get(&url).send()?.text()?, "two");
+        Ok(())
+    }
+
+    #[test]
+    fn touched_manifests_are_newer_than_a_cached_copy() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        std::fs::create_dir_all(root.path().join("@mod"))?;
+        let manifest = root.path().join("@mod").join("foxy_addon.json");
+        let payload = root.path().join("@mod").join("data.pbo");
+        std::fs::write(&manifest, b"{}")?;
+        std::fs::write(&payload, b"bytes")?;
+        let old = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        for path in [&manifest, &payload] {
+            std::fs::File::options()
+                .write(true)
+                .open(path)?
+                .set_modified(old)?;
+        }
+        assert_eq!(touch_manifests(root.path())?, 1);
+        assert!(std::fs::metadata(&manifest)?.modified()? > old);
+        assert_eq!(std::fs::metadata(&payload)?.modified()?, old);
         Ok(())
     }
 
