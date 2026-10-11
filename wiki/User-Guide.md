@@ -305,7 +305,7 @@ Lists addons the repository marks as optional. It works like the Addons tab. You
 
 External addons are mods found outside the repository: in repository-space shared paths, in additional search folders you register in Game space settings, or in your Steam Workshop content. The tab adds:
 - **Include Steam Addons** - toggles Steam Workshop addons in the list.
-- **Origin filter** and **Group by origin**.
+- **Origin filter** and **Group by origin**. An addon shared by several repositories appears when filtering by any of them, including repositories that list it as optional.
 - **State filter** (All, Enabled, Disabled).
 - A **Refresh** button that rescans every addon source.
 

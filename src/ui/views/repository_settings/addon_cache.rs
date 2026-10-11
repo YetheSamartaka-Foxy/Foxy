@@ -1127,11 +1127,18 @@ impl Foxy {
                     }
                     let path_lower = path.to_lowercase();
 
-                    origins.insert(origin.clone());
+                    let origin_filters = Foxy::addon_origin_filters_from(
+                        &self.repository_view_state.repositories,
+                        addon_name,
+                        path,
+                        origin,
+                    );
+                    origins.extend(origin_filters.iter().cloned());
                     rows.push(crate::ui::app::ExternalAddonRowCache {
                         addon_name: addon_name.clone(),
                         path: path.clone(),
                         origin: origin.clone(),
+                        origin_filters,
                         addon_name_lower,
                         path_lower,
                         origin_lower: origin.to_lowercase(),
@@ -1201,12 +1208,9 @@ impl Foxy {
             if reset_collapsed_origins {
                 cache.collapsed_origins.clear();
             } else {
-                cache.collapsed_origins.retain(|origin| {
-                    cache
-                        .origin_options
-                        .iter()
-                        .any(|current_origin| current_origin == origin)
-                });
+                cache
+                    .collapsed_origins
+                    .retain(|origin| cache.rows.iter().any(|row| &row.origin == origin));
             }
             cache.enabled_by_row = enabled_by_row;
             cache.favorite_by_row = favorite_by_row;
@@ -1472,8 +1476,7 @@ impl Foxy {
                                 })
                             });
                     file_search_matches_by_row[index] = matches_file_filter;
-                    let matches_origin_filter =
-                        origin_filter == "All" || row.origin.as_str() == origin_filter;
+                    let matches_origin_filter = row.matches_origin_filter(origin_filter);
                     let matches_state_filter = match addon_state_filter {
                         "Enabled" => cache.enabled_by_row[index],
                         "Disabled" => !cache.enabled_by_row[index],
@@ -1872,6 +1875,115 @@ mod tests {
 
     fn size_key(repo_address: &str, addon_name: &str) -> (String, String) {
         Foxy::repository_addon_size_key(repo_address, addon_name)
+    }
+
+    #[test]
+    fn external_addon_origin_filter_matches_each_repository_sharing_an_optional_addon() {
+        let root = tempfile::tempdir().expect("repository root");
+        std::fs::create_dir_all(root.path().join("@mod_01/addons")).expect("addon directory");
+        std::fs::write(root.path().join("@mod_01/addons/data.pbo"), b"addon").expect("addon file");
+        let main = Repository {
+            name: "MainRepo".to_string(),
+            path: root.path().display().to_string(),
+            repository_space_id: Some("space".to_string()),
+            ..Repository::default()
+        };
+        let alpha = Repository {
+            name: "RepoAlpha".to_string(),
+            optional_addons: vec![("@mod_01".to_string(), true)],
+            ..main.clone()
+        };
+        let beta = Repository {
+            name: "RepoBeta, extras".to_string(),
+            addons: vec![("@mod_01".to_string(), true)],
+            ..main.clone()
+        };
+
+        for enabled in [true, false] {
+            let mut alpha = alpha.clone();
+            alpha.optional_addons[0].1 = enabled;
+            let repositories = [main.clone(), alpha, beta.clone()];
+            let inventory = Foxy::gather_all_addon_origins_from(
+                &repositories,
+                &[],
+                &HashMap::new(),
+                "",
+                "",
+                &crate::core::game::arma3::Arma3Module,
+            );
+            assert_eq!(inventory.len(), 1);
+            let (name, path, origin, _) = &inventory[0];
+            assert_eq!(origin, "RepoAlpha, RepoBeta, extras");
+            assert!(repository_external_addon_visible_for_repo(
+                &repositories,
+                0,
+                path
+            ));
+            let row = crate::ui::app::ExternalAddonRowCache {
+                origin: origin.clone(),
+                origin_filters: Foxy::addon_origin_filters_from(&repositories, name, path, origin),
+                ..Default::default()
+            };
+            assert_eq!(row.origin_filters, ["RepoAlpha", "RepoBeta, extras"]);
+            assert!(row.matches_origin_filter("RepoAlpha"));
+            assert!(row.matches_origin_filter("RepoBeta, extras"));
+            assert!(row.matches_origin_filter("All"));
+            assert!(!row.matches_origin_filter("MainRepo"));
+            assert!(!row.matches_origin_filter("RepoBeta"));
+            assert!(!row.matches_origin_filter("extras"));
+        }
+    }
+
+    #[test]
+    fn external_addon_origin_filter_preserves_non_repository_labels() {
+        for origin in ["Additional, extras", "Steam Workshop"] {
+            let row = crate::ui::app::ExternalAddonRowCache {
+                origin: origin.to_string(),
+                origin_filters: Foxy::addon_origin_filters_from(
+                    &[],
+                    "@mod_01",
+                    "R:/Mods/Additional/@mod_01",
+                    origin,
+                ),
+                ..Default::default()
+            };
+            assert_eq!(row.origin_filters, [origin]);
+            assert!(row.matches_origin_filter(origin));
+            assert!(row.matches_origin_filter("All"));
+            assert!(!row.matches_origin_filter("Additional"));
+            assert!(!row.matches_origin_filter("extras"));
+        }
+    }
+
+    #[test]
+    fn external_addon_origin_filter_keeps_other_installations_separate() {
+        let repositories = [
+            Repository {
+                name: "RepoAlpha".to_string(),
+                path: "R:/Mods/RepoAlpha".to_string(),
+                addons: vec![("@mod_01".to_string(), true)],
+                ..Repository::default()
+            },
+            Repository {
+                name: "RepoBeta".to_string(),
+                path: "R:/Mods/RepoBeta".to_string(),
+                optional_addons: vec![("@mod_01".to_string(), true)],
+                ..Repository::default()
+            },
+        ];
+        let row = crate::ui::app::ExternalAddonRowCache {
+            origin: "RepoAlpha".to_string(),
+            origin_filters: Foxy::addon_origin_filters_from(
+                &repositories,
+                "@mod_01",
+                "R:/Mods/RepoAlpha/@mod_01",
+                "RepoAlpha",
+            ),
+            ..Default::default()
+        };
+        assert_eq!(row.origin_filters, ["RepoAlpha"]);
+        assert!(row.matches_origin_filter("RepoAlpha"));
+        assert!(!row.matches_origin_filter("RepoBeta"));
     }
 
     #[test]

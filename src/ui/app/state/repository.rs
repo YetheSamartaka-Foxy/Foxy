@@ -347,11 +347,18 @@ pub struct ExternalAddonRowCache {
     pub addon_name: String,
     pub path: String,
     pub origin: String,
+    pub origin_filters: Vec<String>,
     pub addon_name_lower: String,
     pub path_lower: String,
     pub origin_lower: String,
     pub path_lookup_key: String,
     pub local_size_bytes: Option<u64>,
+}
+
+impl ExternalAddonRowCache {
+    pub fn matches_origin_filter(&self, filter: &str) -> bool {
+        filter == "All" || self.origin_filters.iter().any(|origin| origin == filter)
+    }
 }
 
 #[derive(Debug, Default)]
