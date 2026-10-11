@@ -1,4 +1,9 @@
-﻿# 1.2.0
+﻿# 1.2.1
+## Fixed
+- The update progress bar no longer seems to stop near the end when a repository has many small files and a few large ones. The bar and percentage now follow downloaded bytes instead of the number of finished files.
+- Checking a partially installed repository in a shared folder no longer pauses with a wrong-folder warning when most of its addons have never been downloaded.
+
+# 1.2.0
 ## Added
 - Game spaces: Foxy can now manage more than one game. Each game gets its own space with separate settings, repositories, and mods.
 - Switch between game spaces from the sidebar without restarting Foxy. The last one you used opens on the next launch.

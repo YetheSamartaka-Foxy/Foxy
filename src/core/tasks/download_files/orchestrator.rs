@@ -30,7 +30,7 @@ use super::batching::{DownloadModCompletion, ModDownloadBatch, process_mod_batch
 use super::metrics::{
     DownloadMetrics, DownloadModOutcome, DownloadRunReport, DownloadSchedulerState,
 };
-use super::progress::{download_progress_percent, start_progress_ticker};
+use super::progress::{ModProgressEntry, download_progress_percent, start_progress_ticker};
 use super::range_scheduler::{RangePartMeta, range_part_meta_path};
 use super::transfer::cancellation_requested;
 use crate::core::tasks::calculate_hashes::{HashStorageClass, detect_storage_class_for_path};
@@ -1097,10 +1097,18 @@ pub(crate) async fn download_files(
         );
     }
 
+    let byte_entries = all_download_refs
+        .iter()
+        .map(|file| ModProgressEntry {
+            size: file.expected_download_bytes.min(file.size),
+            download_total: file.download_total.clone(),
+        })
+        .collect();
     let ticker = start_progress_ticker(
         progress_tx.clone(),
         completed.clone(),
         total_files,
+        byte_entries,
         operation_id.clone(),
     );
 

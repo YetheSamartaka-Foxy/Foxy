@@ -147,6 +147,8 @@ Foxy rereads each space's manifest from the server at launch and every 30 minute
 
 A repository space can define a common local folder for all its repositories. When a repository belongs to a space, its local path is inherited from the space's shared path and cannot be changed individually. Required repositories of the space are added automatically and see the same shared folder.
 
+If only some of a repository's addons are installed in the shared folder, Foxy can check it and offer to download the rest. Addons already installed by another repository do not cause a wrong-folder warning for addons that have never been downloaded. Foxy still pauses if the configured folder is missing, files appear under unexpected paths, or most content with saved local verification state has disappeared.
+
 ### Bulk operations
 
 The repository space toolbar operates on every repository in the space at once:
