@@ -54,7 +54,8 @@ impl Foxy {
     }
 
     pub(crate) fn database_updates_blocked(&self) -> bool {
-        self.pending_db_schema_wipe.is_some()
+        self.db_lock_conflict.is_some()
+            || self.pending_db_schema_wipe.is_some()
             || self.database_wipe_in_flight
             || crate::core::tasks::db_schema_check::live_schema_incompatible()
     }

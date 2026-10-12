@@ -575,16 +575,14 @@ impl Foxy {
             workshop_task_rx: None,
             workshop_task_worker: None,
         };
+        app.db_lock_conflict = app.claim_active_space_database();
+        if app.db_lock_conflict.is_some() {
+            return app;
+        }
+        crate::core::tasks::init_database::check_and_wipe_database();
         app.load_settings();
         app.pending_renderer_fallback_notice =
             crate::core::utils::renderer_fallback::renderer_fallback_notice_path().exists();
-        // Claim the database before anything can open it. Turso has no
-        // multi-process access, so a second window sharing one game space
-        // corrupts it silently rather than failing.
-        app.db_lock_conflict = app.claim_active_space_database();
-        // Compare the local database schema generation against this binary's.
-        // Bootstraps a sidecar for fresh/legacy databases (no prompt) and only
-        // returns Some(..) when an out-of-date database needs an explicit wipe.
         let _ = crate::core::tasks::db_schema_version::evaluate_and_bootstrap();
         app.refresh_database_repair_requirement();
         app.apply_debug_modal_previews();

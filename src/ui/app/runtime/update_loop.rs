@@ -231,9 +231,15 @@ impl Foxy {
         let polls = SectionTimer::start(FrameSection::Polls);
         let ctx = ui.ctx().clone();
         self.repaint_ctx = Some(ctx.clone());
+        self.apply_runtime_palette_visuals(&ctx);
+
+        if self.db_lock_conflict.is_some() {
+            self.render_db_lock_conflict_prompt(&ctx);
+            polls.stop(&mut self.frame_cost);
+            return;
+        }
 
         super::keyboard_focus::repair_lost_keyboard_focus();
-        self.apply_runtime_palette_visuals(&ctx);
         self.apply_runtime_ui_scale(&ctx);
         self.invalidate_galley_caches_on_font_atlas_change(&ctx);
         self.log_display_metrics_if_changed(&ctx);
@@ -273,6 +279,11 @@ impl Foxy {
 
         self.poll_persistence_results();
         self.process_pending_game_space_switch(&ctx);
+        if self.db_lock_conflict.is_some() {
+            self.render_db_lock_conflict_prompt(&ctx);
+            polls.stop(&mut self.frame_cost);
+            return;
+        }
         self.refresh_live_database_repair_requirement();
 
         if self.startup_frame_rendered

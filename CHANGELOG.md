@@ -1,5 +1,7 @@
 ﻿# 1.2.1
 ## Fixed
+- Windows updates no longer repeat a previously selected full data reset, preserving saved repositories, settings, and databases. The reset checkbox always starts unchecked and must be explicitly ticked and confirmed for each manual install. Silent installers always keep user data. This fix does not require a database wipe.
+- Opening a second Foxy window for the same game space now stops at the already-running notice without saving configuration, starting database tasks, or processing a pending database wipe.
 - Joining a server now shows enabled Steam and TeamSpeak 3 warnings before checking the server and its addons. Steam must be running to continue; TeamSpeak remains an advisory warning. Missing external addons are also reported when server-addon checking is disabled.
 - Foxy now detects incompatible databases left behind by a skipped rebuild after an older update. You can postpone rebuilding and keep using Foxy, Launch, and Join; each launch or join offers a separate reminder after the other launch warnings, with a green database wipe button. Mod checks and updates stay blocked until rebuilding succeeds. Healthy databases from 1.2.0 do not need another wipe.
 - Joining a server no longer treats an addon as different just because its display name differs from its folder name, or mixes up addon names from separate installs of the same repository. Long addon confirmation lists now scroll while keeping the launch and cancel buttons visible.

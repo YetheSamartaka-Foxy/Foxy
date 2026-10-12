@@ -50,7 +50,7 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 ; Only offered when a previous installation or its data directory is present.
 ; Downloaded mod folders live wherever the user pointed each repository and are
 ; never touched.
-Name: "deleteuserdata"; Description: "Delete all existing Foxy user data (settings, databases, caches, logs)"; GroupDescription: "Existing installation:"; Flags: unchecked; Check: HasExistingInstall
+Name: "deleteuserdata"; Description: "Delete all existing Foxy user data (settings, databases, caches, logs)"; GroupDescription: "Existing installation:"; Flags: unchecked checkedonce; Check: HasExistingInstall
 
 [Files]
 Source: "{#SourceDir}\Foxy.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -120,11 +120,22 @@ begin
   Result := True;
 end;
 
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  if CurPageID = wpSelectTasks then
+    WizardSelectTasks('!deleteuserdata');
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
-  // Runs after CloseApplications has stopped Foxy, so database.db is unlocked.
-  if (CurStep = ssInstall) and WizardIsTaskSelected('deleteuserdata') then
-    DeleteFoxyUserData();
+  if (CurStep = ssInstall) and not WizardSilent
+    and WizardIsTaskSelected('deleteuserdata') then
+  begin
+    if MsgBox('Delete all saved Foxy repositories, settings, databases, caches and logs?' + #13#10#13#10
+      + 'This cannot be undone. Downloaded mod folders will be kept. Choose No to keep your setup and continue installing.',
+      mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
+      DeleteFoxyUserData();
+  end;
 end;
 
 function InitializeUninstall(): Boolean;

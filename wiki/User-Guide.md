@@ -102,6 +102,8 @@ Each game space stores its data under `games/<game space>` in the Foxy config di
 
 ### Upgrading from an older Foxy
 
+Windows updates preserve your saved repositories, settings, and databases. Silent installers always keep this data. During a manual install, **Delete all existing Foxy user data** starts unchecked each time and requires confirmation before removing your setup. Leave it unchecked to keep your configuration; downloaded mod folders are kept even when you explicitly reset Foxy.
+
 When you upgrade from a Foxy version without game spaces, your existing setup moves into an Arma 3 game space automatically. The previous files are kept as `.pre-gamespaces.bak` copies, so the change can be rolled back.
 
 ---

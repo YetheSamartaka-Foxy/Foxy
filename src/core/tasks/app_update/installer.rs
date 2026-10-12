@@ -229,6 +229,15 @@ pub fn normalize_installer_hash_algorithm(algorithm: &str) -> Result<&'static st
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn windows_installer_args(silent: bool) -> Vec<&'static str> {
+    let mut args = vec!["/MERGETASKS=!deleteuserdata"];
+    if silent {
+        args.extend(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/CLOSEAPPLICATIONS"]);
+    }
+    args
+}
+
 /// Launch the installer and exit the app.
 /// On Windows, runs the installer with /VERYSILENT flags.
 /// On Linux, runs the shell installer with --silent.
@@ -237,10 +246,7 @@ pub fn launch_installer(path: &Path, silent: bool) -> Result<()> {
 
     #[cfg(target_os = "windows")]
     {
-        let mut args: Vec<&str> = Vec::new();
-        if silent {
-            args.extend(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/CLOSEAPPLICATIONS"]);
-        }
+        let args = windows_installer_args(silent);
 
         // A per-user install updates in place, but an older install under
         // Program Files cannot be overwritten by an unelevated Foxy. Setup
@@ -441,6 +447,57 @@ fn linux_sudo_noninteractive_available() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn silent_windows_update_deselects_previous_data_deletion_task() {
+        let args = windows_installer_args(true);
+        assert!(args.contains(&"/MERGETASKS=!deleteuserdata"));
+        for flag in ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/CLOSEAPPLICATIONS"] {
+            assert!(args.contains(&flag));
+        }
+    }
+
+    #[test]
+    fn interactive_windows_update_deselects_previous_data_deletion_task() {
+        assert_eq!(
+            windows_installer_args(false),
+            ["/MERGETASKS=!deleteuserdata"]
+        );
+    }
+
+    #[test]
+    fn windows_setup_requires_fresh_interactive_data_deletion_confirmation() {
+        let script =
+            include_str!("../../../../installer/windows/foxy-setup.iss").replace("\r\n", "\n");
+        let task = script
+            .lines()
+            .find(|line| line.starts_with("Name: \"deleteuserdata\";"))
+            .unwrap();
+        assert!(task.contains("Flags: unchecked checkedonce;"));
+        let task_page = script
+            .split("procedure CurPageChanged(CurPageID: Integer);")
+            .nth(1)
+            .unwrap()
+            .split("procedure CurStepChanged(CurStep: TSetupStep);")
+            .next()
+            .unwrap();
+        assert!(task_page.contains(
+            "if CurPageID = wpSelectTasks then\n    WizardSelectTasks('!deleteuserdata');"
+        ));
+        let deletion_step = script
+            .split("procedure CurStepChanged(CurStep: TSetupStep);")
+            .nth(1)
+            .unwrap()
+            .split("function InitializeUninstall(): Boolean;")
+            .next()
+            .unwrap();
+        assert!(deletion_step.contains("(CurStep = ssInstall) and not WizardSilent"));
+        assert!(deletion_step.contains("and WizardIsTaskSelected('deleteuserdata') then"));
+        assert!(
+            deletion_step
+                .contains("MB_YESNO or MB_DEFBUTTON2) = IDYES then\n      DeleteFoxyUserData();")
+        );
+    }
 
     #[test]
     fn verify_installer_sha256_matches_known_digest() {

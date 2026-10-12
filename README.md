@@ -61,6 +61,8 @@ Download the latest release from the repository Releases page.
 - Linux user install: run `chmod +x Foxy-<version>-linux-x86_64-installer.sh && ./Foxy-<version>-linux-x86_64-installer.sh --prefix="$HOME/.local/opt/foxy"`
 - Linux system install: run `chmod +x Foxy-<version>-linux-x86_64-installer.sh && sudo ./Foxy-<version>-linux-x86_64-installer.sh`
 
+Windows updates keep saved repositories, settings, and databases. Silent installers always preserve user data; a reset during a manual install requires a fresh selection and confirmation.
+
 Linux in-app updates use Foxy's self-extracting `.sh` installer. System installs may prompt for administrator privileges through `pkexec` when the install prefix is not writable.
 
 ### Build from source

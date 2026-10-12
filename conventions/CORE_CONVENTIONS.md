@@ -87,6 +87,8 @@ younger than 30 days; replacing the database file loses it.
 
 \### Process launching
 
+Windows in-app installers always receive `/MERGETASKS=!deleteuserdata`, including interactive and elevated launches, to clear a previous reset task while keeping shortcut preferences. The setup task uses `unchecked checkedonce`, and `CurPageChanged` explicitly deselects it whenever the task page opens, after Inno has restored prior choices and applied task presets. Deleting user data always requires ticking the checkbox in the current wizard. Its deletion handler refuses silent mode and requires a fresh confirmation with No as the default. An app update must never remove the Foxy data root or request a database wipe just to apply an installer fix.
+
 \- Foxy does not request administrator rights (the installer is a per-user install and removes the old "Run as administrator" AppCompat flag), but a user can still start it elevated. A game started from an elevated Foxy inherits the admin token, and Windows then blocks unelevated Discord, TeamSpeak, and OBS from sending it input or capturing its window.
 
 \- Start the game, Eden Editor, Steam, and any other user-facing child process through `utils::deelevate::spawn_unelevated`, which uses the shell's unelevated token when this process is elevated and falls back to a plain spawn (with a warning) when it cannot. It returns a raw pid. A bare `Command::spawn` for those processes is a bug.

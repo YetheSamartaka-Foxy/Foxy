@@ -95,15 +95,16 @@ impl Foxy {
             opened.id, opened.game_id
         );
 
-        // Honor a pending wipe marker in the target space before its database
-        // is first opened, mirroring the startup ordering in main.rs.
-        crate::core::tasks::init_database::check_and_wipe_database();
-
         let switch_started = std::time::Instant::now();
         self.stop_fs_watcher();
         self.reset_space_scoped_state();
         let reset_elapsed = switch_started.elapsed();
         self.reload_active_game_space(ctx);
+        if self.db_lock_conflict.is_some() {
+            self.game_space_switch_requested_at = None;
+            self.needs_repaint = true;
+            return;
+        }
 
         self.current_view = FoxyView::RepositoryList;
         self.last_view = FoxyView::None;
@@ -160,6 +161,11 @@ impl Foxy {
     /// space-scoped startup tasks (pending-update restore, quick scan,
     /// filesystem watcher, rechecks).
     fn reload_active_game_space(&mut self, ctx: &egui::Context) {
+        self.db_lock_conflict = self.claim_active_space_database();
+        if self.db_lock_conflict.is_some() {
+            return;
+        }
+        crate::core::tasks::init_database::check_and_wipe_database();
         self.load_settings();
         // Debug mode stays a launch-flag-only feature across reloads;
         // switching is blocked while it is active.
@@ -167,7 +173,6 @@ impl Foxy {
         self.sanitize_settings_debug_artifacts();
         self.sync_debug_runtime_state();
         self.i18n.set_language(&self.settings_view_state.locale);
-        self.db_lock_conflict = self.claim_active_space_database();
         let _ = crate::core::tasks::db_schema_version::evaluate_and_bootstrap();
         self.pending_db_schema_wipe = None;
         self.refresh_database_repair_requirement();

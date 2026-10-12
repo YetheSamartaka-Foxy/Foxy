@@ -53,6 +53,8 @@
 
 \### Launch and Join readiness
 
+An instance that cannot claim its game-space database renders only the already-running notice. Claim before loading settings or honoring a pending wipe marker, both at startup and on a space switch. Do not run background tasks, configuration persistence, or normal close persistence while the lock-conflict notice is active.
+
 Launch and Join use the same readiness modal. An enabled Steam check blocks game-launch actions until Steam is running; TeamSpeak, missing external addons, and addon/DLC selections remain advisory. Standalone addon downloads do not require Steam. Join readiness confirmation resumes server status and addon queries before dispatch, and Steam is checked again at dispatch for games with a Steam App ID. Generic games without a Steam App ID do not require Steam.
 
 The readiness modal scrolls its complete body within the viewport and keeps launch/cancel actions outside that scroll area. Addon matching retains folder aliases even when database display names are available. Display-name snapshots are keyed by normalized `(URL, local path)` so separate installs of the same repository cannot overwrite one another's addon metadata.
