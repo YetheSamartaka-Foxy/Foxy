@@ -1,4 +1,7 @@
 # 1.2.1
+## Added
+- Export logs to ZIP is now available beside the activity log button in the footer and in troubleshooting notices and error dialogs, making it easier to share diagnostic logs with support.
+
 ## Fixed
 - Windows updates no longer repeat a previously selected full data reset, preserving saved repositories, settings, and databases. The reset checkbox always starts unchecked and must be explicitly ticked and confirmed for each manual install. Silent installers always keep user data. This fix does not require a database wipe.
 - Opening a second Foxy window for the same game space now stops at the already-running notice without saving configuration, starting database tasks, or processing a pending database wipe.

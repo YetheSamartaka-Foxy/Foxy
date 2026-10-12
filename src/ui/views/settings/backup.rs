@@ -104,6 +104,12 @@ impl Foxy {
                             self.color_text_error()
                         }),
                     );
+                    if !notice.success {
+                        ui.horizontal(|ui| {
+                            ui.add_space(horizontal_padding);
+                            self.render_export_logs_button(ui);
+                        });
+                    }
                     ui.separator();
                 }
 

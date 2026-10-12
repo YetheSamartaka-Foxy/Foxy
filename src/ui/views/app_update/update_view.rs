@@ -60,6 +60,7 @@ impl Foxy {
                 if retry_btn.clicked() {
                     self.start_update_check();
                 }
+                self.render_export_logs_button(ui);
             }
             _ => {}
         }

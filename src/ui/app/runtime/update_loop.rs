@@ -584,7 +584,7 @@ impl Foxy {
                 ));
                 ui.add_space(16.0);
 
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     let ok_btn = ui.button(self.t("OK"));
                     if ok_btn.hovered() {
                         ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
@@ -602,6 +602,7 @@ impl Foxy {
                         self.settings_view_state.current_tab = "Application".to_string();
                         self.dismiss_renderer_fallback_notice();
                     }
+                    self.render_export_logs_button(ui);
                 });
             });
     }

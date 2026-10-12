@@ -1,5 +1,6 @@
 mod danger;
 mod input;
+mod log_export;
 pub(crate) mod spinner;
 mod style;
 mod widgets;

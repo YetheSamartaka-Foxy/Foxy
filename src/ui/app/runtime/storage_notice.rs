@@ -209,7 +209,7 @@ impl Foxy {
                     self.t("Do not show this again for these locations"),
                 );
                 ui.add_space(10.0);
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     let ok_btn = ui.button(self.t("OK"));
                     if ok_btn.hovered() {
                         ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
@@ -217,6 +217,7 @@ impl Foxy {
                     if ok_btn.clicked() {
                         ok_clicked = true;
                     }
+                    self.render_export_logs_button(ui);
                 });
             });
 

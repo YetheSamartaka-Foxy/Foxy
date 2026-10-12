@@ -445,36 +445,10 @@ impl Foxy {
         });
         ui.separator();
 
-        // Export logs to ZIP
         ui.horizontal(|ui| {
             ui.add_space(horizontal_padding);
             let button_width = ui.available_width() - 2.0 * horizontal_padding;
-            let export_logs_button = ui.add_sized(
-                Vec2::new(button_width, 40.0),
-                Button::new(
-                    RichText::new(format!("\u{1F4E6}  {}", tr("Export logs to ZIP"))).size(16.0),
-                )
-                .fill(self.color_main_bg()),
-            ).on_hover_text(tr("Package Foxy log files into a timestamped ZIP archive for sharing with support."));
-
-            if export_logs_button.hovered() {
-                ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
-            }
-            if export_logs_button.clicked() {
-                info!("Export logs to ZIP triggered from settings");
-                match self.export_logs_to_zip() {
-                    Ok(true) => {
-                        self.show_success_toast(self.t("Logs exported successfully."));
-                    }
-                    Ok(false) => {
-                        // User cancelled the save dialog – nothing to report.
-                    }
-                    Err(err) => {
-                        warn!("Failed to export logs to ZIP: {}", err);
-                        self.show_error_toast(self.t("Failed to export logs."));
-                    }
-                }
-            }
+            self.render_sized_export_logs_button(ui, Vec2::new(button_width, 40.0), 16.0);
             ui.add_space(horizontal_padding);
         });
         ui.separator();

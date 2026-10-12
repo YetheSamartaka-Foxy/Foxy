@@ -45,7 +45,7 @@
 
 \- Use the shared persistent galley cache in `src/ui/views/galley\_cache.rs` (`lazy\_galley`, `truncated\_galley`, `paint\_centered`, `paint\_overlay\_left`, `paint\_anchored`) for hot scrolling rows. Shape each row once with `Color32::PLACEHOLDER`, store `Arc<Galley>`, and recolor at paint time via the fallback-color arg of `Painter::galley` so state/color changes never re-shape. Width-independent text uses `layout\_no\_wrap`; width-dependent text is truncated and rebuilt on resize. Fill lazily (only rows actually viewed). Do not cache short non-scrolling sections (e.g. the repository-view server list) - egui's per-frame cache already covers them and a galley cache is dead weight.
 
-\- The settings FPS toggle (footer readout left of the activity-log button) is the tool to measure these regressions.
+\- The settings FPS toggle (footer readout left of the log-export button) is the tool to measure these regressions.
 
 \### Per-instance repository status
 

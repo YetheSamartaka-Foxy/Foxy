@@ -98,6 +98,8 @@ impl Foxy {
                             cancel_clicked = ui.button(self.t("Cancel")).clicked();
                         }
                     }
+                    ui.add_space(10.0);
+                    self.render_export_logs_button(ui);
                 });
             });
         self.db_schema_wipe_recheck_all = recheck_all;

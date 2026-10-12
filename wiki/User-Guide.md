@@ -690,7 +690,7 @@ Turn on **Enable benchmarks** in Settings > Benchmarks, repeat the action, save 
 
 ### Activity log and log files
 
-Open the activity log from the bottom-right footer button to see current work, recent core events, and errors. For deeper troubleshooting, use **Open log folder** or **Export logs to ZIP** in Settings > Application. Log files older than 90 days are removed automatically, and Foxy keeps up to 16 recent log files.
+Open the activity log from the bottom-right footer button to see current work, recent core events, and errors. Use **Export logs to ZIP** immediately to its left to save diagnostic logs for support. The same export button is available in the activity log, Settings > Application, startup troubleshooting notices, and several operation error dialogs. You can also use **Open log folder** in Settings > Application. Log files older than 90 days are removed automatically, and Foxy keeps up to 16 recent log files.
 
 ---
 

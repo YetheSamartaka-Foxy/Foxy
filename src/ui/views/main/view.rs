@@ -240,7 +240,8 @@ impl Foxy {
                         self.open_reference_view(FoxyView::Help);
                     }
 
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let footer_layout = Layout::right_to_left(Align::Center).with_main_wrap(true);
+                    ui.with_layout(footer_layout, |ui| {
                         let toggle_button_size = self.activity_log_toggle_button_size();
                         if let Some(tfr_logo) = &self.tfr_logo {
                             let logo_size = Vec2::splat(toggle_button_size.y);
@@ -296,8 +297,12 @@ impl Foxy {
                             );
                         }
 
-                        // Optional FPS readout, sitting just left of the activity-log
-                        // toggle. Lives in the footer rather than as a floating overlay.
+                        self.render_sized_export_logs_button(
+                            ui,
+                            Vec2::new(0.0, toggle_button_size.y),
+                            footer_text_size,
+                        );
+
                         if self.settings_view_state.show_fps_counter {
                             ui.add_space(6.0);
                             let fps = self.fps_ema.round().max(0.0) as i32;
@@ -444,28 +449,7 @@ impl Foxy {
                                 }
                             }
                         }
-                        let export_button = ui.add(Button::new(
-                            RichText::new(format!("\u{1F4E6}  {}", self.t("Export logs to ZIP")))
-                                .size(font_size),
-                        ));
-                        if export_button.hovered() {
-                            ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
-                        }
-                        if export_button.clicked() {
-                            info!("Export logs to ZIP triggered from activity log");
-                            match self.export_logs_to_zip() {
-                                Ok(true) => {
-                                    self.show_success_toast(self.t("Logs exported successfully."));
-                                }
-                                Ok(false) => {
-                                    // User cancelled the save dialog – nothing to report.
-                                }
-                                Err(err) => {
-                                    warn!("Failed to export logs to ZIP: {}", err);
-                                    self.show_error_toast(self.t("Failed to export logs."));
-                                }
-                            }
-                        }
+                        self.render_sized_export_logs_button(ui, Vec2::ZERO, font_size);
                         let open_folder_button = ui.add(Button::new(
                             RichText::new(self.t("Open log folder")).size(font_size),
                         ));
