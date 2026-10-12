@@ -3499,7 +3499,7 @@ impl Foxy {
             self.storage_compat_notice.is_some(),
             "storage-compat-notice",
         );
-        push(self.pending_db_schema_wipe.is_some(), "db-schema-wipe");
+        push(self.database_repair_prompt_visible(), "db-schema-wipe");
         push(self.benchmark_prompt.is_some(), "benchmark-save");
         push(self.benchmarks_view.export.is_some(), "benchmark-export");
         push(self.pending_app_update_prompt, "app-update-available");

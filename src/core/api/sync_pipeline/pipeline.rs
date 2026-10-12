@@ -1013,7 +1013,18 @@ async fn run_repository_pipeline(
         );
     }
     let base_context = tokio::select! {
-        context = create_context_with_recheck_level(RecheckLevel::DEFAULT) => context,
+        result = async {
+            crate::core::tasks::db_schema_version::ensure_database_ready_for_updates().await?;
+            Ok::<_, String>(create_context_with_recheck_level(RecheckLevel::DEFAULT).await)
+        } => match result {
+            Ok(context) => context,
+            Err(message) => {
+                error!("{}", message);
+                summary.log_table("failed-database-schema");
+                emit_progress!(ProgressEvent::Failed(message));
+                return;
+            }
+        },
         _ = sync_cancel_requested(&mut cancel_rx) => {
             info!(
                 "Sync cancelled while waiting for database availability: op={} repo={}",

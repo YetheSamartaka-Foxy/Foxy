@@ -1513,6 +1513,8 @@
     "Switch to the Foxy window that is already open, or close it and start Foxy again.": "すでに開いている Foxy のウィンドウに切り替えるか、そのウィンドウを閉じてから Foxy を起動し直してください。",
     "Close this window": "このウィンドウを閉じる",
     "Database update required": "データベースの更新が必要です",
+    "The local database must be rebuilt before Foxy can check or download mod updates. You can keep using Foxy and launch or join games without wiping. This reminder will appear before each launch or join until the database is rebuilt.": "Foxy で MOD の更新をチェックまたはダウンロードするには、ローカルデータベースの再構築が必要です。データベースを消去しなくても、Foxy を引き続き使用し、ゲームを起動したり、ゲームに参加したりできます。データベースが再構築されるまで、ゲームの起動や参加の前に、毎回この通知が表示されます。",
+    "Continue without wiping": "消去せずに続行",
     "This version of Foxy uses a newer database format than the data stored on this computer. The local database must be wiped and rebuilt before it can be used reliably.": "このバージョンの Foxy は、このコンピューターに保存されているデータより新しいデータベース形式を使用します。ローカルデータベースを消去して再構築しないと、確実に使用できません。",
     "The database stored on this computer was built by an older version of Foxy and this version cannot read it. Until it is rebuilt, Foxy cannot detect or download mod updates - repositories will keep showing as up to date even when they are not.": "このコンピューターに保存されているデータベースは古いバージョンの Foxy が作成したもので、このバージョンでは読み取れません。再構築するまで、Foxy は Mod の更新を検出もダウンロードもできず、リポジトリは最新でなくても最新と表示され続けます。",
     "Wiping clears cached repository data only - your downloaded mods and files on disk are not touched. Foxy rebuilds the cache automatically the next time it checks each repository.": "消去されるのはキャッシュされたリポジトリのデータだけです - ダウンロード済みの Mod やディスク上のファイルには影響しません。Foxy は次に各リポジトリを確認するときに自動でキャッシュを再構築します。",

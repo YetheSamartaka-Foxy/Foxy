@@ -347,6 +347,10 @@ When you click **Join**, these warnings appear before Foxy checks the server and
 
 When the Steam check is enabled, **Launch** and **Join** stay disabled in the warning dialog until Steam is running. TeamSpeak 3, missing external addons, addon selections, and Creator DLC differences are advisory: you can continue after reviewing them. Missing external addons are also reported on Join when server-addon checking is disabled or the server reports no addons. An offline server, a failed server query, or an invalid game installation still stops the launch or join.
 
+Long addon warning lists scroll inside the dialog, with launch and cancel buttons kept below the scrolling content. Server addon matching recognizes both folder and display names, and keeps metadata separate for each local installation of a repository.
+
+If the database needs rebuilding, a separate reminder appears after these readiness and addon/DLC warnings, before each **Launch** or **Join**. The green **Wipe database and continue** button rebuilds it and then resumes your selected action. **Continue without wiping** proceeds for this action only, and **Cancel** stops it. The reminder explains that mod checks and updates stay blocked until rebuilding succeeds; see [database rebuilding](#foxy-asks-to-wipe-and-rebuild-the-database).
+
 If you disable the Steam warning, Foxy tries to start Steam automatically before launching a game that requires it. If Steam cannot start or is no longer running, the game does not launch. This requirement also applies to command-line launches and the Eden Editor; Generic games configured without a Steam App ID can launch without Steam.
 
 Foxy never runs the game with administrator rights, even if Foxy itself was started as administrator, so Discord, TeamSpeak hotkeys, and OBS capture keep working in the game window.
@@ -630,6 +634,10 @@ Only one Foxy window or command can use a game space at a time. If Foxy reports 
 ### Foxy asks to wipe and rebuild the database
 
 After an update, the stored database may have been made by an incompatible version. Rebuilding keeps your downloaded mods on disk, and Foxy rechecks your repositories afterward. Files Foxy already verified and that have not changed are restored from its verified-hash record instead of being read again, unless you turned off **Skip unchanged files after a database reset**.
+
+Foxy checks the database itself, including leftover constraints from older versions. Updating a healthy database from 1.2.0 to 1.2.1 does not require another rebuild. If an earlier required rebuild was skipped and the database is still incompatible, Foxy asks for it again.
+
+You can dismiss the startup warning and keep using Foxy, including **Launch** and **Join**. Postponing does not remove the rebuild requirement: mod checks, updates, and background startup scans stay blocked until rebuilding succeeds. Each Launch or Join gives you another reminder after the other launch warnings, with an option to continue without wiping for that action. A failed rebuild keeps the requirement in place. Command-line mod checks and updates are blocked too, while command-line game launches remain available.
 
 ### Storage check notice
 

@@ -97,7 +97,7 @@ fn live_probe_result() -> Option<SchemaCompatibility> {
 /// Probe the freshly opened database and record the verdict for `path`. Runs
 /// once per database open; the statement prepares are parse-only, so the cost is
 /// a few milliseconds even on a slow disk.
-async fn probe_and_record(path: &Path, conn: &Connection) {
+async fn probe_and_record(path: &Path, conn: &Connection) -> SchemaCompatibility {
     let result = probe(conn).await;
     if result.is_compatible() {
         info!("STARTUP: live database schema matches this build");
@@ -114,15 +114,19 @@ async fn probe_and_record(path: &Path, conn: &Connection) {
         ANY_INCOMPATIBLE.store(true, Ordering::Relaxed);
     }
     if let Ok(mut slot) = LAST_PROBE.lock() {
-        *slot = Some((path.to_path_buf(), result));
+        *slot = Some((path.to_path_buf(), result.clone()));
     }
+    result
 }
 
 /// Convenience wrapper that opens its own tuned connection.
-pub(crate) async fn probe_database(path: &Path, db: &Database) {
+pub(crate) async fn probe_database(path: &Path, db: &Database) -> Option<SchemaCompatibility> {
     match crate::core::tasks::db_turso::connect_tuned(db).await {
-        Ok(conn) => probe_and_record(path, conn.raw()).await,
-        Err(err) => warn!("STARTUP: could not probe live database schema: {}", err),
+        Ok(conn) => Some(probe_and_record(path, conn.raw()).await),
+        Err(err) => {
+            warn!("STARTUP: could not probe live database schema: {}", err);
+            None
+        }
     }
 }
 
@@ -152,7 +156,66 @@ async fn probe(conn: &Connection) -> SchemaCompatibility {
         }
     }
 
+    for (table, identity) in [
+        ("repositories", &["remote_url", "local_path"][..]),
+        ("pending_updates", &["repository_url", "local_path"][..]),
+        ("addons", &["name", "remote_path", "local_path"][..]),
+        ("files", &["name", "remote_path", "local_path"][..]),
+    ] {
+        match unique_keys(conn, table).await {
+            Ok(keys) => {
+                let expected: BTreeSet<String> =
+                    identity.iter().map(|column| column.to_string()).collect();
+                if !keys.contains(&expected) {
+                    problems.push(format!(
+                        "table `{table}` is missing its composite identity UNIQUE"
+                    ));
+                }
+                if keys
+                    .iter()
+                    .any(|key| !key.is_empty() && key.is_subset(&expected) && key != &expected)
+                {
+                    problems.push(format!("table `{table}` has an obsolete UNIQUE that prevents independent local instances"));
+                }
+            }
+            Err(err) => problems.push(format!(
+                "table `{table}` identity cannot be inspected: {err}"
+            )),
+        }
+    }
+
     SchemaCompatibility { problems }
+}
+
+async fn unique_keys(conn: &Connection, table: &str) -> turso::Result<Vec<BTreeSet<String>>> {
+    let mut rows = conn
+        .query(&format!("PRAGMA index_list({table})"), ())
+        .await?;
+    let mut indexes = Vec::new();
+    while let Some(row) = rows.next().await? {
+        if row.get_value(2)? == turso::Value::Integer(1)
+            && row.get_value(4)? == turso::Value::Integer(0)
+            && let turso::Value::Text(name) = row.get_value(1)?
+        {
+            indexes.push(name);
+        }
+    }
+    drop(rows);
+    let mut keys = Vec::new();
+    for index in indexes {
+        let quoted = index.replace('\'', "''");
+        let mut rows = conn
+            .query(&format!("PRAGMA index_info('{quoted}')"), ())
+            .await?;
+        let mut key = BTreeSet::new();
+        while let Some(row) = rows.next().await? {
+            if let turso::Value::Text(column) = row.get_value(2)? {
+                key.insert(column.to_ascii_lowercase());
+            }
+        }
+        keys.push(key);
+    }
+    Ok(keys)
 }
 
 /// Column names the engine reports for `table`, or `None` when the table does
@@ -434,5 +497,77 @@ mod tests {
             "expected the upsert prepare to fail, got {:?}",
             result.problems
         );
+    }
+
+    #[tokio::test]
+    async fn obsolete_url_unique_is_incompatible_even_with_composite_unique() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("database.db");
+        let db = crate::core::tasks::db_turso::build_and_bootstrap(path.to_str().unwrap())
+            .await
+            .unwrap();
+        let conn = crate::core::tasks::db_turso::connect_tuned(&db)
+            .await
+            .unwrap();
+        conn.execute(
+            "CREATE UNIQUE INDEX legacy_repository_url ON repositories(remote_url)",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.raw().prepare(REPOSITORY_UPSERT_SQL).await.unwrap();
+
+        let result = probe(conn.raw()).await;
+        assert!(
+            result
+                .problems
+                .iter()
+                .any(|problem| problem.contains("repositories")
+                    && problem.contains("obsolete UNIQUE")),
+            "{:?}",
+            result.problems
+        );
+        drop(conn);
+        crate::core::tasks::db_turso::wipe_and_rebuild_live(&db)
+            .await
+            .unwrap();
+        let result = probe_database(&path, &db).await.unwrap();
+        assert!(result.is_compatible(), "{:?}", result.problems);
+    }
+
+    #[tokio::test]
+    async fn addon_and_file_identity_constraints_are_required() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("database.db");
+        let db = crate::core::tasks::db_turso::build_and_bootstrap(path.to_str().unwrap())
+            .await
+            .unwrap();
+        let conn = crate::core::tasks::db_turso::connect_tuned(&db)
+            .await
+            .unwrap();
+        for table in ["addons", "files"] {
+            conn.execute(&format!("ALTER TABLE {table} RENAME TO legacy_{table}"), ())
+                .await
+                .unwrap();
+            conn.execute(
+                &format!("CREATE TABLE {table} AS SELECT * FROM legacy_{table}"),
+                (),
+            )
+            .await
+            .unwrap();
+        }
+
+        let result = probe(conn.raw()).await;
+        for table in ["addons", "files"] {
+            assert!(
+                result
+                    .problems
+                    .iter()
+                    .any(|problem| problem.contains(&format!("`{table}`"))
+                        && problem.contains("composite identity UNIQUE")),
+                "{:?}",
+                result.problems
+            );
+        }
     }
 }

@@ -90,6 +90,9 @@ impl Foxy {
     /// that connects as soon as the first frame renders would otherwise see an
     /// idle app and measure nothing. Treat the gap as busy.
     pub(in crate::ui::app) fn startup_sync_in_progress(&self) -> bool {
+        if self.database_updates_blocked() {
+            return false;
+        }
         if !self.startup_tasks_started {
             return true;
         }

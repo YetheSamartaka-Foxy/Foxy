@@ -99,6 +99,9 @@ impl Foxy {
         folder_id: &str,
         mode: SyncMode,
     ) -> usize {
+        if self.block_database_update_request() {
+            return 0;
+        }
         let targets = self.collect_repository_visual_folder_sync_targets(folder_id);
         self.repository_visual_folder_sync_queue.clear();
         for repo_idx in targets {
@@ -125,6 +128,9 @@ impl Foxy {
         mode: SyncMode,
         selected_repo_indices: &[usize],
     ) -> usize {
+        if self.block_database_update_request() {
+            return 0;
+        }
         let selected: HashSet<usize> = selected_repo_indices.iter().copied().collect();
         if selected.is_empty() {
             self.repository_space_sync_queue.clear();
@@ -363,7 +369,10 @@ impl Foxy {
     }
 
     pub(in crate::ui::app) fn process_repository_space_sync_queue(&mut self) {
-        if self.repository_sync_active() || self.is_direct_download_running() {
+        if self.database_updates_blocked()
+            || self.repository_sync_active()
+            || self.is_direct_download_running()
+        {
             return;
         }
 
@@ -396,7 +405,10 @@ impl Foxy {
     }
 
     pub(in crate::ui::app) fn process_repository_visual_folder_sync_queue(&mut self) {
-        if self.repository_sync_active() || self.is_direct_download_running() {
+        if self.database_updates_blocked()
+            || self.repository_sync_active()
+            || self.is_direct_download_running()
+        {
             return;
         }
 
@@ -425,7 +437,8 @@ impl Foxy {
     }
 
     pub(in crate::ui::app) fn process_addon_hash_recalc_queue(&mut self) {
-        if self.repository_sync_active()
+        if self.database_updates_blocked()
+            || self.repository_sync_active()
             || self.is_direct_download_running()
             || self.addon_hash_recalc_in_flight
         {

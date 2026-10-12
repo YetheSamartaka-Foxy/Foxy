@@ -168,8 +168,9 @@ impl Foxy {
         self.sync_debug_runtime_state();
         self.i18n.set_language(&self.settings_view_state.locale);
         self.db_lock_conflict = self.claim_active_space_database();
-        self.pending_db_schema_wipe =
-            crate::core::tasks::db_schema_version::evaluate_and_bootstrap();
+        let _ = crate::core::tasks::db_schema_version::evaluate_and_bootstrap();
+        self.pending_db_schema_wipe = None;
+        self.refresh_database_repair_requirement();
         self.load_repositories();
         self.load_repository_spaces();
         self.reconcile_repository_space_paths();
@@ -182,14 +183,7 @@ impl Foxy {
         self.detect_arma3_profiles_now();
         self.request_repository_images(ctx);
 
-        if !self.settings_view_state.debug_mode {
-            self.restore_pending_updates();
-            if self.settings_view_state.auto_quick_scan_on_launch {
-                self.start_quick_local_scan();
-            }
-            self.start_fs_watcher();
-        }
-        self.queue_startup_rechecks();
+        self.start_database_startup_tasks();
         self.start_startup_ts3_plugin_scan();
         self.storage_compat_notice = None;
         self.startup_diagnostics_rx = Some(crate::core::api::spawn_storage_compat_check(
@@ -303,6 +297,9 @@ impl Foxy {
         self.wipe_db_include_benchmarks = false;
         self.db_schema_wipe_recheck_all = true;
         self.recheck_all_after_database_wipe = false;
+        self.database_wipe_in_flight = false;
+        self.show_db_schema_wipe_prompt = false;
+        self.pending_database_launch = None;
         self.benchmark_armed = None;
         self.benchmark_capture = None;
         self.benchmark_prompt = None;

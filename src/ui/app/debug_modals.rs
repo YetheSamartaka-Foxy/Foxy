@@ -66,6 +66,7 @@ impl DebugModal {
                         target_version: target,
                         blocking: false,
                     });
+                app.show_db_schema_wipe_prompt = true;
             }
             DebugModal::StorageCheck => {
                 app.storage_compat_notice = Some(preview_storage_notice());

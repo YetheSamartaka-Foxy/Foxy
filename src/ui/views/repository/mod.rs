@@ -61,7 +61,7 @@ pub(super) enum RepositoryBannerResponse {
 pub(super) type RepositoryUiAction = Box<dyn FnOnce(&mut Foxy)>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum LaunchDispatchResult {
+pub(crate) enum LaunchDispatchResult {
     Launched,
     Deferred,
     Failed,

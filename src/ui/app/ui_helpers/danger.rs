@@ -58,14 +58,46 @@ impl Foxy {
         label: String,
         enabled: bool,
     ) -> Response {
+        self.add_prompt_primary_button(
+            ui,
+            label,
+            enabled,
+            self.color_action_destructive(),
+            self.color_error(),
+        )
+    }
+
+    pub(crate) fn add_repair_primary_button(
+        &self,
+        ui: &mut Ui,
+        label: String,
+        enabled: bool,
+    ) -> Response {
+        self.add_prompt_primary_button(
+            ui,
+            label,
+            enabled,
+            self.color_success_muted(),
+            self.color_success(),
+        )
+    }
+
+    fn add_prompt_primary_button(
+        &self,
+        ui: &mut Ui,
+        label: String,
+        enabled: bool,
+        fill: Color32,
+        stroke: Color32,
+    ) -> Response {
         let body_size = egui::TextStyle::Body.resolve(ui.style()).size;
         let response = ui
             .vertical_centered_justified(|ui| {
                 ui.add_enabled(
                     enabled,
                     Button::new(RichText::new(label).strong().color(palette::ON_STRONG_FILL))
-                        .fill(self.color_action_destructive())
-                        .stroke(Stroke::new(1.0, self.color_error()))
+                        .fill(fill)
+                        .stroke(Stroke::new(1.0, stroke))
                         .corner_radius(CornerRadius::same(6))
                         .min_size(egui::vec2(
                             0.0,

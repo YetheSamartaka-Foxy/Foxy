@@ -727,6 +727,15 @@ pub async fn wipe_database_live() -> Result<(), String> {
         .map_err(|e| format!("Failed to wipe Turso database: {e}"))?;
     // The tables were dropped and recreated from the bootstrap schema, so any
     // incompatibility recorded for this file is now stale.
-    crate::core::tasks::db_schema_check::probe_database(&path, &db).await;
+    let result = crate::core::tasks::db_schema_check::probe_database(&path, &db)
+        .await
+        .ok_or_else(|| "Failed to validate the rebuilt database schema".to_string())?;
+    if !result.is_compatible() {
+        return Err(format!(
+            "Rebuilt database is incompatible: {}",
+            result.problems.join("; ")
+        ));
+    }
+    crate::core::tasks::db_schema_version::mark_wiped();
     Ok(())
 }

@@ -36,6 +36,7 @@ use agent_driver::AgentGuiRuntime;
 
 pub use downloads::UpdateModalDiskSpaceProbe;
 pub use repository::game_space_overview::{RepositoryGroupSummary, TeamSpeakSummary};
+pub(crate) use runtime::DatabaseLaunchContinuation;
 pub use scheduling::{PendingPostAction, ScheduledJobRun};
 pub use state::*;
 
@@ -136,13 +137,14 @@ pub struct Foxy {
     pub benchmarks_view: benchmarks::BenchmarksViewState,
     pub benchmark_channels: benchmarks::BenchmarkChannels,
     pub pending_renderer_fallback_notice: bool,
-    /// Set when the local database schema is older than the schema this binary
-    /// ships and the user must be prompted to wipe-and-continue (or dismiss and
-    /// keep the old data at their own risk). Driven by `db_schema_version`.
+    /// Outstanding repair requirement, retained while its warning is hidden.
     pub pending_db_schema_wipe: Option<crate::core::tasks::db_schema_version::DbSchemaWipePrompt>,
+    pub(crate) show_db_schema_wipe_prompt: bool,
+    pub(crate) pending_database_launch: Option<runtime::DatabaseLaunchContinuation>,
     /// Opt-out on the schema wipe prompt: recheck every repository once the wipe lands.
     pub db_schema_wipe_recheck_all: bool,
     pub recheck_all_after_database_wipe: bool,
+    pub(crate) database_wipe_in_flight: bool,
     /// Set when another Foxy process already owns this game space's database.
     /// Turso has no multi-process access, so this window must not touch the data
     /// at all: the prompt it raises only offers closing Foxy. Carries the owning

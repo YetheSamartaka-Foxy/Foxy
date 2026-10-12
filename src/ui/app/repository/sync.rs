@@ -68,6 +68,9 @@ impl Foxy {
         prepare_download_plan: bool,
         force_full_downloads: bool,
     ) {
+        if self.block_database_update_request() {
+            return;
+        }
         let benchmark_arm = self.benchmark_armed.take();
         if self.syncing_repository.is_some() {
             warn!("Sync request ignored: another repository sync is already in progress");
@@ -378,6 +381,9 @@ impl Foxy {
     }
 
     pub(crate) fn prepare_update_confirmation(&mut self, repo_idx: usize) {
+        if self.block_database_update_request() {
+            return;
+        }
         self.update_modal_open = false;
         self.open_update_after_sync = true;
         self.start_core_sync_internal(repo_idx, SyncMode::RecheckOnly, None, false, true, false);
@@ -409,6 +415,9 @@ impl Foxy {
     }
 
     pub fn standalone_download_addons(&mut self, repo_idx: usize, addon_names: &[String]) -> bool {
+        if self.block_database_update_request() {
+            return false;
+        }
         if self.repository_sync_active() || self.is_direct_download_running() {
             warn!("Standalone addon download ignored: sync worker is currently active");
             return false;
@@ -492,6 +501,9 @@ impl Foxy {
     }
 
     pub fn force_redownload_repository(&mut self, repo_idx: usize) {
+        if self.block_database_update_request() {
+            return;
+        }
         if self.repository_sync_active() || self.is_direct_download_running() {
             warn!("Force redownload ignored: sync worker is currently active");
             return;
@@ -563,6 +575,9 @@ impl Foxy {
     }
 
     pub fn recalculate_addon_hashes(&mut self, repo_idx: usize, addon_name: &str) -> bool {
+        if self.block_database_update_request() {
+            return false;
+        }
         let addon_name = addon_name.trim();
         if addon_name.is_empty() {
             warn!("Addon hash recalculation ignored: addon name is empty");
@@ -738,6 +753,9 @@ impl Foxy {
         addon_name: &str,
         addon_path: Option<&str>,
     ) -> bool {
+        if self.block_database_update_request() {
+            return false;
+        }
         if self.repository_sync_active() || self.is_direct_download_running() {
             warn!("Addon force redownload ignored: sync worker is currently active");
             return false;
@@ -884,6 +902,9 @@ impl Foxy {
     }
 
     fn complete_addon_force_redownload(&mut self, result: AddonForceRedownloadProbeResult) {
+        if self.block_database_update_request() {
+            return;
+        }
         let AddonForceRedownloadProbeResult {
             repo_address,
             repo_path,

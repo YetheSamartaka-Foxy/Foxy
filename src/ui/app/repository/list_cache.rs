@@ -373,6 +373,9 @@ impl Foxy {
     }
 
     pub fn restore_pending_updates(&mut self) {
+        if self.database_updates_blocked() {
+            return;
+        }
         if self.startup_pending_restore_worker.is_some() {
             debug!("Startup pending-update restore worker is already running");
             return;

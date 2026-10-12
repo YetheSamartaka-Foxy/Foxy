@@ -1,6 +1,8 @@
 ﻿# 1.2.1
 ## Fixed
 - Joining a server now shows enabled Steam and TeamSpeak 3 warnings before checking the server and its addons. Steam must be running to continue; TeamSpeak remains an advisory warning. Missing external addons are also reported when server-addon checking is disabled.
+- Foxy now detects incompatible databases left behind by a skipped rebuild after an older update. You can postpone rebuilding and keep using Foxy, Launch, and Join; each launch or join offers a separate reminder after the other launch warnings, with a green database wipe button. Mod checks and updates stay blocked until rebuilding succeeds. Healthy databases from 1.2.0 do not need another wipe.
+- Joining a server no longer treats an addon as different just because its display name differs from its folder name, or mixes up addon names from separate installs of the same repository. Long addon confirmation lists now scroll while keeping the launch and cancel buttons visible.
 - The update progress bar no longer seems to stop near the end when a repository has many small files and a few large ones. The bar and percentage now follow downloaded bytes instead of the number of finished files.
 - Checking a partially installed repository in a shared folder no longer pauses with a wrong-folder warning when most of its addons have never been downloaded.
 - External addons shared by several repositories now appear when filtering by any of those repositories, including optional addons.

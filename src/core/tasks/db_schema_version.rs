@@ -1,27 +1,4 @@
-//! Database schema-version tracking and the auto-wipe gate.
-//!
-//! Foxy occasionally has to change the database schema in ways that are not
-//! cleanly forward-migratable (the Turso migration is the first big one). For
-//! those cases the database simply needs to be wiped and rebuilt from the
-//! current migrations. Rather than silently corrupting or guessing, we track a
-//! single monotonically increasing [`DB_SCHEMA_VERSION`] and persist the
-//! version the local database was last built/wiped at in a small JSON sidecar
-//! next to `database.db`.
-//!
-//! On startup the GUI compares the stored version against the compiled one. If
-//! the running binary ships a *newer* schema than the local database was built
-//! for, the user is prompted (a blocking modal) to wipe-and-continue or to
-//! dismiss and keep using the old data at their own risk.
-//!
-//! The sidecar file - not the mere presence of `database.db` - is the primary
-//! source of truth, because `database.db` is created very early in startup (an
-//! empty file is touched before the UI exists), so its mere existence cannot
-//! distinguish a fresh install from an upgrade. The *one* exception is a
-//! sidecar that is missing entirely: a fresh install has no sidecar **and** no
-//! populated database, whereas a build that predates schema versioning has a
-//! populated `database.db` but never wrote a sidecar. We treat the latter
-//! (missing sidecar + non-empty database) as schema version 0 and prompt for a
-//! wipe, so those users are notified rather than silently left on stale data.
+//! Database schema-version tracking and the rebuild requirement for updates.
 
 use std::fs;
 use std::path::PathBuf;
@@ -87,10 +64,7 @@ pub struct DbMeta {
 pub struct DbSchemaWipePrompt {
     pub stored_version: u32,
     pub target_version: u32,
-    /// The live database was probed and cannot run this build's statements, so
-    /// "continue without wiping" is not a real option: every sync would persist
-    /// nothing and still report success. The UI drops the dismiss action for a
-    /// blocking prompt.
+    /// The live database cannot run this build's statements.
     pub blocking: bool,
 }
 
@@ -136,6 +110,48 @@ pub(crate) fn decide(
             target: compiled,
         },
     }
+}
+
+fn wipe_requirement(
+    meta: Option<&DbMeta>,
+    legacy_db_present: bool,
+    compiled: u32,
+    live_incompatible: bool,
+) -> Option<DbSchemaWipePrompt> {
+    let stored = meta.map(|meta| meta.schema_version).unwrap_or(0);
+    let outdated = match meta {
+        Some(meta) => meta.schema_version < compiled,
+        None => legacy_db_present,
+    };
+    (outdated || live_incompatible).then_some(DbSchemaWipePrompt {
+        stored_version: stored,
+        target_version: compiled,
+        blocking: live_incompatible,
+    })
+}
+
+pub(crate) fn current_wipe_requirement() -> Option<DbSchemaWipePrompt> {
+    wipe_requirement(
+        read_meta().as_ref(),
+        legacy_database_present(),
+        DB_SCHEMA_VERSION,
+        crate::core::tasks::db_schema_check::live_schema_incompatible(),
+    )
+}
+
+pub(crate) async fn ensure_database_ready_for_updates() -> Result<(), String> {
+    // Classify a fresh install before opening creates a populated database.
+    evaluate_and_bootstrap();
+    crate::core::tasks::db_turso::init_turso_database().await;
+    if let Some(prompt) = current_wipe_requirement() {
+        return Err(format!(
+            "The local database must be rebuilt before mod checks or updates can run \
+             (stored v{}, this build expects v{}). Run `foxy --wipe-db --yes` to rebuild it, \
+             or use the database repair button in Foxy.",
+            prompt.stored_version, prompt.target_version
+        ));
+    }
+    Ok(())
 }
 
 /// Whether a populated database already exists on disk. Used only to
@@ -259,17 +275,14 @@ pub fn blocking_prompt_if_live_schema_incompatible() -> Option<DbSchemaWipePromp
     })
 }
 
-/// CLI-side, read-only schema gate. Performs the same fresh/legacy sidecar
-/// bootstrap as [`evaluate_and_bootstrap`] (so first runs are not nagged) and,
-/// when the local database is behind a breaking bump that has not been
-/// dismissed, logs a warning and returns a short user-facing hint string. Never
-/// wipes - the CLI must not destroy data without explicit consent (`--wipe-db
-/// --yes`). Returns `None` when nothing is out of date.
+/// CLI reminder for an outstanding rebuild, including previously dismissed ones.
 pub fn cli_wipe_hint() -> Option<String> {
-    evaluate_and_bootstrap().map(|prompt| {
+    evaluate_and_bootstrap();
+    current_wipe_requirement().map(|prompt| {
         format!(
-            "local database schema is out of date (stored v{}, this build expects v{}); \
-             run `foxy --wipe-db --yes` to wipe and rebuild, or continue at your own risk",
+            "local database rebuild required (stored v{}, this build expects v{}); \
+             mod checks and updates are unavailable until `foxy --wipe-db --yes` rebuilds it; \
+             launches remain available",
             prompt.stored_version, prompt.target_version
         )
     })
@@ -307,29 +320,6 @@ pub(crate) fn mark_content_hash_format_current() {
     write_meta(&meta);
 }
 
-/// Whether the persisted schema metadata is already current for this binary.
-pub fn is_current() -> bool {
-    read_meta().is_some_and(|meta| meta.schema_version >= DB_SCHEMA_VERSION)
-}
-
-/// Record that the user dismissed the wipe prompt for `target` and chose to keep
-/// the existing database. Preserves the stored (older) version so the schema is
-/// still considered out of date, but suppresses the prompt until the next bump.
-pub fn mark_dismissed(stored: u32, target: u32) {
-    log::warn!(
-        "User dismissed database wipe prompt (stored={} target={}); keeping old data at their own risk",
-        stored,
-        target
-    );
-    write_meta(&DbMeta {
-        schema_version: stored,
-        dismissed_for_version: Some(target),
-        content_hash_format: read_meta()
-            .map(|meta| meta.content_hash_format)
-            .unwrap_or_else(legacy_content_hash_format),
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -361,6 +351,73 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(decide(Some(&meta), true, 21), SchemaDecision::UpToDate);
+    }
+
+    #[test]
+    fn rebuilt_1_2_0_database_does_not_prompt_for_1_2_1() {
+        let meta = DbMeta {
+            schema_version: 25,
+            dismissed_for_version: None,
+            content_hash_format: CONTENT_HASH_FORMAT,
+        };
+        assert_eq!(
+            decide(Some(&meta), true, DB_SCHEMA_VERSION),
+            SchemaDecision::UpToDate
+        );
+        assert_eq!(
+            wipe_requirement(Some(&meta), true, DB_SCHEMA_VERSION, false),
+            None
+        );
+    }
+
+    #[test]
+    fn dismissed_old_schema_still_requires_rebuild_for_updates() {
+        let meta = DbMeta {
+            schema_version: 24,
+            dismissed_for_version: Some(DB_SCHEMA_VERSION),
+            content_hash_format: CONTENT_HASH_FORMAT,
+        };
+        assert_eq!(
+            wipe_requirement(Some(&meta), true, DB_SCHEMA_VERSION, false),
+            Some(DbSchemaWipePrompt {
+                stored_version: 24,
+                target_version: DB_SCHEMA_VERSION,
+                blocking: false,
+            })
+        );
+    }
+
+    #[test]
+    fn live_incompatibility_requires_rebuild_despite_current_metadata() {
+        let meta = DbMeta {
+            schema_version: DB_SCHEMA_VERSION,
+            content_hash_format: CONTENT_HASH_FORMAT,
+            ..Default::default()
+        };
+        assert_eq!(
+            wipe_requirement(Some(&meta), true, DB_SCHEMA_VERSION, true),
+            Some(DbSchemaWipePrompt {
+                stored_version: DB_SCHEMA_VERSION,
+                target_version: DB_SCHEMA_VERSION,
+                blocking: true,
+            })
+        );
+    }
+
+    #[test]
+    fn missing_metadata_requires_rebuild_only_for_a_populated_database() {
+        assert_eq!(
+            wipe_requirement(None, false, DB_SCHEMA_VERSION, false),
+            None
+        );
+        assert_eq!(
+            wipe_requirement(None, true, DB_SCHEMA_VERSION, false),
+            Some(DbSchemaWipePrompt {
+                stored_version: 0,
+                target_version: DB_SCHEMA_VERSION,
+                blocking: false,
+            })
+        );
     }
 
     #[test]

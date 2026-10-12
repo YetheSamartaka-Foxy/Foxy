@@ -73,7 +73,7 @@ impl Foxy {
         addons
     }
 
-    pub(super) fn handle_post_launch_window_behavior(
+    pub(crate) fn handle_post_launch_window_behavior(
         &mut self,
         ctx: &egui::Context,
         reason: &'static str,
@@ -86,7 +86,31 @@ impl Foxy {
         }
     }
 
-    pub(super) fn launch_repository_with_steam_guard(
+    pub(crate) fn launch_repository_with_database_guard(
+        &mut self,
+        effective: &Repository,
+        server: Option<&RepositoryServer>,
+        repo_name: &str,
+        launch_label: &'static str,
+    ) -> LaunchDispatchResult {
+        self.refresh_database_repair_requirement();
+        if self.database_updates_blocked() {
+            if self.pending_database_launch.is_none() {
+                self.pending_database_launch = Some(crate::ui::app::DatabaseLaunchContinuation {
+                    repository: effective.clone(),
+                    server: server.cloned(),
+                    repo_name: repo_name.to_string(),
+                    launch_label,
+                });
+            }
+            self.show_db_schema_wipe_prompt = true;
+            self.needs_repaint = true;
+            return LaunchDispatchResult::Deferred;
+        }
+        self.launch_repository_with_steam_guard(effective, server, repo_name, launch_label)
+    }
+
+    pub(crate) fn launch_repository_with_steam_guard(
         &mut self,
         effective: &Repository,
         server: Option<&RepositoryServer>,
@@ -484,6 +508,7 @@ impl Foxy {
         });
 
         let address = server.address.clone();
+        let database_metadata_available = !self.database_updates_blocked();
         let repo_urls = self
             .repository_view_state
             .repositories
@@ -509,7 +534,7 @@ impl Foxy {
                     address, port, err
                 )
             });
-            let display_names = {
+            let display_names = if database_metadata_available {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build();
@@ -528,6 +553,8 @@ impl Foxy {
                         Default::default()
                     }
                 }
+            } else {
+                Default::default()
             };
             match &result {
                 Ok(query_result) => {
@@ -815,7 +842,7 @@ impl Foxy {
         }
 
         let launch_result =
-            self.launch_repository_with_steam_guard(effective, None, repo_name, "regular");
+            self.launch_repository_with_database_guard(effective, None, repo_name, "regular");
         if launch_result == LaunchDispatchResult::Launched {
             self.handle_post_launch_window_behavior(ctx, "launch completed");
         }
@@ -916,7 +943,7 @@ impl Foxy {
         repo_name: &str,
     ) {
         let launch_result =
-            self.launch_repository_with_steam_guard(effective, Some(server), repo_name, "join");
+            self.launch_repository_with_database_guard(effective, Some(server), repo_name, "join");
         if matches!(
             launch_result,
             LaunchDispatchResult::Launched | LaunchDispatchResult::Deferred

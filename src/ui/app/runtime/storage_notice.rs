@@ -89,7 +89,7 @@ impl Foxy {
     pub(crate) fn storage_check_repositories(&self) -> Vec<StartupRepositoryInstance> {
         if self.settings_view_state.debug_mode
             || self.db_lock_conflict.is_some()
-            || self.pending_db_schema_wipe.is_some()
+            || self.database_repair_prompt_visible()
         {
             return Vec::new();
         }

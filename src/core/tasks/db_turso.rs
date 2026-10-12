@@ -162,6 +162,7 @@ pub(crate) async fn wipe_and_rebuild_live(db: &Database) -> turso::Result<()> {
         "download_target_file",
         "addon_files",
         "repository_addons",
+        "file_subfiles",
         "subfiles",
         "files",
         "addons",
@@ -1167,7 +1168,7 @@ async fn open_and_prepare_database(path: &Path) -> Arc<Database> {
     // The bootstrap above is `CREATE ... IF NOT EXISTS`, so it silently no-ops on
     // a database an older Foxy built. Confirm the live schema can actually run
     // this build's statements before the app starts syncing against it.
-    crate::core::tasks::db_schema_check::probe_database(path, &db).await;
+    let _ = crate::core::tasks::db_schema_check::probe_database(path, &db).await;
 
     info!(
         "STARTUP: Turso database initialized in {:.2}s",
@@ -1434,6 +1435,31 @@ mod tests {
             .expect("live wipe should finish after shared access is released")
             .expect("live wipe task should not panic")
             .expect("live wipe should succeed");
+    }
+
+    #[tokio::test]
+    async fn live_wipe_removes_legacy_part_links() {
+        let db = build_test_database().await;
+        let conn = connect_tuned(&db).await.unwrap();
+        apply_schema(
+            conn.raw(),
+            include_str!("../../../migrations/07_files_parts.sql"),
+        )
+        .await
+        .unwrap();
+        drop(conn);
+
+        wipe_and_rebuild_live(&db).await.unwrap();
+
+        let conn = connect_tuned(&db).await.unwrap();
+        let mut rows = conn
+            .query(
+                "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'file_subfiles'",
+                (),
+            )
+            .await
+            .unwrap();
+        assert!(rows.next().await.unwrap().is_none());
     }
 
     /// Benchmark (run explicitly: `cargo test --release bench_fresh_insert_vs_upsert

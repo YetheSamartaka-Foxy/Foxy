@@ -640,7 +640,8 @@ impl Foxy {
                 .add_enabled_ui(!sync_active, |ui| {
                     ui.add_sized(
                         Vec2::new(button_width, 30.0),
-                        Button::new(tr("Wipe Database")).fill(self.color_text_error()),
+                        Button::new(RichText::new(tr("Wipe Database")).color(crate::ui::palette::ON_STRONG_FILL))
+                            .fill(self.color_success_muted()),
                     ).on_hover_text(tr("Remove all cached repository data from the database. Use this only as a last resort."))
                 })
                 .inner;

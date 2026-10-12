@@ -5,37 +5,22 @@ use crate::ui::app::debug_modals::DebugModal;
 use crate::ui::app::{Foxy, FoxyView};
 
 impl Foxy {
-    /// Blocking startup prompt shown when the local database schema is older
-    /// than the schema this binary ships. Offers a primary "wipe and continue"
-    /// action and a secondary "keep my data at my own risk" dismissal.
     pub(super) fn render_db_schema_wipe_prompt(&mut self, ctx: &egui::Context) {
         let preview = self.previewing_debug_modal(DebugModal::DbSchemaWipe);
-        // The database is opened lazily, well after the startup sidecar check, so
-        // the live-schema verdict only becomes available here. Escalate to a
-        // non-dismissible prompt once it does: a database this build cannot query
-        // makes every sync a silent no-op that still reports success.
-        if !preview
-            && let Some(blocking) =
-                crate::core::tasks::db_schema_version::blocking_prompt_if_live_schema_incompatible()
-            && self
-                .pending_db_schema_wipe
-                .is_none_or(|pending| !pending.blocking)
-        {
-            self.pending_db_schema_wipe = Some(blocking);
+        self.refresh_live_database_repair_requirement();
+        if !self.database_repair_prompt_visible() {
+            return;
         }
         let Some(prompt) = self.pending_db_schema_wipe else {
             return;
         };
-        if !preview && !prompt.blocking && crate::core::tasks::db_schema_version::is_current() {
-            self.pending_db_schema_wipe = None;
-            return;
-        }
 
         // A wipe must not race an in-flight sync (it drops the tables the sync
         // is writing). Mirror the settings wipe dialog's guard.
         let sync_active = self.repository_sync_active();
         let mut wipe_clicked = false;
         let mut dismiss_clicked = false;
+        let mut cancel_clicked = false;
         let mut recheck_all = self.db_schema_wipe_recheck_all;
         let window_frame = self.danger_modal_chrome(ctx);
 
@@ -46,17 +31,18 @@ impl Foxy {
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .default_width(540.0)
+            .min_width(0.0)
+            .max_width((ctx.content_rect().width() - 40.0).clamp(1.0, 540.0))
+            .default_width((ctx.content_rect().width() - 40.0).clamp(1.0, 540.0))
             .show(ctx, |ui| {
-                let message = if prompt.blocking {
-                    self.t(
-                        "The database stored on this computer was built by an older version of Foxy and this version cannot read it. Until it is rebuilt, Foxy cannot detect or download mod updates - repositories will keep showing as up to date even when they are not.",
-                    )
-                } else {
-                    self.t(
-                        "This version of Foxy uses a newer database format than the data stored on this computer. The local database must be wiped and rebuilt before it can be used reliably.",
-                    )
-                };
+                egui::ScrollArea::vertical()
+                    .id_salt("database_repair_body")
+                    .max_height((ctx.content_rect().height() - 230.0).max(1.0))
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                let message = self.t(
+                    "The local database must be rebuilt before Foxy can check or download mod updates. You can keep using Foxy and launch or join games without wiping. This reminder will appear before each launch or join until the database is rebuilt.",
+                );
                 self.render_danger_callout(ui, message);
                 ui.add_space(10.0);
                 ui.add(
@@ -69,11 +55,14 @@ impl Foxy {
                     .wrap(),
                 );
                 ui.add_space(12.0);
-                Self::ui_state_checkbox(ui, &mut recheck_all, self.t("Recheck all repositories"));
+                ui.add_enabled_ui(!self.database_wipe_in_flight, |ui| {
+                    Self::ui_state_checkbox(ui, &mut recheck_all, self.t("Recheck all repositories"));
+                });
+                });
                 ui.add_space(12.0);
 
                 wipe_clicked = self
-                    .add_danger_primary_button(
+                    .add_repair_primary_button(
                         ui,
                         self.t("Wipe database and continue"),
                         !sync_active,
@@ -81,7 +70,13 @@ impl Foxy {
                     .clicked();
 
                 ui.vertical_centered(|ui| {
-                    if sync_active {
+                    if self.database_wipe_in_flight {
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            ui.add(crate::ui::app::PacedSpinner::new());
+                            ui.label(self.t("Operation in progress"));
+                        });
+                    } else if sync_active {
                         ui.add_space(6.0);
                         ui.label(
                             RichText::new(
@@ -91,23 +86,27 @@ impl Foxy {
                         );
                     }
 
-                    if !prompt.blocking {
+                    if !self.database_wipe_in_flight {
                         ui.add_space(10.0);
                         dismiss_clicked = self
                             .add_secondary_prompt_button(
                                 ui,
-                                self.t("Continue without wiping (at my own risk)"),
+                                self.t("Continue without wiping"),
                             )
                             .clicked();
+                        if self.pending_database_launch.is_some() {
+                            cancel_clicked = ui.button(self.t("Cancel")).clicked();
+                        }
                     }
                 });
             });
         self.db_schema_wipe_recheck_all = recheck_all;
 
         if preview {
-            if wipe_clicked || dismiss_clicked {
+            if wipe_clicked || dismiss_clicked || cancel_clicked {
                 info!("Debug modal preview: closing database wipe prompt without acting");
                 self.pending_db_schema_wipe = None;
+                self.show_db_schema_wipe_prompt = false;
             }
             return;
         }
@@ -117,7 +116,7 @@ impl Foxy {
                 "Database schema wipe confirmed (stored={} target={} recheck_all={})",
                 prompt.stored_version, prompt.target_version, self.db_schema_wipe_recheck_all
             );
-            self.pending_db_schema_wipe = None;
+            self.database_wipe_in_flight = true;
             self.recheck_all_after_database_wipe = self.db_schema_wipe_recheck_all;
             // Wipe on a background thread so the UI draw loop is never blocked.
             let database_wipe_tx = self.database_wipe_tx.clone();
@@ -126,7 +125,6 @@ impl Foxy {
                     Ok(rt) => {
                         match rt.block_on(crate::core::tasks::init_database::wipe_database_live()) {
                             Ok(()) => {
-                                crate::core::tasks::db_schema_version::mark_wiped();
                                 info!("Database schema wipe completed");
                                 Ok(())
                             }
@@ -148,11 +146,11 @@ impl Foxy {
             self.repo_states.clear();
             self.update_ready_repo = None;
         } else if dismiss_clicked {
-            crate::core::tasks::db_schema_version::mark_dismissed(
-                prompt.stored_version,
-                prompt.target_version,
-            );
-            self.pending_db_schema_wipe = None;
+            self.show_db_schema_wipe_prompt = false;
+            self.resume_database_launch(ctx);
+        } else if cancel_clicked {
+            self.show_db_schema_wipe_prompt = false;
+            self.pending_database_launch = None;
         }
     }
 

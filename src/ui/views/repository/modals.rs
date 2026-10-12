@@ -15,6 +15,20 @@ use log::{info, warn};
 /// How often the preflight modal re-checks whether TeamSpeak or Steam started.
 const PRELAUNCH_RECHECK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1500);
 
+fn join_preflight_body<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> R {
+    let footer_reserve = 3.0 * ui.spacing().interact_size.y
+        + 2.0 * ui.text_style_height(&egui::TextStyle::Heading)
+        + 5.0 * ui.spacing().item_spacing.y
+        + 40.0;
+    let height = (ui.ctx().content_rect().height() - footer_reserve).max(1.0);
+    ScrollArea::vertical()
+        .id_salt("join_preflight_body")
+        .max_height(height)
+        .auto_shrink([false, true])
+        .show(ui, add_contents)
+        .inner
+}
+
 impl Foxy {
     pub(super) fn render_join_preflight_modal(&mut self, ctx: &egui::Context) {
         let Some(mut pending) = self.pending_join_preflight.clone() else {
@@ -88,6 +102,7 @@ impl Foxy {
             self.t("Enabled additional/external addons")
         };
 
+        let modal_width = (ctx.content_rect().width() - 40.0).clamp(1.0, 760.0);
         egui::Window::new(title)
             .frame(self.modal_window_chrome(ctx))
             .title_frame(self.modal_window_chrome(ctx))
@@ -95,8 +110,11 @@ impl Foxy {
             .collapsible(false)
             .resizable(false)
             .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-            .default_width(760.0)
+            .min_width(0.0)
+            .max_width(modal_width)
+            .default_width(modal_width)
             .show(ctx, |ui| {
+                join_preflight_body(ui, |ui| {
                 Frame::NONE
                     .fill(self.color_main_bg())
                     .stroke(egui::Stroke::new(1.0, self.color_text_gray()))
@@ -489,6 +507,7 @@ impl Foxy {
                     });
                 }
 
+                });
                 ui.add_space(12.0);
                 ui.horizontal_wrapped(|ui| {
                     let selected_local_suggestions =
@@ -668,7 +687,7 @@ impl Foxy {
 
             self.pending_join_preflight = None;
             let selected_repository = Self::repository_with_join_preflight_selections(&pending);
-            let result = self.launch_repository_with_steam_guard(
+            let result = self.launch_repository_with_database_guard(
                 &selected_repository,
                 Some(&pending.server),
                 &pending.repo_name,
@@ -697,7 +716,7 @@ impl Foxy {
             } else {
                 (Some(&pending.server), "join")
             };
-            let result = self.launch_repository_with_steam_guard(
+            let result = self.launch_repository_with_database_guard(
                 &launch_repository,
                 server_arg,
                 &pending.repo_name,
@@ -2040,6 +2059,52 @@ impl Foxy {
             }
             RepositoryContextConfirmAction::ForceRedownload(idx) => {
                 self.force_redownload_repository(idx);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn long_preflight_body_keeps_wrapped_actions_inside_viewport() {
+        for size in [egui::vec2(900.0, 600.0), egui::vec2(540.0, 380.0)] {
+            let ctx = egui::Context::default();
+            let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+            let mut actions = Vec::new();
+            for _ in 0..3 {
+                actions.clear();
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(viewport),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        ui.heading("Enable server-required addons?");
+                        join_preflight_body(ui, |ui| {
+                            for index in 0..200 {
+                                ui.label(format!("@mod_{index:02}"));
+                            }
+                        });
+                        ui.add_space(12.0);
+                        ui.horizontal_wrapped(|ui| {
+                            for label in [
+                                "Launch with selected addons",
+                                "Launch without suggested addons",
+                                "Cancel",
+                            ] {
+                                actions.push(ui.button(label).rect);
+                            }
+                        });
+                    },
+                );
+                output.textures_delta.clear();
+            }
+            assert_eq!(actions.len(), 3);
+            for action in actions {
+                assert!(viewport.contains_rect(action), "{size:?}: {action:?}");
             }
         }
     }

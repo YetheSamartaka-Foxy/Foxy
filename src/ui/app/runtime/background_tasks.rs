@@ -23,6 +23,23 @@ fn unix_time_millis() -> u64 {
 }
 
 impl Foxy {
+    pub(in crate::ui::app) fn start_database_startup_tasks(&mut self) {
+        if self.database_updates_blocked() {
+            return;
+        }
+        if !self.settings_view_state.debug_mode {
+            self.restore_pending_updates();
+            if self.settings_view_state.auto_quick_scan_on_launch
+                && self.startup_quick_scan_filter_worker.is_none()
+                && self.startup_quick_scan_filter_rx.is_none()
+            {
+                self.start_quick_local_scan();
+            }
+            self.start_fs_watcher();
+        }
+        self.queue_startup_rechecks();
+    }
+
     fn mark_quick_scan_instances_active(
         &mut self,
         repositories: impl IntoIterator<Item = api::StartupRepositoryInstance>,
@@ -102,6 +119,9 @@ impl Foxy {
     }
 
     pub fn queue_startup_rechecks(&mut self) {
+        if self.database_updates_blocked() {
+            return;
+        }
         self.startup_recheck_queue.clear();
         let mut candidates: Vec<(String, String, String)> = Vec::new();
         let mut skipped_incomplete = 0usize;
@@ -266,6 +286,9 @@ impl Foxy {
     }
 
     pub fn start_quick_local_scan(&mut self) {
+        if self.database_updates_blocked() {
+            return;
+        }
         let mut requested_repositories = Vec::new();
         for repo in &self.repository_view_state.repositories {
             if !self.repo_auto_quick_scan_on_launch(repo) {
@@ -381,6 +404,10 @@ impl Foxy {
         }
 
         if let Some(payload) = result {
+            if self.database_updates_blocked() {
+                self.startup_quick_scan_filter_rx = None;
+                return;
+            }
             self.note_startup_eligibility_plan(
                 payload.eligible_repositories.len(),
                 payload.prevalidated_repositories.len(),
@@ -457,6 +484,9 @@ impl Foxy {
         prevalidated: bool,
         force_fresh_addon_hash: bool,
     ) {
+        if self.block_database_update_request() {
+            return;
+        }
         let mut newly_added = 0usize;
         for repo_url in repo_urls {
             if repo_url.trim().is_empty() {
@@ -696,7 +726,10 @@ impl Foxy {
                 self.quick_scan_progress_by_instance.clear();
                 self.needs_repaint = true;
             }
-            if self.syncing_repository.is_none() && !self.pending_quick_scan_urls.is_empty() {
+            if !self.database_updates_blocked()
+                && self.syncing_repository.is_none()
+                && !self.pending_quick_scan_urls.is_empty()
+            {
                 let repo_urls: Vec<String> = self.pending_quick_scan_urls.drain().collect();
                 let prevalidated_repo_urls: HashSet<String> = repo_urls
                     .iter()
@@ -755,6 +788,9 @@ impl Foxy {
     }
 
     pub fn start_fs_watcher(&mut self) {
+        if self.database_updates_blocked() {
+            return;
+        }
         if self.fs_watch_worker.is_some() {
             debug!("Filesystem watcher is already running");
             return;
@@ -818,7 +854,7 @@ impl Foxy {
     /// Deferred while a sync is running or queued so a bulk repository-space run
     /// respawns once at the end instead of after every repository.
     pub(in crate::ui::app) fn refresh_fs_watcher_if_stale(&mut self) {
-        if self.settings_view_state.debug_mode {
+        if self.settings_view_state.debug_mode || self.database_updates_blocked() {
             return;
         }
         let worker_exited = self
@@ -982,6 +1018,9 @@ impl Foxy {
     }
 
     pub fn poll_fs_watch_results(&mut self) {
+        if self.database_updates_blocked() {
+            return;
+        }
         self.release_expired_fs_watch_backoff();
         while let Ok(event) = self.fs_watch_rx.try_recv() {
             if event.repo_urls.is_empty() {
@@ -1053,7 +1092,8 @@ impl Foxy {
     }
 
     pub fn process_startup_rechecks(&mut self) {
-        if self.syncing_repository.is_some()
+        if self.database_updates_blocked()
+            || self.syncing_repository.is_some()
             || self.current_sync_mode.is_some()
             || self.quick_scan_worker.is_some()
         {

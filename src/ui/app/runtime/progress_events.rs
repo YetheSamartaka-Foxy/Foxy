@@ -30,7 +30,8 @@ impl Foxy {
     }
 
     pub(crate) fn repository_sync_active(&self) -> bool {
-        self.syncing_repository.is_some()
+        self.database_wipe_in_flight
+            || self.syncing_repository.is_some()
             || self.current_sync_mode.is_some()
             || self
                 .backend_worker
@@ -166,17 +167,30 @@ impl Foxy {
     }
 
     /// Drain completed global database wipe results.
-    pub(in crate::ui::app) fn poll_database_wipe_result(&mut self) {
+    pub(in crate::ui::app) fn poll_database_wipe_result(&mut self, ctx: &egui::Context) {
         loop {
             match self.database_wipe_rx.try_recv() {
                 Ok(Ok(())) => {
+                    let repair_required = self.pending_db_schema_wipe.is_some();
+                    self.database_wipe_in_flight = false;
+                    self.pending_db_schema_wipe = None;
+                    self.show_db_schema_wipe_prompt = false;
+                    self.join_preflight_cache.clear();
+                    self.fs_watch_index_dirty = true;
                     self.show_success_toast(self.t("Database wiped successfully"));
-                    if std::mem::take(&mut self.recheck_all_after_database_wipe) {
+                    if repair_required && self.startup_tasks_started {
+                        self.start_database_startup_tasks();
+                    }
+                    if self.startup_tasks_started
+                        && std::mem::take(&mut self.recheck_all_after_database_wipe)
+                    {
                         self.queue_recheck_all_repositories();
                     }
                     self.needs_repaint = true;
+                    self.resume_database_launch(ctx);
                 }
                 Ok(Err(err)) => {
+                    self.database_wipe_in_flight = false;
                     self.recheck_all_after_database_wipe = false;
                     self.show_error_toast(self.t("Failed to wipe database") + &format!(": {err}"));
                     self.needs_repaint = true;
