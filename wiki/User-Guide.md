@@ -343,6 +343,8 @@ Enabled [extra files](#extra-files-and-config-packs) are copied into the game di
 
 With **Check Steam is running before launching** turned on in Game space settings, Foxy warns when Steam is not running and offers to start it. **Check TeamSpeak is running before joining** does the same for TeamSpeak 3 when the repository ships a TS3 plugin. Repositories can override both checks.
 
+When you click **Join**, these warnings appear before Foxy checks the server and its addon requirements. Use **Launch Steam** or **Launch TeamSpeak** to start the missing client, then **Join** to continue with the server checks, or **Cancel** to stop.
+
 Foxy never runs the game with administrator rights, even if Foxy itself was started as administrator, so Discord, TeamSpeak hotkeys, and OBS capture keep working in the game window.
 
 ### After launch

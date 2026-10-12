@@ -230,7 +230,7 @@ impl Foxy {
 
     pub(super) fn try_join_repository_server(
         &mut self,
-        _ctx: &egui::Context,
+        ctx: &egui::Context,
         effective: &Repository,
         server: &RepositoryServer,
         repo_name: &str,
@@ -263,6 +263,30 @@ impl Foxy {
             return;
         }
 
+        let ts3_gate = self.evaluate_ts3_join_gate(effective, repo_name);
+        let steam_gate = self.evaluate_steam_launch_gate(effective, repo_name);
+        if let Some(preflight) = crate::ui::app::PendingJoinPreflightState::for_join_readiness(
+            repo_name,
+            server.clone(),
+            effective.clone(),
+            ts3_gate,
+            steam_gate,
+        ) {
+            self.prelaunch_recheck_at = None;
+            self.pending_join_preflight = Some(preflight);
+            ctx.request_repaint();
+            return;
+        }
+
+        self.start_join_server_query(effective, server, repo_name);
+    }
+
+    pub(super) fn start_join_server_query(
+        &mut self,
+        effective: &Repository,
+        server: &RepositoryServer,
+        repo_name: &str,
+    ) {
         info!(
             "Join requested for repository {} server {}:{}",
             repo_name, server.address, server.port
@@ -381,10 +405,10 @@ impl Foxy {
                 }
 
                 info!(
-                    "Joining repository {} without addon preflight dialog because no addon preflight gate was active; evaluating TeamSpeak gate",
+                    "Joining repository {} without addon preflight dialog because no addon preflight gate was active",
                     repo_name
                 );
-                self.present_join_preflight(ctx, effective, server, repo_name, None);
+                self.present_join_addon_preflight(ctx, effective, server, repo_name, None);
             }
             ServerOnlineStatus::Offline => {
                 warn!(
@@ -583,7 +607,7 @@ impl Foxy {
                 result.requirements.len()
             );
         }
-        self.present_join_preflight(ctx, effective, server, repo_name, addon_state);
+        self.present_join_addon_preflight(ctx, effective, server, repo_name, addon_state);
     }
 
     /// Adds the Creator DLC differences to the join modal. Skipped when the
@@ -644,12 +668,7 @@ impl Foxy {
         state.dlc_disable = dlc_disable;
     }
 
-    /// Single convergence point that decides whether to open the join preflight
-    /// modal (for addon actions and/or a TeamSpeak warning) or launch directly.
-    ///
-    /// The TS3 gate is evaluated here so it applies regardless of whether the
-    /// addon preflight setting is enabled.
-    pub(crate) fn present_join_preflight(
+    pub(crate) fn present_join_addon_preflight(
         &mut self,
         ctx: &egui::Context,
         effective: &Repository,
@@ -657,40 +676,11 @@ impl Foxy {
         repo_name: &str,
         addon_state: Option<crate::ui::app::PendingJoinPreflightState>,
     ) {
-        let (ts3_required, ts3_running) = self.evaluate_ts3_join_gate(effective, repo_name);
-        let (steam_required, steam_running) = self.evaluate_steam_launch_gate(effective, repo_name);
-        let needs_attention = (ts3_required && !ts3_running) || (steam_required && !steam_running);
         self.prelaunch_recheck_at = None;
 
         match addon_state {
-            Some(mut preflight) => {
-                preflight.ts3_required = ts3_required;
-                preflight.ts3_running = ts3_running;
-                preflight.steam_required = steam_required;
-                preflight.steam_running = steam_running;
+            Some(preflight) => {
                 self.pending_join_preflight = Some(preflight);
-            }
-            None if needs_attention => {
-                info!(
-                    "Join preflight opening for repository {} server {}:{} with pre-join warnings only (ts3_attention={}, steam_attention={})",
-                    repo_name,
-                    server.address,
-                    server.port,
-                    ts3_required && !ts3_running,
-                    steam_required && !steam_running
-                );
-                self.pending_join_preflight = Some(crate::ui::app::PendingJoinPreflightState {
-                    ts3_required,
-                    ts3_running,
-                    steam_required,
-                    steam_running,
-                    ..crate::ui::app::PendingJoinPreflightState::empty(
-                        repo_name,
-                        server.clone(),
-                        effective.clone(),
-                        false,
-                    )
-                });
             }
             None => {
                 info!(

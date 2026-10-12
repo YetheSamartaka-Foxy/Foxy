@@ -1,5 +1,6 @@
 ﻿# 1.2.1
 ## Fixed
+- Joining a server now shows enabled Steam and TeamSpeak 3 warnings before checking the server and its addons.
 - The update progress bar no longer seems to stop near the end when a repository has many small files and a few large ones. The bar and percentage now follow downloaded bytes instead of the number of finished files.
 - Checking a partially installed repository in a shared folder no longer pauses with a wrong-folder warning when most of its addons have never been downloaded.
 - External addons shared by several repositories now appear when filtering by any of those repositories, including optional addons.

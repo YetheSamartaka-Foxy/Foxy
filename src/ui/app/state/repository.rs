@@ -495,6 +495,8 @@ pub struct PendingJoinPreflightState {
     /// "Join" action, so there is no server to connect to. The `server` field
     /// holds a placeholder and the launch must not pass connection params.
     pub launch_only: bool,
+    // Readiness confirmation must resume server checks before any game launch.
+    pub query_server_before_join: bool,
 }
 
 impl PendingJoinPreflightState {
@@ -521,7 +523,29 @@ impl PendingJoinPreflightState {
             steam_required: false,
             steam_running: false,
             launch_only,
+            query_server_before_join: false,
         }
+    }
+
+    pub(crate) fn for_join_readiness(
+        repo_name: &str,
+        server: RepositoryServer,
+        original_repository: Repository,
+        (ts3_required, ts3_running): (bool, bool),
+        (steam_required, steam_running): (bool, bool),
+    ) -> Option<Self> {
+        let needs_attention = (ts3_required && !ts3_running) || (steam_required && !steam_running);
+        if !needs_attention {
+            return None;
+        }
+        Some(Self {
+            ts3_required,
+            ts3_running,
+            steam_required,
+            steam_running,
+            query_server_before_join: true,
+            ..Self::empty(repo_name, server, original_repository, false)
+        })
     }
 
     pub fn has_dlc_changes(&self) -> bool {
@@ -571,7 +595,78 @@ pub struct JoinPreflightQueryResult {
 
 #[cfg(test)]
 mod tests {
-    use super::ListGalleyCache;
+    use super::{ListGalleyCache, PendingJoinPreflightState};
+    use crate::ui::types::{Repository, RepositoryServer};
+
+    #[test]
+    fn join_readiness_preserves_warnings_and_resumes_server_checks() {
+        let server = RepositoryServer {
+            name: "MainRepo".to_string(),
+            address: "127.0.0.1".to_string(),
+            port: "2302".to_string(),
+            ..RepositoryServer::default()
+        };
+        let repository = Repository {
+            path: "R:/Mods/MainRepo".to_string(),
+            ..Repository::default()
+        };
+        for (ts3_gate, steam_gate) in [
+            ((true, false), (true, false)),
+            ((true, false), (true, true)),
+            ((true, true), (true, false)),
+            ((false, false), (true, false)),
+            ((true, false), (false, false)),
+        ] {
+            let pending = PendingJoinPreflightState::for_join_readiness(
+                "MainRepo",
+                server.clone(),
+                repository.clone(),
+                ts3_gate,
+                steam_gate,
+            )
+            .expect("a missing required client must warn before querying the server");
+            assert_eq!((pending.ts3_required, pending.ts3_running), ts3_gate);
+            assert_eq!((pending.steam_required, pending.steam_running), steam_gate);
+            assert!(pending.query_server_before_join);
+            assert!(!pending.launch_only);
+            assert_eq!(pending.server, server);
+            assert_eq!(pending.original_repository.path, repository.path);
+        }
+    }
+
+    #[test]
+    fn join_readiness_skips_running_or_disabled_checks() {
+        for (ts3_gate, steam_gate) in [
+            ((true, true), (true, true)),
+            ((false, false), (false, false)),
+            ((true, true), (false, false)),
+            ((false, false), (true, true)),
+        ] {
+            assert!(
+                PendingJoinPreflightState::for_join_readiness(
+                    "MainRepo",
+                    RepositoryServer::default(),
+                    Repository::default(),
+                    ts3_gate,
+                    steam_gate,
+                )
+                .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn addon_and_plain_launch_modals_do_not_repeat_server_checks() {
+        for launch_only in [false, true] {
+            let pending = PendingJoinPreflightState::empty(
+                "MainRepo",
+                RepositoryServer::default(),
+                Repository::default(),
+                launch_only,
+            );
+            assert!(!pending.query_server_before_join);
+        }
+    }
 
     #[test]
     fn slot_index_is_row_major() {

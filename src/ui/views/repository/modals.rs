@@ -673,6 +673,14 @@ impl Foxy {
         if launch_without_suggestions {
             self.pending_join_preflight = None;
             self.prelaunch_recheck_at = None;
+            if pending.query_server_before_join {
+                self.start_join_server_query(
+                    &pending.original_repository,
+                    &pending.server,
+                    &pending.repo_name,
+                );
+                return;
+            }
             let launch_repository = Self::repository_without_join_preflight_suggestions(&pending);
             let (server_arg, launch_label) = if pending.launch_only {
                 (None, "regular")

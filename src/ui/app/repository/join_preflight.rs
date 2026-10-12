@@ -174,12 +174,12 @@ impl Foxy {
             unavailable_enabled,
             dlc_enable: Vec::new(),
             dlc_disable: Vec::new(),
-            // Filled in by `present_join_preflight` once the gate is evaluated.
             ts3_required: false,
             ts3_running: false,
             steam_required: false,
             steam_running: false,
             launch_only: false,
+            query_server_before_join: false,
         })
     }
 
@@ -1624,6 +1624,7 @@ mod tests {
             steam_required: false,
             steam_running: false,
             launch_only: false,
+            query_server_before_join: false,
         }
     }
 
