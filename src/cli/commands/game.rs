@@ -313,6 +313,7 @@ fn cmd_generic_game_launch(
         &space_dir,
         install_dir,
         &state.settings.steam_directory,
+        config.steam_app_id.is_some(),
     )?;
 
     Ok(CommandSuccess {
@@ -398,6 +399,7 @@ fn cmd_twwh3_game_launch(
         &space_dir,
         install_dir,
         &state.settings.steam_directory,
+        module.steam_app_id_from_settings(&state.settings).is_some(),
     )?;
 
     Ok(CommandSuccess {
@@ -482,6 +484,7 @@ fn cmd_reforger_game_launch(
         &space_dir,
         install_dir,
         &state.settings.steam_directory,
+        module.steam_app_id_from_settings(&state.settings).is_some(),
     )?;
 
     Ok(CommandSuccess {
@@ -518,6 +521,7 @@ fn execute_game_launch(
     space_dir: &std::path::Path,
     install_dir: &str,
     steam_directory: &str,
+    steam_required: bool,
 ) -> Result<ExecutedGameLaunch, CommandError> {
     let extra_files = crate::core::game::extra_files::activate_for_launch(space_dir, install_dir)
         .map_err(|err| {
@@ -526,19 +530,29 @@ fn execute_game_launch(
             format!("Failed to apply extra files before launch: {}", err),
         )
     })?;
-    let steam_status = match ensure_steam_running(steam_directory) {
-        Ok(SteamEnsureResult::AlreadyRunning) => "already_running",
-        Ok(SteamEnsureResult::Started) => "started",
-        Ok(SteamEnsureResult::SkippedMissingDirectory) => "not_configured_fallback",
-        Err(err) => {
-            return Err(CommandError::operation(
-                "game.launch",
-                format!("Failed to prepare Steam before launch: {}", err),
-            ));
+    let steam_status = if !steam_required {
+        "not_required"
+    } else {
+        match ensure_steam_running(steam_directory) {
+            Ok(SteamEnsureResult::AlreadyRunning) => "already_running",
+            Ok(SteamEnsureResult::Started) => "started",
+            Ok(SteamEnsureResult::SkippedMissingDirectory) => "not_configured_fallback",
+            Err(err) => {
+                return Err(CommandError::operation(
+                    "game.launch",
+                    format!("Failed to prepare Steam before launch: {}", err),
+                ));
+            }
         }
     };
 
     let args: Vec<std::ffi::OsString> = command.args.iter().map(std::ffi::OsString::from).collect();
+    if steam_required && !crate::core::steam::is_steam_running() {
+        return Err(CommandError::operation(
+            "game.launch",
+            "Steam is not running",
+        ));
+    }
     let pid = crate::core::utils::deelevate::spawn_unelevated(
         command.program.as_os_str(),
         &args,

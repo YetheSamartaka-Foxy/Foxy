@@ -36,37 +36,30 @@ impl Foxy {
         let has_dlc_changes = pending.has_dlc_changes();
         let has_addon_actions = has_addon_list_actions || has_dlc_changes;
 
-        let ts3_attention = pending.ts3_required && !pending.ts3_running;
-        let steam_attention = pending.steam_required && !pending.steam_running;
-
-        // Throttled re-check so the TeamSpeak/Steam warnings clear automatically
-        // once the respective client starts after the user clicks "Launch ...".
-        if ts3_attention || steam_attention {
+        if pending.ts3_required || pending.steam_required {
             let now = std::time::Instant::now();
             let due = self
                 .prelaunch_recheck_at
                 .is_none_or(|at| now.duration_since(at) >= PRELAUNCH_RECHECK_INTERVAL);
             if due {
                 self.prelaunch_recheck_at = Some(now);
-                if ts3_attention && crate::core::ts3_plugin::is_teamspeak_running() {
-                    pending.ts3_running = true;
-                    pending_changed = true;
-                    info!(
-                        "TeamSpeak detected running while preflight modal open for repository {}; clearing warning",
-                        pending.repo_name
-                    );
+                if pending.ts3_required {
+                    let running = crate::core::ts3_plugin::is_teamspeak_running();
+                    pending_changed |= pending.ts3_running != running;
+                    pending.ts3_running = running;
                 }
-                if steam_attention && crate::core::steam::is_steam_running() {
-                    pending.steam_running = true;
-                    pending_changed = true;
-                    info!(
-                        "Steam detected running while preflight modal open for repository {}; clearing warning",
-                        pending.repo_name
-                    );
+                if pending.steam_required {
+                    let running = crate::core::steam::is_steam_running();
+                    pending_changed |= pending.steam_running != running;
+                    pending.steam_running = running;
                 }
             }
             ctx.request_repaint_after(PRELAUNCH_RECHECK_INTERVAL);
         }
+
+        let ts3_attention = pending.ts3_required && !pending.ts3_running;
+        let steam_attention = pending.steam_required && !pending.steam_running;
+        let can_launch = pending.can_launch();
 
         let title = if !has_addon_actions && steam_attention {
             self.t("Steam is not running")
@@ -539,10 +532,10 @@ impl Foxy {
                             self.t("Launch with selected addons")
                         };
                         let launch_with_btn = ui.add_enabled(
-                            has_selected_addons,
+                            has_selected_addons && (selected_missing_known_remote || can_launch),
                             Button::new(action_label),
                         );
-                        if launch_with_btn.hovered() && has_selected_addons {
+                        if launch_with_btn.hovered() && launch_with_btn.enabled() {
                             ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                         }
                         if launch_with_btn.clicked() {
@@ -562,8 +555,9 @@ impl Foxy {
                     } else {
                         self.t("Join")
                     };
-                    let launch_without_btn = ui.button(launch_without_label);
-                    if launch_without_btn.hovered() {
+                    let launch_without_btn =
+                        ui.add_enabled(can_launch, Button::new(launch_without_label));
+                    if launch_without_btn.hovered() && can_launch {
                         ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                     }
                     if launch_without_btn.clicked() {
@@ -640,6 +634,22 @@ impl Foxy {
                 self.pending_join_preflight = Some(pending);
             }
             return;
+        }
+
+        let downloading_selected = launch_with_suggestions
+            && pending
+                .known_remote
+                .iter()
+                .any(|remote| remote.selected && !remote.available);
+        if (launch_without_suggestions || launch_with_suggestions && !downloading_selected)
+            && pending.steam_required
+        {
+            pending.steam_running = crate::core::steam::is_steam_running();
+            if !pending.can_launch() {
+                self.pending_join_preflight = Some(pending);
+                ctx.request_repaint();
+                return;
+            }
         }
 
         if launch_with_suggestions {

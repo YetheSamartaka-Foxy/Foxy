@@ -345,6 +345,10 @@ With **Check Steam is running before launching** turned on in Game space setting
 
 When you click **Join**, these warnings appear before Foxy checks the server and its addon requirements. Use **Launch Steam** or **Launch TeamSpeak** to start the missing client, then **Join** to continue with the server checks, or **Cancel** to stop.
 
+When the Steam check is enabled, **Launch** and **Join** stay disabled in the warning dialog until Steam is running. TeamSpeak 3, missing external addons, addon selections, and Creator DLC differences are advisory: you can continue after reviewing them. Missing external addons are also reported on Join when server-addon checking is disabled or the server reports no addons. An offline server, a failed server query, or an invalid game installation still stops the launch or join.
+
+If you disable the Steam warning, Foxy tries to start Steam automatically before launching a game that requires it. If Steam cannot start or is no longer running, the game does not launch. This requirement also applies to command-line launches and the Eden Editor; Generic games configured without a Steam App ID can launch without Steam.
+
 Foxy never runs the game with administrator rights, even if Foxy itself was started as administrator, so Discord, TeamSpeak hotkeys, and OBS capture keep working in the game window.
 
 ### After launch

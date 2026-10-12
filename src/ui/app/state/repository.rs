@@ -551,6 +551,10 @@ impl PendingJoinPreflightState {
     pub fn has_dlc_changes(&self) -> bool {
         !self.dlc_enable.is_empty() || !self.dlc_disable.is_empty()
     }
+
+    pub(crate) fn can_launch(&self) -> bool {
+        !self.steam_required || self.steam_running
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -595,7 +599,10 @@ pub struct JoinPreflightQueryResult {
 
 #[cfg(test)]
 mod tests {
-    use super::{ListGalleyCache, PendingJoinPreflightState};
+    use super::{
+        JoinPreflightDlcChange, JoinPreflightUnavailableAddon, ListGalleyCache,
+        PendingJoinPreflightState,
+    };
     use crate::ui::types::{Repository, RepositoryServer};
 
     #[test]
@@ -627,6 +634,7 @@ mod tests {
             .expect("a missing required client must warn before querying the server");
             assert_eq!((pending.ts3_required, pending.ts3_running), ts3_gate);
             assert_eq!((pending.steam_required, pending.steam_running), steam_gate);
+            assert_eq!(pending.can_launch(), !steam_gate.0 || steam_gate.1);
             assert!(pending.query_server_before_join);
             assert!(!pending.launch_only);
             assert_eq!(pending.server, server);
@@ -666,6 +674,52 @@ mod tests {
             );
             assert!(!pending.query_server_before_join);
         }
+    }
+
+    #[test]
+    fn steam_blocks_launch_and_join_until_running() {
+        for launch_only in [false, true] {
+            let mut pending = PendingJoinPreflightState::empty(
+                "MainRepo",
+                RepositoryServer::default(),
+                Repository::default(),
+                launch_only,
+            );
+            pending.steam_required = true;
+            assert!(!pending.can_launch());
+            pending.steam_running = true;
+            assert!(pending.can_launch());
+            pending.steam_running = false;
+            assert!(!pending.can_launch());
+        }
+    }
+
+    #[test]
+    fn ts3_and_addon_warnings_remain_advisory() {
+        let mut pending = PendingJoinPreflightState::empty(
+            "MainRepo",
+            RepositoryServer::default(),
+            Repository::default(),
+            false,
+        );
+        pending.ts3_required = true;
+        pending
+            .unavailable_enabled
+            .push(JoinPreflightUnavailableAddon {
+                addon_name: "@mod_01".to_string(),
+                path: "R:/Mods/@mod_01".to_string(),
+            });
+        pending.dlc_enable.push(JoinPreflightDlcChange {
+            code: "gm",
+            name: "Global Mobilization",
+            selected: true,
+        });
+        assert!(pending.can_launch());
+        pending.steam_required = true;
+        assert!(!pending.can_launch());
+        pending.steam_running = true;
+        assert!(pending.can_launch());
+        assert!(!pending.ts3_running);
     }
 
     #[test]

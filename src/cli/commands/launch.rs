@@ -109,6 +109,12 @@ pub fn cmd_launch(cli: &CliArgs, args: LaunchArgs) -> Result<CommandSuccess, Com
         }
     };
 
+    if module.steam_app_id_from_settings(&state.settings).is_some()
+        && !crate::core::steam::is_steam_running()
+    {
+        return Err(CommandError::operation("launch", "Steam is not running"));
+    }
+
     let args: Vec<std::ffi::OsString> = launch_spec
         .args
         .iter()

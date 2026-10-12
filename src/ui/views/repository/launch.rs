@@ -145,10 +145,14 @@ impl Foxy {
             .active()
             .display_name()
             .to_string();
+        let steam_required = crate::core::game::registry()
+            .active()
+            .steam_app_id_from_settings(&self.settings_view_state)
+            .is_some();
         self.activate_extra_files_before_launch();
 
-        if steam::is_steam_running() {
-            return match spawn_launch_process(&executable, &args, cwd.as_deref()) {
+        if !steam_required || steam::is_steam_running() {
+            return match spawn_launch_process(&executable, &args, cwd.as_deref(), steam_required) {
                 Ok(pid) => {
                     info!(
                         "Launched {} for repository {} (pid={})",
@@ -191,10 +195,11 @@ impl Foxy {
                 }
                 Ok(SteamEnsureResult::SkippedMissingDirectory) => {
                     warn!(
-                        "Steam directory is not configured and auto-detection failed; proceeding \
-                         with direct {} launch for repository {}",
+                        "Steam directory is not configured and auto-detection failed; cancelling \
+                         {} launch for repository {}",
                         launch_label_owned, repo_name_owned
                     );
+                    return;
                 }
                 Err(err) => {
                     warn!(
@@ -209,6 +214,7 @@ impl Foxy {
                 &executable_for_thread,
                 &args_for_thread,
                 cwd_for_thread.as_deref(),
+                steam_required,
             ) {
                 Ok(pid) => {
                     info!(
@@ -677,9 +683,32 @@ impl Foxy {
         addon_state: Option<crate::ui::app::PendingJoinPreflightState>,
     ) {
         self.prelaunch_recheck_at = None;
+        let (steam_required, steam_running) = self.evaluate_steam_launch_gate(effective, repo_name);
+        let mut addon_state = addon_state.or_else(|| {
+            Self::build_join_preflight_state(
+                effective,
+                &self.repository_view_state.repositories,
+                server,
+                repo_name,
+                &[],
+                &crate::core::addon_metadata::AddonDisplayNameSnapshot::new(),
+            )
+        });
+        if steam_required && !steam_running {
+            addon_state.get_or_insert_with(|| {
+                crate::ui::app::PendingJoinPreflightState::empty(
+                    repo_name,
+                    server.clone(),
+                    effective.clone(),
+                    false,
+                )
+            });
+        }
 
         match addon_state {
-            Some(preflight) => {
+            Some(mut preflight) => {
+                preflight.steam_required = steam_required;
+                preflight.steam_running = steam_running;
                 self.pending_join_preflight = Some(preflight);
             }
             None => {
@@ -697,7 +726,12 @@ impl Foxy {
     /// per-repo/global check is enabled and the repository ships `.ts3_plugin`
     /// files. Synchronous - acceptable for a user-initiated join action.
     fn evaluate_ts3_join_gate(&self, effective: &Repository, repo_name: &str) -> (bool, bool) {
-        if !self.repo_check_ts3_running_before_join(effective) {
+        if !crate::core::game::registry()
+            .active()
+            .capabilities()
+            .teamspeak3_plugins
+            || !self.repo_check_ts3_running_before_join(effective)
+        {
             return (false, false);
         }
         if effective.path.trim().is_empty() {
@@ -721,7 +755,12 @@ impl Foxy {
     /// since Steam must be running for Arma 3 to launch. Synchronous - acceptable
     /// for a user-initiated launch/join action.
     fn evaluate_steam_launch_gate(&self, effective: &Repository, repo_name: &str) -> (bool, bool) {
-        if !self.repo_check_steam_running_before_launch(effective) {
+        if crate::core::game::registry()
+            .active()
+            .steam_app_id_from_settings(&self.settings_view_state)
+            .is_none()
+            || !self.repo_check_steam_running_before_launch(effective)
+        {
             return (false, false);
         }
         let running = steam::is_steam_running();
@@ -974,7 +1013,7 @@ impl Foxy {
         self.activate_extra_files_before_launch();
 
         if steam::is_steam_running() {
-            match spawn_launch_process(&executable, &args, cwd.as_deref()) {
+            match spawn_launch_process(&executable, &args, cwd.as_deref(), true) {
                 Ok(pid) => {
                     info!("Launched Eden Editor (pid={})", pid);
                     self.handle_post_launch_window_behavior(ctx, "editor launch completed");
@@ -992,7 +1031,7 @@ impl Foxy {
         let repo_name_owned = repo_name.to_string();
         std::thread::spawn(
             move || match steam::ensure_steam_running(&steam_directory) {
-                Ok(_) => match spawn_launch_process(&executable, &args, cwd.as_deref()) {
+                Ok(_) => match spawn_launch_process(&executable, &args, cwd.as_deref(), true) {
                     Ok(pid) => info!(
                         "Launched Eden Editor after Steam startup (pid={}) for repository {}",
                         pid, repo_name_owned

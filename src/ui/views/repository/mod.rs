@@ -114,7 +114,11 @@ pub(super) fn spawn_launch_process(
     executable: &OsString,
     args: &[OsString],
     cwd: Option<&Path>,
+    steam_required: bool,
 ) -> std::io::Result<u32> {
+    if steam_required && !crate::core::steam::is_steam_running() {
+        return Err(std::io::Error::other("Steam is not running"));
+    }
     crate::core::utils::deelevate::spawn_unelevated(executable, args, cwd)
 }
 

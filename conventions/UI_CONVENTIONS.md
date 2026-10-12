@@ -51,6 +51,10 @@
 
 \- Repository status/pending-update maps in the UI are keyed per *instance* via `repo\_instance\_key(url, local\_path)` (= `normalize\_repo\_url(url) + U+001F + content\_hash::normalize\_path(path)`), not by URL alone, so two installs of one URL in different folders show independent status. Use the `\*\_for\_address` helpers in `src/ui/app/repository/list\_cache.rs` and thread `local\_path` through results/events. `repo\_foxy\_modes` is the deliberate exception - foxy mode is a URL-level property. See the identity invariant in root `AGENTS.md` and `conventions/CORE\_CONVENTIONS.md`.
 
+\### Launch and Join readiness
+
+Launch and Join use the same readiness modal. An enabled Steam check blocks game-launch actions until Steam is running; TeamSpeak, missing external addons, and addon/DLC selections remain advisory. Standalone addon downloads do not require Steam. Join readiness confirmation resumes server status and addon queries before dispatch, and Steam is checked again at dispatch for games with a Steam App ID. Generic games without a Steam App ID do not require Steam.
+
 \### Renderer startup
 
 \- `src/ui/launcher.rs` owns graphics startup. A crash inside a Vulkan ICD or an injected overlay layer kills the process before any panic hook runs, so the only evidence is the launch-attempt marker (`renderer_fallback::record_launch_attempt`) written before `eframe::run_native` and cleared in the app-creator closure. `next_launch_stage` moves a launch that finds the marker one rung down `GraphicsLaunchStage`: `Full` (every wgpu backend, or the one remembered in the graphics-backend record), `SafeBackend` (DX12 on Windows, GL on Linux), then `Glow`, which is persisted into the renderer setting and shows the existing fallback notice.

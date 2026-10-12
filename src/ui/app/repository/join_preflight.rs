@@ -53,7 +53,17 @@ impl Foxy {
             .collect::<HashMap<_, _>>();
 
         if requirement_by_name.is_empty() {
-            return None;
+            let unavailable_enabled =
+                Self::unavailable_enabled_external_addons(effective, configured_repositories);
+            return (!unavailable_enabled.is_empty()).then(|| PendingJoinPreflightState {
+                unavailable_enabled,
+                ..PendingJoinPreflightState::empty(
+                    repo_name,
+                    server.clone(),
+                    effective.clone(),
+                    false,
+                )
+            });
         }
 
         let mut candidates_by_requirement = collect_disabled_local_candidates(
@@ -2794,6 +2804,60 @@ mod tests {
 
         assert_eq!(unavailable.len(), 1);
         assert_eq!(unavailable[0].addon_name, "@missing_mod");
+    }
+
+    #[test]
+    fn join_without_server_requirements_warns_about_missing_external_addons() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let repository = Repository {
+            external_addons: vec![(
+                "@mod_01".to_string(),
+                true,
+                dir.path().join("@mod_01").to_string_lossy().to_string(),
+            )],
+            optional_addons: vec![("@mod_02".to_string(), true)],
+            ..Repository::default()
+        };
+        let pending = Foxy::build_join_preflight_state(
+            &repository,
+            &[],
+            &RepositoryServer::default(),
+            "MainRepo",
+            &[],
+            &AddonDisplayNameSnapshot::new(),
+        )
+        .expect("missing external addons must warn without server-addon checks");
+        assert_eq!(pending.unavailable_enabled.len(), 1);
+        assert_eq!(pending.unavailable_enabled[0].addon_name, "@mod_01");
+        assert!(pending.extra_enabled.is_empty());
+        assert!(pending.can_launch());
+        assert!(!pending.query_server_before_join);
+    }
+
+    #[test]
+    fn join_without_server_requirements_keeps_available_addons_without_warning() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let addon_path = dir.path().join("@mod_01");
+        std::fs::create_dir(&addon_path).expect("addon dir");
+        let repository = Repository {
+            external_addons: vec![(
+                "@mod_01".to_string(),
+                true,
+                addon_path.to_string_lossy().to_string(),
+            )],
+            ..Repository::default()
+        };
+        assert!(
+            Foxy::build_join_preflight_state(
+                &repository,
+                &[],
+                &RepositoryServer::default(),
+                "MainRepo",
+                &[],
+                &AddonDisplayNameSnapshot::new(),
+            )
+            .is_none()
+        );
     }
 
     #[test]
