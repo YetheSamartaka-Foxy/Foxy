@@ -30,7 +30,7 @@ use crate::core::models::repository::{FoxyRepository, load_repository_by_remote_
 use crate::core::tasks::calculate_hashes::{calculate_hashes, calculate_hashes_for_files};
 use crate::core::tasks::create_context::create_context_with_recheck_level;
 use crate::core::tasks::download_files::DownloadModCompletion;
-use crate::core::tasks::init_database::{SQLITE_MAX_VARIABLES, read_chunk_ids};
+use crate::core::tasks::init_database::read_chunk_ids;
 use crate::core::utils::app_paths;
 
 use flexi_logger::writers::LogWriter;

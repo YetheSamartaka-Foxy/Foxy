@@ -29,10 +29,11 @@ use crate::core::models::pending_update::fetch_pending_update_for_context;
 use crate::core::models::repository::load_repository_by_remote_url_and_local_path;
 use crate::core::tasks::calculate_hashes::{
     AddonHashMetrics, HashCalculationResult, HashPhaseTimings, PatchedFileSegments,
-    RepositoryHashContext, VerifiedHashRecordUse, calculate_hashes_for_files_in_tree_with_profile,
-    calculate_hashes_for_files_with_profile, calculate_hashes_with_tree_and_profile_cancellable,
-    finalize_repository_hashes_from_mods, finalize_repository_hashes_from_tree,
-    pre_propagate_sibling_checksums, propagate_checksums_to_siblings,
+    RepositoryHashContext, VerifiedHashRecordUse, calculate_hash_from_items,
+    calculate_hashes_for_files_in_tree_with_profile, calculate_hashes_for_files_with_profile,
+    calculate_hashes_with_tree_and_profile_cancellable, finalize_repository_hashes_from_mods,
+    finalize_repository_hashes_from_tree, pre_propagate_sibling_checksums,
+    propagate_checksums_to_siblings,
 };
 use crate::core::tasks::download_files::{
     DownloadRunReport, UpdateRollbackSession, apply_download_plan_bytes,
@@ -638,45 +639,146 @@ async fn invalidate_local_hash_baseline(
     }
 
     let db = context.db();
-    let chunk_size = SQLITE_MAX_VARIABLES.saturating_sub(10).max(1);
-    let mut ids: Vec<i64> = file_ids.iter().map(|file_id| *file_id as i64).collect();
-    ids.sort_unstable();
-
-    let mut affected = 0u64;
-    for chunk in ids.chunks(chunk_size) {
-        let placeholders = vec!["?"; chunk.len()].join(", ");
-        let values: Vec<DbValue> = chunk.iter().copied().map(DbValue::from).collect();
-        affected = affected.saturating_add(
-            db.execute_retry(
-                "invalidate force-redownload file baseline",
-                &format!(
-                    "UPDATE files \
-                     SET local_checksum = '', local_content_hash = '' \
-                     WHERE id IN ({placeholders}) \
-                       AND (local_checksum != '' OR local_content_hash != '')"
-                ),
-                values,
-            )
-            .await?,
-        );
-
-        let values: Vec<DbValue> = chunk.iter().copied().map(DbValue::from).collect();
-        affected = affected.saturating_add(
-            db.execute_retry(
-                "invalidate force-redownload part baseline",
-                &format!(
-                    "UPDATE subfiles \
-                     SET local_checksum = '', local_length = 0, local_start = 0 \
-                     WHERE file_id IN ({placeholders}) \
-                       AND (local_checksum != '' OR local_length != 0 OR local_start != 0)"
-                ),
-                values,
-            )
-            .await?,
-        );
-    }
-
-    Ok(affected)
+    let chunk_size = read_chunk_ids();
+    let ids: HashSet<i64> = file_ids.iter().map(|file_id| *file_id as i64).collect();
+    let affected = Arc::new(AtomicU64::new(0));
+    let result_count = affected.clone();
+    // Siblings must lose their state together, or propagation can restore a stale checksum.
+    db.transaction("invalidate shared local hash baseline", move |txn| {
+        let ids = ids.clone();
+        let result_count = result_count.clone();
+        Box::pin(async move {
+            let mut paths = HashSet::new();
+            let mut sorted_ids: Vec<i64> = ids.iter().copied().collect();
+            sorted_ids.sort_unstable();
+            for chunk in sorted_ids.chunks(chunk_size) {
+                let placeholders = vec!["?"; chunk.len()].join(", ");
+                txn.query_each(
+                    &format!("SELECT local_path FROM files WHERE id IN ({placeholders})"),
+                    chunk.iter().copied().map(DbValue::from).collect(),
+                    |row| {
+                        let stored_path = row.get_opt_string("local_path")?.unwrap_or_default();
+                        let path = crate::core::utils::content_hash::normalize_path(&stored_path);
+                        if !path.is_empty() {
+                            paths.insert(path);
+                        }
+                        Ok(())
+                    },
+                ).await?;
+            }
+            let mut shared_ids = ids;
+            if !paths.is_empty() {
+                txn.query_each("SELECT id, local_path FROM files", params![], |row| {
+                    let stored_path = row.get_opt_string("local_path")?.unwrap_or_default();
+                    let path = crate::core::utils::content_hash::normalize_path(&stored_path);
+                    if paths.contains(&path) {
+                        shared_ids.insert(row.get_i64("id")?);
+                    }
+                    Ok(())
+                }).await?;
+            }
+            let mut shared_ids: Vec<i64> = shared_ids.into_iter().collect();
+            shared_ids.sort_unstable();
+            let mut rows = 0u64;
+            let mut affected_addons = HashMap::new();
+            for chunk in shared_ids.chunks(chunk_size) {
+                let placeholders = vec!["?"; chunk.len()].join(", ");
+                let addon_ids = format!("SELECT addon_id FROM addon_files WHERE file_id IN ({placeholders})");
+                txn.query_each(
+                    &format!("SELECT id, remote_checksum FROM addons WHERE id IN ({addon_ids})"),
+                    chunk.iter().copied().map(DbValue::from).collect(),
+                    |row| {
+                        affected_addons.insert(row.get_i64("id")?, row.get_string("remote_checksum")?);
+                        Ok(())
+                    },
+                ).await?;
+                let statements = [
+                    format!(
+                        "UPDATE files SET local_checksum = '', local_content_hash = '' \
+                         WHERE id IN ({placeholders}) AND (local_checksum != '' OR local_content_hash != '')"
+                    ),
+                    format!(
+                        "UPDATE subfiles SET local_checksum = '', local_length = 0, local_start = 0 \
+                         WHERE file_id IN ({placeholders}) \
+                         AND (local_checksum != '' OR local_length != 0 OR local_start != 0)"
+                    ),
+                ];
+                let values: Vec<DbValue> = chunk.iter().copied().map(DbValue::from).collect();
+                for sql in statements {
+                    rows = rows.saturating_add(txn.execute(&sql, values.clone()).await?);
+                }
+            }
+            let mut affected_repositories = HashMap::new();
+            for (addon_id, remote_checksum) in affected_addons {
+                let mut files = Vec::new();
+                txn.query_each(
+                    "SELECT id, data_order, local_checksum, remote_checksum FROM files \
+                     WHERE id IN (SELECT file_id FROM addon_files WHERE addon_id = ?) ORDER BY data_order, id",
+                    params![addon_id],
+                    |row| {
+                        files.push(FoxyModFile {
+                            id: row.get_i64("id")? as u64,
+                            data_order: row.get_i64("data_order").unwrap_or_default(),
+                            local_checksum: row.get_string("local_checksum")?,
+                            remote_checksum: row.get_string("remote_checksum")?,
+                            ..Default::default()
+                        });
+                        Ok(())
+                    },
+                ).await?;
+                let local_checksum = if !files.is_empty() && files.iter().all(|file| !file.local_checksum.is_empty() && file.local_checksum == file.remote_checksum) {
+                    remote_checksum
+                } else {
+                    calculate_hash_from_items(&mut files).to_uppercase()
+                };
+                rows = rows.saturating_add(txn.execute(
+                    "UPDATE addons SET local_checksum = ?, local_content_hash = '' WHERE id = ? \
+                     AND (local_checksum != ? OR local_content_hash != '')",
+                    params![local_checksum.clone(), addon_id, local_checksum],
+                ).await?);
+                txn.query_each(
+                    "SELECT id, remote_checksum FROM repositories WHERE id IN \
+                     (SELECT repository_id FROM repository_addons WHERE addon_id = ?)",
+                    params![addon_id],
+                    |row| {
+                        affected_repositories.insert(row.get_i64("id")?, row.get_string("remote_checksum")?);
+                        Ok(())
+                    },
+                ).await?;
+            }
+            for (repository_id, remote_checksum) in affected_repositories {
+                let mut addons = Vec::new();
+                txn.query_each(
+                    "SELECT id, data_order, local_checksum, remote_checksum FROM addons WHERE id IN \
+                     (SELECT addon_id FROM repository_addons WHERE repository_id = ?) ORDER BY data_order, id",
+                    params![repository_id],
+                    |row| {
+                        addons.push(crate::core::models::modification::FoxyMod {
+                            id: row.get_i64("id")? as u64,
+                            data_order: row.get_i64("data_order").unwrap_or_default(),
+                            local_checksum: row.get_string("local_checksum")?,
+                            remote_checksum: row.get_string("remote_checksum")?,
+                            ..Default::default()
+                        });
+                        Ok(())
+                    },
+                ).await?;
+                let local_checksum = if addons.iter().all(|addon| addon.local_checksum == addon.remote_checksum) {
+                    remote_checksum
+                } else {
+                    calculate_hash_from_items(&mut addons).to_uppercase()
+                };
+                rows = rows.saturating_add(txn.execute(
+                    "UPDATE repositories SET local_checksum = ?, local_content_hash = '' WHERE id = ? \
+                     AND (local_checksum != ? OR local_content_hash != '')",
+                    params![local_checksum.clone(), repository_id, local_checksum],
+                ).await?);
+            }
+            result_count.store(rows, Ordering::Relaxed);
+            Ok(())
+        })
+    }).await?;
+    Ok(affected.load(Ordering::Relaxed))
 }
 
 fn should_rebenchmark_auto_profile(
@@ -721,8 +823,7 @@ async fn reconcile_target_repository_local_checksum(
 /// - a cheap `repo.json` re-probe shows the remote repository checksum is
 ///   unchanged since the queue was built.
 ///
-/// Patch-first execution and the final hash pass still re-validate every file,
-/// so a stale or incomplete queue degrades to a retry, never silent corruption.
+/// Files invalidated by shared rollback must be covered by the queue.
 async fn can_reuse_prepared_download_queue(
     context: Arc<FoxyContext>,
     repo_url: &str,
@@ -749,6 +850,9 @@ async fn can_reuse_prepared_download_queue(
     if file_ids.is_empty() {
         return false;
     }
+    if !prepared_queue_covers_unverified_files(context.clone(), repo.id).await {
+        return false;
+    }
     // Confirm the remote repository has not changed since the queue was built.
     let probed =
         probe_remote_repository_checksum(context, repo_url, hash_algorithm_preference).await;
@@ -756,6 +860,26 @@ async fn can_reuse_prepared_download_queue(
         &repo.remote_checksum,
         &repo.local_checksum,
         probed.as_deref(),
+    )
+}
+
+async fn prepared_queue_covers_unverified_files(
+    context: Arc<FoxyContext>,
+    repository_id: u64,
+) -> bool {
+    matches!(
+        context
+            .db()
+            .query_one(
+                "SELECT 1 FROM repository_addons ra JOIN addons a ON a.id = ra.addon_id \
+         JOIN addon_files af ON af.addon_id = a.id JOIN files f ON f.id = af.file_id \
+         WHERE ra.repository_id = ? AND a.enabled = 1 \
+         AND f.local_checksum = '' AND f.local_content_hash = '' \
+         AND NOT EXISTS (SELECT 1 FROM download_target_file dt WHERE dt.file_id = f.id) LIMIT 1",
+                params![repository_id as i64],
+            )
+            .await,
+        Ok(None)
     )
 }
 
@@ -1057,7 +1181,8 @@ async fn run_repository_pipeline(
     // verify; for a reused confirmation queue it is loaded from the prepared
     // pending-update payload instead.
     let mut mods: Vec<ModDiffSummary> = Vec::new();
-    let cached_pending_scope = pending_update_mod_scope(&context.db(), &normalized_repo_url).await;
+    let cached_pending_scope =
+        pending_update_mod_scope(context.clone(), &normalized_repo_url).await;
 
     if *cancel_rx.borrow() {
         info!(
@@ -3167,14 +3292,15 @@ async fn run_repository_pipeline(
         });
         if let Some(session) = rollback_session.as_ref() {
             let mut rollback = session.lock().await;
-            if let Err(err) = rollback.restore_all(Some(progress_tx.clone())).await {
+            let restore_result = rollback.restore_all(Some(progress_tx.clone())).await;
+            forget_reverted_hashes(context.clone(), &rollback.touched_file_ids(), "cancel").await;
+            if let Err(err) = restore_result {
                 let message = format!("Failed to revert cancelled update: {}", err);
                 error!("{}", message);
                 summary.log_table("failed-rollback");
                 emit_progress!(ProgressEvent::Failed(message));
                 return;
             }
-            forget_reverted_hashes(context.clone(), &rollback.touched_file_ids(), "cancel").await;
         }
         summary.log_table("cancelled");
         emit_progress!(ProgressEvent::Cancelled);
@@ -3260,14 +3386,15 @@ async fn run_repository_pipeline(
         });
         if let Some(session) = rollback_session.as_ref() {
             let mut rollback = session.lock().await;
-            if let Err(err) = rollback.restore_all(Some(progress_tx.clone())).await {
+            let restore_result = rollback.restore_all(Some(progress_tx.clone())).await;
+            forget_reverted_hashes(context.clone(), &rollback.touched_file_ids(), "cancel").await;
+            if let Err(err) = restore_result {
                 let message = format!("Failed to revert cancelled update: {}", err);
                 error!("{}", message);
                 summary.log_table("failed-rollback");
                 emit_progress!(ProgressEvent::Failed(message));
                 return;
             }
-            forget_reverted_hashes(context.clone(), &rollback.touched_file_ids(), "cancel").await;
         }
         summary.log_table("cancelled");
         emit_progress!(ProgressEvent::Cancelled);
@@ -3285,14 +3412,15 @@ async fn run_repository_pipeline(
         });
         if let Some(session) = rollback_session.as_ref() {
             let mut rollback = session.lock().await;
-            if let Err(err) = rollback.restore_all(Some(progress_tx.clone())).await {
+            let restore_result = rollback.restore_all(Some(progress_tx.clone())).await;
+            forget_reverted_hashes(context.clone(), &rollback.touched_file_ids(), "cancel").await;
+            if let Err(err) = restore_result {
                 let message = format!("Failed to revert cancelled update: {}", err);
                 error!("{}", message);
                 summary.log_table("failed-rollback");
                 emit_progress!(ProgressEvent::Failed(message));
                 return;
             }
-            forget_reverted_hashes(context.clone(), &rollback.touched_file_ids(), "cancel").await;
         }
         summary.log_table("cancelled");
         emit_progress!(ProgressEvent::Cancelled);
@@ -3604,9 +3732,206 @@ pub fn spawn_repository_sync(
 }
 
 #[cfg(test)]
+#[path = "rollback_tests.rs"]
+mod rollback_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::db::{FoxyDb, params};
+
+    #[tokio::test]
+    async fn reverted_shared_files_invalidate_siblings_and_parent_baselines() {
+        let db = crate::core::tasks::db_turso::build_test_database().await;
+        let fdb = FoxyDb::from_turso(db.clone());
+        for (id, repo_url, root, checksum) in [
+            (
+                1i64,
+                "https://repo.example.invalid/RepoAlpha/",
+                "R:/Mods/Shared",
+                "NEW",
+            ),
+            (
+                2,
+                "https://repo.example.invalid/RepoBeta/",
+                "R:/Mods/Shared",
+                "NEW",
+            ),
+            (
+                3,
+                "https://repo.example.invalid/RepoGamma/",
+                "R:/Mods/Shared",
+                "OLD",
+            ),
+            (
+                4,
+                "https://repo.example.invalid/RepoAlpha/",
+                "R:/Mods/Other",
+                "NEW",
+            ),
+        ] {
+            let file_path = format!("{root}/@mod_01/data.pbo");
+            let file_path = if id == 3 && cfg!(windows) {
+                file_path.replace('/', "\\").to_lowercase()
+            } else {
+                file_path
+            };
+            fdb.execute(
+                "INSERT INTO repositories (id, name, remote_url, local_path, local_checksum, remote_checksum, local_content_hash) \
+                 VALUES (?, 'RepoAlpha', ?, ?, ?, ?, 'BASELINE')",
+                params![id, repo_url, root, checksum, checksum],
+            ).await.unwrap();
+            fdb.execute(
+                "INSERT INTO addons (id, name, remote_path, local_path, required, enabled, local_checksum, remote_checksum, local_content_hash) \
+                 VALUES (?, '@mod_01', ?, ?, 1, 1, ?, ?, 'BASELINE')",
+                params![id, format!("{repo_url}@mod_01/"), format!("{root}/@mod_01"), checksum, checksum],
+            ).await.unwrap();
+            fdb.execute(
+                "INSERT INTO files (id, name, remote_path, local_path, local_checksum, remote_checksum, local_content_hash, length) \
+                 VALUES (?, 'data.pbo', ?, ?, ?, ?, 'BASELINE', 4)",
+                params![id, format!("{repo_url}@mod_01/data.pbo"), file_path, checksum, checksum],
+            ).await.unwrap();
+            fdb.execute(
+                "INSERT INTO subfiles (file_id, path, local_checksum, remote_checksum, local_length, remote_length, local_start, remote_start) \
+                 VALUES (?, 'part0', ?, ?, 4, 4, 1, 1)",
+                params![id, checksum, checksum],
+            ).await.unwrap();
+            fdb.execute(
+                "INSERT INTO repository_addons (repository_id, addon_id) VALUES (?, ?)",
+                params![id, id],
+            )
+            .await
+            .unwrap();
+            fdb.execute(
+                "INSERT INTO addon_files (addon_id, file_id) VALUES (?, ?)",
+                params![id, id],
+            )
+            .await
+            .unwrap();
+        }
+        fdb.execute(
+            "INSERT INTO files (id, local_path, local_checksum, remote_checksum, local_content_hash) VALUES (5, NULL, 'NEW', 'NEW', 'BASELINE')",
+            params![],
+        ).await.unwrap();
+        fdb.execute(
+            "INSERT INTO files (id, local_path, local_checksum, remote_checksum, local_content_hash) VALUES (6, 'R:/Mods/Shared/@mod_01/untouched.pbo', 'NEW', 'NEW', 'BASELINE')",
+            params![],
+        ).await.unwrap();
+        fdb.execute(
+            "INSERT INTO addon_files (addon_id, file_id) VALUES (1, 6)",
+            params![],
+        )
+        .await
+        .unwrap();
+        let context = Arc::new(FoxyContext::new(db, reqwest::Client::new()));
+        let sibling_url = "https://repo.example.invalid/RepoBeta/";
+        let sibling_context = Arc::new(
+            context
+                .as_ref()
+                .clone()
+                .with_target_local_path("R:/Mods/Shared"),
+        );
+        let payload = serde_json::to_string(&vec![ModDiffSummary {
+            name: "@mod_02".into(),
+            needs_update: true,
+            total_bytes: 4,
+            files: Vec::new(),
+        }])
+        .unwrap();
+        save_pending_update_for_context(sibling_context.clone(), sibling_url, &payload)
+            .await
+            .unwrap();
+        assert_eq!(
+            pending_update_mod_scope(sibling_context.clone(), sibling_url).await,
+            Some(HashSet::from(["@mod_02".to_string()]))
+        );
+        assert_eq!(
+            invalidate_local_hash_baseline(context.clone(), &HashSet::new())
+                .await
+                .unwrap(),
+            0
+        );
+        invalidate_local_hash_baseline(context.clone(), &HashSet::from([1]))
+            .await
+            .unwrap();
+        assert_eq!(
+            pending_update_mod_scope(sibling_context.clone(), sibling_url).await,
+            Some(HashSet::from([
+                "@mod_01".to_string(),
+                "@mod_02".to_string()
+            ]))
+        );
+        assert_eq!(
+            fetch_pending_update_for_context(sibling_context, sibling_url)
+                .await
+                .unwrap(),
+            Some(payload)
+        );
+        assert_eq!(
+            pre_propagate_sibling_checksums(
+                context.clone(),
+                "https://repo.example.invalid/RepoAlpha/"
+            )
+            .await,
+            0
+        );
+        assert_eq!(
+            pre_propagate_sibling_checksums(
+                context.clone(),
+                "https://repo.example.invalid/RepoBeta/"
+            )
+            .await,
+            0
+        );
+        assert_eq!(
+            invalidate_local_hash_baseline(context, &HashSet::from([1]))
+                .await
+                .unwrap(),
+            0
+        );
+
+        for table in ["files", "addons", "repositories"] {
+            let rows = fdb.query_all(&format!("SELECT id, local_checksum, remote_checksum, local_content_hash FROM {table} ORDER BY id"), params![]).await.unwrap();
+            for row in &rows[..3] {
+                let local = row.get_string("local_checksum").unwrap();
+                if table == "files" {
+                    assert!(local.is_empty());
+                } else {
+                    assert!(!local.is_empty());
+                    assert_ne!(local, row.get_string("remote_checksum").unwrap());
+                }
+                assert_eq!(row.get_string("local_content_hash").unwrap(), "", "{table}");
+                assert!(!row.get_string("remote_checksum").unwrap().is_empty());
+            }
+            assert_eq!(
+                rows[3].get_string("local_checksum").unwrap(),
+                "NEW",
+                "{table}"
+            );
+            assert_eq!(
+                rows[3].get_string("local_content_hash").unwrap(),
+                "BASELINE",
+                "{table}"
+            );
+            if table == "files" {
+                assert_eq!(rows[4].get_string("local_checksum").unwrap(), "NEW");
+                assert_eq!(rows[5].get_string("local_checksum").unwrap(), "NEW");
+                assert_eq!(
+                    rows[5].get_string("local_content_hash").unwrap(),
+                    "BASELINE"
+                );
+            }
+        }
+        let parts = fdb.query_all("SELECT file_id, local_checksum, local_length, local_start FROM subfiles ORDER BY file_id", params![]).await.unwrap();
+        for part in &parts[..3] {
+            assert_eq!(part.get_string("local_checksum").unwrap(), "");
+            assert_eq!(part.get_i64("local_length").unwrap(), 0);
+            assert_eq!(part.get_i64("local_start").unwrap(), 0);
+        }
+        assert_eq!(parts[3].get_string("local_checksum").unwrap(), "NEW");
+        assert_eq!(parts[3].get_i64("local_length").unwrap(), 4);
+        assert_eq!(parts[3].get_i64("local_start").unwrap(), 1);
+    }
 
     #[tokio::test]
     async fn checksum_reconciliation_updates_only_target_repository_instance() {

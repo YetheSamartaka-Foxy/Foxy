@@ -1,6 +1,6 @@
 use super::super::*;
 use super::db_helpers::load_patch_download_bytes_by_file_ids;
-use crate::core::db::{DbValue, FoxyDb, params};
+use crate::core::db::{DbValue, params};
 use crate::core::models::download_target_file::{
     attach_part_change_details, fetch_all_download_targets_with_mod_and_name,
 };
@@ -650,17 +650,20 @@ pub(crate) async fn apply_download_target_estimates_to_pending_updates(
 }
 
 pub(crate) async fn pending_update_mod_scope(
-    db: &FoxyDb,
+    context: Arc<FoxyContext>,
     repo_url: &str,
 ) -> Option<HashSet<String>> {
-    let row = match db
-        .query_one(
-            "SELECT diff_json FROM pending_updates WHERE repository_url = ? LIMIT 1",
-            params![repo_url],
-        )
+    let repo = load_repository_by_remote_url(context.clone(), repo_url)
         .await
+        .ok()?;
+    let db = context.db();
+    let mut names = HashSet::new();
+    let payload = match crate::core::models::pending_update::fetch_pending_update_for_context(
+        context, repo_url,
+    )
+    .await
     {
-        Ok(row) => row,
+        Ok(payload) => payload,
         Err(err) => {
             warn!(
                 "Failed to load pending-update scope for repo {}: {}",
@@ -669,32 +672,41 @@ pub(crate) async fn pending_update_mod_scope(
             return None;
         }
     };
-
-    let payload = row?;
-    let diff_json = payload.get_string("diff_json").unwrap_or_default();
-
-    let mods: Vec<ModDiffSummary> = match serde_json::from_str(&diff_json) {
-        Ok(mods) => mods,
+    if let Some(payload) = payload {
+        match serde_json::from_str::<Vec<ModDiffSummary>>(&payload) {
+            Ok(mods) => names.extend(
+                mods.into_iter()
+                    .filter(|m| m.needs_update)
+                    .map(|m| m.name.to_lowercase()),
+            ),
+            Err(err) => {
+                warn!(
+                    "Failed to parse pending-update scope for repo {}: {}",
+                    repo_url, err
+                );
+                return None;
+            }
+        }
+    }
+    match db.query_all(
+        "SELECT DISTINCT a.name FROM repository_addons ra JOIN addons a ON a.id = ra.addon_id \
+         JOIN addon_files af ON af.addon_id = a.id JOIN files f ON f.id = af.file_id \
+         WHERE ra.repository_id = ? AND a.enabled = 1 AND f.local_checksum = '' AND f.local_content_hash = ''",
+        params![repo.id as i64],
+    ).await {
+        Ok(rows) => names.extend(rows.iter().filter_map(|row| row.get_string("name").ok()).map(|name| name.to_lowercase())),
         Err(err) => {
-            warn!(
-                "Failed to parse pending-update scope for repo {}: {}",
-                repo_url, err
-            );
+            warn!("Failed to load unverified addon scope for repo {}: {}", repo_url, err);
             return None;
         }
-    };
-
-    let names: HashSet<String> = mods
-        .into_iter()
-        .filter(|m| m.needs_update)
-        .map(|m| m.name.to_lowercase())
-        .collect();
+    }
     if names.is_empty() { None } else { Some(names) }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::db::FoxyDb;
 
     fn file_summary(name: &str, total_bytes: u64) -> FileDiffSummary {
         FileDiffSummary {
@@ -713,6 +725,68 @@ mod tests {
             total_bytes,
             files,
         }
+    }
+
+    #[tokio::test]
+    async fn pending_scope_preserves_cached_work_and_matches_the_repository_instance() {
+        let db = crate::core::tasks::db_turso::build_test_database().await;
+        let fdb = FoxyDb::from_turso(db.clone());
+        let url = "https://repo.example.invalid/RepoAlpha/";
+        let mut contexts = Vec::new();
+        for (id, root, name) in [
+            (1i64, "R:/Mods/Shared", "@mod_01"),
+            (2, "R:/Mods/Other", "@mod_02"),
+        ] {
+            fdb.execute(
+                "INSERT INTO repositories (id, name, remote_url, local_path, local_checksum, remote_checksum, local_content_hash) VALUES (?, 'RepoAlpha', ?, ?, 'LOCAL', 'REMOTE', 'BASELINE')",
+                params![id, url, root],
+            ).await.unwrap();
+            let context = Arc::new(
+                FoxyContext::new(db.clone(), reqwest::Client::new()).with_target_local_path(root),
+            );
+            let payload = serde_json::to_string(&vec![mod_summary(name, 4, Vec::new())]).unwrap();
+            save_pending_update_for_context(context.clone(), url, &payload)
+                .await
+                .unwrap();
+            assert_eq!(
+                pending_update_mod_scope(context.clone(), url).await,
+                Some(HashSet::from([name.to_string()]))
+            );
+            contexts.push(context);
+        }
+        for (tree, content) in [("", ""), ("", "BASELINE"), ("LOCAL", ""), ("LOCAL", " ")] {
+            fdb.execute(
+                "UPDATE repositories SET local_checksum = ?, local_content_hash = ? WHERE id = 1",
+                params![tree, content],
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                pending_update_mod_scope(contexts[0].clone(), url).await,
+                Some(HashSet::from(["@mod_01".to_string()]))
+            );
+            assert_eq!(
+                pending_update_mod_scope(contexts[1].clone(), url).await,
+                Some(HashSet::from(["@mod_02".to_string()]))
+            );
+            assert!(
+                crate::core::models::pending_update::fetch_pending_update_for_context(
+                    contexts[0].clone(),
+                    url
+                )
+                .await
+                .unwrap()
+                .is_some()
+            );
+        }
+        save_pending_update_for_context(contexts[0].clone(), url, "invalid JSON")
+            .await
+            .unwrap();
+        assert!(
+            pending_update_mod_scope(contexts[0].clone(), url)
+                .await
+                .is_none()
+        );
     }
 
     async fn seed_same_url_repositories_for_patch_estimate(

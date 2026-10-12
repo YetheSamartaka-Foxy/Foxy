@@ -758,7 +758,19 @@ Failure exits:
 - Cancellation: join the incremental hash worker first (it skips its final
   flush once a cancel is pending), rollback touched files, then clear the
   local hash baseline of every reverted file, so no checksum outlives the
-  bytes it described. A cancelled delta patch attempt keeps its plan
+  bytes it described. Invalidation includes every file row sharing that
+  normalized local path, regardless of its remote checksum, plus their parts.
+  Recompute affected addon and repository tree rollups from
+  stored child checksums and clear only their content baselines in the same
+  transaction. Keep parent tree checksums populated so recovery hashes only
+  the invalidated files. Different-folder instances keep their state. Apply the
+  same rule after a failed download restores files, including partial rollback failures. Guarded
+  by `reverted_shared_files_invalidate_siblings_and_parent_baselines`. The
+  pending-addon scope includes addons owning invalidated files alongside the
+  cached pending work. Keep prepared-queue reuse when those files are already
+  queued; otherwise rebuild within that addon scope. Keep the pending payload
+  and patch plans for retry; load the payload using the repository instance's
+  local path. A cancelled delta patch attempt keeps its plan
   (`planned`, not `fallback_full`) so the retry patches again. The rollback
   session records its state as a header manifest plus an append-only
   `journal.jsonl` (one line per registered, promoted, restored or committed
@@ -1145,9 +1157,10 @@ Keep or refresh pending cache when:
   rebuilds instead of reusing it; the watcher is suppressed while a sync that
   writes into the repository folder runs, so Foxy's own cleanup is not read as
   a user edit
-- backup and network transfer still begin only after the user confirms; the
-  reuse fast path re-probes `repo.json` and re-validates every file, so a stale
-  queue degrades to a rebuild, never silent corruption
+- backup and network transfer still begin only after the user confirms; reuse
+  re-probes `repo.json` and requires that invalidated enabled files are already
+  queued. Files outside the queue widen the pending-addon scope only to their
+  owning addons before rebuilding the plan.
 
 ### `RecheckIntegrity`
 
