@@ -16,9 +16,9 @@ if ! command -v cargo >/dev/null 2>&1; then
     exit 1
 fi
 
-APP_VERSION="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+APP_VERSION="$(sed -n 's/^# \([0-9.]*\)[[:space:]]*$/\1/p' CHANGELOG.md | head -n 1)"
 if [ -z "$APP_VERSION" ]; then
-    echo "Error: Could not read package version from Cargo.toml." >&2
+    echo "Error: Could not read release version from CHANGELOG.md." >&2
     exit 1
 fi
 TARGET="${TARGET:-x86_64-unknown-linux-gnu}"

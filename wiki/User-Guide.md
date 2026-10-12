@@ -46,7 +46,7 @@ The footer at the bottom of the window contains:
 - An **activity log toggle** (bottom right) that shows what Foxy is doing and recent core messages, which is useful for troubleshooting.
 - An **info icon** that opens the About page.
 - A **question mark icon** that opens the in-app Help page.
-- The **version number**, which opens the changelog when clicked.
+- The **version number**, taken from the latest changelog release when Foxy is built, which opens the changelog when clicked.
 - An **update badge** when a newer Foxy version is available.
 
 ### Initial setup

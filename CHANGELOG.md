@@ -1,4 +1,4 @@
-﻿# 1.2.1
+# 1.2.1
 ## Fixed
 - Windows updates no longer repeat a previously selected full data reset, preserving saved repositories, settings, and databases. The reset checkbox always starts unchecked and must be explicitly ticked and confirmed for each manual install. Silent installers always keep user data. This fix does not require a database wipe.
 - Opening a second Foxy window for the same game space now stops at the already-running notice without saving configuration, starting database tasks, or processing a pending database wipe.
@@ -8,6 +8,7 @@
 - The update progress bar no longer seems to stop near the end when a repository has many small files and a few large ones. The bar and percentage now follow downloaded bytes instead of the number of finished files.
 - Checking a partially installed repository in a shared folder no longer pauses with a wrong-folder warning when most of its addons have never been downloaded.
 - External addons shared by several repositories now appear when filtering by any of those repositories, including optional addons.
+- Foxy's version number now comes from the latest changelog release, keeping the displayed version and update checks in sync with the release notes.
 
 # 1.2.0
 ## Added

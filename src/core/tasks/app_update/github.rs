@@ -31,7 +31,7 @@ pub async fn fetch_github_releases(repo_slug: &str) -> Result<Vec<GitHubRelease>
     let client = super::super::create_web_client::create_web_client().await;
     let response = client
         .get(&url)
-        .header("User-Agent", format!("Foxy/{}", env!("CARGO_PKG_VERSION")))
+        .header("User-Agent", format!("Foxy/{}", crate::build_info::VERSION))
         .header("Accept", "application/vnd.github+json")
         .send()
         .await
@@ -249,7 +249,7 @@ async fn fetch_checksum_asset_text(
 ) -> Result<String> {
     let response = client
         .get(&asset.browser_download_url)
-        .header("User-Agent", format!("Foxy/{}", env!("CARGO_PKG_VERSION")))
+        .header("User-Agent", format!("Foxy/{}", crate::build_info::VERSION))
         .send()
         .await
         .with_context(|| {

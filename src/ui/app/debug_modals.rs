@@ -38,7 +38,7 @@ impl DebugModal {
     fn seed(self, app: &mut Foxy) {
         match self {
             DebugModal::AppUpdate => {
-                let current_version = env!("CARGO_PKG_VERSION").to_string();
+                let current_version = crate::build_info::VERSION.to_string();
                 let latest = preview_next_version(&current_version);
                 let (versions, changelogs) = preview_app_update_versions(&current_version, &latest);
                 app.app_update_status =

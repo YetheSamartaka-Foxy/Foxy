@@ -76,6 +76,8 @@ Main app:
 cargo build --release
 ```
 
+Foxy's application version comes from the first `# MAJOR.MINOR.PATCH` release heading in `CHANGELOG.md`. The desktop UI, CLI, update checks, and installer builds use that version; `Cargo.toml` retains separate package metadata.
+
 Workspace (main app + server backend CLI):
 ```bash
 cargo build --workspace --release
@@ -86,11 +88,10 @@ Pre-release build (release-optimized, version label and logs carry source commit
 cargo prerelease
 ```
 
-Pre-release installer, one command (set the version and short commit hash; output lands in `dist/`, needs Inno Setup `iscc` in `PATH`):
+Pre-release installer (version comes from the changelog and the short commit hash is filled in automatically; output lands in `dist/`, needs Inno Setup `iscc` in `PATH`):
 ```bash
-cargo build --release --features prerelease -p Foxy && iscc /DAppVersion="1.2.0" /DOutputSuffix="-prerelease-f6b8ab9" /DSourceDir="..\..\target\release" installer\windows\foxy-setup.iss
+scripts\build-windows-prerelease-installer.bat
 ```
-Or let `scripts\build-windows-prerelease-installer.bat` fill both in for you.
 
 Build installers:
 ```bash

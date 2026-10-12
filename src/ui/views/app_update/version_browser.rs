@@ -48,7 +48,7 @@ impl Foxy {
         ui: &mut Ui,
         info: Option<&app_update::AppUpdateInfo>,
     ) {
-        let current_version = env!("CARGO_PKG_VERSION");
+        let current_version = crate::build_info::VERSION;
         let platform_key = app_update::current_platform_key();
 
         let empty_versions = Vec::new();

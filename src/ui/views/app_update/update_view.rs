@@ -120,7 +120,7 @@ impl Foxy {
                         ui.label(format!(
                             "{}: {}",
                             self.t("Current version"),
-                            env!("CARGO_PKG_VERSION")
+                            crate::build_info::VERSION
                         ));
                     }
                     UpdateCheckStatus::Available(info) => {
@@ -140,7 +140,7 @@ impl Foxy {
         ui: &mut Ui,
         info: &app_update::AppUpdateInfo,
     ) {
-        let current = env!("CARGO_PKG_VERSION");
+        let current = crate::build_info::VERSION;
         let latest = &info.manifest.latest;
         let heading_size = egui::TextStyle::Heading.resolve(ui.style()).size;
         let download_button_height = Self::adaptive_button_height(heading_size, 64.0);

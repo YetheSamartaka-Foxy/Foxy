@@ -6,6 +6,8 @@
 
 \- If no version is specified, update the highest (latest) version already present in `CHANGELOG.md`.
 
+\- Keep the latest release first, with a `# MAJOR.MINOR.PATCH` heading. Foxy's build script derives the application version from this heading and rejects missing or invalid versions. Cargo package metadata is separate from the application release version.
+
 \- Keep sections in this exact order:
 
 &#x20; - `## Added`

@@ -34,16 +34,16 @@ function Require-Tool {
 function Get-AppVersion {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$CargoToml
+        [string]$Changelog
     )
 
-    foreach ($line in Get-Content -Path $CargoToml) {
-        if ($line -match '^version\s*=\s*"(.+)"') {
+    foreach ($line in Get-Content -LiteralPath $Changelog) {
+        if ($line -match '^# ([0-9]+\.[0-9]+\.[0-9]+)\s*$') {
             return $Matches[1]
         }
     }
 
-    throw "Could not read package version from Cargo.toml."
+    throw "Could not read release version from CHANGELOG.md."
 }
 
 function Quote-Sh {
@@ -57,8 +57,8 @@ function Quote-Sh {
 }
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$cargoToml = Join-Path $repoRoot "Cargo.toml"
-$appVersion = Get-AppVersion -CargoToml $cargoToml
+$changelog = Join-Path $repoRoot "CHANGELOG.md"
+$appVersion = Get-AppVersion -Changelog $changelog
 $artifactName = "Foxy-$appVersion-macos-arm64.dmg"
 $localOutputDir = Join-Path $repoRoot $OutputDir
 $localOutput = Join-Path $localOutputDir $artifactName

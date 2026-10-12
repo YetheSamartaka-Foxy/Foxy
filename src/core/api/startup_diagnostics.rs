@@ -318,7 +318,7 @@ pub fn startup_system_diagnostics_lines(storage_paths: &[StartupStoragePath]) ->
     lines.push(format!(
         "app: name={} version={} arch={} profile={} build={} commit={}",
         env!("CARGO_PKG_NAME"),
-        env!("CARGO_PKG_VERSION"),
+        crate::build_info::VERSION,
         std::env::consts::ARCH,
         if cfg!(debug_assertions) {
             "debug"

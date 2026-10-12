@@ -24,14 +24,14 @@ if errorlevel 1 (
     exit /b 1
 )
 
-for /f "tokens=2 delims== " %%A in ('findstr /b /c:"version" Cargo.toml') do (
-    set "APP_VERSION=%%~A"
+for /f "tokens=2" %%A in ('findstr /b /c:"# " CHANGELOG.md') do (
+    set "APP_VERSION=%%A"
     goto :version_found
 )
 
 :version_found
 if not defined APP_VERSION (
-    echo Error: Could not read package version from Cargo.toml.
+    echo Error: Could not read release version from CHANGELOG.md.
     popd
     exit /b 1
 )
