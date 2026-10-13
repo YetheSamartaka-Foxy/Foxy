@@ -200,8 +200,11 @@ async fn download_file_simple(
                 .send()
                 .await?
         };
+        let resp = resp
+            .error_for_status()
+            .map_err(reqwest::Error::without_url)?;
         if !resp.status().is_success() {
-            anyhow::bail!("GET request for {} failed: {}", path, resp.status());
+            anyhow::bail!("GET request failed: {}", resp.status());
         }
 
         // If we asked for a Range but got 200 (not 206), the server doesn't
@@ -414,6 +417,76 @@ pub(super) async fn download_file_ranges(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn missing_http_status_survives_simple_and_ranged_transfers() {
+        use crate::core::tasks::download_files::failure::is_missing_remote_file;
+        use std::sync::atomic::AtomicUsize;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/missing.bin", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                let _ = stream.read(&mut request).await;
+                let _ = stream
+                    .write_all(
+                        b"HTTP/1.1 410 Gone\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await;
+            }
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let context = Arc::new(FoxyContext::new(
+            crate::core::tasks::db_turso::build_test_database().await,
+            reqwest::Client::new(),
+        ));
+        let (_pause_tx, pause_rx) = watch::channel(false);
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        for size in [4, LARGE_FILE_THRESHOLD + 1] {
+            let path = directory
+                .path()
+                .join(format!("missing-{size}.bin"))
+                .to_string_lossy()
+                .to_string();
+            let target = DownloadTargetFile {
+                file_id: 1,
+                download_remote_url: Arc::from(url.as_str()),
+                download_local_path: Arc::from(path.as_str()),
+                size,
+                expected_download_bytes: size,
+                download_total: Arc::new(AtomicUsize::new(0)),
+                download_cycle: Arc::new(AtomicUsize::new(0)),
+            };
+            let error = tokio::time::timeout(
+                Duration::from_secs(5),
+                download_file_ranges(
+                    context.clone(),
+                    &target,
+                    &url,
+                    &path,
+                    Arc::new(AdaptiveBandwidthLimiter::from_mbps(None)),
+                    pause_rx.clone(),
+                    cancel_rx.clone(),
+                    None,
+                    true,
+                    Arc::new(DownloadMetrics::new()),
+                    Arc::new(DownloadSchedulerState::new(
+                        super::super::DownloadResourceLimits::normal(),
+                    )),
+                ),
+            )
+            .await
+            .unwrap()
+            .err()
+            .unwrap();
+            assert!(is_missing_remote_file(&error));
+            assert!(!is_download_cancelled_error(&error));
+        }
+        server.abort();
+    }
 
     #[test]
     fn classifies_download_cancelled_error() {

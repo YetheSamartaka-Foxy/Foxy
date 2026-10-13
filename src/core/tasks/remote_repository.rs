@@ -963,6 +963,16 @@ pub(crate) async fn remote_repository(
         final_has_linked_addons,
         final_has_remote_state,
     );
+    if !final_remote_graph_complete {
+        log_remote_refresh_sol(
+            &context,
+            refresh_started,
+            "failed",
+            index_requests,
+            Some(rebuild_work),
+        );
+        return None;
+    }
     log_remote_refresh_sol(
         &context,
         refresh_started,

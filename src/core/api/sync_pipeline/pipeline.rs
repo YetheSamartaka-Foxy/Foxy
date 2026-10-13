@@ -18,6 +18,7 @@ use super::hashing::{
     HashTotalSummary, SqlitePerfRunGuard, render_aggregated_addon_hash_metrics,
     render_hash_total_summary, run_incremental_hash_batch,
 };
+use super::remote_recovery::invalidate_remote_graph;
 use super::summary::{PipelineSummary, StageEntry};
 use crate::core::api::FileDiffKind;
 use crate::core::db::{DbValue, FoxyDb, params};
@@ -36,7 +37,7 @@ use crate::core::tasks::calculate_hashes::{
     propagate_checksums_to_siblings,
 };
 use crate::core::tasks::download_files::{
-    DownloadRunReport, UpdateRollbackSession, apply_download_plan_bytes,
+    DownloadRunReport, MissingRemoteFiles, UpdateRollbackSession, apply_download_plan_bytes,
     build_download_estimate_diffs, download_files,
 };
 use crate::core::tasks::purge_repository::purge_repository_instance;
@@ -853,6 +854,9 @@ async fn can_reuse_prepared_download_queue(
     if !prepared_queue_covers_unverified_files(context.clone(), repo.id).await {
         return false;
     }
+    if !prepared_remote_graph_is_complete(context.clone(), repo.id).await {
+        return false;
+    }
     // Confirm the remote repository has not changed since the queue was built.
     let probed =
         probe_remote_repository_checksum(context, repo_url, hash_algorithm_preference).await;
@@ -876,6 +880,26 @@ async fn prepared_queue_covers_unverified_files(
          WHERE ra.repository_id = ? AND a.enabled = 1 \
          AND f.local_checksum = '' AND f.local_content_hash = '' \
          AND NOT EXISTS (SELECT 1 FROM download_target_file dt WHERE dt.file_id = f.id) LIMIT 1",
+                params![repository_id as i64],
+            )
+            .await,
+        Ok(None)
+    )
+}
+
+async fn prepared_remote_graph_is_complete(context: Arc<FoxyContext>, repository_id: u64) -> bool {
+    matches!(
+        context
+            .db()
+            .query_one(
+                "SELECT 1 FROM repository_addons ra JOIN addons a ON a.id = ra.addon_id \
+         WHERE ra.repository_id = ? AND a.enabled = 1 AND (a.remote_checksum = '' \
+         OR NOT EXISTS (SELECT 1 FROM addon_files af WHERE af.addon_id = a.id) \
+         OR EXISTS (SELECT 1 FROM addon_files af JOIN files f ON f.id = af.file_id \
+         WHERE af.addon_id = a.id AND (f.remote_checksum = '' OR (f.length > 0 \
+         AND NOT EXISTS (SELECT 1 FROM subfiles sf WHERE sf.file_id = f.id)) \
+         OR EXISTS (SELECT 1 FROM subfiles sf WHERE sf.file_id = f.id \
+         AND (sf.remote_checksum IS NULL OR sf.remote_checksum = ''))))) LIMIT 1",
                 params![repository_id as i64],
             )
             .await,
@@ -3313,6 +3337,13 @@ async fn run_repository_pipeline(
                 return;
             }
         }
+        if download_result
+            .as_ref()
+            .is_err_and(|err| err.is::<MissingRemoteFiles>())
+            && let Err(err) = invalidate_remote_graph(context.clone(), &normalized_repo_url).await
+        {
+            warn!("Could not invalidate unavailable remote metadata: {}", err);
+        }
         summary.log_table("cancelled");
         emit_progress!(ProgressEvent::Cancelled);
         return;
@@ -3338,6 +3369,22 @@ async fn run_repository_pipeline(
                 }
                 forget_reverted_hashes(context.clone(), &rollback.touched_file_ids(), "failure")
                     .await;
+            }
+            if err.is::<MissingRemoteFiles>() {
+                match invalidate_remote_graph(context.clone(), &normalized_repo_url).await {
+                    Ok(()) => info!(
+                        "Invalidated prepared queue and remote file lists after a missing server file; next attempt will refresh metadata"
+                    ),
+                    Err(invalidation_err) => {
+                        let message = format!(
+                            "Download failed and the server file list could not be invalidated: {}. Recheck repository integrity before retrying.",
+                            invalidation_err
+                        );
+                        summary.log_table("failed-remote-invalidation");
+                        emit_progress!(ProgressEvent::Failed(message));
+                        return;
+                    }
+                }
             }
             summary.log_table("failed-download");
             emit_progress!(ProgressEvent::Failed(message));

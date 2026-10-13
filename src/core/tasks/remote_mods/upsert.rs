@@ -479,15 +479,6 @@ pub(super) async fn process_mods_upsert(
                 );
                 return None;
             }
-            if mod_entry.remote_checksum == mod_entry.local_checksum
-                && has_content_hash
-                && !force_mod_refresh
-                && context_clone.recheck_level < RecheckLevel::MOD
-                && local_mod_exists()
-            {
-                debug!("Up-to-date: Mod: {}.", mod_entry.remote_path.clone());
-                return None;
-            }
             if force_mod_refresh {
                 debug!(
                     "Recheck needed: Mod: {} (forced by pending local mismatch)",
@@ -644,5 +635,114 @@ mod tests {
             missing_part_remote_checksums: 1,
         };
         assert!(!state.complete());
+    }
+
+    async fn assert_clean_addon_refreshes_files(previous_remote: &str, seed_part: bool) {
+        use crate::core::db::params;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let remote_url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            assert!(stream.read(&mut request).await.unwrap() > 0);
+            let body = r#"{"files":[{"path":"new.bin","checksum":"FILE","length":4,"parts":[{"path":"new.bin","checksum":"PART","start":0,"length":4}]}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let addon_path = directory.path().join("@mod_01");
+        std::fs::create_dir(&addon_path).unwrap();
+        std::fs::write(addon_path.join("new.bin"), b"data").unwrap();
+        let local_path = directory.path().to_string_lossy().replace('\\', "/");
+        let addon_local_path = addon_path.to_string_lossy().replace('\\', "/");
+        let mut context = FoxyContext::new(
+            crate::core::tasks::db_turso::build_test_database().await,
+            reqwest::Client::new(),
+        );
+        context.queue_download_targets = false;
+        let context = Arc::new(context);
+        let db = context.db();
+        db.execute(
+            "INSERT INTO repositories (id, name, remote_url, local_path) VALUES (1, 'MainRepo', ?, ?)",
+            params![remote_url.clone(), local_path.clone()],
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO addons (id, name, remote_path, local_path, enabled, required, local_checksum, remote_checksum, local_content_hash, data_order) VALUES (1, '@mod_01', ?, ?, 1, 1, 'NEW', ?, 'CONTENT', 0)",
+            params![format!("{remote_url}@mod_01"), addon_local_path.clone(), previous_remote],
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO repository_addons (repository_id, addon_id) VALUES (1, 1)",
+            params![],
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO files (id, name, remote_path, local_path, local_checksum, remote_checksum, length, data_order) VALUES (1, 'old.bin', ?, ?, 'FILE', 'FILE', 4, 0)",
+            params![format!("{remote_url}@mod_01/old.bin"), format!("{addon_local_path}/old.bin")],
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO addon_files (addon_id, file_id) VALUES (1, 1)",
+            params![],
+        )
+        .await
+        .unwrap();
+        if seed_part {
+            db.execute(
+                "INSERT INTO subfiles (file_id, path, local_length, local_start, remote_length, remote_start, local_checksum, remote_checksum, data_order) VALUES (1, 'old.bin', 4, 0, 4, 0, 'PART', 'PART', 0)",
+                params![],
+            )
+            .await
+            .unwrap();
+        }
+        let repository = Arc::new(FoxyRepository {
+            id: 1,
+            name: "MainRepo".to_string(),
+            remote_url,
+            local_path,
+            image: String::new(),
+            local_checksum: String::new(),
+            local_content_hash: String::new(),
+            remote_checksum: String::new(),
+            foxy_mode: crate::core::models::repository::FoxyMode::None,
+        });
+        process_mods_upsert(
+            context,
+            repository,
+            serde_json::json!([{ "modName": "@mod_01", "checkSum": "NEW" }]),
+            true,
+            None,
+        )
+        .await;
+        server.abort();
+        let files = db
+            .query_all(
+                "SELECT f.name FROM files f JOIN addon_files af ON af.file_id = f.id WHERE af.addon_id = 1",
+                params![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].get_string("name").unwrap(), "new.bin");
+    }
+
+    #[tokio::test]
+    async fn matching_local_addon_checksum_does_not_hide_incomplete_graph() {
+        assert_clean_addon_refreshes_files("NEW", false).await;
+    }
+
+    #[tokio::test]
+    async fn matching_local_addon_checksum_does_not_hide_changed_remote_manifest() {
+        assert_clean_addon_refreshes_files("OLD", true).await;
     }
 }

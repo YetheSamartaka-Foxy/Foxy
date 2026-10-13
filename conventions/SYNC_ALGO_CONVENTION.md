@@ -161,6 +161,22 @@ to a full-file download.
 
 ## Core Invariants
 
+Prepared queues require a complete enabled-addon file graph, including part rows
+for every nonempty file. Local checksums matching newly published checksums do
+not prove that the stored remote graph is unchanged or complete.
+
+HTTP 404 and 410 during a file transfer stop the run without retrying the same
+URL or reporting user cancellation. After all transfer and hash workers settle
+and rollback finishes, invalidate the instance's enabled-addon remote checksums,
+parent repository remote checksums, prepared targets, patch plans, pending
+payload and cached manifest validators. Preserve file and part remote metadata
+and untouched local state so the next update can refresh manifests, prune old
+names and retain delta planning. Parents sharing the same addon rows must also
+lose their remote checksum; a same-URL install in another folder is independent.
+Content rollups do not include filenames, so unchanged published checksums
+cannot veto this recovery. A failed addon manifest fetch keeps its remote
+checksum empty, and an incomplete refresh must fail before downloading.
+
 1. `repo.json.checksum == repositories.local_checksum` means the local
    repository tree is fully verified against the current remote repository.
    Remote metadata fetches beyond `repo.json` must be skipped unless forced.

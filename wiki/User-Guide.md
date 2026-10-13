@@ -677,6 +677,8 @@ A yellow **Legacy Protocol (MD5)** banner means the server still uses the older 
 
 If downloads fail repeatedly, check your connection, open the repository URL in a browser, and read the activity log for the specific error.
 
+If a queued file is missing on the server (HTTP 404 or 410), Foxy stops the update and rolls back that attempt. Retry **Update** once: Foxy refreshes the server's file lists and rebuilds the plan, even when the server's repository checksum has not changed. Files that were already verified and left untouched keep their saved checksums. If the fresh plan still requests missing files, use **Recheck repository integrity** and send the log ZIP to the repository maintainer; the published files and manifests may disagree.
+
 ### Force redownload
 
 If a repository stays in a bad state, use **Force redownload repository** in Repository Settings > Configuration. It asks for confirmation, checks that the server can be reached, then removes local files and downloads everything again.

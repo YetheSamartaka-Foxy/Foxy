@@ -1,5 +1,67 @@
 use super::*;
 
+#[tokio::test]
+async fn prepared_queue_requires_each_enabled_files_remote_graph() {
+    let context = Arc::new(FoxyContext::new(
+        crate::core::tasks::db_turso::build_test_database().await,
+        reqwest::Client::new(),
+    ));
+    let db = context.db();
+    db.execute("INSERT INTO repositories (id, name, remote_url, local_path) VALUES (1, 'MainRepo', 'http://repo.example.invalid:8080/', 'R:/Mods/MainRepo/')", params![]).await.unwrap();
+    db.execute("INSERT INTO addons (id, name, required, enabled, remote_checksum) VALUES (1, '@mod_01', 1, 1, 'ADDON')", params![]).await.unwrap();
+    db.execute(
+        "INSERT INTO repository_addons (repository_id, addon_id) VALUES (1, 1)",
+        params![],
+    )
+    .await
+    .unwrap();
+    db.execute("INSERT INTO files (id, name, remote_checksum, length) VALUES (1, 'first.bin', 'FILE', 4), (2, 'second.bin', 'FILE', 4)", params![]).await.unwrap();
+    db.execute(
+        "INSERT INTO addon_files (addon_id, file_id) VALUES (1, 1), (1, 2)",
+        params![],
+    )
+    .await
+    .unwrap();
+    db.execute(
+        "INSERT INTO subfiles (file_id, path, remote_checksum) VALUES (1, 'first.bin', 'PART')",
+        params![],
+    )
+    .await
+    .unwrap();
+    assert!(!prepared_remote_graph_is_complete(context.clone(), 1).await);
+    db.execute(
+        "INSERT INTO subfiles (file_id, path, remote_checksum) VALUES (2, 'second.bin', 'PART')",
+        params![],
+    )
+    .await
+    .unwrap();
+    assert!(prepared_remote_graph_is_complete(context.clone(), 1).await);
+    db.execute(
+        "UPDATE subfiles SET remote_checksum = '' WHERE file_id = 2",
+        params![],
+    )
+    .await
+    .unwrap();
+    assert!(!prepared_remote_graph_is_complete(context.clone(), 1).await);
+    db.execute(
+        "UPDATE subfiles SET remote_checksum = 'PART' WHERE file_id = 2",
+        params![],
+    )
+    .await
+    .unwrap();
+    db.execute(
+        "UPDATE addons SET remote_checksum = '' WHERE id = 1",
+        params![],
+    )
+    .await
+    .unwrap();
+    assert!(!prepared_remote_graph_is_complete(context.clone(), 1).await);
+    db.execute("UPDATE addons SET enabled = 0 WHERE id = 1", params![])
+        .await
+        .unwrap();
+    assert!(prepared_remote_graph_is_complete(context, 1).await);
+}
+
 fn checksum(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex().to_uppercase()
 }

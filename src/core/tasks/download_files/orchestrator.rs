@@ -27,6 +27,7 @@ use super::DownloadResourceLimits;
 use super::SharedRollbackSession;
 use super::bandwidth::AdaptiveBandwidthLimiter;
 use super::batching::{DownloadModCompletion, ModDownloadBatch, process_mod_batch};
+use super::failure::{DownloadStop, MissingRemoteFiles};
 use super::metrics::{
     DownloadMetrics, DownloadModOutcome, DownloadRunReport, DownloadSchedulerState,
 };
@@ -1247,6 +1248,19 @@ pub(crate) async fn download_files(
         .queued_large_files
         .store(total_large_files, Ordering::Relaxed);
 
+    let (transfer_cancel_tx, transfer_cancel_rx) = watch::channel(*cancel_rx.borrow());
+    let download_stop = Arc::new(DownloadStop::new(transfer_cancel_tx.clone()));
+    let cancel_forwarder = {
+        let mut user_cancel_rx = cancel_rx.clone();
+        tokio::spawn(async move {
+            loop {
+                if user_cancel_rx.changed().await.is_err() || *user_cancel_rx.borrow() {
+                    transfer_cancel_tx.send_replace(true);
+                    break;
+                }
+            }
+        })
+    };
     for batch in batches {
         let file_count = batch.files.len();
         let ctx = context.clone();
@@ -1257,10 +1271,11 @@ pub(crate) async fn download_files(
         let mod_completion_tx_clone = mod_completion_tx.clone();
         let completed_clone = completed.clone();
         let pause_rx = download_pause_rx.clone();
-        let cancel_rx_clone = cancel_rx.clone();
+        let cancel_rx_clone = transfer_cancel_rx.clone();
         let rollback_session_clone = rollback_session.clone();
         let metrics_clone = metrics.clone();
         let scheduler_clone = scheduler_state.clone();
+        let download_stop_clone = download_stop.clone();
         let handle = tokio::spawn(async move {
             process_mod_batch(
                 batch,
@@ -1278,6 +1293,7 @@ pub(crate) async fn download_files(
                 metrics_clone,
                 scheduler_clone,
                 mod_completion_tx_clone,
+                download_stop_clone,
             )
             .await
         });
@@ -1342,6 +1358,7 @@ pub(crate) async fn download_files(
         }
     }
 
+    cancel_forwarder.abort();
     if let Some((handle, stop)) = ticker {
         stop.store(true, Ordering::SeqCst);
         let _ = handle.await;
@@ -1668,6 +1685,10 @@ pub(crate) async fn download_files(
 
     let report = metrics.build_report(&mod_outcomes);
 
+    if download_stop.has_missing_remote_file() {
+        let _ = cleanup_staged_temp_files(&all_download_refs).await;
+        return Err(MissingRemoteFiles.into());
+    }
     if cancellation_requested(&cancel_rx) {
         let (removed_temp_files, failed_temp_files) =
             cleanup_staged_temp_files(&all_download_refs).await;
