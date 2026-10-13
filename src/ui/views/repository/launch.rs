@@ -175,8 +175,14 @@ impl Foxy {
             .is_some();
         self.activate_extra_files_before_launch();
 
-        if !steam_required || steam::is_steam_running() {
-            return match spawn_launch_process(&executable, &args, cwd.as_deref(), steam_required) {
+        if !steam_required || steam::is_steam_running(&self.settings_view_state.steam_directory) {
+            return match spawn_launch_process(
+                &executable,
+                &args,
+                cwd.as_deref(),
+                steam_required,
+                &self.settings_view_state.steam_directory,
+            ) {
                 Ok(pid) => {
                     info!(
                         "Launched {} for repository {} (pid={})",
@@ -239,6 +245,7 @@ impl Foxy {
                 &args_for_thread,
                 cwd_for_thread.as_deref(),
                 steam_required,
+                &steam_directory,
             ) {
                 Ok(pid) => {
                     info!(
@@ -790,7 +797,7 @@ impl Foxy {
         {
             return (false, false);
         }
-        let running = steam::is_steam_running();
+        let running = steam::is_steam_running(&self.settings_view_state.steam_directory);
         info!(
             "Steam launch gate for repository {}: steam_required=true steam_running={}",
             repo_name, running
@@ -1023,8 +1030,8 @@ impl Foxy {
             return;
         };
 
-        // Add the mission.sqm path as a positional argument.
-        command.arg(&mission.sqm_path);
+        let mission_arg = steam::arma3_mission_argument(&command, Path::new(&mission.sqm_path));
+        command.arg(mission_arg);
 
         info!(
             "Launching Eden Editor with mission {} ({}) for repository {}",
@@ -1039,8 +1046,14 @@ impl Foxy {
         let cwd: Option<PathBuf> = command.get_current_dir().map(Path::to_path_buf);
         self.activate_extra_files_before_launch();
 
-        if steam::is_steam_running() {
-            match spawn_launch_process(&executable, &args, cwd.as_deref(), true) {
+        if steam::is_steam_running(&self.settings_view_state.steam_directory) {
+            match spawn_launch_process(
+                &executable,
+                &args,
+                cwd.as_deref(),
+                true,
+                &self.settings_view_state.steam_directory,
+            ) {
                 Ok(pid) => {
                     info!("Launched Eden Editor (pid={})", pid);
                     self.handle_post_launch_window_behavior(ctx, "editor launch completed");
@@ -1058,7 +1071,13 @@ impl Foxy {
         let repo_name_owned = repo_name.to_string();
         std::thread::spawn(
             move || match steam::ensure_steam_running(&steam_directory) {
-                Ok(_) => match spawn_launch_process(&executable, &args, cwd.as_deref(), true) {
+                Ok(_) => match spawn_launch_process(
+                    &executable,
+                    &args,
+                    cwd.as_deref(),
+                    true,
+                    &steam_directory,
+                ) {
                     Ok(pid) => info!(
                         "Launched Eden Editor after Steam startup (pid={}) for repository {}",
                         pid, repo_name_owned

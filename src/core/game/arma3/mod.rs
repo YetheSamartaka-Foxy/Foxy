@@ -127,7 +127,7 @@ impl GameModule for Arma3Module {
         }
 
         let Some(launch) =
-            steam::arma3_launch_command(install_dir_path, ctx.steam_directory.trim())
+            steam::arma3_launch_command(install_dir_path, ctx.steam_directory.trim(), game_args)
         else {
             log::warn!("Cannot create launch command: Steam launch command is unavailable");
             return Err(LaunchError::LauncherUnavailable);
@@ -136,12 +136,9 @@ impl GameModule for Arma3Module {
         let cwd = (!install_dir.is_empty() && install_dir_path.exists())
             .then(|| install_dir_path.to_path_buf());
 
-        let mut args = launch.args;
-        args.extend(game_args);
-
         Ok(LaunchCommand {
             program: launch.program,
-            args,
+            args: launch.args,
             cwd,
         })
     }

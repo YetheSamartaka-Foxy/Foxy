@@ -63,7 +63,9 @@ impl Foxy {
                     pending.ts3_running = running;
                 }
                 if pending.steam_required {
-                    let running = crate::core::steam::is_steam_running();
+                    let running = crate::core::steam::is_steam_running(
+                        &self.settings_view_state.steam_directory,
+                    );
                     pending_changed |= pending.steam_running != running;
                     pending.steam_running = running;
                 }
@@ -663,7 +665,8 @@ impl Foxy {
         if (launch_without_suggestions || launch_with_suggestions && !downloading_selected)
             && pending.steam_required
         {
-            pending.steam_running = crate::core::steam::is_steam_running();
+            pending.steam_running =
+                crate::core::steam::is_steam_running(&self.settings_view_state.steam_directory);
             if !pending.can_launch() {
                 self.pending_join_preflight = Some(pending);
                 ctx.request_repaint();

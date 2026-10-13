@@ -353,6 +353,8 @@ When you join an Arma 3 server, Foxy reads what the server reports and can:
 
 Enabled [extra files](#extra-files-and-config-packs) are copied into the game directory before each launch.
 
+On Linux, use the native Linux Foxy build when possible. If you run Windows Foxy through Wine, Foxy detects native Linux Steam and launches Arma 3 through Steam's selected Proton version, skipping the Arma launcher. Native, Flatpak, and Snap Steam installations are supported. Use **Auto-detect** for the Steam and Arma 3 directories, or select their folders through Wine's mapped drives. Mod, profile, and editor mission paths are translated for the game's Proton prefix. Arma 3 must be installed and configured to use Proton in Steam; start it from Steam once to finish its initial setup.
+
 ### Steam and TeamSpeak checks
 
 With **Check Steam is running before launching** turned on in Game space settings, Foxy warns when Steam is not running and offers to start it. **Check TeamSpeak is running before joining** does the same for TeamSpeak 3 when the repository ships a TS3 plugin. Repositories can override both checks.

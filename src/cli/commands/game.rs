@@ -547,7 +547,7 @@ fn execute_game_launch(
     };
 
     let args: Vec<std::ffi::OsString> = command.args.iter().map(std::ffi::OsString::from).collect();
-    if steam_required && !crate::core::steam::is_steam_running() {
+    if steam_required && !crate::core::steam::is_steam_running(steam_directory) {
         return Err(CommandError::operation(
             "game.launch",
             "Steam is not running",

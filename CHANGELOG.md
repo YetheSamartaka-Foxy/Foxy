@@ -8,6 +8,7 @@
 - A new **Reduce motion** setting in Application settings stops these animations and interface transitions. Progress and status text still update.
 
 ## Fixed
+- On Linux, Windows Foxy running through Wine now detects and starts native Steam, finds its Arma 3 libraries, and launches Arma through Steam's selected Proton runtime with the enabled mods and server settings.
 - Windows updates no longer repeat a previously selected full data reset, preserving saved repositories, settings, and databases. The reset checkbox always starts unchecked and must be explicitly ticked and confirmed for each manual install. Silent installers always keep user data. This fix does not require a database wipe.
 - Opening a second Foxy window for the same game space now stops at the already-running notice without saving configuration, starting database tasks, or processing a pending database wipe.
 - Joining a server now shows enabled Steam and TeamSpeak 3 warnings before checking the server and its addons. Steam must be running to continue; TeamSpeak remains an advisory warning. Missing external addons are also reported when server-addon checking is disabled.

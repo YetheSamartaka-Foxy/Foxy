@@ -65,6 +65,8 @@ Windows updates keep saved repositories, settings, and databases. Silent install
 
 Linux in-app updates use Foxy's self-extracting `.sh` installer. System installs may prompt for administrator privileges through `pkexec` when the install prefix is not writable.
 
+Windows Foxy running through Wine can also detect native Linux Steam and launch Arma 3 through its selected Proton runtime. See the [launch setup](wiki/User-Guide.md#how-each-game-launches).
+
 ### Build from source
 
 Requirements:
