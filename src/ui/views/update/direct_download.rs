@@ -94,10 +94,11 @@ impl Foxy {
                 }
                 ui.add_space(10.0);
                 ui.label(stage_text.clone());
+                let motion = update_bar_motion(running, self.download_paused, false);
                 ui.add(
-                    ProgressBar::new(progress_pct)
+                    ActivityBar::new(transfer_progress(progress_pct, motion))
                         .fill(self.color_primary_accent())
-                        .show_percentage()
+                        .motion(motion)
                         .text(format!("{:.1}%", progress_pct * 100.0)),
                 );
 

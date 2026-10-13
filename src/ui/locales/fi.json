@@ -276,6 +276,8 @@
     "Write detailed hashing, checking, download, network, database, disk and memory diagnostics to the log files. Useful when reporting a performance problem; the logs grow faster while enabled. Always on while Benchmarks is enabled.": "Kirjoita lokitiedostoihin yksityiskohtaiset hajautus-, tarkistus-, lataus-, verkko-, tietokanta-, levy- ja muistidiagnostiikat. Hyödyllinen, kun raportoit suorituskykyongelmasta; lokit kasvavat nopeammin, kun ne ovat käytössä. Aina päällä, kun suorituskykymittaukset ovat käytössä.",
     "Hide repository image": "Piilota arkiston kuva",
     "Hide the banner image shown at the top of the repository and repository space views. Individual repositories can override this in their settings.": "Piilottaa arkiston ja arkistotilan näkymien yläosassa näkyvän bannerikuvan. Yksittäiset arkistot voivat ohittaa tämän asetuksissaan.",
+    "Reduce motion": "Vähennä liikettä",
+    "Stop the blinking, bubbling and sparkling animations on progress indicators and turn off interface transitions. Progress and status text still update.": "Pysäyttää edistymisilmaisimien vilkkuvat, kuplivat ja kimaltelevat animaatiot ja poistaa käyttöliittymän siirtymät käytöstä. Edistyminen ja tilateksti päivittyvät edelleen.",
     "FPS": "FPS",
     "Current process memory and estimated Foxy-owned allocations. Values are approximate and exclude some allocator, driver, and OS caching overhead.": "Nykyinen prosessimuisti ja arvioidut Foxy-omisteiset allokaatiot. Arvot ovat likimääräisiä ja eivät sisällä joitakin allokaattori-, ajuri- ja käyttöjärjestelmävälimuistikustannuksia.",
     "Capture snapshot": "Ota tilannekuva",

@@ -206,7 +206,10 @@ pub fn install(case: &Value, config: &Path, run: &Path) -> Result<()> {
         // flat legacy fixture over it would trigger the game-space migration
         // and replace the very state the case is measuring.
         None if seeded => return Ok(()),
-        None => generated(case)?,
+        None => {
+            create_run_folders(case, run)?;
+            generated(case)?
+        }
     };
     let files = fixture["files"]
         .as_object()
@@ -216,6 +219,32 @@ pub fn install(case: &Value, config: &Path, run: &Path) -> Result<()> {
     write_json(&run.join("fixture.json"), &fixture)?;
     for (name, value) in files {
         write_json(&config.join(name), value)?;
+    }
+    Ok(())
+}
+
+/// Creates the generated repository and space folders that live inside the run
+/// directory, empty, as a person picks a fresh folder: a missing folder makes
+/// the app's first check stop at its moved-folder guard.
+fn create_run_folders(case: &Value, run: &Path) -> Result<()> {
+    let extra_paths = case["extra_repositories"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|extra| &extra["path"]);
+    let paths = std::iter::once(&case["repository"]["path"])
+        .chain(extra_paths)
+        .chain(std::iter::once(&case["space"]["shared_path"]))
+        .filter_map(Value::as_str)
+        .map(Path::new)
+        .filter(|path| {
+            path.starts_with(run)
+                && !path
+                    .components()
+                    .any(|part| matches!(part, std::path::Component::ParentDir))
+        });
+    for path in paths {
+        fs::create_dir_all(path)?;
     }
     Ok(())
 }
@@ -274,5 +303,24 @@ mod tests {
         );
         assert!(validate_files(json!({"repositories.json":{}}).as_object().unwrap()).is_err());
         assert!(validate_files(json!({"../settings.json":{}}).as_object().unwrap()).is_err());
+    }
+    #[test]
+    fn only_repository_folders_inside_the_run_are_created() {
+        let root = tempfile::tempdir().unwrap();
+        let run = root.path().join("run");
+        let outside = root.path().join("outside");
+        let case = json!({
+            "repository": {"path": run.join("payload")},
+            "extra_repositories": [
+                {"path": outside.join("elsewhere")},
+                {"path": run.join("..").join("escaped")}
+            ],
+            "space": {"shared_path": run.join("space")}
+        });
+        create_run_folders(&case, &run).unwrap();
+        assert!(run.join("payload").is_dir());
+        assert!(run.join("space").is_dir());
+        assert!(!outside.exists());
+        assert!(!root.path().join("escaped").exists());
     }
 }

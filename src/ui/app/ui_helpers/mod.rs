@@ -1,3 +1,4 @@
+pub(crate) mod activity;
 mod danger;
 mod input;
 mod log_export;

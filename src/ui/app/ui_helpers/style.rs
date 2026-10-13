@@ -423,6 +423,27 @@ impl Foxy {
         }
     }
 
+    /// Reduce motion zeroes egui's animation time, which stops Foxy's activity
+    /// visuals along with egui's own transitions. Stable-render screenshots
+    /// own the value while they are on.
+    pub(in crate::ui::app) fn apply_runtime_motion_preference(&self, ctx: &egui::Context) {
+        if self
+            .agent_gui
+            .as_ref()
+            .is_some_and(|runtime| runtime.stable_render)
+        {
+            return;
+        }
+        let target = if self.settings_view_state.reduce_motion {
+            0.0
+        } else {
+            egui::Style::default().animation_time
+        };
+        if ctx.global_style().animation_time != target {
+            ctx.all_styles_mut(|style| style.animation_time = target);
+        }
+    }
+
     /// Drop every frame-persistent galley cache.
     ///
     /// Cached `Arc<Galley>`s hold pixel UVs into egui's font atlas. When egui

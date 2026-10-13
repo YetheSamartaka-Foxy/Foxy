@@ -276,6 +276,8 @@
     "Write detailed hashing, checking, download, network, database, disk and memory diagnostics to the log files. Useful when reporting a performance problem; the logs grow faster while enabled. Always on while Benchmarks is enabled.": "詳細なハッシュ、チェック、ダウンロード、ネットワーク、データベース、ディスク、メモリの診断をログ ファイルに書き込みます。パフォーマンスの問題を報告する場合に役立ちます。有効にすると、ログの増大が速くなります。ベンチマークが有効になっている間は常にオンになります。",
     "Hide repository image": "リポジトリ画像を非表示",
     "Hide the banner image shown at the top of the repository and repository space views. Individual repositories can override this in their settings.": "リポジトリおよびリポジトリスペースビューの上部に表示されるバナー画像を非表示にします。個々のリポジトリは設定でこれを上書きできます。",
+    "Reduce motion": "動きを減らす",
+    "Stop the blinking, bubbling and sparkling animations on progress indicators and turn off interface transitions. Progress and status text still update.": "進行状況インジケーターの点滅、泡、きらめきのアニメーションを止め、画面切り替えの効果をオフにします。進行状況とステータスの表示は引き続き更新されます。",
     "FPS": "FPS",
     "Current process memory and estimated Foxy-owned allocations. Values are approximate and exclude some allocator, driver, and OS caching overhead.": "現在のプロセスメモリとFoxyが所有する推定割り当て量です。値は概算であり、一部のアロケータ、ドライバー、およびOSキャッシュのオーバーヘッドは含まれません。",
     "Capture snapshot": "スナップショットを取得",

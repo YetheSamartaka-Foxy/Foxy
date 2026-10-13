@@ -546,6 +546,16 @@ impl Foxy {
                             changed,
                         );
 
+                        Self::render_wrapped_settings_checkbox(
+                            ui,
+                            true,
+                            &mut self.settings_view_state.reduce_motion,
+                            tr("Reduce motion"),
+                            Some(tr("Stop the blinking, bubbling and sparkling animations on progress indicators and turn off interface transitions. Progress and status text still update.")),
+                            row_width,
+                            changed,
+                        );
+
                         let close_after_launch_checkbox = Self::render_wrapped_settings_checkbox(
                             ui,
                             true,

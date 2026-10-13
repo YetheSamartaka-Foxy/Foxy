@@ -1,6 +1,11 @@
 # 1.2.1
 ## Added
 - Export logs to ZIP is now available beside the activity log button in the footer and in troubleshooting notices and error dialogs, making it easier to share diagnostic logs with support.
+- New animated progress: progress bars are made of small triangles in a few tones of the bar's color that blink and bubble while work runs, and sweep a light along while the amount of work is not known yet. A finished bar flashes once.
+- Checks and integrity rechecks show a verification map that fills as files are confirmed, an icon names the running work, and a light runs around a running banner's border, which flares when the work finishes.
+- Repositories in the sidebar show a small triangle orb and a line of triangles under their name while an operation runs, and repository space Recheck all and Update all show one block per repository as each one finishes.
+- The update view's speed history now shades the area under its line and marks the newest sample while the transfer runs.
+- A new **Reduce motion** setting in Application settings stops these animations and interface transitions. Progress and status text still update.
 
 ## Fixed
 - Windows updates no longer repeat a previously selected full data reset, preserving saved repositories, settings, and databases. The reset checkbox always starts unchecked and must be explicitly ticked and confirmed for each manual install. Silent installers always keep user data. This fix does not require a database wipe.
@@ -12,6 +17,10 @@
 - Checking a partially installed repository in a shared folder no longer pauses with a wrong-folder warning when most of its addons have never been downloaded.
 - External addons shared by several repositories now appear when filtering by any of those repositories, including optional addons.
 - Foxy's version number now comes from the latest changelog release, keeping the displayed version and update checks in sync with the release notes.
+- Resuming a paused download with a download speed limit no longer stops the download with an error.
+- Cancelling a download now keeps showing the cancelling state until it finishes, instead of flipping back to download progress for a few seconds.
+- Repository space Recheck all and Update all now show the first repository as running as soon as the run starts.
+- Long repository space and folder names no longer push the repository list wider than the sidebar and cut off its collapse buttons.
 
 # 1.2.0
 ## Added

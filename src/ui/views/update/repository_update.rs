@@ -1,5 +1,9 @@
 use super::*;
+use crate::ui::app::{paint_area_under, paint_bar_label, paint_live_marker, rise_effect};
 use crate::ui::views::galley_cache;
+
+const MOD_DONE_FLASH_SECONDS: f64 = 0.9;
+const UPDATE_FINISHED_FLASH_SECONDS: f64 = 1.2;
 
 impl Foxy {
     pub fn render_repository_update_view(&mut self, ui: &mut Ui) {
@@ -468,7 +472,7 @@ impl Foxy {
                                                         &[("size", fmt_bytes(m.total_bytes))],
                                                     );
                                                     let response = ui.add(
-                                                        ProgressBar::new(1.0)
+                                                        ActivityBar::new(Some(1.0))
                                                             .fill(self.color_success()),
                                                     );
                                                     paint_update_progress_bar_text_left(
@@ -520,8 +524,23 @@ impl Foxy {
                                                     } else {
                                                         bar_text
                                                     };
-                                                    let response =
-                                                        ui.add(ProgressBar::new(pct).fill(fill));
+                                                    let motion = update_bar_motion(
+                                                        !mod_done && per_mod.is_some(),
+                                                        self.download_paused,
+                                                        in_cancel_stage,
+                                                    );
+                                                    let flash = rise_effect(
+                                                        ui,
+                                                        Id::new(("update-mod-done", &m.name)),
+                                                        mod_done,
+                                                        MOD_DONE_FLASH_SECONDS,
+                                                    );
+                                                    let response = ui.add(
+                                                        ActivityBar::new(Some(pct))
+                                                            .fill(fill)
+                                                            .motion(motion)
+                                                            .flash(flash),
+                                                    );
                                                     paint_update_progress_bar_text_left(
                                                         ui,
                                                         response.rect,
@@ -539,7 +558,7 @@ impl Foxy {
                                                         &[("size", fmt_bytes(m.total_bytes))],
                                                     );
                                                     let response = ui.add(
-                                                        ProgressBar::new(1.0)
+                                                        ActivityBar::new(Some(1.0))
                                                             .fill(self.color_success()),
                                                     );
                                                     paint_update_progress_bar_text_left(
@@ -564,7 +583,7 @@ impl Foxy {
                                                         ],
                                                     );
                                                     let response = ui.add(
-                                                        ProgressBar::new(0.0)
+                                                        ActivityBar::new(Some(0.0))
                                                             .fill(self.color_text_error()),
                                                     );
                                                     paint_update_progress_bar_text_left(
@@ -590,7 +609,11 @@ impl Foxy {
                     && let Some(summary) = &self.download_summary {
                         ui.separator();
                         self.render_download_summary_stats(ui, summary);
-                        self.render_download_summary_speed_graph(ui, summary);
+                        self.render_download_summary_speed_graph(
+                            ui,
+                            summary,
+                            downloading && !download_finished_for_selected && !self.download_paused,
+                        );
                         ui.add_space(6.0);
                     }
 
@@ -748,13 +771,22 @@ impl Foxy {
                 };
 
                 let rounding = CornerRadius::same(6);
-                ui.painter().rect_filled(rect, rounding, bg_color);
-
-                if progress_pct > 0.0 {
-                    let mut fill_rect = rect;
-                    fill_rect.max.x = rect.min.x + (rect.width() * progress_pct).min(rect.width());
-                    ui.painter().rect_filled(fill_rect, rounding, fill_color);
-                }
+                let footer_motion = update_bar_motion(
+                    downloading && !download_finished_for_selected,
+                    self.download_paused,
+                    in_cancel_stage,
+                );
+                ActivityBar::new(transfer_progress(progress_pct, footer_motion))
+                    .fill(fill_color)
+                    .track(bg_color)
+                    .motion(footer_motion)
+                    .flash(rise_effect(
+                        ui,
+                        Id::new("repository-update-finished"),
+                        download_finished_for_selected,
+                        UPDATE_FINISHED_FLASH_SECONDS,
+                    ))
+                    .paint_at(ui, rect);
 
                 ui.painter().rect_stroke(
                     rect,
@@ -1009,10 +1041,12 @@ impl Foxy {
         });
     }
 
+    /// `live` marks each lane's newest sample while the transfer runs.
     fn render_download_summary_speed_graph(
         &self,
         ui: &mut Ui,
         summary: &crate::ui::types::DownloadSummary,
+        live: bool,
     ) {
         ui.add_space(4.0);
         ui.label(self.t("Speed history"));
@@ -1228,7 +1262,7 @@ impl Foxy {
                 3 => SummaryGraphValue::CpuPercent,
                 _ => SummaryGraphValue::MemoryBytes,
             };
-            draw_summary_lane(
+            let newest = draw_summary_lane(
                 SummaryGraphLaneContext {
                     painter: &painter,
                     lane_rect,
@@ -1248,6 +1282,9 @@ impl Foxy {
                     max_value: spec.max_value,
                 },
             );
+            if live && let Some(newest) = newest {
+                paint_live_marker(ui, &painter, newest, spec.color);
+            }
         }
 
         let axis_y = content_rect.bottom() - 9.0;
@@ -1382,7 +1419,11 @@ enum SummaryGraphValue {
     MemoryBytes,
 }
 
-fn draw_summary_lane(context: SummaryGraphLaneContext<'_>, style: SummaryGraphLaneStyle<'_>) {
+/// Returns the point of the newest sample when it has a value to plot.
+fn draw_summary_lane(
+    context: SummaryGraphLaneContext<'_>,
+    style: SummaryGraphLaneStyle<'_>,
+) -> Option<egui::Pos2> {
     let painter = context.painter;
     let lane_rect = context.lane_rect;
     let plot_rect = context.plot_rect;
@@ -1435,11 +1476,10 @@ fn draw_summary_lane(context: SummaryGraphLaneContext<'_>, style: SummaryGraphLa
         egui::FontId::proportional(10.0),
         style.dim_color,
     );
-    if points.len() >= 2 {
-        painter.add(egui::Shape::line(
-            points.iter().map(|(_, point)| *point).collect(),
-            egui::Stroke::new(2.0, style.color),
-        ));
+    let line: Vec<egui::Pos2> = points.iter().map(|(_, point)| *point).collect();
+    paint_area_under(painter, &line, plot_rect.bottom(), style.color);
+    if line.len() >= 2 {
+        painter.add(egui::Shape::line(line, egui::Stroke::new(2.0, style.color)));
     } else if let Some((_, point)) = points.first() {
         painter.circle_filled(*point, 2.0, style.color);
     }
@@ -1453,6 +1493,10 @@ fn draw_summary_lane(context: SummaryGraphLaneContext<'_>, style: SummaryGraphLa
         );
         painter.circle_filled(*point, 3.0, style.color);
     }
+    points
+        .last()
+        .filter(|(idx, _)| *idx + 1 == context.samples.len())
+        .map(|(_, point)| *point)
 }
 
 fn summary_graph_value(
@@ -1669,16 +1713,14 @@ fn paint_update_progress_bar_text(
     font_size: f32,
     color: egui::Color32,
 ) {
-    let font_id = egui::FontId::proportional(font_size);
     let painter = ui.painter().with_clip_rect(rect);
-    painter.text(
-        pos + Vec2::new(1.0, 1.0),
-        align,
-        text,
-        font_id.clone(),
-        egui::Color32::BLACK,
+    let galley = painter.layout_no_wrap(
+        text.to_owned(),
+        egui::FontId::proportional(font_size),
+        egui::Color32::PLACEHOLDER,
     );
-    painter.text(pos, align, text, font_id, color);
+    let at = align.anchor_size(pos, galley.size()).min;
+    paint_bar_label(&painter, galley, at, color);
 }
 
 fn update_view_downloader_bar_text_size(
@@ -1843,6 +1885,15 @@ mod tests {
             "Cancel translated",
             "Revert translated",
         ));
+    }
+
+    #[test]
+    fn download_bars_move_with_the_transfer_state() {
+        assert_eq!(update_bar_motion(true, false, false), BarMotion::Forward);
+        assert_eq!(update_bar_motion(true, true, false), BarMotion::Held);
+        assert_eq!(update_bar_motion(true, true, true), BarMotion::Backward);
+        assert_eq!(update_bar_motion(true, false, true), BarMotion::Backward);
+        assert_eq!(update_bar_motion(false, false, true), BarMotion::Still);
     }
 
     #[test]

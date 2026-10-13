@@ -1111,6 +1111,10 @@ impl Foxy {
                     self.needs_repaint = true;
                 }
                 ProgressEvent::Stage { label, percent } => {
+                    let cancel_requested = self.cancel_tx.as_ref().is_some_and(|tx| *tx.borrow());
+                    if Self::stage_hidden_by_cancel(cancel_requested, label) {
+                        continue;
+                    }
                     if self.current_sync_mode == Some(SyncMode::Download) {
                         let hash_stage_label = Self::stage_label_is_download_hashing(label)
                             || Self::stage_label_uses_hash_counter(label);
@@ -1239,6 +1243,12 @@ impl Foxy {
         label == "Hashing..." || label.starts_with("Hashing downloaded files")
     }
 
+    /// A cancel takes a few seconds to wind the work down, and the stages it
+    /// still reports must not replace the cancelling state shown on request.
+    fn stage_hidden_by_cancel(cancel_requested: bool, label: &str) -> bool {
+        cancel_requested && !matches!(label, "Cancelling..." | "Reverting changes")
+    }
+
     fn hashing_files_stage_has_progress(label: &str) -> bool {
         let Some(progress) = label
             .strip_prefix("Hashing ")
@@ -1250,5 +1260,22 @@ impl Foxy {
             return false;
         };
         checked.parse::<usize>().is_ok() && total.parse::<usize>().is_ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::ui::app::Foxy;
+
+    #[test]
+    fn a_requested_cancel_keeps_its_label_over_late_stages() {
+        assert!(Foxy::stage_hidden_by_cancel(true, "Download 361/864 50.9%"));
+        assert!(Foxy::stage_hidden_by_cancel(true, "Hashing..."));
+        assert!(!Foxy::stage_hidden_by_cancel(true, "Cancelling..."));
+        assert!(!Foxy::stage_hidden_by_cancel(true, "Reverting changes"));
+        assert!(!Foxy::stage_hidden_by_cancel(
+            false,
+            "Download 361/864 50.9%"
+        ));
     }
 }

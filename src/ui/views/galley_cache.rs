@@ -75,6 +75,20 @@ pub(crate) fn truncated_galley(
     max_width: f32,
     text: impl FnOnce() -> String,
 ) -> Arc<Galley> {
+    lazy_galley_truncated(ui, slot, font_id, Color32::PLACEHOLDER, max_width, text)
+}
+
+/// Like [`lazy_galley_colored`] but truncated with an ellipsis to `max_width`,
+/// for a row widget whose label must never push the row wider than its column.
+/// Fold `max_width` into the cache fingerprint.
+pub(crate) fn lazy_galley_truncated(
+    ui: &Ui,
+    slot: &mut Option<Arc<Galley>>,
+    font_id: FontId,
+    color: Color32,
+    max_width: f32,
+    text: impl FnOnce() -> String,
+) -> Arc<Galley> {
     if let Some(galley) = slot {
         return galley.clone();
     }
@@ -82,7 +96,7 @@ pub(crate) fn truncated_galley(
         text(),
         TextFormat {
             font_id,
-            color: Color32::PLACEHOLDER,
+            color,
             valign: Align::Center,
             ..Default::default()
         },

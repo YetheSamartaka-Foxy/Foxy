@@ -1,6 +1,12 @@
-use super::{RepositoryActionBannerAction, RepositoryBannerResponse, RepositoryUiAction};
+use super::{
+    BANNER_CORNER_RADIUS, BANNER_FLARE_SECONDS, RepositoryActionBannerAction,
+    RepositoryBannerResponse, RepositoryUiAction,
+};
 use crate::core::api::SyncMode;
-use crate::ui::app::Foxy;
+use crate::ui::app::{
+    ActivityBar, ActivityIcon, BarMotion, Foxy, VerificationMap, paint_border_beam,
+    paint_border_flare, rise_effect,
+};
 use crate::ui::i18n::tr;
 use crate::ui::palette;
 use crate::ui::types::{FoxyView, RepositorySettingsTab};
@@ -498,10 +504,17 @@ impl Foxy {
                             palette::WARN,
                             None,
                             None,
+                            None,
                         );
                         ui.add_space(10.0);
                     }
 
+                    let check_finished_flare = rise_effect(
+                        ui,
+                        egui::Id::new(("repository-check-finished", selected_idx)),
+                        status_banner.is_none() && completed_check_banner.is_some(),
+                        BANNER_FLARE_SECONDS,
+                    );
                     if let Some(status_banner) = status_banner {
                         let banner_font_size = self
                             .settings_view_state
@@ -515,16 +528,22 @@ impl Foxy {
                         let hint = status_banner.hint;
                         let progress = status_banner.progress;
                         let cancellable = status_banner.cancellable;
+                        let glyph = status_banner.glyph;
+                        let verification = status_banner.verification;
                         let elapsed_label = status_banner_elapsed_label.unwrap_or_default();
 
-                        Frame::NONE
+                        let banner = Frame::NONE
                             .fill(status_banner_fill)
                             .stroke(egui::Stroke::new(1.0, status_banner_stroke))
-                            .corner_radius(CornerRadius::same(10))
+                            .corner_radius(CornerRadius::same(BANNER_CORNER_RADIUS))
                             .inner_margin(Margin::same(12))
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
-                                    ui.add(crate::ui::app::PacedSpinner::new().size(detail_font_size.max(16.0)));
+                                    ui.add(
+                                        ActivityIcon::new(glyph)
+                                            .size(banner_font_size.max(18.0))
+                                            .color(status_banner_stroke),
+                                    );
                                     ui.add_space(8.0);
                                     ui.label(
                                         RichText::new(title.as_str())
@@ -568,19 +587,32 @@ impl Foxy {
                                         .size(hint_font_size)
                                         .color(status_banner_dim),
                                 );
-                                if let Some(progress) = progress {
-                                    ui.add_space(8.0);
+                                ui.add_space(8.0);
+                                if verification {
+                                    ui.add(VerificationMap::new(
+                                        progress,
+                                        status_banner_stroke,
+                                        self.color_card_bg(),
+                                    ));
+                                } else {
                                     ui.add(
-                                        egui::ProgressBar::new(progress)
-                                            .desired_width(ui.available_width())
-                                            .fill(status_banner_stroke),
+                                        ActivityBar::new(progress)
+                                            .fill(status_banner_stroke)
+                                            .motion(BarMotion::Forward)
+                                            .height(VerificationMap::HEIGHT),
                                     );
                                 }
                             });
+                        paint_border_beam(
+                            ui,
+                            banner.response.rect.shrink(0.5),
+                            f32::from(BANNER_CORNER_RADIUS),
+                            status_banner_stroke,
+                        );
                         ui.add_space(10.0);
                     } else if let Some(completed_check_banner) = completed_check_banner {
                         let update_ready_label = tr("Update ready - click here");
-                        let response = self.render_repository_message_banner(
+                        let banner = self.render_repository_message_banner(
                             ui,
                             completed_check_banner.title.as_str(),
                             completed_check_banner.detail.as_str(),
@@ -591,8 +623,18 @@ impl Foxy {
                             )),
                             (!completed_check_banner.show_pending_action)
                                 .then_some(dismiss_label.as_str()),
+                            None,
                         );
-                        match response {
+                        if let Some(flare) = check_finished_flare {
+                            paint_border_flare(
+                                ui,
+                                banner.response.rect.shrink(0.5),
+                                f32::from(BANNER_CORNER_RADIUS),
+                                completed_check_banner.stroke_color,
+                                flare,
+                            );
+                        }
+                        match banner.inner {
                             RepositoryBannerResponse::ActionClicked => {
                                 Self::queue_open_pending_update_action(
                                     &mut open_pending_update_action,
@@ -610,14 +652,20 @@ impl Foxy {
                         // without first opening (and then closing) the summary.
                         let allow_dismiss = action_banner.action
                             == RepositoryActionBannerAction::UpdateSummary;
-                        let response = self.render_repository_message_banner(
-                            ui,
-                            action_banner.title.as_str(),
-                            action_banner.detail.as_str(),
-                            action_banner.stroke_color,
-                            Some((action_banner.button_label.as_str(), action_banner.button_fill)),
-                            allow_dismiss.then_some(dismiss_label.as_str()),
-                        );
+                        let response = self
+                            .render_repository_message_banner(
+                                ui,
+                                action_banner.title.as_str(),
+                                action_banner.detail.as_str(),
+                                action_banner.stroke_color,
+                                Some((
+                                    action_banner.button_label.as_str(),
+                                    action_banner.button_fill,
+                                )),
+                                allow_dismiss.then_some(dismiss_label.as_str()),
+                                action_banner.activity,
+                            )
+                            .inner;
                         if response == RepositoryBannerResponse::DismissClicked {
                             let idx = selected_idx;
                             open_summary_action = Some(Box::new(move |app| {

@@ -276,6 +276,8 @@
     "Write detailed hashing, checking, download, network, database, disk and memory diagnostics to the log files. Useful when reporting a performance problem; the logs grow faster while enabled. Always on while Benchmarks is enabled.": "Skriv detaljerad diagnostik för hashning, kontroll, nedladdning, nätverk, databas, disk och minne till loggfilerna. Användbart vid rapportering av ett prestandaproblem; loggarna växer snabbare när det är aktiverat. Alltid på när Benchmarks är aktiverade.",
     "Hide repository image": "Dölj lagringsplatsens bild",
     "Hide the banner image shown at the top of the repository and repository space views. Individual repositories can override this in their settings.": "Döljer bannerbilden som visas högst upp i vyerna för lagringsplats och lagringsplatsutrymme. Enskilda lagringsplatser kan åsidosätta detta i sina inställningar.",
+    "Reduce motion": "Minska rörelse",
+    "Stop the blinking, bubbling and sparkling animations on progress indicators and turn off interface transitions. Progress and status text still update.": "Stoppar de blinkande, bubblande och gnistrande animationerna på förloppsindikatorer och stänger av övergångar i gränssnittet. Förlopp och statustext uppdateras fortfarande.",
     "FPS": "FPS",
     "Current process memory and estimated Foxy-owned allocations. Values are approximate and exclude some allocator, driver, and OS caching overhead.": "Aktuellt processminne och uppskattade Foxy-ägda allokeringar. Värden är ungefärliga och exkluderar vissa allokerare, drivrutins- och OS-caching-overhead.",
     "Capture snapshot": "Ta ögonblicksbild",

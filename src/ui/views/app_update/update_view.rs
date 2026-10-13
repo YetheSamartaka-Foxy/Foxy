@@ -9,7 +9,11 @@ impl Foxy {
                 bytes_total,
             } => {
                 ui.label(self.t("Downloading installer..."));
-                ui.add(ProgressBar::new(*progress).show_percentage());
+                ui.add(
+                    ActivityBar::new(Some(*progress))
+                        .motion(BarMotion::Forward)
+                        .text(format!("{}%", (*progress * 100.0) as usize)),
+                );
                 ui.label(format!(
                     "{} / {} MB",
                     format_mb(*bytes_done),
@@ -18,7 +22,7 @@ impl Foxy {
             }
             UpdateCheckStatus::Verifying => {
                 ui.label(self.t("Verifying installer integrity..."));
-                ui.add(crate::ui::app::PacedSpinner::new());
+                ui.add(ActivityIcon::new(ActivityGlyph::Shield));
             }
             UpdateCheckStatus::ReadyToInstall { installer_path } => {
                 let path = installer_path.clone();

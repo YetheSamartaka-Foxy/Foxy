@@ -1,3 +1,4 @@
+mod agent_caption;
 pub mod agent_driver;
 pub mod agent_support;
 mod backup;
@@ -12,6 +13,11 @@ mod runtime;
 mod scheduling;
 mod state;
 mod ui_helpers;
+pub(crate) use ui_helpers::activity::{
+    ActivityBar, ActivityGlyph, ActivityIcon, BarMotion, ProgressOrb, StepTrack, VerificationMap,
+    paint_area_under, paint_bar_label, paint_border_beam, paint_border_flare, paint_live_marker,
+    rise_effect, transfer_progress,
+};
 pub(crate) use ui_helpers::spinner::{PROGRESS_FRAME_INTERVAL, PacedSpinner, request_frame_after};
 
 use std::collections::{HashMap, HashSet, VecDeque};

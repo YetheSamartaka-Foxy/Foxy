@@ -33,6 +33,15 @@ pub(crate) struct AdaptiveBandwidthState {
 }
 
 impl AdaptiveBandwidthState {
+    /// The slowest pace the limiter allows. A paused download drags the
+    /// rolling average towards zero, and a pullback that reached zero would
+    /// leave the next slot an infinite wait.
+    fn floor_bytes_per_sec(&self) -> u64 {
+        RAMP_MIN_START_BYTES_PER_SEC
+            .min(self.max_bytes_per_sec)
+            .max(1)
+    }
+
     fn avg_history_bps(&self) -> Option<u64> {
         if self.avg_speed_samples_bps.is_empty() {
             return None;
@@ -161,7 +170,9 @@ impl AdaptiveBandwidthState {
             let pullback = step
                 .min(self.current_bytes_per_sec.saturating_sub(history_target))
                 .max(RAMP_MIN_STEP_BYTES_PER_SEC);
-            self.current_bytes_per_sec.saturating_sub(pullback)
+            self.current_bytes_per_sec
+                .saturating_sub(pullback)
+                .max(self.floor_bytes_per_sec())
         } else {
             self.current_bytes_per_sec
         };
@@ -284,5 +295,52 @@ impl AdaptiveBandwidthLimiter {
         if !delay.is_zero() {
             sleep(delay).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A limiter mid-transfer whose rolling average fell while the download
+    /// sat paused: the state logged right before a resumed download panicked.
+    fn after_a_pause(max_bytes_per_sec: u64, current_bytes_per_sec: u64) -> AdaptiveBandwidthState {
+        let now = Instant::now();
+        let ago = |seconds| now.checked_sub(Duration::from_secs(seconds)).unwrap_or(now);
+        AdaptiveBandwidthState {
+            max_bytes_per_sec,
+            current_bytes_per_sec,
+            started_at: ago(60),
+            last_adjusted_at: ago(1),
+            next_slot_at: now,
+            observed_bytes: 2_000_000,
+            observed_bytes_at_last_adjust: 2_000_000 - 49_058,
+            sample_window_started_at: now,
+            sample_window_bytes: 0,
+            avg_speed_samples_bps: VecDeque::from([41_636]),
+            consecutive_low_speed_windows: 0,
+        }
+    }
+
+    #[test]
+    fn a_pullback_after_a_pause_never_stops_the_transfer() {
+        let mut state = after_a_pause(500_000, RAMP_MIN_START_BYTES_PER_SEC);
+        state.adjust_rate_if_due();
+        assert_eq!(state.current_bytes_per_sec, RAMP_MIN_START_BYTES_PER_SEC);
+    }
+
+    #[test]
+    fn a_limit_below_the_ramp_start_is_its_own_floor() {
+        let mut state = after_a_pause(125_000, 125_000);
+        state.adjust_rate_if_due();
+        assert_eq!(state.current_bytes_per_sec, 125_000);
+    }
+
+    #[test]
+    fn a_pullback_above_the_floor_still_slows_down() {
+        let mut state = after_a_pause(2_000_000, 1_000_000);
+        state.adjust_rate_if_due();
+        assert!(state.current_bytes_per_sec < 1_000_000);
+        assert!(state.current_bytes_per_sec >= RAMP_MIN_START_BYTES_PER_SEC);
     }
 }

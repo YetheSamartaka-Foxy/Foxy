@@ -477,6 +477,7 @@ impl Foxy {
                         (self.settings_view_state.font_sizes.repository_view.status_banner as f32)
                             .to_bits(),
                         self.color_text_normal().to_array(),
+                        ui.available_width().to_bits(),
                     )),
                 );
                 if self.drag_source_repo_index.is_some() {

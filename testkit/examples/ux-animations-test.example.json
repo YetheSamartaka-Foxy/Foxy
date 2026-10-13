@@ -1,0 +1,408 @@
+{
+  "id": "ux-animations-test",
+  "kind": "ux",
+  "description": "A paced showcase of the progress animations for a person to watch and review: mana triangle progress bars, the verification map, banner beams and flares, the sidebar orb of triangles and the line of triangles under a repository, paused and draining mana, and a repository space run as triangle blocks. A caption names each scene before it starts, pause steps hold it, and a screenshot after every step lands in the run directory.",
+  "build": "release",
+  "harness": "gui",
+  "timeout_s": 1800,
+  "tags": [
+    "showcase",
+    "animations"
+  ],
+  "notes": "Scenes (about 5 minutes), each opened by a caption: 1 Check for updates into the empty folder: signal icon, verification map, the light running around the border, sidebar orb and the line of triangles under the repository, then the finished banner's flare. 2 download at 4 Mbps, held until bytes flow: the Updating banner's mana triangles, then the update view's blinking mana triangles and live speed graph; paused mana; the same download seen from the repository list. 3 cancel: the bubbles sink. 4 a faster download to the end: the completion surge. 5 integrity recheck: shield icon and the hashing map shedding sparkles. 6 quick check: radar icon. 7 repository space Recheck all: a row of triangle blocks filling one by one, then the space banner's flare. Origins needed under testkit/origin/data: synthetic-parts, sibling-synthetic (repo-a, repo-b), synthetic-tiny and synthetic-large; see Local origin in testkit/README.md.",
+  "origin": {
+    "root": "${REPO_ROOT}\\testkit\\origin\\data",
+    "port": 8139
+  },
+  "repository": {
+    "name": "Mana Showcase",
+    "address": "http://127.0.0.1:8139/synthetic-parts/",
+    "path": "${RUN_DIR}\\payload",
+    "space_id": null,
+    "hide_repo_image": true
+  },
+  "extra_repositories": [
+    {
+      "name": "Vial A",
+      "address": "http://127.0.0.1:8139/sibling-synthetic/repo-a/",
+      "path": "${RUN_DIR}\\space",
+      "space_id": "space-animations-showcase",
+      "hide_repo_image": true
+    },
+    {
+      "name": "Vial B",
+      "address": "http://127.0.0.1:8139/sibling-synthetic/repo-b/",
+      "path": "${RUN_DIR}\\space",
+      "space_id": "space-animations-showcase",
+      "hide_repo_image": true
+    },
+    {
+      "name": "Vial C",
+      "address": "http://127.0.0.1:8139/synthetic-tiny/",
+      "path": "${RUN_DIR}\\space",
+      "space_id": "space-animations-showcase",
+      "hide_repo_image": true
+    },
+    {
+      "name": "Vial D",
+      "address": "http://127.0.0.1:8139/synthetic-large/",
+      "path": "${RUN_DIR}\\space",
+      "space_id": "space-animations-showcase",
+      "hide_repo_image": true
+    }
+  ],
+  "space": {
+    "id": "space-animations-showcase",
+    "name": "Animations Showcase Space",
+    "shared_path": "${RUN_DIR}\\space",
+    "entries": [
+      {
+        "name": "Vial A",
+        "address": "http://127.0.0.1:8139/sibling-synthetic/repo-a/",
+        "required": true
+      },
+      {
+        "name": "Vial B",
+        "address": "http://127.0.0.1:8139/sibling-synthetic/repo-b/",
+        "required": true
+      },
+      {
+        "name": "Vial C",
+        "address": "http://127.0.0.1:8139/synthetic-tiny/",
+        "required": true
+      },
+      {
+        "name": "Vial D",
+        "address": "http://127.0.0.1:8139/synthetic-large/",
+        "required": true
+      }
+    ]
+  },
+  "settings": {
+    "download_speed_limit_mbps": 4,
+    "hide_repository_image": true,
+    "reduce_motion": false,
+    "enable_editor_mission_list": false
+  },
+  "stable_render": false,
+  "screenshots": "each-step",
+  "allow_warnings": [
+    "Filesystem watcher",
+    "Hash profile auto benchmark skipped",
+    "Failed to load repository for cached targets",
+    "Failed to load repository for addon-selection persist",
+    "Fresh deferred subfiles insert requested but table is not empty",
+    "persistent addon hash cache produced zero hits",
+    "High content-hash failure rate",
+    "Loader Message",
+    "objects: (type"
+  ],
+  "steps": [
+    {
+      "command": "window",
+      "action": "maximize"
+    },
+    {
+      "command": "health"
+    },
+    {
+      "command": "select",
+      "repository": 0
+    },
+    {
+      "command": "caption",
+      "title": "Animations showcase",
+      "detail": "Seven scenes, about five minutes. A caption like this one names each scene before it starts.",
+      "ms": 4000
+    },
+    {
+      "command": "caption",
+      "title": "Scene 1 of 7: Check for updates",
+      "detail": "Watch the verification map in the banner, the the light running around the border, and the orb and line of triangles on the sidebar repository. The banner flares when the check finishes.",
+      "ms": 5000
+    },
+    {
+      "command": "invoke",
+      "action": "remote-recheck",
+      "params": {
+        "repo-index": 0
+      },
+      "allow_destructive": true
+    },
+    {
+      "command": "pause",
+      "ms": 3000
+    },
+    {
+      "command": "wait",
+      "condition": {
+        "kind": "busy-reason-cleared",
+        "reason": "core-sync"
+      },
+      "timeout_ms": 240000
+    },
+    {
+      "command": "pause",
+      "ms": 4000
+    },
+    {
+      "command": "caption",
+      "title": "Scene 2 of 7: Download",
+      "detail": "A download held to 4 Mbps. First the Updating banner's triangle bar, then the update view's per-mod triangle bars and the live speed graph.",
+      "ms": 5000
+    },
+    {
+      "command": "invoke",
+      "action": "start-sync",
+      "params": {
+        "repo-index": 0
+      },
+      "allow_destructive": true
+    },
+    {
+      "command": "pause",
+      "ms": 2500
+    },
+    {
+      "command": "wait",
+      "condition": {
+        "kind": "download-transferring"
+      },
+      "timeout_ms": 180000
+    },
+    {
+      "command": "pause",
+      "ms": 5000
+    },
+    {
+      "command": "invoke",
+      "action": "open-update-view"
+    },
+    {
+      "command": "pause",
+      "ms": 8000
+    },
+    {
+      "command": "caption",
+      "title": "Scene 2 of 7: Paused, then resumed",
+      "detail": "Pausing the download holds every bar still. After a few seconds it resumes and the triangles blink again.",
+      "ms": 4000
+    },
+    {
+      "command": "invoke",
+      "action": "pause-download"
+    },
+    {
+      "command": "pause",
+      "ms": 5000
+    },
+    {
+      "command": "invoke",
+      "action": "resume-download"
+    },
+    {
+      "command": "pause",
+      "ms": 4000
+    },
+    {
+      "command": "caption",
+      "title": "Scene 2 of 7: The download from the repository list",
+      "detail": "The same download, seen from the main view: the banner bar, plus the orb and line of triangles on the repository in the sidebar.",
+      "ms": 4500
+    },
+    {
+      "command": "invoke",
+      "action": "close-modals"
+    },
+    {
+      "command": "invoke",
+      "action": "open-repository-list"
+    },
+    {
+      "command": "pause",
+      "ms": 6000
+    },
+    {
+      "command": "caption",
+      "title": "Scene 3 of 7: Cancel",
+      "detail": "Back in the update view, the download is cancelled. While changes roll back, the bubbles in the bars sink instead of rising.",
+      "ms": 4500
+    },
+    {
+      "command": "invoke",
+      "action": "open-update-view"
+    },
+    {
+      "command": "pause",
+      "ms": 3000
+    },
+    {
+      "command": "invoke",
+      "action": "cancel-download"
+    },
+    {
+      "command": "pause",
+      "ms": 4000
+    },
+    {
+      "command": "wait",
+      "condition": {
+        "kind": "busy-reason-cleared",
+        "reason": "core-sync"
+      },
+      "timeout_ms": 120000
+    },
+    {
+      "command": "pause",
+      "ms": 2000
+    },
+    {
+      "command": "caption",
+      "title": "Scene 4 of 7: Download to the end",
+      "detail": "A faster download that runs to completion. Watch for the surge of light across each bar as it finishes.",
+      "ms": 4500
+    },
+    {
+      "command": "set-setting",
+      "key": "download-speed-limit-mbps",
+      "value": "24"
+    },
+    {
+      "command": "invoke",
+      "action": "start-sync",
+      "params": {
+        "repo-index": 0
+      },
+      "allow_destructive": true
+    },
+    {
+      "command": "invoke",
+      "action": "open-update-view"
+    },
+    {
+      "command": "wait",
+      "condition": {
+        "kind": "download-transferring"
+      },
+      "timeout_ms": 180000
+    },
+    {
+      "command": "pause",
+      "ms": 4000
+    },
+    {
+      "command": "wait",
+      "condition": {
+        "kind": "download-complete"
+      },
+      "timeout_ms": 300000
+    },
+    {
+      "command": "pause",
+      "ms": 6000
+    },
+    {
+      "command": "invoke",
+      "action": "close-modals"
+    },
+    {
+      "command": "pause",
+      "ms": 2000
+    },
+    {
+      "command": "caption",
+      "title": "Scene 5 of 7: Integrity recheck",
+      "detail": "Every file is hashed again: the shield icon and the verification map filling as files are confirmed.",
+      "ms": 4500
+    },
+    {
+      "command": "invoke",
+      "action": "recheck-integrity",
+      "params": {
+        "repo-index": 0
+      },
+      "allow_destructive": true
+    },
+    {
+      "command": "wait",
+      "condition": {
+        "kind": "busy-reason-cleared",
+        "reason": "core-sync"
+      },
+      "timeout_ms": 240000
+    },
+    {
+      "command": "pause",
+      "ms": 5000
+    },
+    {
+      "command": "caption",
+      "title": "Scene 6 of 7: Quick check",
+      "detail": "A fast scan for local changes, marked by the radar icon. It is short, so watch closely.",
+      "ms": 4000
+    },
+    {
+      "command": "invoke",
+      "action": "quick-check",
+      "params": {
+        "repo-index": 0
+      }
+    },
+    {
+      "command": "wait",
+      "condition": {
+        "kind": "busy-reason-cleared",
+        "reason": "core-sync"
+      },
+      "timeout_ms": 120000
+    },
+    {
+      "command": "pause",
+      "ms": 3000
+    },
+    {
+      "command": "caption",
+      "title": "Scene 7 of 7: Repository space Recheck all",
+      "detail": "Four repositories in one space are rechecked in turn. Each one fills its own triangle block, and the space banner flares at the end.",
+      "ms": 5000
+    },
+    {
+      "command": "select",
+      "space": "space-animations-showcase"
+    },
+    {
+      "command": "pause",
+      "ms": 3000
+    },
+    {
+      "command": "invoke",
+      "action": "space-recheck-all",
+      "params": {
+        "space": "space-animations-showcase"
+      },
+      "allow_destructive": true
+    },
+    {
+      "command": "pause",
+      "ms": 3000
+    },
+    {
+      "command": "wait",
+      "condition": {
+        "kind": "busy-reason-cleared",
+        "reason": "space-bulk"
+      },
+      "timeout_ms": 300000
+    },
+    {
+      "command": "pause",
+      "ms": 6000
+    },
+    {
+      "command": "caption",
+      "title": "End of the showcase",
+      "detail": "Screenshots of every step are in the run folder.",
+      "ms": 3000
+    }
+  ]
+}

@@ -7,18 +7,19 @@ use serde_json::Value;
 
 use crate::cli::args::{
     AgentGuiAddonsArgs, AgentGuiAssertArgs, AgentGuiBackupsArgs, AgentGuiBatchArgs,
-    AgentGuiCheckpointArgs, AgentGuiClickArgs, AgentGuiClockArgs, AgentGuiCommand,
-    AgentGuiContextMenuArgs, AgentGuiDialogArgs, AgentGuiDiffArgs, AgentGuiDownloadSummaryArgs,
-    AgentGuiDragArgs, AgentGuiElementArgs, AgentGuiEventsArgs, AgentGuiExecArgs, AgentGuiFillArgs,
-    AgentGuiFindArgs, AgentGuiFixtureArgs, AgentGuiFocusArgs, AgentGuiHoverArgs,
-    AgentGuiInventoryArgs, AgentGuiInvokeArgs, AgentGuiKeyArgs, AgentGuiLogsArgs,
-    AgentGuiMemoryArgs, AgentGuiMenuSelectArgs, AgentGuiMissionsArgs, AgentGuiModifierArgs,
-    AgentGuiMouseArgs, AgentGuiNavArgs, AgentGuiOpenViewArgs, AgentGuiPendingUpdatesArgs,
-    AgentGuiProfilesArgs, AgentGuiQueryArgs, AgentGuiRepositoriesArgs, AgentGuiResizeArgs,
-    AgentGuiRestoreArgs, AgentGuiScaleArgs, AgentGuiScenarioArgs, AgentGuiScreenshotArgs,
-    AgentGuiScrollArgs, AgentGuiSelectArgs, AgentGuiSetFilterArgs, AgentGuiSetSettingArgs,
-    AgentGuiSettleArgs, AgentGuiSnapshotArgs, AgentGuiSpacesArgs, AgentGuiStableRenderArgs,
-    AgentGuiTextArgs, AgentGuiTypeArgs, AgentGuiWaitArgs, AgentGuiWindowArgs, CliArgs,
+    AgentGuiCaptionArgs, AgentGuiCheckpointArgs, AgentGuiClickArgs, AgentGuiClockArgs,
+    AgentGuiCommand, AgentGuiContextMenuArgs, AgentGuiDialogArgs, AgentGuiDiffArgs,
+    AgentGuiDownloadSummaryArgs, AgentGuiDragArgs, AgentGuiElementArgs, AgentGuiEventsArgs,
+    AgentGuiExecArgs, AgentGuiFillArgs, AgentGuiFindArgs, AgentGuiFixtureArgs, AgentGuiFocusArgs,
+    AgentGuiHoverArgs, AgentGuiInventoryArgs, AgentGuiInvokeArgs, AgentGuiKeyArgs,
+    AgentGuiLogsArgs, AgentGuiMemoryArgs, AgentGuiMenuSelectArgs, AgentGuiMissionsArgs,
+    AgentGuiModifierArgs, AgentGuiMouseArgs, AgentGuiNavArgs, AgentGuiOpenViewArgs,
+    AgentGuiPauseArgs, AgentGuiPendingUpdatesArgs, AgentGuiProfilesArgs, AgentGuiQueryArgs,
+    AgentGuiRepositoriesArgs, AgentGuiResizeArgs, AgentGuiRestoreArgs, AgentGuiScaleArgs,
+    AgentGuiScenarioArgs, AgentGuiScreenshotArgs, AgentGuiScrollArgs, AgentGuiSelectArgs,
+    AgentGuiSetFilterArgs, AgentGuiSetSettingArgs, AgentGuiSettleArgs, AgentGuiSnapshotArgs,
+    AgentGuiSpacesArgs, AgentGuiStableRenderArgs, AgentGuiTextArgs, AgentGuiTypeArgs,
+    AgentGuiWaitArgs, AgentGuiWindowArgs, CliArgs,
 };
 use crate::cli::exit_codes;
 use crate::cli::toon;
@@ -297,6 +298,8 @@ fn command_name(command: &AgentGuiCommand) -> &'static str {
         AgentGuiCommand::Select(_) => "select",
         AgentGuiCommand::Window(_) => "window",
         AgentGuiCommand::Settle(_) => "settle",
+        AgentGuiCommand::Pause(_) => "pause",
+        AgentGuiCommand::Caption(_) => "caption",
         AgentGuiCommand::StableRender(_) => "stable-render",
         AgentGuiCommand::Assert(_) => "assert",
         AgentGuiCommand::ContextMenu(_) => "context-menu",
@@ -521,6 +524,10 @@ fn to_driver_command(
         },
         AgentGuiCommand::Window(AgentGuiWindowArgs { action }) => DriverCommand::Window { action },
         AgentGuiCommand::Settle(AgentGuiSettleArgs { frames }) => DriverCommand::Settle { frames },
+        AgentGuiCommand::Pause(AgentGuiPauseArgs { ms }) => DriverCommand::Pause { ms },
+        AgentGuiCommand::Caption(AgentGuiCaptionArgs { title, detail, ms }) => {
+            DriverCommand::Caption { title, detail, ms }
+        }
         AgentGuiCommand::StableRender(AgentGuiStableRenderArgs { on }) => {
             DriverCommand::StableRender { on }
         }
@@ -748,6 +755,9 @@ fn wait_condition(args: AgentGuiWaitArgs) -> Result<AgentGuiWaitCondition, Comma
     if args.download_complete {
         return Ok(AgentGuiWaitCondition::DownloadComplete);
     }
+    if args.download_transferring {
+        return Ok(AgentGuiWaitCondition::DownloadTransferring);
+    }
     if let Some(fps) = args.fps_above {
         return Ok(AgentGuiWaitCondition::FpsAbove { fps });
     }
@@ -756,7 +766,7 @@ fn wait_condition(args: AgentGuiWaitArgs) -> Result<AgentGuiWaitCondition, Comma
     }
     Err(CommandError::validation(
         "agent-gui.wait",
-        "Provide --text, --view, --idle, --modal-open, --modal-closed, --toast, --busy-reason-cleared, --download-complete, --fps-above, or --node-visible",
+        "Provide --text, --view, --idle, --modal-open, --modal-closed, --toast, --busy-reason-cleared, --download-complete, --download-transferring, --fps-above, or --node-visible",
     ))
 }
 
@@ -1035,6 +1045,7 @@ mod tests {
             toast: None,
             busy_reason_cleared: None,
             download_complete: false,
+            download_transferring: false,
             fps_above: None,
             node_visible: None,
             timeout_ms: 1000,
@@ -1083,6 +1094,14 @@ mod tests {
             })
             .unwrap(),
             AgentGuiWaitCondition::DownloadComplete
+        ));
+        assert!(matches!(
+            wait_condition(AgentGuiWaitArgs {
+                download_transferring: true,
+                ..empty_wait_args()
+            })
+            .unwrap(),
+            AgentGuiWaitCondition::DownloadTransferring
         ));
     }
 

@@ -276,6 +276,8 @@
     "Write detailed hashing, checking, download, network, database, disk and memory diagnostics to the log files. Useful when reporting a performance problem; the logs grow faster while enabled. Always on while Benchmarks is enabled.": "Γράψτε αναλυτικά διαγνωστικά κατακερματισμού, ελέγχου, λήψης, δικτύου, βάσης δεδομένων, δίσκου και μνήμης στα αρχεία καταγραφής. Χρήσιμο κατά την αναφορά ενός προβλήματος απόδοσης. τα αρχεία καταγραφής μεγαλώνουν πιο γρήγορα ενώ είναι ενεργοποιημένα. Πάντα ενεργοποιημένο όσο είναι ενεργοποιημένα τα Benchmarks.",
     "Hide repository image": "Απόκρυψη εικόνας αποθετηρίου",
     "Hide the banner image shown at the top of the repository and repository space views. Individual repositories can override this in their settings.": "Απόκρυψη της εικόνας banner που εμφανίζεται στο επάνω μέρος των προβολών αποθετηρίου και χώρου αποθετηρίου. Μεμονωμένα αποθετήρια μπορούν να το παρακάμψουν στις ρυθμίσεις τους.",
+    "Reduce motion": "Μείωση κίνησης",
+    "Stop the blinking, bubbling and sparkling animations on progress indicators and turn off interface transitions. Progress and status text still update.": "Σταματά τα κινούμενα εφέ αναβοσβησίματος, φυσαλίδων και σπινθήρων στις ενδείξεις προόδου και απενεργοποιεί τις μεταβάσεις του περιβάλλοντος. Η πρόοδος και το κείμενο κατάστασης εξακολουθούν να ενημερώνονται.",
     "FPS": "FPS",
     "Current process memory and estimated Foxy-owned allocations. Values are approximate and exclude some allocator, driver, and OS caching overhead.": "Μνήμη τρέχουσας διεργασίας και εκτιμώμενες εκχωρήσεις Foxy. Οι τιμές είναι κατά προσέγγιση και εξαιρούν ορισμένα γενικά έξοδα εκχωρητή, προγράμματος οδήγησης και προσωρινής αποθήκευσης ΛΣ.",
     "Capture snapshot": "Λήψη στιγμιότυπου",

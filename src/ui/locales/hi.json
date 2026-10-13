@@ -276,6 +276,8 @@
     "Write detailed hashing, checking, download, network, database, disk and memory diagnostics to the log files. Useful when reporting a performance problem; the logs grow faster while enabled. Always on while Benchmarks is enabled.": "लॉग फ़ाइलों में विस्तृत हैशिंग, जाँच, डाउनलोड, नेटवर्क, डेटाबेस, डिस्क और मेमोरी डायग्नोस्टिक्स लिखें। प्रदर्शन समस्या की रिपोर्ट करते समय उपयोगी; सक्षम होने पर लॉग तेजी से बढ़ते हैं। बेंचमार्क सक्षम होने पर हमेशा चालू रहें।",
     "Hide repository image": "रिपॉजिटरी छवि छिपाएं",
     "Hide the banner image shown at the top of the repository and repository space views. Individual repositories can override this in their settings.": "रिपॉजिटरी और रिपॉजिटरी स्पेस दृश्यों के शीर्ष पर दिखाई गई बैनर छवि को छिपाएं। अलग-अलग रिपॉजिटरी अपनी सेटिंग्स में इसे ओवरराइड कर सकती हैं।",
+    "Reduce motion": "गति कम करें",
+    "Stop the blinking, bubbling and sparkling animations on progress indicators and turn off interface transitions. Progress and status text still update.": "प्रगति संकेतकों पर टिमटिमाने, बुलबुले और चमक वाले एनिमेशन रोकें और इंटरफ़ेस ट्रांज़िशन बंद करें। प्रगति और स्थिति टेक्स्ट फिर भी अपडेट होते रहते हैं।",
     "FPS": "FPS",
     "Current process memory and estimated Foxy-owned allocations. Values are approximate and exclude some allocator, driver, and OS caching overhead.": "वर्तमान प्रक्रिया मेमोरी और अनुमानित फ़ॉक्सी-स्वामित्व वाला आवंटन। मान अनुमानित हैं और इसमें कुछ आवंटनकर्ता, ड्राइवर और ओएस कैशिंग ओवरहेड शामिल नहीं हैं।",
     "Capture snapshot": "स्नैपशॉट कैप्चर करें",

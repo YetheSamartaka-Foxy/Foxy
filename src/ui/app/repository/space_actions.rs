@@ -128,6 +128,20 @@ impl Foxy {
         mode: SyncMode,
         selected_repo_indices: &[usize],
     ) -> usize {
+        let queued =
+            self.enqueue_selected_repository_space_sync(space_id, mode, selected_repo_indices);
+        if queued > 0 {
+            self.process_repository_space_sync_queue();
+        }
+        queued
+    }
+
+    fn enqueue_selected_repository_space_sync(
+        &mut self,
+        space_id: &str,
+        mode: SyncMode,
+        selected_repo_indices: &[usize],
+    ) -> usize {
         if self.block_database_update_request() {
             return 0;
         }
@@ -158,11 +172,7 @@ impl Foxy {
                 .push_back((space_id.to_string(), repo_idx, mode));
         }
 
-        let queued = self.repository_space_sync_queue.len();
-        if queued > 0 {
-            self.process_repository_space_sync_queue();
-        }
-        queued
+        self.repository_space_sync_queue.len()
     }
 
     fn sync_mode_for_bulk_mode(mode: RepositorySpaceBulkMode) -> SyncMode {
@@ -225,7 +235,9 @@ impl Foxy {
         mode: RepositorySpaceBulkMode,
         selected_repo_indices: &[usize],
     ) -> usize {
-        let queued = self.queue_selected_repository_space_sync(
+        // Processing starts the first repository and pops it from the queue, so
+        // the targets are read from the queue before it runs.
+        let queued = self.enqueue_selected_repository_space_sync(
             space_id,
             Self::sync_mode_for_bulk_mode(mode),
             selected_repo_indices,
@@ -259,7 +271,7 @@ impl Foxy {
             target_repo_urls,
             completed_repo_urls: HashSet::new(),
         });
-        self.refresh_repository_space_bulk_current_repo();
+        self.process_repository_space_sync_queue();
         queued
     }
 

@@ -241,6 +241,7 @@ impl Foxy {
 
         super::keyboard_focus::repair_lost_keyboard_focus();
         self.apply_runtime_ui_scale(&ctx);
+        self.apply_runtime_motion_preference(&ctx);
         self.invalidate_galley_caches_on_font_atlas_change(&ctx);
         self.log_display_metrics_if_changed(&ctx);
         self.update_fps_estimate(&ctx);

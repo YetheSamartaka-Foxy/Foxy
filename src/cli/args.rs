@@ -236,6 +236,10 @@ pub enum AgentGuiCommand {
     Window(AgentGuiWindowArgs),
     /// Park until N frames render, then return the post-input snapshot.
     Settle(AgentGuiSettleArgs),
+    /// Hold for a real-time span while the app keeps running, then return the snapshot.
+    Pause(AgentGuiPauseArgs),
+    /// Show a scene caption over the app for a real-time span, then return the snapshot.
+    Caption(AgentGuiCaptionArgs),
     /// Toggle stable-render mode for byte-stable screenshots.
     StableRender(AgentGuiStableRenderArgs),
     /// Assert one observed field equals/contains an expected value.
@@ -567,6 +571,26 @@ pub struct AgentGuiSettleArgs {
 }
 
 #[derive(Args, Debug)]
+pub struct AgentGuiPauseArgs {
+    #[arg(long, help = "Milliseconds to hold before returning the snapshot")]
+    pub ms: u64,
+}
+
+#[derive(Args, Debug)]
+pub struct AgentGuiCaptionArgs {
+    #[arg(help = "Scene title shown in the caption (English only, never translated)")]
+    pub title: String,
+    #[arg(long, help = "Optional second line describing what the scene shows")]
+    pub detail: Option<String>,
+    #[arg(
+        long,
+        default_value_t = 3000,
+        help = "Milliseconds to show the caption before returning the snapshot"
+    )]
+    pub ms: u64,
+}
+
+#[derive(Args, Debug)]
 pub struct AgentGuiStableRenderArgs {
     #[arg(
         // A positional bool defaults to a flag action; force it to take a value
@@ -892,6 +916,7 @@ pub struct AgentGuiDialogArgs {
             "toast",
             "busy_reason_cleared",
             "download_complete",
+            "download_transferring",
             "fps_above",
             "node_visible",
         ])
@@ -919,6 +944,11 @@ pub struct AgentGuiWaitArgs {
     pub busy_reason_cleared: Option<String>,
     #[arg(long, help = "Wait until a download has completed")]
     pub download_complete: bool,
+    #[arg(
+        long,
+        help = "Wait until the running download has received its first bytes"
+    )]
+    pub download_transferring: bool,
     #[arg(
         long,
         help = "Wait until the smoothed FPS estimate is at or above this value"

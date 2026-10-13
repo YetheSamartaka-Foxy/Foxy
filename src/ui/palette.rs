@@ -52,6 +52,12 @@ pub const ACTION_DESTRUCTIVE: Color32 = Color32::from_rgb(200, 50, 50);
 /// Text and glyphs drawn on a saturated accent or destructive fill, in every theme
 pub const ON_STRONG_FILL: Color32 = Color32::WHITE;
 
+/// Backing and outline behind text drawn over progress bars, in every theme
+pub const BAR_LABEL_SHADE: Color32 = Color32::BLACK;
+
+/// Dims the app behind a scene caption an agent GUI scenario shows, in every theme
+pub const AGENT_CAPTION_BACKDROP: Color32 = Color32::from_black_alpha(120);
+
 /// Green used to indicate enabled checkbox states
 pub const CHECKBOX_ENABLED: Color32 = Color32::from_rgb(70, 170, 70);
 

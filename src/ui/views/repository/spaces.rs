@@ -1,5 +1,5 @@
 use crate::core::api::SyncMode;
-use crate::ui::app::Foxy;
+use crate::ui::app::{BarMotion, Foxy, StepTrack, paint_border_flare, rise_effect};
 use crate::ui::i18n::fmt_bytes;
 use crate::ui::search_filter::MultiEntryFilter;
 use crate::ui::types::{FoxyView, RepositorySpaceBulkMode};
@@ -9,7 +9,7 @@ use eframe::egui::{
 };
 use log::info;
 
-use super::RepositoryBannerResponse;
+use super::{BANNER_CORNER_RADIUS, BANNER_FLARE_SECONDS, RepositoryBannerResponse};
 
 impl Foxy {
     pub(super) fn render_repository_space_detail(&mut self, ui: &mut Ui, space_id: &str) {
@@ -347,15 +347,36 @@ impl Foxy {
                             self.color_primary_accent(),
                             RichText::new(detail).strong(),
                         );
+                        let (current, motion) = self
+                            .syncing_repository
+                            .map_or((None, BarMotion::Forward), |index| {
+                                self.repository_operation_activity(index)
+                            });
+                        ui.add_space(4.0);
+                        ui.add(
+                            StepTrack::new(
+                                progress.completed_count,
+                                progress.total_count,
+                                self.color_primary_accent(),
+                                self.color_card_bg(),
+                            )
+                            .running(current, motion),
+                        );
                     }
                 });
 
-                if let Some(progress) = self
+                let finished_bulk = self
                     .repository_space_bulk_progress
                     .as_ref()
                     .filter(|progress| progress.space_id == space.id)
-                    .filter(|progress| progress.completed_count >= progress.total_count)
-                {
+                    .filter(|progress| progress.completed_count >= progress.total_count);
+                let bulk_finished_flare = rise_effect(
+                    ui,
+                    egui::Id::new(("space-bulk-finished", space.id.as_str())),
+                    finished_bulk.is_some(),
+                    BANNER_FLARE_SECONDS,
+                );
+                if let Some(progress) = finished_bulk {
                     ui.add_space(8.0);
                     let (title, detail) = match progress.mode {
                         RepositorySpaceBulkMode::RecheckAll => (
@@ -386,15 +407,25 @@ impl Foxy {
                         self.color_success_muted()
                     };
                     let dismiss_label = self.t("Dismiss");
-                    if self.render_repository_message_banner(
+                    let banner = self.render_repository_message_banner(
                         ui,
                         title.as_str(),
                         detail.as_str(),
                         stroke_color,
                         None,
                         Some(dismiss_label.as_str()),
-                    ) == RepositoryBannerResponse::DismissClicked
-                    {
+                        None,
+                    );
+                    if let Some(flare) = bulk_finished_flare {
+                        paint_border_flare(
+                            ui,
+                            banner.response.rect.shrink(0.5),
+                            f32::from(BANNER_CORNER_RADIUS),
+                            stroke_color,
+                            flare,
+                        );
+                    }
+                    if banner.inner == RepositoryBannerResponse::DismissClicked {
                         dismiss_completed_bulk_progress = true;
                     }
                 }

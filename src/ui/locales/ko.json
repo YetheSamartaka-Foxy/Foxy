@@ -276,6 +276,8 @@
     "Write detailed hashing, checking, download, network, database, disk and memory diagnostics to the log files. Useful when reporting a performance problem; the logs grow faster while enabled. Always on while Benchmarks is enabled.": "자세한 해싱, 확인, 다운로드, 네트워크, 데이터베이스, 디스크 및 메모리 진단을 로그 파일에 기록합니다. 성능 문제를 보고할 때 유용합니다. 활성화된 동안 로그는 더 빠르게 커집니다. 벤치마크가 활성화된 동안에는 항상 켜져 있습니다.",
     "Hide repository image": "저장소 이미지 숨기기",
     "Hide the banner image shown at the top of the repository and repository space views. Individual repositories can override this in their settings.": "저장소 및 저장소 공간 보기 상단에 표시되는 배너 이미지를 숨깁니다. 개별 저장소는 설정에서 이를 재정의할 수 있습니다.",
+    "Reduce motion": "동작 줄이기",
+    "Stop the blinking, bubbling and sparkling animations on progress indicators and turn off interface transitions. Progress and status text still update.": "진행률 표시기의 깜박임, 거품, 반짝임 애니메이션을 멈추고 인터페이스 전환 효과를 끕니다. 진행률과 상태 텍스트는 계속 업데이트됩니다.",
     "FPS": "FPS",
     "Current process memory and estimated Foxy-owned allocations. Values are approximate and exclude some allocator, driver, and OS caching overhead.": "현재 프로세스 메모리 및 Foxy 소유 할당 추정값입니다. 값은 근사치이며 일부 할당자, 드라이버 및 OS 캐싱 오버헤드는 제외됩니다.",
     "Capture snapshot": "스냅샷 캡처",
