@@ -40,7 +40,7 @@ impl Foxy {
         for required in [true, false] {
             for entry in &space.entries {
                 if entry.required == required {
-                    ordered_entry_urls.push(Self::normalize_repo_url(&entry.address));
+                    ordered_entry_urls.push(Self::repo_url_match_key(&entry.address));
                 }
             }
         }
@@ -52,7 +52,7 @@ impl Foxy {
                 if repo.repository_space_id.as_deref() != Some(space_id) || seen.contains(&idx) {
                     continue;
                 }
-                if Self::normalize_repo_url(&repo.address) == *entry_url {
+                if Self::repo_url_match_key(&repo.address) == *entry_url {
                     seen.insert(idx);
                     ordered_targets.push(idx);
                 }
@@ -197,7 +197,7 @@ impl Foxy {
             .entries
             .iter()
             .filter(|entry| entry.required)
-            .map(|entry| Self::normalize_repo_url(&entry.address))
+            .map(|entry| Self::repo_url_match_key(&entry.address))
             .collect();
 
         let entries = self
@@ -205,7 +205,7 @@ impl Foxy {
             .into_iter()
             .filter_map(|repo_index| {
                 let repo = self.repository_view_state.repositories.get(repo_index)?;
-                let normalized_repo_url = Self::normalize_repo_url(&repo.address);
+                let normalized_repo_url = Self::repo_url_match_key(&repo.address);
                 let state = self.repo_state_for_address(&repo.address, &repo.path);
                 let default_selected = match mode {
                     RepositorySpaceBulkMode::RecheckAll => true,

@@ -467,13 +467,13 @@ impl Foxy {
         space_id: &str,
         entry_address: &str,
     ) -> usize {
-        let normalized_entry = Self::normalize_repo_url(entry_address);
+        let normalized_entry = Self::repo_url_match_key(entry_address);
         self.repository_view_state
             .repositories
             .iter()
             .filter(|repo| {
                 repo.repository_space_id.as_deref() == Some(space_id)
-                    && Self::normalize_repo_url(&repo.address) == normalized_entry
+                    && Self::repo_url_match_key(&repo.address) == normalized_entry
             })
             .count()
     }

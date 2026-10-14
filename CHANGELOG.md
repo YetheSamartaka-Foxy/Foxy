@@ -8,7 +8,11 @@
 - The update view's speed history now shades the area under its line and marks the newest sample while the transfer runs.
 - A new **Reduce motion** setting in Application settings stops these animations and interface transitions. Progress and status text still update.
 
+## Changed
+- The repository space page has a cleaner, more modern layout matching the game space overview. Summary tiles show how many repositories and required repositories are added, how many have updates, and the total size. Each repository shows whether it is required or optional and whether it is added, with an **Add** button that stands out when it is not. Added copies list their update status with a quick link and **Detach**. The whole page now scrolls as one list instead of a small inner box, and a missing required repository is reported at the top of the page.
+
 ## Fixed
+- Repositories in a repository space are now recognized even when their address differs from the space's list only in upper or lower case, so they no longer show as not added or leave a required repository reported as missing. Adding a repository whose address differs only in case from one already in the same folder now shows the duplicate warning.
 - Updates no longer keep retrying obsolete file names after the server removes or renames files. Foxy stops on a missing server file, rolls back the attempt, and refreshes the file list on the next update without forcing a full redownload. Failed metadata refreshes and incomplete saved file lists can no longer be reused as a prepared update.
 - On Linux, Windows Foxy running through Wine now detects and starts native Steam, finds its Arma 3 libraries, and launches Arma through Steam's selected Proton runtime with the enabled mods and server settings.
 - Windows updates no longer repeat a previously selected full data reset, preserving saved repositories, settings, and databases. The reset checkbox always starts unchecked and must be explicitly ticked and confirmed for each manual install. Silent installers always keep user data. This fix does not require a database wipe.

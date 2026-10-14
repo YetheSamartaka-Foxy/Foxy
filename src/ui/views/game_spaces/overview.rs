@@ -16,14 +16,14 @@ use crate::ui::views::settings::ts3_plugins::Ts3PluginRowStatus;
 
 const OVERVIEW_LOGO_MAX_WIDTH: f32 = 200.0;
 const STAT_VALUE_SIZE: f32 = 24.0;
-const CARD_GAP: f32 = 12.0;
+pub(crate) const CARD_GAP: f32 = 12.0;
 const SHARE_BAR_HEIGHT: f32 = 4.0;
 const RECENT_BENCHMARKS: usize = 5;
 const BENCHMARK_ROW_HEIGHT: f32 = 28.0;
 
-struct StatTile {
-    value: String,
-    label: String,
+pub(crate) struct StatTile {
+    pub(crate) value: String,
+    pub(crate) label: String,
 }
 
 #[cfg(target_os = "windows")]
@@ -363,7 +363,11 @@ impl Foxy {
             .max_by_key(|(_, at)| *at)
     }
 
-    fn overview_card(&mut self, ui: &mut Ui, add_contents: impl FnOnce(&mut Self, &mut Ui)) {
+    pub(crate) fn overview_card(
+        &mut self,
+        ui: &mut Ui,
+        add_contents: impl FnOnce(&mut Self, &mut Ui),
+    ) {
         Frame::NONE
             .fill(self.color_card_bg())
             .stroke(Stroke::new(1.0, self.color_widget_bg()))
@@ -377,7 +381,7 @@ impl Foxy {
 
     /// "Open folder" button followed by the path; an empty path renders as
     /// "Not configured" with the button disabled.
-    fn overview_folder_row(&self, ui: &mut Ui, path: &str, log_label: &str) {
+    pub(crate) fn overview_folder_row(&self, ui: &mut Ui, path: &str, log_label: &str) {
         let dim_color = self.color_text_dim();
         ui.horizontal(|ui| {
             let open_button = ui
@@ -391,10 +395,7 @@ impl Foxy {
             }
             if open_button.clicked() {
                 match open_directory(Path::new(path)) {
-                    Ok(()) => info!(
-                        "Opened the {} folder from the game space overview",
-                        log_label
-                    ),
+                    Ok(()) => info!("Opened the {} folder", log_label),
                     Err(err) => warn!("Failed to open the {} folder: {}", log_label, err),
                 }
             }
@@ -482,7 +483,7 @@ impl Foxy {
         }
     }
 
-    fn overview_section_title(&self, ui: &mut Ui, title: &str) {
+    pub(crate) fn overview_section_title(&self, ui: &mut Ui, title: &str) {
         ui.label(
             RichText::new(title.to_uppercase())
                 .small()
@@ -492,7 +493,7 @@ impl Foxy {
         ui.add_space(8.0);
     }
 
-    fn overview_chip(&self, ui: &mut Ui, text: &str, color: Color32) {
+    pub(crate) fn overview_chip(&self, ui: &mut Ui, text: &str, color: Color32) {
         Frame::NONE
             .fill(self.color_main_bg())
             .stroke(Stroke::new(1.0, color))
@@ -503,7 +504,7 @@ impl Foxy {
             });
     }
 
-    fn render_stat_tiles(&self, ui: &mut Ui, tiles: &[StatTile]) {
+    pub(crate) fn render_stat_tiles(&self, ui: &mut Ui, tiles: &[StatTile]) {
         let count = tiles.len().max(1) as f32;
         let tile_width = ((ui.available_width() - CARD_GAP * (count - 1.0)) / count).max(0.0);
         let accent = self.color_primary_accent();

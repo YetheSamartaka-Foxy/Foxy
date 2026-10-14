@@ -264,7 +264,7 @@ fn collect_repository_space_sync_targets(
     for required in [true, false] {
         for entry in entries {
             if entry.required == required {
-                ordered_entry_urls.push(Foxy::normalize_repo_url(&entry.address));
+                ordered_entry_urls.push(Foxy::repo_url_match_key(&entry.address));
             }
         }
     }
@@ -277,7 +277,7 @@ fn collect_repository_space_sync_targets(
             if repo.repository_space_id.as_deref() != Some(space_id) || seen.contains(&idx) {
                 continue;
             }
-            if Foxy::normalize_repo_url(&repo.address) == *entry_url {
+            if Foxy::repo_url_match_key(&repo.address) == *entry_url {
                 seen.insert(idx);
                 ordered.push(idx);
             }
@@ -291,4 +291,61 @@ fn collect_repository_space_sync_targets(
     }
 
     ordered
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn repo(name: &str, address: &str, space_id: Option<&str>) -> Repository {
+        Repository {
+            name: name.to_string(),
+            address: address.to_string(),
+            repository_space_id: space_id.map(str::to_string),
+            ..Repository::default()
+        }
+    }
+
+    #[test]
+    fn space_sync_targets_match_entries_regardless_of_case() {
+        let entries = vec![
+            RepositorySpaceEntry {
+                name: "RepoAlpha".to_string(),
+                address: "http://repo.example.invalid:8080/mods/Repo_alpha".to_string(),
+                required: true,
+            },
+            RepositorySpaceEntry {
+                name: "RepoBeta".to_string(),
+                address: "http://repo.example.invalid:8080/mods/Repo_Beta".to_string(),
+                required: false,
+            },
+        ];
+        let repositories = vec![
+            repo(
+                "RepoBeta",
+                "http://repo.example.invalid:8080/mods/repo_BETA/",
+                Some("space-a"),
+            ),
+            repo(
+                "Unlisted",
+                "http://repo.example.invalid:8080/mods/Other/",
+                Some("space-a"),
+            ),
+            repo(
+                "RepoAlpha",
+                "http://repo.example.invalid:8080/mods/Repo_Alpha/",
+                Some("space-a"),
+            ),
+            repo(
+                "Elsewhere",
+                "http://repo.example.invalid:8080/mods/Repo_Alpha/",
+                None,
+            ),
+        ];
+
+        assert_eq!(
+            collect_repository_space_sync_targets("space-a", &entries, &repositories),
+            vec![2, 0, 1]
+        );
+    }
 }

@@ -1,9 +1,8 @@
 use crate::core::api::SyncMode;
 use crate::ui::app::{BarMotion, Foxy, StepTrack, paint_border_flare, rise_effect};
-use crate::ui::i18n::fmt_bytes;
 use crate::ui::search_filter::MultiEntryFilter;
 use crate::ui::types::{FoxyView, RepositorySpaceBulkMode};
-use crate::ui::views::galley_cache;
+use crate::ui::views::game_spaces::overview::CARD_GAP;
 use eframe::egui::{
     self, Align, CursorIcon, Layout, Margin, RichText, ScrollArea, TextEdit, TextStyle, Ui,
 };
@@ -270,100 +269,79 @@ impl Foxy {
                     });
                 });
 
-                ui.add_space(8.0);
-                let mut info_block =
-                    egui::containers::Frame::side_top_panel(&ui.ctx().global_style());
-                info_block.fill = self.color_widget_bg();
-                info_block.corner_radius = egui::CornerRadius::same(8);
-                info_block.inner_margin = Margin::same(10);
-                info_block.show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    ui.label(self.t_fmt(
-                        "Shared path: {path}",
-                        &[("path", space.shared_path.clone())],
-                    ));
-                    let installed_count = self
-                        .repository_view_state
-                        .repositories
-                        .iter()
-                        .filter(|repo| repo.repository_space_id.as_deref() == Some(space.id.as_str()))
-                        .count();
-                    ui.label(format!(
-                        "{} - {}",
-                        self.t_fmt(
-                            "Total size: {size}",
-                            &[("size", fmt_bytes(self.repository_space_remote_size_bytes(&space.id)))],
-                        ),
-                        self.t_fmt(
-                            "Showing {shown} / {total} repositories",
+
+                ui.add_space(CARD_GAP);
+                self.render_repository_space_stat_tiles(ui, &space);
+
+                if !self.repository_space_required_entries_satisfied(&space.id) {
+                    ui.add_space(CARD_GAP);
+                    self.render_repository_message_banner(
+                        ui,
+                        self.t("Required repositories missing").as_str(),
+                        self.t("Required repositories must be added at least once").as_str(),
+                        self.color_warn(),
+                        None,
+                        None,
+                        None,
+                    );
+                }
+
+                if let Some(progress) = self
+                    .repository_space_bulk_progress
+                    .clone()
+                    .filter(|progress| progress.space_id == space.id)
+                    .filter(|progress| progress.completed_count < progress.total_count)
+                {
+                    ui.add_space(CARD_GAP);
+                    let active_count = if progress.current_repo_name.is_some() {
+                        (progress.completed_count + 1).min(progress.total_count)
+                    } else {
+                        progress.completed_count
+                    };
+                    let current_repo = progress
+                        .current_repo_name
+                        .clone()
+                        .unwrap_or_else(|| self.t("Preparing"));
+                    let detail = match progress.mode {
+                        RepositorySpaceBulkMode::RecheckAll => self.t_fmt(
+                            "Rechecking {done}/{total} - {repo}",
                             &[
-                                ("shown", installed_count.to_string()),
-                                ("total", space.entries.len().to_string()),
+                                ("done", active_count.to_string()),
+                                ("total", progress.total_count.to_string()),
+                                ("repo", current_repo),
                             ],
                         ),
-                    ));
-                    if let Some(progress) = self
-                        .repository_space_bulk_progress
-                        .as_ref()
-                        .filter(|progress| progress.space_id == space.id)
-                        .filter(|progress| progress.completed_count < progress.total_count)
-                    {
-                        let active_count = if progress.current_repo_name.is_some() {
-                            (progress.completed_count + 1).min(progress.total_count)
-                        } else {
-                            progress.completed_count
-                        };
-                        let detail = match progress.mode {
-                            RepositorySpaceBulkMode::RecheckAll => self.t_fmt(
-                                "Rechecking {done}/{total} - {repo}",
-                                &[
-                                    ("done", active_count.to_string()),
-                                    ("total", progress.total_count.to_string()),
-                                    (
-                                        "repo",
-                                        progress
-                                            .current_repo_name
-                                            .clone()
-                                            .unwrap_or_else(|| self.t("Preparing")),
-                                    ),
-                                ],
-                            ),
-                            RepositorySpaceBulkMode::UpdateAll => self.t_fmt(
-                                "Updating {done}/{total} - {repo}",
-                                &[
-                                    ("done", active_count.to_string()),
-                                    ("total", progress.total_count.to_string()),
-                                    (
-                                        "repo",
-                                        progress
-                                            .current_repo_name
-                                            .clone()
-                                            .unwrap_or_else(|| self.t("Preparing")),
-                                    ),
-                                ],
-                            ),
-                        };
+                        RepositorySpaceBulkMode::UpdateAll => self.t_fmt(
+                            "Updating {done}/{total} - {repo}",
+                            &[
+                                ("done", active_count.to_string()),
+                                ("total", progress.total_count.to_string()),
+                                ("repo", current_repo),
+                            ],
+                        ),
+                    };
+                    let (current, motion) = self
+                        .syncing_repository
+                        .map_or((None, BarMotion::Forward), |index| {
+                            self.repository_operation_activity(index)
+                        });
+                    self.overview_card(ui, |this, ui| {
                         ui.colored_label(
-                            self.color_primary_accent(),
+                            this.color_primary_accent(),
                             RichText::new(detail).strong(),
                         );
-                        let (current, motion) = self
-                            .syncing_repository
-                            .map_or((None, BarMotion::Forward), |index| {
-                                self.repository_operation_activity(index)
-                            });
                         ui.add_space(4.0);
                         ui.add(
                             StepTrack::new(
                                 progress.completed_count,
                                 progress.total_count,
-                                self.color_primary_accent(),
-                                self.color_card_bg(),
+                                this.color_primary_accent(),
+                                this.color_card_bg(),
                             )
                             .running(current, motion),
                         );
-                    }
-                });
+                    });
+                }
 
                 let finished_bulk = self
                     .repository_space_bulk_progress
@@ -377,7 +355,7 @@ impl Foxy {
                     BANNER_FLARE_SECONDS,
                 );
                 if let Some(progress) = finished_bulk {
-                    ui.add_space(8.0);
+                    ui.add_space(CARD_GAP);
                     let (title, detail) = match progress.mode {
                         RepositorySpaceBulkMode::RecheckAll => (
                             self.t("Recheck completed"),
@@ -430,208 +408,77 @@ impl Foxy {
                     }
                 }
 
-                ui.add_space(8.0);
+                ui.add_space(CARD_GAP);
                 let detail_filter_hint = self.t("Filter by name or address");
                 let detail_filter_help = self.t("repository_filter_help");
-                ui.horizontal(|ui| {
-                    ui.label(self.t("Filter:"));
-                    let filter_input = ui.add(
-                        TextEdit::singleline(&mut self.repository_space_detail_filter)
-                            .hint_text(detail_filter_hint)
-                            .desired_width((ui.available_width() - 150.0).max(200.0)),
-                    );
-                    if filter_input.hovered() {
-                        ui.ctx().output_mut(|o| o.cursor_icon = CursorIcon::Text);
-                    }
-                    ui.add_space(6.0);
-                    self.filter_help_icon(ui, &detail_filter_help);
-                });
-                if has_detail_filter {
-                    ui.label(self.t_fmt(
-                        "Showing {shown} / {total} repositories",
-                        &[
-                            ("shown", filtered_entry_indices.len().to_string()),
-                            ("total", space.entries.len().to_string()),
-                        ],
-                    ));
-                }
-                ui.add_space(8.0);
-                ui.heading(self.t("Available repositories"));
-                let remaining_detail_height = ui.available_height().max(0.0);
-                let candidate_info_lines = 1.0
-                    + if selector_state.last_scan_result_count.is_some() {
-                        1.0
-                    } else {
-                        0.0
-                    }
-                    + if has_detail_filter { 1.0 } else { 0.0 };
-                let candidate_controls_height = 62.0 + candidate_info_lines * 18.0;
-                let candidate_list_height = if filtered_candidate_indices.is_empty() {
-                    72.0
-                } else {
-                    ((filtered_candidate_indices.len() as f32)
-                        * Self::repository_space_candidate_row_height()
-                        + 8.0)
-                        .clamp(72.0, 180.0)
-                };
-                let reserved_bottom_height = candidate_controls_height + candidate_list_height + 12.0;
-                let available_list_height =
-                    (remaining_detail_height - reserved_bottom_height).max(220.0);
-                ScrollArea::vertical()
-                    .id_salt(("space_detail_entries", space_id))
-                    .max_height(available_list_height)
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        ui.set_min_width(ui.available_width());
-                        for (list_idx, entry_idx) in filtered_entry_indices.iter().enumerate() {
-                            ui.push_id(*entry_idx, |ui| {
-                                let entry = &space.entries[*entry_idx];
-                                self.render_repository_space_detail_entry_card(
-                                    ui,
-                                    &space,
-                                    entry,
-                                    &mut add_entry_action,
-                                    &mut jump_to_repository,
-                                    &mut detach_repo_idx,
-                                );
-                                if list_idx + 1 < filtered_entry_indices.len() {
-                                    ui.add_space(6.0);
-                                }
-                            });
-                        }
-                    });
-
-                ui.separator();
-                ui.vertical(|ui| {
-                    ui.set_min_width(ui.available_width());
-                    ui.heading(self.t("Matching existing repositories"));
+                self.overview_card(ui, |this, ui| {
+                    this.overview_section_title(ui, &this.t("Available repositories"));
+                    this.overview_folder_row(ui, &space.shared_path, "repository space shared");
+                    ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        let scan_btn = ui.button(self.t("Scan existing repositories"));
-                        if scan_btn.hovered() {
-                            ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
-                        }
-                        if scan_btn.clicked() {
-                            refresh_scan = true;
-                        }
-
-                        let move_btn = ui.button(self.t("Move selected repositories"));
-                        if move_btn.hovered() {
-                            ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
-                        }
-                        if move_btn.clicked() {
-                            move_selected = true;
-                        }
-                    });
-                    if let Some(scan_count) = selector_state.last_scan_result_count {
-                        if scan_count == 0 {
-                            ui.colored_label(
-                                self.color_text_dim(),
-                                self.t("No unassigned repositories found matching this space's entries."),
-                            );
-                        } else {
-                            ui.colored_label(
-                                self.color_text_dim(),
-                                self.t_fmt(
-                                    "Scan complete: found {count} matching repositories.",
-                                    &[("count", scan_count.to_string())],
-                                ),
-                            );
-                        }
-                    }
-                    if has_detail_filter {
-                        ui.label(self.t_fmt(
-                            "Showing {shown} / {total} repositories",
-                            &[
-                                ("shown", filtered_candidate_indices.len().to_string()),
-                                ("total", selector_state.candidates.len().to_string()),
-                            ],
-                        ));
-                    }
-                    if filtered_candidate_indices.is_empty() {
-                        ScrollArea::vertical()
-                            .id_salt(("space_detail_scan_candidates", &space.id))
-                            .max_height(180.0)
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                ui.set_min_width(ui.available_width());
-                                if selector_state.last_scan_result_count == Some(0)
-                                    && !has_detail_filter
-                                {
-                                    ui.label(self.t(
-                                        "No unassigned repositories found matching this space's entries.",
-                                    ));
-                                } else {
-                                    ui.label(self.t("No matching existing repositories found"));
-                                }
-                            });
-                    } else {
-                        self.space_detail_candidate_galleys.ensure(
-                            filtered_candidate_indices.len(),
-                            1,
-                            galley_cache::fingerprint((
-                                space.id.as_str(),
-                                self.repository_space_detail_filter.as_str(),
-                                filtered_candidate_indices
-                                    .iter()
-                                    .filter_map(|candidate_idx| {
-                                        let candidate = selector_state.candidates.get(*candidate_idx)?;
-                                        self.repository_view_state
-                                            .repositories
-                                            .get(candidate.repo_index)
-                                            .map(|repo| {
-                                                (
-                                                    *candidate_idx,
-                                                    candidate.repo_index,
-                                                    repo.name.as_str(),
-                                                    repo.address.as_str(),
-                                                )
-                                            })
-                                    })
-                                    .collect::<Vec<_>>(),
-                            )),
-                            galley_cache::fingerprint((
-                                self.color_text_normal().to_array(),
-                                self.color_text_dim().to_array(),
-                            )),
+                        let help_width = ui.text_style_height(&TextStyle::Body)
+                            + ui.spacing().item_spacing.x;
+                        let filter_input = ui.add(
+                            TextEdit::singleline(&mut this.repository_space_detail_filter)
+                                .hint_text(detail_filter_hint)
+                                .desired_width((ui.available_width() - help_width).max(120.0)),
                         );
-                        ScrollArea::vertical()
-                            .id_salt(("space_detail_scan_candidates", &space.id))
-                            .max_height(180.0)
-                            .auto_shrink([false, false])
-                            .show_rows(
+                        if filter_input.hovered() {
+                            ui.ctx().output_mut(|o| o.cursor_icon = CursorIcon::Text);
+                        }
+                        this.filter_help_icon(ui, &detail_filter_help);
+                    });
+                    if has_detail_filter {
+                        ui.label(
+                            RichText::new(this.t_fmt(
+                                "Showing {shown} / {total} repositories",
+                                &[
+                                    ("shown", filtered_entry_indices.len().to_string()),
+                                    ("total", space.entries.len().to_string()),
+                                ],
+                            ))
+                            .small()
+                            .color(this.color_text_dim()),
+                        );
+                    }
+                    ui.add_space(8.0);
+                    if filtered_entry_indices.is_empty() {
+                        ui.label(
+                            RichText::new(this.t("No repositories match the current filter."))
+                                .italics()
+                                .color(this.color_text_dim()),
+                        );
+                    }
+                    for (list_idx, entry_idx) in filtered_entry_indices.iter().enumerate() {
+                        ui.push_id(*entry_idx, |ui| {
+                            this.render_repository_space_detail_entry_card(
                                 ui,
-                                Self::repository_space_candidate_row_height(),
-                                filtered_candidate_indices.len(),
-                                |ui, row_range| {
-                                    ui.set_min_width(ui.available_width());
-                                    for filtered_idx in row_range {
-                                        let candidate_idx =
-                                            filtered_candidate_indices[filtered_idx];
-                                        ui.push_id(candidate_idx, |ui| {
-                                            let candidate =
-                                                &mut selector_state.candidates[candidate_idx];
-                                            self.render_repository_space_candidate_row(
-                                                ui,
-                                                filtered_idx,
-                                                true,
-                                                candidate,
-                                            );
-                                        });
-                                    }
-                                },
+                                &space,
+                                &space.entries[*entry_idx],
+                                &mut add_entry_action,
+                                &mut jump_to_repository,
+                                &mut detach_repo_idx,
                             );
+                        });
+                        if list_idx + 1 < filtered_entry_indices.len() {
+                            ui.add_space(6.0);
+                        }
                     }
                 });
-                if let Some(error) = &selector_state.error {
-                    ui.colored_label(self.color_text_error(), error);
-                }
 
-                if !self.repository_space_required_entries_satisfied(&space.id) {
-                    ui.colored_label(
-                        self.color_text_error(),
-                        self.t("Required repositories must be added at least once"),
+                ui.add_space(CARD_GAP);
+                self.overview_card(ui, |this, ui| {
+                    let actions = this.render_repository_space_matching_section(
+                        ui,
+                        &space.id,
+                        &mut selector_state,
+                        &filtered_candidate_indices,
+                        has_detail_filter,
                     );
-                }
+                    refresh_scan = actions.scan;
+                    move_selected = actions.move_selected;
+                });
+                ui.add_space(CARD_GAP);
             });
 
         if refresh_scan {

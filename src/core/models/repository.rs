@@ -114,6 +114,15 @@ pub(crate) fn normalize_repository_url(url: &str) -> String {
     normalized
 }
 
+/// Key for deciding whether two addresses name the same repository, such as a
+/// repository space entry and an added repository: the canonical form,
+/// case-folded. Manifests are written by hand and hosts commonly serve paths
+/// case-insensitively, so a case difference must not split one repository in
+/// two. Requests and database keys keep the configured spelling.
+pub(crate) fn repository_url_match_key(url: &str) -> String {
+    normalize_repository_url(url).to_lowercase()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn upsert_repository_entry(
     context: Arc<FoxyContext>,
@@ -259,6 +268,19 @@ mod tests {
             normalize_repository_url("https://example.com/repo\t\n"),
             "https://example.com/repo/"
         );
+    }
+
+    #[test]
+    fn repository_url_match_key_ignores_case_and_trailing_slash() {
+        assert_eq!(
+            repository_url_match_key("http://repo.example.invalid:8080/mods/Repo_Alpha"),
+            repository_url_match_key(" http://REPO.example.invalid:8080/mods/repo_alpha/ "),
+        );
+        assert_ne!(
+            repository_url_match_key("http://repo.example.invalid:8080/mods/Repo_Alpha"),
+            repository_url_match_key("http://repo.example.invalid:8080/mods/Repo_Beta"),
+        );
+        assert_eq!(repository_url_match_key("  "), "");
     }
 
     #[test]
