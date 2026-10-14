@@ -1,5 +1,6 @@
 # 1.2.1
 ## Added
+- The Help page now includes search across topic titles and text, making usage guidance easier to find.
 - Export logs to ZIP is now available beside the activity log button in the footer and in troubleshooting notices and error dialogs, making it easier to share diagnostic logs with support.
 - New animated progress: progress bars are made of small triangles in a few tones of the bar's color that blink and bubble while work runs, and sweep a light along while the amount of work is not known yet. A finished bar flashes once.
 - Checks and integrity rechecks show a verification map that fills as files are confirmed, an icon names the running work, and a light runs around a running banner's border, which flares when the work finishes.

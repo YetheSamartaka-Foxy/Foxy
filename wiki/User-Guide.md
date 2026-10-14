@@ -4,6 +4,8 @@ Welcome to Foxy, a mod updater and launcher built for speed and reliability. Arm
 
 The same help is available inside the app: press **F1** or click the question mark in the footer.
 
+Use **Search help** to find topics by their titles and text in the current language. Select a matching topic to read it, and use **Clear** to show all topics again.
+
 ---
 
 ## Table of Contents

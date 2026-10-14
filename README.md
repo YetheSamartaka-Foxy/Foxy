@@ -39,7 +39,7 @@ Current workspace status:
 
 - [User Guide](wiki/User-Guide.md) - game spaces, repositories, syncing, launching, Steam Workshop, benchmarks, settings, troubleshooting, and the CLI.
 - [Server Admin Guide](wiki/Server-Admin-Guide.md) - generating and hosting Arma 3 and Arma Reforger repositories and repository spaces with `foxy-server-backend-cli`, server launch lines and keys, and self-hosted app updates.
-- The in-app Help page (**F1**) covers the same ground in every bundled language.
+- The in-app Help page (**F1**) covers the same ground in every bundled language, with search across topic titles and text.
 
 ## Future roadmap
 

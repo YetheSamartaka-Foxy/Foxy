@@ -297,6 +297,7 @@ impl Foxy {
             selected_repository_for_settings: None,
             current_repository_settings_tab: RepositorySettingsTab::Configuration,
             current_help_tab: HelpTab::Overview,
+            help_search_query: String::new(),
             current_about_tab: AboutTab::About,
             addons_filter: String::new(),
             addons_search_files: false,

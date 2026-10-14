@@ -571,6 +571,7 @@ const APP_GLOBAL_FOXY_FIELDS: &[&str] = &[
     "last_view",
     "main_view_state",
     "current_help_tab",
+    "help_search_query",
     "current_about_tab",
     "fps_ema",
     "frame_intervals_ms",

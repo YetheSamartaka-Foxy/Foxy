@@ -213,6 +213,7 @@ pub struct Foxy {
     pub selected_repository_for_settings: Option<usize>,
     pub current_repository_settings_tab: RepositorySettingsTab,
     pub current_help_tab: HelpTab,
+    pub help_search_query: String,
     pub current_about_tab: AboutTab,
     pub addons_filter: String,
     pub addons_search_files: bool,
