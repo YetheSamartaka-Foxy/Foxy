@@ -30,6 +30,8 @@
 
 \- For long-running operations, expose progress and current status text (not spinner-only).
 
+\- Motion must be stoppable (WCAG 2.2.2 Pause, Stop, Hide): animated visuals freeze under the **Reduce motion** setting, and nothing animates on an idle screen. Never let motion be the only carrier of a state.
+
 \- Respect reduced cognitive load: prefer plain labels, clear grouping, and consistent action placement.
 
 

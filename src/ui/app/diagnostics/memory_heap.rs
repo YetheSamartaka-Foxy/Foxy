@@ -569,6 +569,12 @@ impl Foxy {
                 Self::heap_bytes_of_string(&row.addon_name)
                     + Self::heap_bytes_of_string(&row.path)
                     + Self::heap_bytes_of_string(&row.origin)
+                    + row.origin_filters.capacity() * size_of::<String>()
+                    + row
+                        .origin_filters
+                        .iter()
+                        .map(Self::heap_bytes_of_string)
+                        .sum::<usize>()
                     + Self::heap_bytes_of_string(&row.addon_name_lower)
                     + Self::heap_bytes_of_string(&row.path_lower)
                     + Self::heap_bytes_of_string(&row.origin_lower)

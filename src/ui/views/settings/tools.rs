@@ -624,6 +624,7 @@ impl Foxy {
                 if let Some(error) = &self.direct_download_error {
                     ui.add_space(8.0);
                     ui.colored_label(self.color_text_error(), error);
+                    self.render_export_logs_button(ui);
                 }
 
                 ui.add_space(12.0);

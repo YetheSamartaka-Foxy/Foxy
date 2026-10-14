@@ -43,6 +43,9 @@ pub struct SettingsViewState {
     /// Globally hide the repository banner image in the repository and space views.
     #[serde(default)]
     pub hide_repository_image: bool,
+    /// Stop the animated progress visuals and egui's own transitions.
+    #[serde(default)]
+    pub reduce_motion: bool,
     pub close_after_launch: bool,
     #[serde(default)]
     pub hide_to_tray_after_launch: bool,
@@ -296,6 +299,7 @@ impl Default for SettingsViewState {
             benchmarks_enabled: false,
             extended_diagnostics_by_benchmarks: false,
             hide_repository_image: false,
+            reduce_motion: false,
             close_after_launch: true,
             hide_to_tray_after_launch: false,
             auto_recheck_on_launch: default_auto_recheck_on_launch(),

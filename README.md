@@ -19,14 +19,14 @@ It ships as a single binary with both a full desktop UI and a scriptable CLI, ru
 - **Repository and profile management** - Manage multiple repositories, repository spaces, visual folders for grouping/coloring/collapsing repositories, launch profiles, optional addons, external addons, backups, drag-and-drop ordering, and bulk sync operations with selective include/exclude filtering.
 - **Arma 3 integrations** - Detect Steam and the Arma 3 installation automatically, manage Arma 3 profiles (detect, rename, clone, delete), recognize Steam Workshop addons, validate TeamSpeak 3 and Steam before launch, and support server quick-join flows with repo-provided launch parameters, DLC metadata, and an offer to match the Creator DLCs the server runs.
 - **Daily workflow tools** - Repository filtering, addon file search, editor mission scanning, mission open/duplicate/delete actions, dependency cleanup, scheduled rechecks, automatic downloads, and optional post-job close or shutdown actions are available from the app.
-- **Clear update visibility** - Download screens show per-addon progress, update summaries, toast notifications, transfer history graphs, adaptive speed limits, and grouped download/disk/hash performance metrics.
+- **Clear update visibility** - Download screens show per-addon progress, update summaries, toast notifications, transfer history graphs, adaptive speed limits, and grouped download/disk/hash performance metrics. Work in progress stays visible and alive: checks draw a sparkling map of triangles for the data being hashed, progress bars fill the same blinking triangles with flowing, bubbling mana, and the sidebar shows a round cluster of triangles per repository. **Reduce motion** turns the animations off.
 - **Game spaces** - Each supported game gets its own workspace with separate settings, repositories, stores, benchmarks, and database, switchable at runtime and remembered across launches. Arma 3 is the reference module; Total War: WARHAMMER III (`.pack` repositories and the `used_mods.txt` manifest) and Arma Reforger (`-addons`/`-addonsDir` launch and server join) ship alongside it, and a Generic game module covers other Steam games with a user-supplied executable, arguments, and mods manifest.
 - **Steam Workshop management** - Import Workshop items by id, URL, collection, or share code, set the load order, freeze mods against Steam updates, compare setups with a state checksum, and exchange `.foxyshare` bundles, from the game space settings or the CLI.
 - **Benchmarks** - Save a recheck, update, or redownload as a benchmark with stage timings, transfer and disk charts, CPU and memory use, power source, and speed-of-light ratios, then compare two runs side by side or export one as a ZIP for support.
 - **Migration and direct-download workflows** - Guided Swifty migration preserves repositories and spaces, while direct-download mode can fetch repository, addon, or file URLs without a full database sync.
 - **One binary, two interfaces** - The same `Foxy` executable provides the desktop UI and a scriptable CLI with `--json`, `--dry-run`, `--yes`, `--quiet`, and `--no-progress` support for automation and accessible output.
-- **Cross-platform app delivery** - Native Windows and Linux builds include platform-appropriate installers plus decentralized in-app updates from self-hosted manifests or GitHub Releases, with early experimental macOS builds.
-- **Customizable, accessible UI** - Themes support import/export, presets, scaling, and toast feedback. Keyboard navigation, locale-aware formatting, scalable fonts, clear status messages, and non-color-only indicators are built in.
+- **Cross-platform app delivery** - Native Windows and Linux builds include platform-appropriate installers plus decentralized in-app updates from self-hosted manifests or GitHub Releases, with early experimental macOS builds. The Windows build is also confirmed to work on Linux under Proton and Wine.
+- **Customizable, accessible UI** - Themes support import/export, presets, scaling, and toast feedback. Keyboard navigation, locale-aware formatting, scalable fonts, clear status messages, non-color-only indicators, and a Reduce motion setting are built in.
 - **Broad localization** - Built-in localization bundles cover `en`, `ar`, `bg`, `bn`, `cs`, `da`, `de`, `el`, `es`, `et`, `fa`, `fi`, `fr`, `he`, `hi`, `hr`, `hu`, `id`, `it`, `ja`, `ko`, `lt`, `lv`, `nb`, `nl`, `pl`, `pt`, `pt-BR`, `ro`, `ru`, `sk`, `sl`, `sr`, `sv`, `th`, `tl`, `tr`, `uk`, `ur`, `vi`, and `zh`.
 
 Current workspace status:
@@ -39,7 +39,7 @@ Current workspace status:
 
 - [User Guide](wiki/User-Guide.md) - game spaces, repositories, syncing, launching, Steam Workshop, benchmarks, settings, troubleshooting, and the CLI.
 - [Server Admin Guide](wiki/Server-Admin-Guide.md) - generating and hosting Arma 3 and Arma Reforger repositories and repository spaces with `foxy-server-backend-cli`, server launch lines and keys, and self-hosted app updates.
-- The in-app Help page (**F1**) covers the same ground in every bundled language.
+- The in-app Help page (**F1**) covers the same ground in every bundled language, with search across topic titles and text.
 
 ## Future roadmap
 
@@ -61,7 +61,23 @@ Download the latest release from the repository Releases page.
 - Linux user install: run `chmod +x Foxy-<version>-linux-x86_64-installer.sh && ./Foxy-<version>-linux-x86_64-installer.sh --prefix="$HOME/.local/opt/foxy"`
 - Linux system install: run `chmod +x Foxy-<version>-linux-x86_64-installer.sh && sudo ./Foxy-<version>-linux-x86_64-installer.sh`
 
-Linux in-app updates use Foxy's self-extracting `.sh` installer. System installs may prompt for administrator privileges through `pkexec` when the install prefix is not writable.
+Windows updates keep saved repositories, settings, and databases. Silent installers always preserve user data; a reset during a manual install requires a fresh selection and confirmation.
+
+Native Linux in-app updates use Foxy's self-extracting `.sh` installer. System installs may prompt for administrator privileges through `pkexec` when the install prefix is not writable.
+
+### Linux, Proton, and Wine
+
+The Windows build of **Foxy is confirmed to work on Linux under both Proton and Wine**. You can also use the native Linux build with the installers above.
+
+For the Windows build, run the Windows installer and Foxy in your chosen Proton or Wine environment. To open the desktop UI from a Wine terminal, run this from Foxy's installation folder:
+
+```bash
+wine Foxy.exe ui
+```
+
+Windows Foxy can detect and start native Linux Steam, find Arma 3 across its Steam libraries, and launch the game through Steam's selected Proton runtime with your enabled mods and server settings. Native, Flatpak, and Snap Steam installations are supported.
+
+Configure Arma 3 to use Proton in Steam and start it from Steam once before launching it through Foxy. Use **Auto-detect** for the Steam and Arma 3 directories; Foxy translates mod, profile, and editor mission paths for the game's Proton prefix and skips the Arma launcher. See the [Linux launch setup](wiki/User-Guide.md#linux-proton-and-wine).
 
 ### Build from source
 
@@ -74,6 +90,8 @@ Main app:
 cargo build --release
 ```
 
+Foxy's application version comes from the first `# MAJOR.MINOR.PATCH` release heading in `CHANGELOG.md`. The desktop UI, CLI, update checks, and installer builds use that version; `Cargo.toml` retains separate package metadata.
+
 Workspace (main app + server backend CLI):
 ```bash
 cargo build --workspace --release
@@ -84,11 +102,10 @@ Pre-release build (release-optimized, version label and logs carry source commit
 cargo prerelease
 ```
 
-Pre-release installer, one command (set the version and short commit hash; output lands in `dist/`, needs Inno Setup `iscc` in `PATH`):
+Pre-release installer (version comes from the changelog and the short commit hash is filled in automatically; output lands in `dist/`, needs Inno Setup `iscc` in `PATH`):
 ```bash
-cargo build --release --features prerelease -p Foxy && iscc /DAppVersion="1.2.0" /DOutputSuffix="-prerelease-f6b8ab9" /DSourceDir="..\..\target\release" installer\windows\foxy-setup.iss
+scripts\build-windows-prerelease-installer.bat
 ```
-Or let `scripts\build-windows-prerelease-installer.bat` fill both in for you.
 
 Build installers:
 ```bash

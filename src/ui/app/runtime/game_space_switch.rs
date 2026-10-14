@@ -95,15 +95,16 @@ impl Foxy {
             opened.id, opened.game_id
         );
 
-        // Honor a pending wipe marker in the target space before its database
-        // is first opened, mirroring the startup ordering in main.rs.
-        crate::core::tasks::init_database::check_and_wipe_database();
-
         let switch_started = std::time::Instant::now();
         self.stop_fs_watcher();
         self.reset_space_scoped_state();
         let reset_elapsed = switch_started.elapsed();
         self.reload_active_game_space(ctx);
+        if self.db_lock_conflict.is_some() {
+            self.game_space_switch_requested_at = None;
+            self.needs_repaint = true;
+            return;
+        }
 
         self.current_view = FoxyView::RepositoryList;
         self.last_view = FoxyView::None;
@@ -160,6 +161,11 @@ impl Foxy {
     /// space-scoped startup tasks (pending-update restore, quick scan,
     /// filesystem watcher, rechecks).
     fn reload_active_game_space(&mut self, ctx: &egui::Context) {
+        self.db_lock_conflict = self.claim_active_space_database();
+        if self.db_lock_conflict.is_some() {
+            return;
+        }
+        crate::core::tasks::init_database::check_and_wipe_database();
         self.load_settings();
         // Debug mode stays a launch-flag-only feature across reloads;
         // switching is blocked while it is active.
@@ -167,9 +173,9 @@ impl Foxy {
         self.sanitize_settings_debug_artifacts();
         self.sync_debug_runtime_state();
         self.i18n.set_language(&self.settings_view_state.locale);
-        self.db_lock_conflict = self.claim_active_space_database();
-        self.pending_db_schema_wipe =
-            crate::core::tasks::db_schema_version::evaluate_and_bootstrap();
+        let _ = crate::core::tasks::db_schema_version::evaluate_and_bootstrap();
+        self.pending_db_schema_wipe = None;
+        self.refresh_database_repair_requirement();
         self.load_repositories();
         self.load_repository_spaces();
         self.reconcile_repository_space_paths();
@@ -182,14 +188,7 @@ impl Foxy {
         self.detect_arma3_profiles_now();
         self.request_repository_images(ctx);
 
-        if !self.settings_view_state.debug_mode {
-            self.restore_pending_updates();
-            if self.settings_view_state.auto_quick_scan_on_launch {
-                self.start_quick_local_scan();
-            }
-            self.start_fs_watcher();
-        }
-        self.queue_startup_rechecks();
+        self.start_database_startup_tasks();
         self.start_startup_ts3_plugin_scan();
         self.storage_compat_notice = None;
         self.startup_diagnostics_rx = Some(crate::core::api::spawn_storage_compat_check(
@@ -303,6 +302,9 @@ impl Foxy {
         self.wipe_db_include_benchmarks = false;
         self.db_schema_wipe_recheck_all = true;
         self.recheck_all_after_database_wipe = false;
+        self.database_wipe_in_flight = false;
+        self.show_db_schema_wipe_prompt = false;
+        self.pending_database_launch = None;
         self.benchmark_armed = None;
         self.benchmark_capture = None;
         self.benchmark_prompt = None;
@@ -569,6 +571,7 @@ const APP_GLOBAL_FOXY_FIELDS: &[&str] = &[
     "last_view",
     "main_view_state",
     "current_help_tab",
+    "help_search_query",
     "current_about_tab",
     "fps_ema",
     "frame_intervals_ms",

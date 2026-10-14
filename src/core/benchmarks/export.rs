@@ -380,7 +380,7 @@ best_measured: not comparable
         .unwrap();
         let mut archive = zip::ZipArchive::new(std::fs::File::open(&dest).unwrap()).unwrap();
         let names: Vec<String> = (0..archive.len())
-            .map(|i| archive.by_index(i).unwrap().name().to_owned())
+            .map(|i| archive.by_index(i).unwrap().name().unwrap().into_owned())
             .collect();
         assert_eq!(
             names,

@@ -182,7 +182,11 @@ impl Foxy {
             && self.addon_backup_status.as_ref().is_some_and(|status| {
                 self.selected_repository_for_settings == Some(status.repo_index)
             });
-        if repository_status_visible || quick_scan_status_visible || addon_backup_status_visible {
+        if repository_status_visible
+            || quick_scan_status_visible
+            || addon_backup_status_visible
+            || self.database_wipe_in_flight
+        {
             Self::merge_repaint_interval(&mut interval, STATUS_REPAINT_INTERVAL);
         }
 
@@ -227,10 +231,17 @@ impl Foxy {
         let polls = SectionTimer::start(FrameSection::Polls);
         let ctx = ui.ctx().clone();
         self.repaint_ctx = Some(ctx.clone());
+        self.apply_runtime_palette_visuals(&ctx);
+
+        if self.db_lock_conflict.is_some() {
+            self.render_db_lock_conflict_prompt(&ctx);
+            polls.stop(&mut self.frame_cost);
+            return;
+        }
 
         super::keyboard_focus::repair_lost_keyboard_focus();
-        self.apply_runtime_palette_visuals(&ctx);
         self.apply_runtime_ui_scale(&ctx);
+        self.apply_runtime_motion_preference(&ctx);
         self.invalidate_galley_caches_on_font_atlas_change(&ctx);
         self.log_display_metrics_if_changed(&ctx);
         self.update_fps_estimate(&ctx);
@@ -269,23 +280,23 @@ impl Foxy {
 
         self.poll_persistence_results();
         self.process_pending_game_space_switch(&ctx);
+        if self.db_lock_conflict.is_some() {
+            self.render_db_lock_conflict_prompt(&ctx);
+            polls.stop(&mut self.frame_cost);
+            return;
+        }
+        self.refresh_live_database_repair_requirement();
 
-        if self.startup_frame_rendered && !self.startup_tasks_started {
+        if self.startup_frame_rendered
+            && !self.startup_tasks_started
+            && !self.database_wipe_in_flight
+        {
             self.startup_tasks_started = true;
             self.begin_startup_sync_tracking(self.startup_first_frame_at.unwrap_or_default());
-            if !self.settings_view_state.debug_mode {
-                self.restore_pending_updates();
-                // `Foxy::new` already starts this plan when the database is
-                // safe to open; only launches that skipped it start one here.
-                if self.settings_view_state.auto_quick_scan_on_launch
-                    && self.startup_quick_scan_filter_worker.is_none()
-                    && self.startup_quick_scan_filter_rx.is_none()
-                {
-                    self.start_quick_local_scan();
-                }
-                self.start_fs_watcher();
+            self.start_database_startup_tasks();
+            if std::mem::take(&mut self.recheck_all_after_database_wipe) {
+                self.queue_recheck_all_repositories();
             }
-            self.queue_startup_rechecks();
             self.start_startup_ts3_plugin_scan();
             self.start_repository_space_freshness_probe();
             self.maybe_auto_fill_app_update_url_from_metadata();
@@ -315,7 +326,7 @@ impl Foxy {
         self.poll_quick_scan_progress();
         self.poll_quick_scan_results();
         self.poll_repository_db_wipe_results();
-        self.poll_database_wipe_result();
+        self.poll_database_wipe_result(&ctx);
         self.poll_addon_delete_results();
         self.poll_addon_force_redownload_results();
         self.poll_addon_backup_results();
@@ -574,7 +585,7 @@ impl Foxy {
                 ));
                 ui.add_space(16.0);
 
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     let ok_btn = ui.button(self.t("OK"));
                     if ok_btn.hovered() {
                         ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
@@ -592,6 +603,7 @@ impl Foxy {
                         self.settings_view_state.current_tab = "Application".to_string();
                         self.dismiss_renderer_fallback_notice();
                     }
+                    self.render_export_logs_button(ui);
                 });
             });
     }

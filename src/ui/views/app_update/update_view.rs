@@ -9,7 +9,11 @@ impl Foxy {
                 bytes_total,
             } => {
                 ui.label(self.t("Downloading installer..."));
-                ui.add(ProgressBar::new(*progress).show_percentage());
+                ui.add(
+                    ActivityBar::new(Some(*progress))
+                        .motion(BarMotion::Forward)
+                        .text(format!("{}%", (*progress * 100.0) as usize)),
+                );
                 ui.label(format!(
                     "{} / {} MB",
                     format_mb(*bytes_done),
@@ -18,7 +22,7 @@ impl Foxy {
             }
             UpdateCheckStatus::Verifying => {
                 ui.label(self.t("Verifying installer integrity..."));
-                ui.add(crate::ui::app::PacedSpinner::new());
+                ui.add(ActivityIcon::new(ActivityGlyph::Shield));
             }
             UpdateCheckStatus::ReadyToInstall { installer_path } => {
                 let path = installer_path.clone();
@@ -60,6 +64,7 @@ impl Foxy {
                 if retry_btn.clicked() {
                     self.start_update_check();
                 }
+                self.render_export_logs_button(ui);
             }
             _ => {}
         }
@@ -120,7 +125,7 @@ impl Foxy {
                         ui.label(format!(
                             "{}: {}",
                             self.t("Current version"),
-                            env!("CARGO_PKG_VERSION")
+                            crate::build_info::VERSION
                         ));
                     }
                     UpdateCheckStatus::Available(info) => {
@@ -140,7 +145,7 @@ impl Foxy {
         ui: &mut Ui,
         info: &app_update::AppUpdateInfo,
     ) {
-        let current = env!("CARGO_PKG_VERSION");
+        let current = crate::build_info::VERSION;
         let latest = &info.manifest.latest;
         let heading_size = egui::TextStyle::Heading.resolve(ui.style()).size;
         let download_button_height = Self::adaptive_button_height(heading_size, 64.0);

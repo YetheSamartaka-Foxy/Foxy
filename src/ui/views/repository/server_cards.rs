@@ -83,8 +83,9 @@ impl Foxy {
         let statuses: Vec<ServerOnlineStatus> =
             servers.iter().map(|s| self.get_server_status(s)).collect();
         let mut new_selection = self.repository_selection.clone();
-        let join_preflight_active =
-            self.pending_join_preflight.is_some() || self.pending_join_preflight_query.is_some();
+        let join_preflight_active = self.pending_join_preflight.is_some()
+            || self.pending_join_preflight_query.is_some()
+            || self.pending_join_status_query.is_some();
 
         // Cache each server name's shaped galley: this list culls off-screen
         // rows with `is_rect_visible`, so without a cache scrolling re-shapes
@@ -310,8 +311,9 @@ impl Foxy {
         let repo = &self.repository_view_state.repositories[selected_idx];
         let effective = Self::build_effective_repository_snapshot(repo);
         let servers = repo.servers.clone();
-        let join_preflight_active =
-            self.pending_join_preflight.is_some() || self.pending_join_preflight_query.is_some();
+        let join_preflight_active = self.pending_join_preflight.is_some()
+            || self.pending_join_preflight_query.is_some()
+            || self.pending_join_status_query.is_some();
 
         ui.add_space(12.0);
 

@@ -17,10 +17,11 @@ use serde_json::{Value, json};
 
 use crate::core::api;
 use crate::core::benchmarks::BenchmarkKind;
+use crate::ui::app::agent_caption::AgentCaption;
 use crate::ui::app::{AddonInventoryEntry, Foxy, FoxyView, MemoryDiagnosticsSample};
 use crate::ui::types::{
     MAX_UI_SCALE_PERCENT, MIN_UI_SCALE_PERCENT, RepoState, RepositorySelection,
-    RepositorySettingsTab,
+    RepositorySettingsTab, RepositorySpaceBulkMode,
 };
 
 const SESSION_FILE_NAME: &str = "agent-gui-session.json";
@@ -87,6 +88,8 @@ pub struct AgentGuiRuntime {
     /// The next frame interval spans the idle gap before the probe began and
     /// is not a frame time.
     pub fps_probe_warming: bool,
+    /// The scene caption a `caption` step shows until its time is up.
+    caption: Option<AgentCaption>,
 }
 
 /// How long one `fps` read keeps the UI repainting every frame.
@@ -458,6 +461,21 @@ pub enum AgentGuiCommand {
         #[serde(default = "default_settle_frames")]
         frames: u64,
     },
+    /// Hold the response for `ms` of real time while the app keeps running,
+    /// then return the snapshot: lets a person watch a showcase scenario, or
+    /// lets background work move on between two observations.
+    Pause {
+        ms: u64,
+    },
+    /// Show a scene caption over the app for `ms`, holding like `pause`, so a
+    /// person watching a showcase knows what the next scene shows. Scenario
+    /// text is English only.
+    Caption {
+        title: String,
+        #[serde(default)]
+        detail: Option<String>,
+        ms: u64,
+    },
     /// Toggle stable-render mode: zero egui's animation time and disable caret
     /// blink / hover fades / spinner animation so screenshots are byte-stable.
     StableRender {
@@ -689,6 +707,9 @@ pub enum AgentGuiWaitCondition {
     },
     /// Satisfied once a download has completed (`download_finished`).
     DownloadComplete,
+    /// Satisfied once the running download has received its first bytes,
+    /// past the check and planning stages that come before the transfer.
+    DownloadTransferring,
     /// Satisfied once the smoothed FPS estimate is at or above `fps`.
     FpsAbove {
         fps: f32,
@@ -816,6 +837,7 @@ impl AgentGuiRuntime {
             stable_render: false,
             fps_probe_until: None,
             fps_probe_warming: false,
+            caption: None,
         }
     }
 
@@ -881,6 +903,8 @@ impl AgentGuiCommand {
             Self::Select { .. } => "select",
             Self::Window { .. } => "window",
             Self::Settle { .. } => "settle",
+            Self::Pause { .. } => "pause",
+            Self::Caption { .. } => "caption",
             Self::StableRender { .. } => "stable-render",
             Self::Assert { .. } => "assert",
             Self::ContextMenu { .. } => "context-menu",
@@ -917,6 +941,9 @@ impl AgentGuiCommand {
             Self::Nav { .. } => DEFAULT_COMMAND_TIMEOUT,
             Self::Settle { frames } => Duration::from_millis(frames.saturating_mul(50).max(200))
                 .saturating_add(SETTLE_SLACK),
+            Self::Pause { ms } | Self::Caption { ms, .. } => {
+                Duration::from_millis(*ms).saturating_add(SETTLE_SLACK)
+            }
             // A batch is bounded by the sum of its steps' timeouts so a long
             // `wait`/`download-complete` step inside it does not trip the client.
             Self::Batch { steps, .. } => steps
@@ -1253,6 +1280,13 @@ impl Foxy {
         // Derive view/modal/focus/toast/download transition events from the
         // frame we just observed (the causal feed behind `events`).
         self.agent_gui_record_state_events(ctx, &mut runtime);
+        if runtime
+            .caption
+            .as_ref()
+            .is_some_and(|caption| !caption.paint(ctx, Instant::now()))
+        {
+            runtime.caption = None;
+        }
         if !runtime.pending_waits.is_empty()
             || !runtime.pending_screenshots.is_empty()
             || !runtime.pending_settles.is_empty()
@@ -1815,6 +1849,42 @@ impl Foxy {
                     report_focus: false,
                 });
                 ctx.request_repaint_after(Duration::from_millis(16));
+                return;
+            }
+            AgentGuiCommand::Pause { ms } => {
+                // A settle that no frame count can satisfy: it answers at its
+                // deadline with the snapshot, as a settle that ran out of time does.
+                runtime.pending_settles.push(PendingSettle {
+                    command: command.clone(),
+                    target_frame: u64::MAX,
+                    response_tx: request.response_tx,
+                    deadline: Instant::now()
+                        .checked_add(Duration::from_millis(*ms))
+                        .unwrap_or_else(Instant::now),
+                    requested_at: started_at,
+                    report_focus: false,
+                });
+                ctx.request_repaint_after(Duration::from_millis((*ms).min(50)));
+                return;
+            }
+            AgentGuiCommand::Caption { title, detail, ms } => {
+                let now = Instant::now();
+                let until = now.checked_add(Duration::from_millis(*ms)).unwrap_or(now);
+                runtime.caption = Some(AgentCaption {
+                    title: title.clone(),
+                    detail: detail.clone(),
+                    shown_at: now,
+                    until,
+                });
+                runtime.pending_settles.push(PendingSettle {
+                    command: command.clone(),
+                    target_frame: u64::MAX,
+                    response_tx: request.response_tx,
+                    deadline: until,
+                    requested_at: started_at,
+                    report_focus: false,
+                });
+                ctx.request_repaint();
                 return;
             }
             AgentGuiCommand::StableRender { on } => {
@@ -2630,6 +2700,10 @@ impl Foxy {
                     .any(|candidate| normalize_selector(candidate) == needle)
             }
             AgentGuiWaitCondition::DownloadComplete => self.download_finished,
+            AgentGuiWaitCondition::DownloadTransferring => {
+                self.current_sync_mode == Some(api::SyncMode::Download)
+                    && self.total_downloaded_bytes > 0
+            }
             AgentGuiWaitCondition::FpsAbove { fps } => self.fps_ema >= *fps,
             AgentGuiWaitCondition::NodeVisible { id } => !self
                 .agent_gui_find_nodes(ctx, None, None, Some(id), true)
@@ -2859,6 +2933,14 @@ impl Foxy {
             }
         };
         push(self.backend_worker.is_some(), "core-sync");
+        // A space's bulk run hands one repository to the next with a gap in
+        // `core-sync`, so it gets its own reason for the whole run.
+        push(
+            self.repository_space_bulk_progress
+                .as_ref()
+                .is_some_and(|progress| progress.completed_count < progress.total_count),
+            "space-bulk",
+        );
         push(
             !self.pending_repository_db_wipes.is_empty(),
             "repository-db-wipe",
@@ -3315,6 +3397,14 @@ impl Foxy {
                 self.mark_settings_dirty();
                 json!(parsed)
             }
+            "reduce-motion" | "reduce_motion" => {
+                let parsed = parse_agent_gui_bool(trimmed).ok_or_else(|| {
+                    format!("Expected a boolean for reduce-motion, got '{value}'")
+                })?;
+                self.settings_view_state.reduce_motion = parsed;
+                self.mark_settings_dirty();
+                json!(parsed)
+            }
             "extended-diagnostics-logging" | "extended_diagnostics_logging" => {
                 let parsed = parse_agent_gui_bool(trimmed).ok_or_else(|| {
                     format!("Expected a boolean for extended-diagnostics-logging, got '{value}'")
@@ -3379,7 +3469,7 @@ impl Foxy {
             }
             other => {
                 return Err(format!(
-                    "Unsupported setting '{other}' (try debug-mode, show-activity-log, show-fps-counter, extended-diagnostics-logging, ui-scale-percent, locale, or download-speed-limit-mbps)"
+                    "Unsupported setting '{other}' (try debug-mode, show-activity-log, show-fps-counter, reduce-motion, extended-diagnostics-logging, ui-scale-percent, locale, or download-speed-limit-mbps)"
                 ));
             }
         };
@@ -3499,7 +3589,7 @@ impl Foxy {
             self.storage_compat_notice.is_some(),
             "storage-compat-notice",
         );
-        push(self.pending_db_schema_wipe.is_some(), "db-schema-wipe");
+        push(self.database_repair_prompt_visible(), "db-schema-wipe");
         push(self.benchmark_prompt.is_some(), "benchmark-save");
         push(self.benchmarks_view.export.is_some(), "benchmark-export");
         push(self.pending_app_update_prompt, "app-update-available");
@@ -5081,6 +5171,10 @@ impl Foxy {
             "open-help" => self.open_reference_view(FoxyView::Help),
             "open-app-update" => self.open_reference_view(FoxyView::AppUpdate),
             "open-add-repository-modal" => self.show_add_repository_modal = true,
+            "open-update-view" => {
+                self.direct_download_update_view = false;
+                self.update_modal_open = true;
+            }
             "open-add-profile-window" => self.show_add_profile_window = true,
             "open-rename-profile-window" => self.show_rename_profile_window = true,
             "close-modals" => self.agent_gui_close_modals(),
@@ -5131,6 +5225,41 @@ impl Foxy {
                 let index = self.agent_gui_resolve_repo_index(params)?;
                 self.arm_benchmark(BenchmarkKind::Recheck, Vec::new());
                 self.start_remote_recheck_with_plan(index);
+            }
+            "space-recheck-all" => {
+                let space_id = params
+                    .get("space")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .or_else(|| self.selected_repository_space_id.clone())
+                    .ok_or_else(|| {
+                        (
+                            "invalid-params".to_string(),
+                            "Provide space or select a repository space first".to_string(),
+                        )
+                    })?;
+                let action = self
+                    .build_repository_space_bulk_action(
+                        &space_id,
+                        RepositorySpaceBulkMode::RecheckAll,
+                    )
+                    .ok_or_else(|| {
+                        (
+                            "invalid-params".to_string(),
+                            format!("No repository space with id '{space_id}'"),
+                        )
+                    })?;
+                let selected: Vec<usize> = action
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.selected)
+                    .map(|entry| entry.repo_index)
+                    .collect();
+                self.start_repository_space_bulk_action(
+                    &space_id,
+                    RepositorySpaceBulkMode::RecheckAll,
+                    &selected,
+                );
             }
             "wipe-repo-db" => {
                 let index = self.agent_gui_resolve_repo_index(params)?;
@@ -5394,6 +5523,12 @@ const AGENT_ACTIONS: &[AgentAction] = &[
         summary: "Open the add-repository modal",
     },
     AgentAction {
+        name: "open-update-view",
+        destructive: false,
+        params: "",
+        summary: "Open the update view of the selected repository (the Display update view banner action)",
+    },
+    AgentAction {
         name: "open-add-profile-window",
         destructive: false,
         params: "",
@@ -5458,6 +5593,12 @@ const AGENT_ACTIONS: &[AgentAction] = &[
         destructive: true,
         params: "repo-index",
         summary: "Remote recheck that also prepares the download plan (the toolbar recheck)",
+    },
+    AgentAction {
+        name: "space-recheck-all",
+        destructive: true,
+        params: "space?",
+        summary: "Recheck every repository of a repository space (the space's Recheck all, confirmed with its default selection)",
     },
     AgentAction {
         name: "wipe-repo-db",
@@ -6323,6 +6464,10 @@ mod tests {
                 "busy-reason-cleared",
             ),
             (AgentGuiWaitCondition::DownloadComplete, "download-complete"),
+            (
+                AgentGuiWaitCondition::DownloadTransferring,
+                "download-transferring",
+            ),
             (AgentGuiWaitCondition::FpsAbove { fps: 30.0 }, "fps-above"),
             (
                 AgentGuiWaitCondition::NodeVisible {
@@ -6449,6 +6594,15 @@ mod tests {
                 "window",
             ),
             (AgentGuiCommand::Settle { frames: 2 }, "settle"),
+            (AgentGuiCommand::Pause { ms: 1_500 }, "pause"),
+            (
+                AgentGuiCommand::Caption {
+                    title: "Scene".to_string(),
+                    detail: None,
+                    ms: 1_500,
+                },
+                "caption",
+            ),
             (AgentGuiCommand::StableRender { on: true }, "stable-render"),
             (
                 AgentGuiCommand::Assert {
@@ -6532,6 +6686,34 @@ mod tests {
                 fields: None,
                 since_frame: None
             }
+        ));
+    }
+
+    #[test]
+    fn a_pause_step_parses_and_the_client_waits_out_its_hold() {
+        let pause: AgentGuiCommand =
+            serde_json::from_str(r#"{"command":"pause","ms":4000}"#).unwrap();
+        assert!(matches!(pause, AgentGuiCommand::Pause { ms: 4_000 }));
+        assert!(pause.timeout() > Duration::from_millis(4_000));
+    }
+
+    #[test]
+    fn a_caption_step_parses_with_or_without_detail_and_holds_like_a_pause() {
+        let caption: AgentGuiCommand = serde_json::from_str(
+            r#"{"command":"caption","title":"Scene 1","detail":"Check","ms":3000}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            &caption,
+            AgentGuiCommand::Caption { title, detail: Some(detail), ms: 3_000 }
+                if title == "Scene 1" && detail == "Check"
+        ));
+        assert!(caption.timeout() > Duration::from_millis(3_000));
+        let bare: AgentGuiCommand =
+            serde_json::from_str(r#"{"command":"caption","title":"Scene 2","ms":2000}"#).unwrap();
+        assert!(matches!(
+            bare,
+            AgentGuiCommand::Caption { detail: None, .. }
         ));
     }
 

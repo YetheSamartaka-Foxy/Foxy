@@ -11,6 +11,7 @@ use tokio::sync::{Mutex, watch};
 use tokio::time::{sleep, timeout};
 
 use super::bandwidth::AdaptiveBandwidthLimiter;
+use super::failure::is_missing_remote_file;
 use super::metrics::{DownloadMetrics, DownloadSchedulerState, RangeMetric};
 use super::transfer::{
     download_cancelled_error, ensure_not_cancelled, jitter_delay, wait_for_download_resume,
@@ -492,7 +493,7 @@ pub(super) async fn download_large_file_with_range_queue(
         match result {
             Ok(Ok(())) => {}
             Ok(Err(err)) => {
-                if first_error.is_none() {
+                if first_error.is_none() || is_missing_remote_file(&err) {
                     first_error = Some(err);
                 }
                 // Drain the queue so other workers exit quickly
@@ -673,6 +674,8 @@ async fn download_one_range(
 
     let request_latency = request_started.elapsed();
 
+    resp.error_for_status_ref()
+        .map_err(reqwest::Error::without_url)?;
     if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
         anyhow::bail!(
             "Range request {}-{} returned {} (expected 206)",
@@ -786,6 +789,9 @@ async fn download_one_range(
                 .header("Range", format!("bytes={}-{}", resume_start, end))
                 .send()
                 .await?;
+            reconnect_resp
+                .error_for_status_ref()
+                .map_err(reqwest::Error::without_url)?;
             if reconnect_resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
                 anyhow::bail!(
                     "Reconnect range {}-{} returned {} (expected 206)",

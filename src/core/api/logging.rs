@@ -124,7 +124,7 @@ fn ensure_logger_inner(duplicate_to_terminal: bool) {
                         info!("Logger initialized");
                         info!(
                             "Foxy app version: {} ({}) build={} commit={}",
-                            env!("CARGO_PKG_VERSION"),
+                            crate::build_info::VERSION,
                             std::env::consts::ARCH,
                             crate::build_info::build_kind(),
                             crate::build_info::GIT_HASH

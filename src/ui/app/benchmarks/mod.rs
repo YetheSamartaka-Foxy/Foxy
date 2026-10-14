@@ -622,7 +622,7 @@ impl Foxy {
             favourite: false,
             hidden: false,
             build: crate::core::benchmarks::BenchmarkBuild {
-                version: env!("CARGO_PKG_VERSION").to_owned(),
+                version: crate::build_info::VERSION.to_owned(),
                 commit: crate::build_info::GIT_HASH.to_owned(),
                 kind: crate::build_info::build_kind().to_owned(),
             },

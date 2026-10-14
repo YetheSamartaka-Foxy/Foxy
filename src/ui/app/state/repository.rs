@@ -347,11 +347,18 @@ pub struct ExternalAddonRowCache {
     pub addon_name: String,
     pub path: String,
     pub origin: String,
+    pub origin_filters: Vec<String>,
     pub addon_name_lower: String,
     pub path_lower: String,
     pub origin_lower: String,
     pub path_lookup_key: String,
     pub local_size_bytes: Option<u64>,
+}
+
+impl ExternalAddonRowCache {
+    pub fn matches_origin_filter(&self, filter: &str) -> bool {
+        filter == "All" || self.origin_filters.iter().any(|origin| origin == filter)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -488,6 +495,8 @@ pub struct PendingJoinPreflightState {
     /// "Join" action, so there is no server to connect to. The `server` field
     /// holds a placeholder and the launch must not pass connection params.
     pub launch_only: bool,
+    // Readiness confirmation must resume server checks before any game launch.
+    pub query_server_before_join: bool,
 }
 
 impl PendingJoinPreflightState {
@@ -514,11 +523,37 @@ impl PendingJoinPreflightState {
             steam_required: false,
             steam_running: false,
             launch_only,
+            query_server_before_join: false,
         }
+    }
+
+    pub(crate) fn for_join_readiness(
+        repo_name: &str,
+        server: RepositoryServer,
+        original_repository: Repository,
+        (ts3_required, ts3_running): (bool, bool),
+        (steam_required, steam_running): (bool, bool),
+    ) -> Option<Self> {
+        let needs_attention = (ts3_required && !ts3_running) || (steam_required && !steam_running);
+        if !needs_attention {
+            return None;
+        }
+        Some(Self {
+            ts3_required,
+            ts3_running,
+            steam_required,
+            steam_running,
+            query_server_before_join: true,
+            ..Self::empty(repo_name, server, original_repository, false)
+        })
     }
 
     pub fn has_dlc_changes(&self) -> bool {
         !self.dlc_enable.is_empty() || !self.dlc_disable.is_empty()
+    }
+
+    pub(crate) fn can_launch(&self) -> bool {
+        !self.steam_required || self.steam_running
     }
 }
 
@@ -564,7 +599,128 @@ pub struct JoinPreflightQueryResult {
 
 #[cfg(test)]
 mod tests {
-    use super::ListGalleyCache;
+    use super::{
+        JoinPreflightDlcChange, JoinPreflightUnavailableAddon, ListGalleyCache,
+        PendingJoinPreflightState,
+    };
+    use crate::ui::types::{Repository, RepositoryServer};
+
+    #[test]
+    fn join_readiness_preserves_warnings_and_resumes_server_checks() {
+        let server = RepositoryServer {
+            name: "MainRepo".to_string(),
+            address: "127.0.0.1".to_string(),
+            port: "2302".to_string(),
+            ..RepositoryServer::default()
+        };
+        let repository = Repository {
+            path: "R:/Mods/MainRepo".to_string(),
+            ..Repository::default()
+        };
+        for (ts3_gate, steam_gate) in [
+            ((true, false), (true, false)),
+            ((true, false), (true, true)),
+            ((true, true), (true, false)),
+            ((false, false), (true, false)),
+            ((true, false), (false, false)),
+        ] {
+            let pending = PendingJoinPreflightState::for_join_readiness(
+                "MainRepo",
+                server.clone(),
+                repository.clone(),
+                ts3_gate,
+                steam_gate,
+            )
+            .expect("a missing required client must warn before querying the server");
+            assert_eq!((pending.ts3_required, pending.ts3_running), ts3_gate);
+            assert_eq!((pending.steam_required, pending.steam_running), steam_gate);
+            assert_eq!(pending.can_launch(), !steam_gate.0 || steam_gate.1);
+            assert!(pending.query_server_before_join);
+            assert!(!pending.launch_only);
+            assert_eq!(pending.server, server);
+            assert_eq!(pending.original_repository.path, repository.path);
+        }
+    }
+
+    #[test]
+    fn join_readiness_skips_running_or_disabled_checks() {
+        for (ts3_gate, steam_gate) in [
+            ((true, true), (true, true)),
+            ((false, false), (false, false)),
+            ((true, true), (false, false)),
+            ((false, false), (true, true)),
+        ] {
+            assert!(
+                PendingJoinPreflightState::for_join_readiness(
+                    "MainRepo",
+                    RepositoryServer::default(),
+                    Repository::default(),
+                    ts3_gate,
+                    steam_gate,
+                )
+                .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn addon_and_plain_launch_modals_do_not_repeat_server_checks() {
+        for launch_only in [false, true] {
+            let pending = PendingJoinPreflightState::empty(
+                "MainRepo",
+                RepositoryServer::default(),
+                Repository::default(),
+                launch_only,
+            );
+            assert!(!pending.query_server_before_join);
+        }
+    }
+
+    #[test]
+    fn steam_blocks_launch_and_join_until_running() {
+        for launch_only in [false, true] {
+            let mut pending = PendingJoinPreflightState::empty(
+                "MainRepo",
+                RepositoryServer::default(),
+                Repository::default(),
+                launch_only,
+            );
+            pending.steam_required = true;
+            assert!(!pending.can_launch());
+            pending.steam_running = true;
+            assert!(pending.can_launch());
+            pending.steam_running = false;
+            assert!(!pending.can_launch());
+        }
+    }
+
+    #[test]
+    fn ts3_and_addon_warnings_remain_advisory() {
+        let mut pending = PendingJoinPreflightState::empty(
+            "MainRepo",
+            RepositoryServer::default(),
+            Repository::default(),
+            false,
+        );
+        pending.ts3_required = true;
+        pending
+            .unavailable_enabled
+            .push(JoinPreflightUnavailableAddon {
+                addon_name: "@mod_01".to_string(),
+                path: "R:/Mods/@mod_01".to_string(),
+            });
+        pending.dlc_enable.push(JoinPreflightDlcChange {
+            code: "gm",
+            name: "Global Mobilization",
+            selected: true,
+        });
+        assert!(pending.can_launch());
+        pending.steam_required = true;
+        assert!(!pending.can_launch());
+        pending.steam_running = true;
+        assert!(pending.can_launch());
+        assert!(!pending.ts3_running);
+    }
 
     #[test]
     fn slot_index_is_row_major() {

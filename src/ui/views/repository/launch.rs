@@ -73,7 +73,7 @@ impl Foxy {
         addons
     }
 
-    pub(super) fn handle_post_launch_window_behavior(
+    pub(crate) fn handle_post_launch_window_behavior(
         &mut self,
         ctx: &egui::Context,
         reason: &'static str,
@@ -86,7 +86,31 @@ impl Foxy {
         }
     }
 
-    pub(super) fn launch_repository_with_steam_guard(
+    pub(crate) fn launch_repository_with_database_guard(
+        &mut self,
+        effective: &Repository,
+        server: Option<&RepositoryServer>,
+        repo_name: &str,
+        launch_label: &'static str,
+    ) -> LaunchDispatchResult {
+        self.refresh_database_repair_requirement();
+        if self.database_updates_blocked() {
+            if self.pending_database_launch.is_none() {
+                self.pending_database_launch = Some(crate::ui::app::DatabaseLaunchContinuation {
+                    repository: effective.clone(),
+                    server: server.cloned(),
+                    repo_name: repo_name.to_string(),
+                    launch_label,
+                });
+            }
+            self.show_db_schema_wipe_prompt = true;
+            self.needs_repaint = true;
+            return LaunchDispatchResult::Deferred;
+        }
+        self.launch_repository_with_steam_guard(effective, server, repo_name, launch_label)
+    }
+
+    pub(crate) fn launch_repository_with_steam_guard(
         &mut self,
         effective: &Repository,
         server: Option<&RepositoryServer>,
@@ -145,10 +169,20 @@ impl Foxy {
             .active()
             .display_name()
             .to_string();
+        let steam_required = crate::core::game::registry()
+            .active()
+            .steam_app_id_from_settings(&self.settings_view_state)
+            .is_some();
         self.activate_extra_files_before_launch();
 
-        if steam::is_steam_running() {
-            return match spawn_launch_process(&executable, &args, cwd.as_deref()) {
+        if !steam_required || steam::is_steam_running(&self.settings_view_state.steam_directory) {
+            return match spawn_launch_process(
+                &executable,
+                &args,
+                cwd.as_deref(),
+                steam_required,
+                &self.settings_view_state.steam_directory,
+            ) {
                 Ok(pid) => {
                     info!(
                         "Launched {} for repository {} (pid={})",
@@ -191,10 +225,11 @@ impl Foxy {
                 }
                 Ok(SteamEnsureResult::SkippedMissingDirectory) => {
                     warn!(
-                        "Steam directory is not configured and auto-detection failed; proceeding \
-                         with direct {} launch for repository {}",
+                        "Steam directory is not configured and auto-detection failed; cancelling \
+                         {} launch for repository {}",
                         launch_label_owned, repo_name_owned
                     );
+                    return;
                 }
                 Err(err) => {
                     warn!(
@@ -209,6 +244,8 @@ impl Foxy {
                 &executable_for_thread,
                 &args_for_thread,
                 cwd_for_thread.as_deref(),
+                steam_required,
+                &steam_directory,
             ) {
                 Ok(pid) => {
                     info!(
@@ -230,7 +267,7 @@ impl Foxy {
 
     pub(super) fn try_join_repository_server(
         &mut self,
-        _ctx: &egui::Context,
+        ctx: &egui::Context,
         effective: &Repository,
         server: &RepositoryServer,
         repo_name: &str,
@@ -263,6 +300,30 @@ impl Foxy {
             return;
         }
 
+        let ts3_gate = self.evaluate_ts3_join_gate(effective, repo_name);
+        let steam_gate = self.evaluate_steam_launch_gate(effective, repo_name);
+        if let Some(preflight) = crate::ui::app::PendingJoinPreflightState::for_join_readiness(
+            repo_name,
+            server.clone(),
+            effective.clone(),
+            ts3_gate,
+            steam_gate,
+        ) {
+            self.prelaunch_recheck_at = None;
+            self.pending_join_preflight = Some(preflight);
+            ctx.request_repaint();
+            return;
+        }
+
+        self.start_join_server_query(effective, server, repo_name);
+    }
+
+    pub(super) fn start_join_server_query(
+        &mut self,
+        effective: &Repository,
+        server: &RepositoryServer,
+        repo_name: &str,
+    ) {
         info!(
             "Join requested for repository {} server {}:{}",
             repo_name, server.address, server.port
@@ -381,10 +442,10 @@ impl Foxy {
                 }
 
                 info!(
-                    "Joining repository {} without addon preflight dialog because no addon preflight gate was active; evaluating TeamSpeak gate",
+                    "Joining repository {} without addon preflight dialog because no addon preflight gate was active",
                     repo_name
                 );
-                self.present_join_preflight(ctx, effective, server, repo_name, None);
+                self.present_join_addon_preflight(ctx, effective, server, repo_name, None);
             }
             ServerOnlineStatus::Offline => {
                 warn!(
@@ -454,6 +515,7 @@ impl Foxy {
         });
 
         let address = server.address.clone();
+        let database_metadata_available = !self.database_updates_blocked();
         let repo_urls = self
             .repository_view_state
             .repositories
@@ -479,7 +541,7 @@ impl Foxy {
                     address, port, err
                 )
             });
-            let display_names = {
+            let display_names = if database_metadata_available {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build();
@@ -498,6 +560,8 @@ impl Foxy {
                         Default::default()
                     }
                 }
+            } else {
+                Default::default()
             };
             match &result {
                 Ok(query_result) => {
@@ -583,7 +647,7 @@ impl Foxy {
                 result.requirements.len()
             );
         }
-        self.present_join_preflight(ctx, effective, server, repo_name, addon_state);
+        self.present_join_addon_preflight(ctx, effective, server, repo_name, addon_state);
     }
 
     /// Adds the Creator DLC differences to the join modal. Skipped when the
@@ -644,12 +708,7 @@ impl Foxy {
         state.dlc_disable = dlc_disable;
     }
 
-    /// Single convergence point that decides whether to open the join preflight
-    /// modal (for addon actions and/or a TeamSpeak warning) or launch directly.
-    ///
-    /// The TS3 gate is evaluated here so it applies regardless of whether the
-    /// addon preflight setting is enabled.
-    pub(crate) fn present_join_preflight(
+    pub(crate) fn present_join_addon_preflight(
         &mut self,
         ctx: &egui::Context,
         effective: &Repository,
@@ -657,40 +716,34 @@ impl Foxy {
         repo_name: &str,
         addon_state: Option<crate::ui::app::PendingJoinPreflightState>,
     ) {
-        let (ts3_required, ts3_running) = self.evaluate_ts3_join_gate(effective, repo_name);
-        let (steam_required, steam_running) = self.evaluate_steam_launch_gate(effective, repo_name);
-        let needs_attention = (ts3_required && !ts3_running) || (steam_required && !steam_running);
         self.prelaunch_recheck_at = None;
+        let (steam_required, steam_running) = self.evaluate_steam_launch_gate(effective, repo_name);
+        let mut addon_state = addon_state.or_else(|| {
+            Self::build_join_preflight_state(
+                effective,
+                &self.repository_view_state.repositories,
+                server,
+                repo_name,
+                &[],
+                &crate::core::addon_metadata::AddonDisplayNameSnapshot::new(),
+            )
+        });
+        if steam_required && !steam_running {
+            addon_state.get_or_insert_with(|| {
+                crate::ui::app::PendingJoinPreflightState::empty(
+                    repo_name,
+                    server.clone(),
+                    effective.clone(),
+                    false,
+                )
+            });
+        }
 
         match addon_state {
             Some(mut preflight) => {
-                preflight.ts3_required = ts3_required;
-                preflight.ts3_running = ts3_running;
                 preflight.steam_required = steam_required;
                 preflight.steam_running = steam_running;
                 self.pending_join_preflight = Some(preflight);
-            }
-            None if needs_attention => {
-                info!(
-                    "Join preflight opening for repository {} server {}:{} with pre-join warnings only (ts3_attention={}, steam_attention={})",
-                    repo_name,
-                    server.address,
-                    server.port,
-                    ts3_required && !ts3_running,
-                    steam_required && !steam_running
-                );
-                self.pending_join_preflight = Some(crate::ui::app::PendingJoinPreflightState {
-                    ts3_required,
-                    ts3_running,
-                    steam_required,
-                    steam_running,
-                    ..crate::ui::app::PendingJoinPreflightState::empty(
-                        repo_name,
-                        server.clone(),
-                        effective.clone(),
-                        false,
-                    )
-                });
             }
             None => {
                 info!(
@@ -707,7 +760,12 @@ impl Foxy {
     /// per-repo/global check is enabled and the repository ships `.ts3_plugin`
     /// files. Synchronous - acceptable for a user-initiated join action.
     fn evaluate_ts3_join_gate(&self, effective: &Repository, repo_name: &str) -> (bool, bool) {
-        if !self.repo_check_ts3_running_before_join(effective) {
+        if !crate::core::game::registry()
+            .active()
+            .capabilities()
+            .teamspeak3_plugins
+            || !self.repo_check_ts3_running_before_join(effective)
+        {
             return (false, false);
         }
         if effective.path.trim().is_empty() {
@@ -731,10 +789,15 @@ impl Foxy {
     /// since Steam must be running for Arma 3 to launch. Synchronous - acceptable
     /// for a user-initiated launch/join action.
     fn evaluate_steam_launch_gate(&self, effective: &Repository, repo_name: &str) -> (bool, bool) {
-        if !self.repo_check_steam_running_before_launch(effective) {
+        if crate::core::game::registry()
+            .active()
+            .steam_app_id_from_settings(&self.settings_view_state)
+            .is_none()
+            || !self.repo_check_steam_running_before_launch(effective)
+        {
             return (false, false);
         }
-        let running = steam::is_steam_running();
+        let running = steam::is_steam_running(&self.settings_view_state.steam_directory);
         info!(
             "Steam launch gate for repository {}: steam_required=true steam_running={}",
             repo_name, running
@@ -786,7 +849,7 @@ impl Foxy {
         }
 
         let launch_result =
-            self.launch_repository_with_steam_guard(effective, None, repo_name, "regular");
+            self.launch_repository_with_database_guard(effective, None, repo_name, "regular");
         if launch_result == LaunchDispatchResult::Launched {
             self.handle_post_launch_window_behavior(ctx, "launch completed");
         }
@@ -887,7 +950,7 @@ impl Foxy {
         repo_name: &str,
     ) {
         let launch_result =
-            self.launch_repository_with_steam_guard(effective, Some(server), repo_name, "join");
+            self.launch_repository_with_database_guard(effective, Some(server), repo_name, "join");
         if matches!(
             launch_result,
             LaunchDispatchResult::Launched | LaunchDispatchResult::Deferred
@@ -967,8 +1030,8 @@ impl Foxy {
             return;
         };
 
-        // Add the mission.sqm path as a positional argument.
-        command.arg(&mission.sqm_path);
+        let mission_arg = steam::arma3_mission_argument(&command, Path::new(&mission.sqm_path));
+        command.arg(mission_arg);
 
         info!(
             "Launching Eden Editor with mission {} ({}) for repository {}",
@@ -983,8 +1046,14 @@ impl Foxy {
         let cwd: Option<PathBuf> = command.get_current_dir().map(Path::to_path_buf);
         self.activate_extra_files_before_launch();
 
-        if steam::is_steam_running() {
-            match spawn_launch_process(&executable, &args, cwd.as_deref()) {
+        if steam::is_steam_running(&self.settings_view_state.steam_directory) {
+            match spawn_launch_process(
+                &executable,
+                &args,
+                cwd.as_deref(),
+                true,
+                &self.settings_view_state.steam_directory,
+            ) {
                 Ok(pid) => {
                     info!("Launched Eden Editor (pid={})", pid);
                     self.handle_post_launch_window_behavior(ctx, "editor launch completed");
@@ -1002,7 +1071,13 @@ impl Foxy {
         let repo_name_owned = repo_name.to_string();
         std::thread::spawn(
             move || match steam::ensure_steam_running(&steam_directory) {
-                Ok(_) => match spawn_launch_process(&executable, &args, cwd.as_deref()) {
+                Ok(_) => match spawn_launch_process(
+                    &executable,
+                    &args,
+                    cwd.as_deref(),
+                    true,
+                    &steam_directory,
+                ) {
                     Ok(pid) => info!(
                         "Launched Eden Editor after Steam startup (pid={}) for repository {}",
                         pid, repo_name_owned

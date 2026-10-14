@@ -494,6 +494,9 @@ impl Foxy {
                             },
                             &notice.message,
                         );
+                        if !notice.success {
+                            self.render_export_logs_button(ui);
+                        }
                         ui.separator();
                     }
 

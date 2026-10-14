@@ -20,4 +20,11 @@ impl Foxy {
     pub fn normalize_repo_url(repo_url: &str) -> String {
         crate::core::models::repository::normalize_repository_url(repo_url)
     }
+
+    /// Case-insensitive comparison key for matching addresses from different
+    /// sources (space manifest entries, typed input, imports) against added
+    /// repositories. Never use it as a request URL or a stored key.
+    pub fn repo_url_match_key(repo_url: &str) -> String {
+        crate::core::models::repository::repository_url_match_key(repo_url)
+    }
 }

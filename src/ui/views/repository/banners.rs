@@ -1,9 +1,13 @@
 use super::{
-    RepositoryActionBanner, RepositoryActionBannerAction, RepositoryBannerResponse,
-    RepositoryCheckCompletionBanner, RepositoryCheckStatusBanner, RepositoryUiAction,
+    BANNER_CORNER_RADIUS, RepositoryActionBanner, RepositoryActionBannerAction,
+    RepositoryBannerResponse, RepositoryCheckCompletionBanner, RepositoryCheckStatusBanner,
+    RepositoryUiAction,
 };
 use crate::core::api::SyncMode;
-use crate::ui::app::Foxy;
+use crate::ui::app::{
+    ActivityBar, ActivityGlyph, BarMotion, Foxy, QuickScanProgressState, VerificationMap,
+    paint_border_beam, transfer_progress,
+};
 use crate::ui::i18n::fmt_bytes;
 use crate::ui::types::RepoState;
 use eframe::egui::{
@@ -91,11 +95,23 @@ impl Foxy {
         }
 
         let mode = self.current_sync_mode?;
-        let title = match mode {
-            SyncMode::RemoteRefreshOnly => self.t("Remote data recheck in progress"),
-            SyncMode::QuickCheckOnly => self.t("Quick local check in progress"),
-            SyncMode::RecheckOnly => self.t("Repository recheck in progress"),
-            SyncMode::RecheckIntegrity => self.t("Integrity recheck in progress"),
+        let (title, glyph) = match mode {
+            SyncMode::RemoteRefreshOnly => (
+                self.t("Remote data recheck in progress"),
+                ActivityGlyph::Signal,
+            ),
+            SyncMode::QuickCheckOnly => (
+                self.t("Quick local check in progress"),
+                ActivityGlyph::Radar,
+            ),
+            SyncMode::RecheckOnly => (
+                self.t("Repository recheck in progress"),
+                ActivityGlyph::Radar,
+            ),
+            SyncMode::RecheckIntegrity => (
+                self.t("Integrity recheck in progress"),
+                ActivityGlyph::Shield,
+            ),
             SyncMode::Download => return None,
         };
 
@@ -156,6 +172,8 @@ impl Foxy {
             progress,
             elapsed_seconds: elapsed.as_secs(),
             cancellable: true,
+            glyph,
+            verification: true,
         })
     }
 
@@ -200,25 +218,7 @@ impl Foxy {
         let elapsed = state
             .map(|state| state.started_at.elapsed())
             .unwrap_or_default();
-        let progress = if let Some(state) = state {
-            if let Some((checked_parts, total_parts)) = state.hash_part_counter {
-                if total_parts > 0 {
-                    Some((checked_parts as f32 / total_parts as f32).clamp(0.0, 1.0))
-                } else {
-                    None
-                }
-            } else if let Some((checked, total)) = state.hash_counter {
-                if total > 0 {
-                    Some((checked as f32 / total as f32).clamp(0.0, 1.0))
-                } else {
-                    None
-                }
-            } else {
-                state.stage_percent.map(|percent| percent.clamp(0.0, 1.0))
-            }
-        } else {
-            None
-        };
+        let progress = state.and_then(quick_scan_progress);
 
         Some(RepositoryCheckStatusBanner {
             title: self.t("Quick local check in progress"),
@@ -227,6 +227,8 @@ impl Foxy {
             progress,
             elapsed_seconds: elapsed.as_secs(),
             cancellable: false,
+            glyph: ActivityGlyph::Radar,
+            verification: true,
         })
     }
 
@@ -242,6 +244,8 @@ impl Foxy {
             progress: None,
             elapsed_seconds: elapsed.as_secs(),
             cancellable: false,
+            glyph: ActivityGlyph::Gear,
+            verification: false,
         })
     }
 
@@ -280,7 +284,46 @@ impl Foxy {
             progress: None,
             elapsed_seconds: elapsed.as_secs(),
             cancellable: true,
+            glyph: if force_redownload {
+                ActivityGlyph::Download
+            } else {
+                ActivityGlyph::Gear
+            },
+            verification: false,
         })
+    }
+
+    /// Progress of the work running on a repository (`None` while its end is
+    /// unknown), and whether it moves or a paused download holds it.
+    pub(super) fn repository_operation_activity(
+        &self,
+        repo_index: usize,
+    ) -> (Option<f32>, BarMotion) {
+        if self.syncing_repository != Some(repo_index) {
+            let progress = self
+                .repository_view_state
+                .repositories
+                .get(repo_index)
+                .and_then(|repo| {
+                    let key = Self::repo_instance_key(&repo.address, &repo.path);
+                    self.quick_scan_progress_by_instance.get(&key)
+                })
+                .and_then(quick_scan_progress);
+            return (progress, BarMotion::Forward);
+        }
+        if self.current_sync_mode == Some(SyncMode::Download) {
+            let motion = if self.download_paused {
+                BarMotion::Held
+            } else {
+                BarMotion::Forward
+            };
+            let fraction = self
+                .download_progress
+                .as_ref()
+                .map_or(0.0, |(_, fraction)| *fraction);
+            return (transfer_progress(fraction, motion), motion);
+        }
+        (self.recheck_progress_fraction(), BarMotion::Forward)
     }
 
     pub(super) fn active_repository_row_operation_tooltip(
@@ -330,6 +373,7 @@ impl Foxy {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn render_repository_message_banner(
         &self,
         ui: &mut Ui,
@@ -338,7 +382,8 @@ impl Foxy {
         stroke_color: Color32,
         action_button: Option<(&str, Color32)>,
         dismiss_label: Option<&str>,
-    ) -> RepositoryBannerResponse {
+        activity: Option<ActivityBar>,
+    ) -> egui::InnerResponse<RepositoryBannerResponse> {
         let banner_font_size = self
             .settings_view_state
             .font_sizes
@@ -348,11 +393,12 @@ impl Foxy {
         let status_banner_fill = self.color_widget_bg();
         let status_banner_text = self.color_text_normal();
         let mut response = RepositoryBannerResponse::None;
+        let running = activity.is_some();
 
-        Frame::NONE
+        let frame = Frame::NONE
             .fill(status_banner_fill)
             .stroke(egui::Stroke::new(1.0, stroke_color))
-            .corner_radius(CornerRadius::same(10))
+            .corner_radius(CornerRadius::same(BANNER_CORNER_RADIUS))
             .inner_margin(Margin::same(12))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -418,9 +464,21 @@ impl Foxy {
                         .size(detail_font_size)
                         .color(status_banner_text),
                 );
+                if let Some(activity) = activity {
+                    ui.add_space(8.0);
+                    ui.add(activity);
+                }
             });
+        if running {
+            paint_border_beam(
+                ui,
+                frame.response.rect.shrink(0.5),
+                f32::from(BANNER_CORNER_RADIUS),
+                stroke_color,
+            );
+        }
 
-        response
+        egui::InnerResponse::new(response, frame.response)
     }
 
     pub(super) fn repository_action_banner(
@@ -440,6 +498,7 @@ impl Foxy {
                 self.t("Updating...")
             };
             let detail = self.active_repository_download_stage_detail();
+            let (progress, motion) = self.repository_operation_activity(repo_index);
             return Some(RepositoryActionBanner {
                 title,
                 detail,
@@ -447,6 +506,12 @@ impl Foxy {
                 button_label: self.t("Display update view"),
                 button_fill: self.color_action_info(),
                 action: RepositoryActionBannerAction::UpdateView,
+                activity: Some(
+                    ActivityBar::new(progress)
+                        .fill(self.color_primary_accent())
+                        .motion(motion)
+                        .height(VerificationMap::HEIGHT),
+                ),
             });
         }
 
@@ -487,6 +552,7 @@ impl Foxy {
                 button_label,
                 button_fill: self.color_success_muted(),
                 action: RepositoryActionBannerAction::UpdateSummary,
+                activity: None,
             });
         }
 
@@ -522,6 +588,7 @@ impl Foxy {
             button_label: self.t("Update ready - click here"),
             button_fill: self.color_action_destructive(),
             action: RepositoryActionBannerAction::PendingUpdate,
+            activity: None,
         })
     }
 
@@ -674,6 +741,20 @@ impl Foxy {
     }
 }
 
+/// Parts when the scan reports them, else files, else the stage percent.
+fn quick_scan_progress(state: &QuickScanProgressState) -> Option<f32> {
+    let ratio = |done: usize, total: usize| {
+        (total > 0).then(|| (done as f32 / total as f32).clamp(0.0, 1.0))
+    };
+    if let Some((checked_parts, total_parts)) = state.hash_part_counter {
+        ratio(checked_parts, total_parts)
+    } else if let Some((checked, total)) = state.hash_counter {
+        ratio(checked, total)
+    } else {
+        state.stage_percent.map(|percent| percent.clamp(0.0, 1.0))
+    }
+}
+
 fn above_floor(floor: Option<f32>, fraction: f32) -> f32 {
     let floor = floor.unwrap_or(0.0).clamp(0.0, 1.0);
     floor + (1.0 - floor) * fraction.clamp(0.0, 1.0)
@@ -749,5 +830,20 @@ mod hash_eta_tests {
             Some(1.0)
         );
         assert_eq!(hash_progress_fraction(None, Some((0, 0)), None), None);
+    }
+
+    #[test]
+    fn quick_scan_progress_prefers_parts_then_files_then_the_stage() {
+        use super::quick_scan_progress;
+        let mut state = crate::ui::app::QuickScanProgressState::new(std::time::Instant::now());
+        assert_eq!(quick_scan_progress(&state), None);
+        state.stage_percent = Some(0.3);
+        assert_eq!(quick_scan_progress(&state), Some(0.3));
+        state.hash_counter = Some((1, 4));
+        assert_eq!(quick_scan_progress(&state), Some(0.25));
+        state.hash_part_counter = Some((3, 4));
+        assert_eq!(quick_scan_progress(&state), Some(0.75));
+        state.hash_part_counter = Some((0, 0));
+        assert_eq!(quick_scan_progress(&state), None);
     }
 }

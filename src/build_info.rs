@@ -18,8 +18,10 @@
 
 use std::sync::LazyLock;
 
-/// Package version from `Cargo.toml`, e.g. `1.0.0`.
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+#[cfg(test)]
+mod changelog;
+
+pub const VERSION: &str = env!("FOXY_VERSION");
 
 /// Short git commit the binary was built from, with a `-dirty` suffix when the
 /// working tree had uncommitted changes, or `"unknown"` when unavailable.
@@ -81,6 +83,14 @@ pub fn clap_version() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn version_matches_latest_changelog_release() {
+        assert_eq!(
+            changelog::latest_version(include_str!("../CHANGELOG.md")),
+            Ok(VERSION)
+        );
+    }
 
     #[test]
     fn version_label_always_carries_commit() {

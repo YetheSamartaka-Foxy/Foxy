@@ -1,7 +1,11 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "src/build_info/changelog.rs"]
+mod changelog;
+
 fn main() {
+    emit_app_version();
     emit_build_metadata();
     copy_steamworks_redistributable();
     steamworks_runtime_search_path();
@@ -30,6 +34,13 @@ fn main() {
     }
 
     println!("cargo:rustc-link-arg=app_icon.o");
+}
+
+fn emit_app_version() {
+    println!("cargo:rerun-if-changed=CHANGELOG.md");
+    let changelog = std::fs::read_to_string("CHANGELOG.md").expect("Failed to read CHANGELOG.md");
+    let version = changelog::latest_version(&changelog).expect("Invalid Foxy changelog version");
+    println!("cargo:rustc-env=FOXY_VERSION={version}");
 }
 
 /// Delay-load the Steamworks import on MSVC so a missing `steam_api64.dll` does

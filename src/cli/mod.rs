@@ -6,7 +6,7 @@ pub mod toon;
 
 use clap::{CommandFactory, Parser};
 
-use self::args::{CliArgs, CliCommand};
+use self::args::{AddonCommand, CliArgs, CliCommand, RepoCommand, SpaceCommand};
 use self::commands::{CommandError, run_command};
 use self::output::CliOutput;
 use crate::ui::app::agent_driver::AgentGuiLaunchConfig;
@@ -128,9 +128,32 @@ pub fn run_from_env() -> CliExecution {
 
     crate::core::api::ensure_logger();
 
-    // Read-only schema gate: warn (never wipe) when the local database is behind
-    // a breaking schema bump. Bootstraps the sidecar for fresh installs exactly
-    // like the GUI path. Suppressed in machine-readable output modes.
+    if !cli.dry_run
+        && let Some(action) = update_action(&command)
+    {
+        // Honor an already requested wipe before the readiness check opens the DB.
+        crate::core::tasks::init_database::check_and_wipe_database();
+        let ready = match tokio::runtime::Runtime::new() {
+            Ok(runtime) => runtime.block_on(
+                crate::core::tasks::db_schema_version::ensure_database_ready_for_updates(),
+            ),
+            Err(err) => Err(format!(
+                "Failed to create runtime for database check: {err}"
+            )),
+        };
+        if let Err(message) = ready {
+            emit_error(
+                &output,
+                CommandError {
+                    action: action.to_string(),
+                    message,
+                    code: exit_codes::OPERATION_FAILED,
+                },
+            );
+            return CliExecution::Exit(exit_codes::OPERATION_FAILED);
+        }
+    }
+
     if !output.json
         && let Some(hint) = crate::core::tasks::db_schema_version::cli_wipe_hint()
     {
@@ -146,6 +169,28 @@ pub fn run_from_env() -> CliExecution {
             emit_error(&output, err.clone());
             CliExecution::Exit(err.code)
         }
+    }
+}
+
+fn update_action(command: &CliCommand) -> Option<&'static str> {
+    match command {
+        CliCommand::Sync(_)
+        | CliCommand::Repo {
+            command: RepoCommand::Sync(_),
+        } => Some("repo.sync"),
+        CliCommand::Repo {
+            command: RepoCommand::ForceRedownload(_),
+        } => Some("repo.force-redownload"),
+        CliCommand::Addon {
+            command: AddonCommand::RecalcHashes(_),
+        } => Some("addon.recalc-hashes"),
+        CliCommand::Addon {
+            command: AddonCommand::ForceRedownload(_),
+        } => Some("addon.force-redownload"),
+        CliCommand::Space {
+            command: SpaceCommand::Sync(_),
+        } => Some("space.sync"),
+        _ => None,
     }
 }
 
@@ -227,6 +272,96 @@ fn env_flag_enabled(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_actions_cover_checks_downloads_and_destructive_redownloads() {
+        for (args, action) in [
+            (
+                vec![
+                    "foxy",
+                    "sync",
+                    "--repo-name",
+                    "RepoAlpha",
+                    "--mode",
+                    "quick-check",
+                ],
+                "repo.sync",
+            ),
+            (
+                vec![
+                    "foxy",
+                    "repo",
+                    "sync",
+                    "--repo-name",
+                    "RepoAlpha",
+                    "--mode",
+                    "download",
+                ],
+                "repo.sync",
+            ),
+            (
+                vec![
+                    "foxy",
+                    "repo",
+                    "force-redownload",
+                    "--repo-name",
+                    "RepoAlpha",
+                ],
+                "repo.force-redownload",
+            ),
+            (
+                vec![
+                    "foxy",
+                    "addon",
+                    "recalc-hashes",
+                    "--repo-name",
+                    "RepoAlpha",
+                    "--addon",
+                    "@mod_01",
+                ],
+                "addon.recalc-hashes",
+            ),
+            (
+                vec![
+                    "foxy",
+                    "addon",
+                    "force-redownload",
+                    "--repo-name",
+                    "RepoAlpha",
+                    "--addon",
+                    "@mod_01",
+                ],
+                "addon.force-redownload",
+            ),
+            (
+                vec![
+                    "foxy",
+                    "space",
+                    "sync",
+                    "--space-id",
+                    "MainRepo",
+                    "--update-all",
+                ],
+                "space.sync",
+            ),
+        ] {
+            let cli = CliArgs::try_parse_from(args).unwrap();
+            assert_eq!(update_action(cli.command.as_ref().unwrap()), Some(action));
+        }
+    }
+
+    #[test]
+    fn launches_and_explicit_wipes_are_not_update_actions() {
+        for args in [
+            vec!["foxy", "version"],
+            vec!["foxy", "launch", "--repo-name", "RepoAlpha"],
+            vec!["foxy", "game", "launch"],
+            vec!["foxy", "repo", "wipe-db", "--repo-name", "RepoAlpha"],
+        ] {
+            let cli = CliArgs::try_parse_from(args).unwrap();
+            assert_eq!(update_action(cli.command.as_ref().unwrap()), None);
+        }
+    }
 
     #[test]
     fn env_flag_enabled_accepts_common_truthy_values() {

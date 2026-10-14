@@ -20,7 +20,7 @@ The harness is **implemented**. Live map:
 
 Implemented commands: `status`, `open-view` (with `--repo-index` and `--tab`), `snapshot` (with `--fields`/`--since-frame`), `text`, `find`, `click`, `scroll`, `hover`, `mouse-down`, `mouse-up`, `key`, `type`, `screenshot` (with `--annotate`), `fps`, `wait`, `logs`, `repositories`, `addons`, `settings`, `progress`, `scale`, `resize`, `profiles`, `missions`, `spaces`, `download-summary`, `toasts`, `set-setting`, `close`. Input commands (`key`/`click`/`scroll`/`mouse-*`) accept `--ctrl/--shift/--alt/--command` modifiers. The structured-state reads (`repositories`, `addons`, `settings`, `progress`, `profiles`, `missions`, `spaces`, `download-summary`, `toasts`) let an agent observe app state that has no semantic nodes - addon rows especially. `set-setting` is the only state-mutating read/write fetch; it stays loopback + token-gated and clamps like the offline `settings set` CLI.
 
-**Extended commands** (see [SKILL.md](../SKILL.md) "Extended commands"): efficiency - `--flat`/`--field` client projection, `snapshot --fields/--since-frame`, `settle`, `exec --stdin` (one persistent connection, NDJSON from stdin); interaction - `focus`/`nav`/`fill`, `filters`/`set-filter`, `select`, `window`, `context-menu`/`menu-select`; fetches - `inventory`, `pending-updates`, `app-update`, `memory`, `arma-profiles`, `backups`; diagnostics/determinism - `health`, `stable-render`, `screenshot --annotate`, `assert`, and the `scenario`/`fixture` client-side runners. Snapshot gained a `focused` field. State-mutating commands stay loopback + token-gated; `fixture` only ever writes the small JSON config (allowlisted: `settings.json`/`repositories.json`/`repository_spaces.json`) into the isolated `FOXY_CONFIG_DIR`, never the database; fetches redact absolute paths to basenames. See [SKILL.md](../SKILL.md) for the operating playbook and recipes.
+**Extended commands** (see [SKILL.md](../SKILL.md) "Extended commands"): efficiency - `--flat`/`--field` client projection, `snapshot --fields/--since-frame`, `settle`, `pause --ms` (real-time hold for watched scenarios), `caption` (an English-only scene title over the app, held like `pause`), `exec --stdin` (one persistent connection, NDJSON from stdin); interaction - `focus`/`nav`/`fill`, `filters`/`set-filter`, `select`, `window`, `context-menu`/`menu-select`; fetches - `inventory`, `pending-updates`, `app-update`, `memory`, `arma-profiles`, `backups`; diagnostics/determinism - `health`, `stable-render`, `screenshot --annotate`, `assert`, and the `scenario`/`fixture` client-side runners. Snapshot gained a `focused` field. State-mutating commands stay loopback + token-gated; `fixture` only ever writes the small JSON config (allowlisted: `settings.json`/`repositories.json`/`repository_spaces.json`) into the isolated `FOXY_CONFIG_DIR`, never the database; fetches redact absolute paths to basenames. See [SKILL.md](../SKILL.md) for the operating playbook and recipes.
 
 **Semantic / pipelined / determinism commands** (see [SKILL.md](../SKILL.md) "Semantic / pipelined / determinism commands"): `invoke` (named app-action registry + `list-actions`, destructive intents gated behind `--allow-destructive`), `batch` (server-side pipeline that resumes across frames for parking steps), `diff` (field-level delta vs a stored `last`/`frame:<n>` baseline), `drag` (one-call multi-frame drag), `query` (JMESPath over the union app-state document), `checkpoint`/`restore` (UI-state save & rollback - UI state only), `element` (deep single-node introspection + coordinate hit-test), `events` (semantic UI-event ring with incremental tailing), `clock` (virtual UI-timer time control), `dialog` (native picker automation). The virtual clock and dialog-interception slot live in [`src/ui/app/agent_support.rs`](../../../src/ui/app/agent_support.rs), consulted by ordinary UI code (toast expiry; the `rfd` picker call sites) only while the driver is running. `query` adds the `jmespath` crate. All security invariants hold: destructive intents need `allow_destructive`, paths redact to basenames, and `restore` never rolls back core/DB/disk.
 
@@ -260,6 +260,7 @@ cargo run -- agent-gui wait --modal-closed --timeout-ms 5000 --json
 cargo run -- agent-gui wait --toast "Saved" --timeout-ms 5000 --json
 cargo run -- agent-gui wait --busy-reason-cleared core-sync --timeout-ms 60000 --json
 cargo run -- agent-gui wait --download-complete --timeout-ms 120000 --json
+cargo run -- agent-gui wait --download-transferring --timeout-ms 120000 --json
 cargo run -- agent-gui wait --fps-above 45 --timeout-ms 5000 --json
 cargo run -- agent-gui wait --node-visible footer.help --timeout-ms 2000 --json
 ```
@@ -268,8 +269,10 @@ Conditions beyond text/view/idle/modal: `--toast <text>` (a feedback toast whose
 message contains the text is showing - pairs with `toasts`),
 `--busy-reason-cleared <name>` (the named `busy_reasons` flag is no longer set,
 so you can wait out a single `core-sync`/`quick-scan` without going fully
-idle), `--download-complete` (`download_finished`), `--fps-above <n>`
-(`fps_ema >= n`), and `--node-visible <id>` (a known semantic node is on-screen).
+idle), `--download-complete` (`download_finished`), `--download-transferring`
+(the running download has received bytes, past its check and planning stages),
+`--fps-above <n>` (`fps_ema >= n`), and `--node-visible <id>` (a known semantic
+node is on-screen).
 Each is a predicate over existing per-frame state reusing the pending-wait
 machinery, so the agent never has to poll.
 
@@ -398,7 +401,7 @@ cargo run -- agent-gui set-setting download-speed-limit-mbps unlimited --json
 cargo run -- agent-gui set-setting locale en --json
 ```
 
-Keys: `debug-mode`, `show-activity-log` (routes through `set_activity_log_visibility`), `show-fps-counter` (bool spellings: true/1/on/yes/false/0/off/no), `extended-diagnostics-logging` (bool; also flips the live log level, profiler and resource sampler), `ui-scale-percent` (integer, reuses the `scale` clamp), `locale` (string; also calls `i18n.set_language`), `download-speed-limit-mbps` (integer ≥ 1, or `unlimited`/`none` to disable). Response echoes `{ key, value }` with `value` set to the *applied* (clamped) value so an agent can confirm clamping; an unknown key or unparseable value returns an `invalid-setting` error.
+Keys: `debug-mode`, `show-activity-log` (routes through `set_activity_log_visibility`), `show-fps-counter` and `reduce-motion` (bool spellings: true/1/on/yes/false/0/off/no), `extended-diagnostics-logging` (bool; also flips the live log level, profiler and resource sampler), `ui-scale-percent` (integer, reuses the `scale` clamp), `locale` (string; also calls `i18n.set_language`), `download-speed-limit-mbps` (integer ≥ 1, or `unlimited`/`none` to disable). Response echoes `{ key, value }` with `value` set to the *applied* (clamped) value so an agent can confirm clamping; an unknown key or unparseable value returns an `invalid-setting` error.
 
 ### `invoke`
 

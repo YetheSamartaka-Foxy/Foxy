@@ -5,6 +5,9 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "windows")]
+mod wine;
+
 const STEAM_START_TIMEOUT: Duration = Duration::from_secs(30);
 const STEAM_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const STEAM_SETTLE_DELAY: Duration = Duration::from_secs(5);
@@ -36,7 +39,7 @@ pub enum SteamEnsureResult {
 }
 
 pub fn ensure_steam_running(steam_directory: &str) -> Result<SteamEnsureResult, String> {
-    if is_steam_running() {
+    if is_steam_running(steam_directory) {
         return Ok(SteamEnsureResult::AlreadyRunning);
     }
 
@@ -49,7 +52,7 @@ pub fn ensure_steam_running(steam_directory: &str) -> Result<SteamEnsureResult, 
     let start = Instant::now();
     while start.elapsed() < STEAM_START_TIMEOUT {
         thread::sleep(STEAM_POLL_INTERVAL);
-        if is_steam_running() {
+        if is_steam_running(steam_directory) {
             thread::sleep(STEAM_SETTLE_DELAY);
             return Ok(SteamEnsureResult::Started);
         }
@@ -96,6 +99,11 @@ pub fn resolve_steam_executable_path(steam_directory: &str) -> Option<PathBuf> {
 pub fn resolve_steam_launch_command(steam_directory: &str) -> Option<SteamLaunchCommand> {
     #[cfg(target_os = "windows")]
     {
+        if wine::is_wine()
+            && let Some(command) = wine::steam_launch_command(steam_directory)
+        {
+            return Some(command);
+        }
         let configured = steam_directory.trim();
         let program = if !configured.is_empty() {
             Path::new(configured).join(STEAM_EXECUTABLE)
@@ -236,13 +244,25 @@ pub fn arma3_executable_path(arma3_dir: &Path) -> PathBuf {
     arma3_dir.join(ARMA3_EXECUTABLE)
 }
 
-pub fn arma3_launch_command(arma3_dir: &Path, steam_directory: &str) -> Option<SteamLaunchCommand> {
-    steam_app_launch_command(
+pub fn arma3_launch_command(
+    arma3_dir: &Path,
+    steam_directory: &str,
+    game_args: Vec<String>,
+) -> Option<SteamLaunchCommand> {
+    let mut command = steam_app_launch_command(
         ARMA3_APP_ID.parse().ok()?,
         arma3_dir,
         &[ARMA3_EXECUTABLE],
         steam_directory,
-    )
+    )?;
+    #[cfg(target_os = "windows")]
+    let game_args = if wine::is_native_launch(&command) {
+        wine::arma3_args(game_args, wine::unix_path)
+    } else {
+        game_args
+    };
+    command.args.extend(game_args);
+    Some(command)
 }
 
 pub fn steam_app_launch_command(
@@ -253,8 +273,14 @@ pub fn steam_app_launch_command(
 ) -> Option<SteamLaunchCommand> {
     #[cfg(target_os = "windows")]
     {
-        let _ = app_id;
-        let _ = steam_directory;
+        if wine::is_wine()
+            && let Some(mut command) = wine::steam_launch_command(steam_directory)
+        {
+            command
+                .args
+                .extend(["-applaunch".to_string(), app_id.to_string()]);
+            return Some(command);
+        }
         let executable_name = executable_names.first().copied()?;
         let program = executable_names
             .iter()
@@ -285,6 +311,15 @@ pub fn steam_app_launch_command(
         let _ = steam_directory;
         None
     }
+}
+
+pub fn arma3_mission_argument(command: &Command, path: &Path) -> std::ffi::OsString {
+    #[cfg(target_os = "windows")]
+    if command.get_args().next().is_some_and(|arg| arg == "/unix") {
+        return wine::proton_path(&path.to_string_lossy(), &wine::unix_path).into();
+    }
+    let _ = command;
+    path.as_os_str().to_owned()
 }
 
 /// Validates whether the given path is a valid Arma 3 installation directory.
@@ -345,7 +380,15 @@ pub fn steam_library_roots(steam_directory: &str) -> Vec<PathBuf> {
     let mut steam_roots = Vec::new();
     let configured = steam_directory.trim();
     if !configured.is_empty() {
-        steam_roots.push(PathBuf::from(configured));
+        #[cfg(target_os = "windows")]
+        let configured = if wine::is_wine() && configured.starts_with('/') {
+            wine::dos_path(configured).unwrap_or_else(|| PathBuf::from(configured))
+        } else {
+            PathBuf::from(configured)
+        };
+        #[cfg(not(target_os = "windows"))]
+        let configured = PathBuf::from(configured);
+        steam_roots.push(configured);
     }
     if let Some(path) = detect_steam_install_directory() {
         steam_roots.push(path);
@@ -367,6 +410,13 @@ pub fn steam_library_roots(steam_directory: &str) -> Vec<PathBuf> {
 pub fn detect_steam_install_directory() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     {
+        if wine::is_wine()
+            && let Some(path) = wine::library_candidates()
+                .into_iter()
+                .find(|path| path.join("steamapps").is_dir())
+        {
+            return Some(path);
+        }
         if let Some(path) =
             query_reg_value_for_path(r"HKLM\SOFTWARE\WOW6432Node\Valve\Steam", "InstallPath")
         {
@@ -437,6 +487,9 @@ fn default_steam_library_candidates() -> Vec<PathBuf> {
     #[cfg(target_os = "windows")]
     {
         let mut candidates = Vec::new();
+        if wine::is_wine() {
+            candidates.extend(wine::library_candidates());
+        }
         for drive in ["C", "D", "E", "F", "H", "I", "J", "K"] {
             let root = format!("{drive}:\\");
             candidates.push(Path::new(&root).join("Program Files (x86)").join("Steam"));
@@ -469,7 +522,16 @@ fn read_steam_libraryfolders(steam_root: &Path) -> Vec<PathBuf> {
             || (pair[0].chars().all(|c| c.is_ascii_digit())
                 && (pair[1].contains('\\') || pair[1].contains('/')))
         {
-            folders.push(PathBuf::from(unescape_vdf_path(&pair[1])));
+            let path = unescape_vdf_path(&pair[1]);
+            #[cfg(target_os = "windows")]
+            let path = if wine::is_wine() && path.starts_with('/') {
+                wine::dos_path(&path).unwrap_or_else(|| PathBuf::from(&path))
+            } else {
+                PathBuf::from(path)
+            };
+            #[cfg(not(target_os = "windows"))]
+            let path = PathBuf::from(path);
+            folders.push(path);
         }
     }
     folders
@@ -577,9 +639,14 @@ fn unescape_vdf_path(path: &str) -> String {
     path.replace("\\\\", "\\")
 }
 
-pub fn is_steam_running() -> bool {
+pub fn is_steam_running(steam_directory: &str) -> bool {
+    #[cfg(not(target_os = "windows"))]
+    let _ = steam_directory;
     #[cfg(target_os = "windows")]
     {
+        if wine::is_wine() && wine::steam_launch_command(steam_directory).is_some() {
+            return wine::steam_running();
+        }
         let output = Command::new("tasklist")
             .args(["/FI", "IMAGENAME eq steam.exe", "/FO", "CSV", "/NH"])
             .output();
@@ -677,6 +744,26 @@ fn query_reg_value_for_path(key_path: &str, value_name: &str) -> Option<PathBuf>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn regular_arma_launch_keeps_the_editor_mission_path() {
+        let command = Command::new("arma3_x64.exe");
+        let path = Path::new("R:/Missions/mission.sqm");
+        assert_eq!(arma3_mission_argument(&command, path), path.as_os_str());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn native_steam_editor_mission_is_converted_after_command_creation() {
+        let mut command = Command::new("start.exe");
+        command.args(["/unix", "/usr/bin/steam", "-applaunch", "107410"]);
+        let mission = arma3_mission_argument(&command, Path::new("/Missions/mission.sqm"));
+        command.arg(mission);
+        assert_eq!(
+            command.get_args().last().unwrap(),
+            "Z:\\Missions\\mission.sqm"
+        );
+    }
 
     #[test]
     fn resolve_steam_executable_with_configured_path() {

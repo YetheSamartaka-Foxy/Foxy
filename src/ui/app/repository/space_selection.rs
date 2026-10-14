@@ -39,12 +39,12 @@ impl Foxy {
         let entry_urls: HashSet<String> = space
             .entries
             .iter()
-            .map(|entry| Self::normalize_repo_url(&entry.address))
+            .map(|entry| Self::repo_url_match_key(&entry.address))
             .collect();
 
         let mut candidates = Vec::new();
         for (repo_index, repo) in self.repository_view_state.repositories.iter().enumerate() {
-            let normalized_repo = Self::normalize_repo_url(&repo.address);
+            let normalized_repo = Self::repo_url_match_key(&repo.address);
             if !entry_urls.contains(&normalized_repo) {
                 continue;
             }
@@ -80,7 +80,7 @@ impl Foxy {
         let mut entries_by_address: HashMap<String, String> = HashMap::new();
         for entry in &space.entries {
             entries_by_address.insert(
-                Self::normalize_repo_url(&entry.address),
+                Self::repo_url_match_key(&entry.address),
                 entry.address.clone(),
             );
         }
@@ -100,7 +100,7 @@ impl Foxy {
                 continue;
             };
 
-            let normalized_repo = Self::normalize_repo_url(&repo.address);
+            let normalized_repo = Self::repo_url_match_key(&repo.address);
             if !entries_by_address.contains_key(&normalized_repo) {
                 continue;
             }

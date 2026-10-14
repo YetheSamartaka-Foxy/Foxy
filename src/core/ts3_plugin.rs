@@ -387,7 +387,7 @@ fn read_expected_installed_files(package_path: &Path) -> Vec<Ts3ExpectedInstalle
             warn!(
                 "Skipping unsafe TS3 plugin archive entry: package={} entry={}",
                 sanitize_log_path(package_path),
-                entry.name()
+                entry.name().unwrap_or_else(|_| "<invalid name>".into())
             );
             continue;
         };
@@ -407,7 +407,7 @@ fn read_expected_installed_files(package_path: &Path) -> Vec<Ts3ExpectedInstalle
             Err(err) => warn!(
                 "Failed to hash TS3 plugin archive entry: package={} entry={} error={}",
                 sanitize_log_path(package_path),
-                entry.name(),
+                entry.name().unwrap_or_else(|_| "<invalid name>".into()),
                 err
             ),
         }

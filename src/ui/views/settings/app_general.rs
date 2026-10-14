@@ -445,36 +445,10 @@ impl Foxy {
         });
         ui.separator();
 
-        // Export logs to ZIP
         ui.horizontal(|ui| {
             ui.add_space(horizontal_padding);
             let button_width = ui.available_width() - 2.0 * horizontal_padding;
-            let export_logs_button = ui.add_sized(
-                Vec2::new(button_width, 40.0),
-                Button::new(
-                    RichText::new(format!("\u{1F4E6}  {}", tr("Export logs to ZIP"))).size(16.0),
-                )
-                .fill(self.color_main_bg()),
-            ).on_hover_text(tr("Package Foxy log files into a timestamped ZIP archive for sharing with support."));
-
-            if export_logs_button.hovered() {
-                ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
-            }
-            if export_logs_button.clicked() {
-                info!("Export logs to ZIP triggered from settings");
-                match self.export_logs_to_zip() {
-                    Ok(true) => {
-                        self.show_success_toast(self.t("Logs exported successfully."));
-                    }
-                    Ok(false) => {
-                        // User cancelled the save dialog – nothing to report.
-                    }
-                    Err(err) => {
-                        warn!("Failed to export logs to ZIP: {}", err);
-                        self.show_error_toast(self.t("Failed to export logs."));
-                    }
-                }
-            }
+            self.render_sized_export_logs_button(ui, Vec2::new(button_width, 40.0), 16.0);
             ui.add_space(horizontal_padding);
         });
         ui.separator();
@@ -572,6 +546,16 @@ impl Foxy {
                             changed,
                         );
 
+                        Self::render_wrapped_settings_checkbox(
+                            ui,
+                            true,
+                            &mut self.settings_view_state.reduce_motion,
+                            tr("Reduce motion"),
+                            Some(tr("Stop the blinking, bubbling and sparkling animations on progress indicators and turn off interface transitions. Progress and status text still update.")),
+                            row_width,
+                            changed,
+                        );
+
                         let close_after_launch_checkbox = Self::render_wrapped_settings_checkbox(
                             ui,
                             true,
@@ -640,7 +624,8 @@ impl Foxy {
                 .add_enabled_ui(!sync_active, |ui| {
                     ui.add_sized(
                         Vec2::new(button_width, 30.0),
-                        Button::new(tr("Wipe Database")).fill(self.color_text_error()),
+                        Button::new(RichText::new(tr("Wipe Database")).color(crate::ui::palette::ON_STRONG_FILL))
+                            .fill(self.color_success_muted()),
                     ).on_hover_text(tr("Remove all cached repository data from the database. Use this only as a last resort."))
                 })
                 .inner;

@@ -88,6 +88,9 @@ pub async fn recalculate_hashes_for_addon_by_name(
     let normalized_repo_url =
         crate::core::models::repository::normalize_repository_url(repository_url);
 
+    crate::core::tasks::db_schema_version::ensure_database_ready_for_updates()
+        .await
+        .map_err(anyhow::Error::msg)?;
     let context = create_context_with_recheck_level(RecheckLevel::DEFAULT).await;
     let tree = Tree::load(context.clone(), &normalized_repo_url).await?;
     if tree.repositories.is_empty() {
@@ -185,6 +188,12 @@ pub fn filter_repo_instances_with_db_entry(
 
     rt.block_on(async move {
         ensure_logger();
+        if let Err(message) =
+            crate::core::tasks::db_schema_version::ensure_database_ready_for_updates().await
+        {
+            warn!("Startup recheck DB-entry filter skipped: {}", message);
+            return HashSet::new();
+        }
         let context = crate::core::tasks::create_context::shared_background_context().await;
         let placeholders = vec!["?"; normalized_urls.len()].join(", ");
         let sql = format!(
@@ -242,6 +251,15 @@ pub fn plan_startup_quick_scan_repos(
         // DATABASE_URL is set once at startup in main.rs to avoid unsafe env::set_var
         // race conditions in multi-threaded context.
 
+        if let Err(message) =
+            crate::core::tasks::db_schema_version::ensure_database_ready_for_updates().await
+        {
+            warn!("Startup quick scan skipped: {}", message);
+            return StartupQuickScanPlan {
+                completed: true,
+                ..Default::default()
+            };
+        }
         let context = crate::core::tasks::create_context::shared_background_context().await;
 
         // Keep local eligibility independent from network latency.
@@ -930,6 +948,25 @@ pub fn spawn_quick_local_scan_instances(
             // DATABASE_URL is set once at startup in main.rs to avoid unsafe env::set_var
             // race conditions in multi-threaded context.
 
+            if let Err(message) =
+                crate::core::tasks::db_schema_version::ensure_database_ready_for_updates().await
+            {
+                warn!("Quick scan skipped: {}", message);
+                for repository in repositories {
+                    let result = QuickScanResult {
+                        repo_url: crate::core::models::repository::normalize_repository_url(
+                            &repository.repo_url,
+                        ),
+                        local_path: normalize_instance_path(&repository.local_path),
+                        mods: Vec::new(),
+                        skipped: true,
+                    };
+                    if result_tx.send(result).is_ok() {
+                        request_background_repaint(repaint_ctx.as_ref());
+                    }
+                }
+                return;
+            }
             let context = crate::core::tasks::create_context::shared_background_context().await;
             let shared_cache: Arc<Mutex<QuickScanSharedCache>> =
                 Arc::new(Mutex::new(QuickScanSharedCache::default()));

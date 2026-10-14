@@ -16,6 +16,7 @@ use tokio::time::sleep;
 
 use super::SharedRollbackSession;
 use super::bandwidth::AdaptiveBandwidthLimiter;
+use super::failure::{DownloadStop, is_missing_remote_file};
 use super::metrics::{DownloadMetrics, DownloadSchedulerState, FileMetric};
 use super::progress::{ModProgressEntry, summarize_mod_progress};
 use super::transfer::{
@@ -356,6 +357,7 @@ pub(super) async fn process_mod_batch(
     metrics: Arc<DownloadMetrics>,
     scheduler_state: Arc<DownloadSchedulerState>,
     download_completion_tx: Option<mpsc::Sender<DownloadModCompletion>>,
+    download_stop: Arc<DownloadStop>,
 ) -> (usize, ModDownloadBatch, bool) {
     info!(
         "Starting download for mod {} ({} files, {} bytes)",
@@ -608,6 +610,12 @@ pub(super) async fn process_mod_batch(
                 }
                 Ok((Err(err), _is_large, file)) => {
                     running_total = running_total.saturating_sub(1);
+                    if is_missing_remote_file(&err) {
+                        download_stop.remote_file_missing();
+                        warn!(
+                            "Stopping download: queued file is no longer available on the server"
+                        );
+                    }
                     if cancellation_requested(&cancel_rx) || is_download_cancelled_error(&err) {
                         saw_cancelled_error = true;
                         info!(

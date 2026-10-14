@@ -234,6 +234,20 @@ impl Foxy {
         matches
     }
 
+    pub(crate) fn addon_origin_filters_from(
+        repositories: &[Repository],
+        addon_name: &str,
+        absolute_path: &str,
+        origin: &str,
+    ) -> Vec<String> {
+        let origins = Self::addon_repo_origins_from(repositories, addon_name, absolute_path);
+        if origins.is_empty() {
+            vec![origin.to_string()]
+        } else {
+            origins
+        }
+    }
+
     /// Whether the active game has a client-side addon concept at all. Arma 3
     /// servers report their addon list and tolerate extra client-only mods;
     /// Reforger activates exactly the server's mod set on join, so no surface

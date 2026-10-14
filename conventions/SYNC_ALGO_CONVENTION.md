@@ -161,6 +161,22 @@ to a full-file download.
 
 ## Core Invariants
 
+Prepared queues require a complete enabled-addon file graph, including part rows
+for every nonempty file. Local checksums matching newly published checksums do
+not prove that the stored remote graph is unchanged or complete.
+
+HTTP 404 and 410 during a file transfer stop the run without retrying the same
+URL or reporting user cancellation. After all transfer and hash workers settle
+and rollback finishes, invalidate the instance's enabled-addon remote checksums,
+parent repository remote checksums, prepared targets, patch plans, pending
+payload and cached manifest validators. Preserve file and part remote metadata
+and untouched local state so the next update can refresh manifests, prune old
+names and retain delta planning. Parents sharing the same addon rows must also
+lose their remote checksum; a same-URL install in another folder is independent.
+Content rollups do not include filenames, so unchanged published checksums
+cannot veto this recovery. A failed addon manifest fetch keeps its remote
+checksum empty, and an incomplete refresh must fail before downloading.
+
 1. `repo.json.checksum == repositories.local_checksum` means the local
    repository tree is fully verified against the current remote repository.
    Remote metadata fetches beyond `repo.json` must be skipped unless forced.
@@ -758,7 +774,19 @@ Failure exits:
 - Cancellation: join the incremental hash worker first (it skips its final
   flush once a cancel is pending), rollback touched files, then clear the
   local hash baseline of every reverted file, so no checksum outlives the
-  bytes it described. A cancelled delta patch attempt keeps its plan
+  bytes it described. Invalidation includes every file row sharing that
+  normalized local path, regardless of its remote checksum, plus their parts.
+  Recompute affected addon and repository tree rollups from
+  stored child checksums and clear only their content baselines in the same
+  transaction. Keep parent tree checksums populated so recovery hashes only
+  the invalidated files. Different-folder instances keep their state. Apply the
+  same rule after a failed download restores files, including partial rollback failures. Guarded
+  by `reverted_shared_files_invalidate_siblings_and_parent_baselines`. The
+  pending-addon scope includes addons owning invalidated files alongside the
+  cached pending work. Keep prepared-queue reuse when those files are already
+  queued; otherwise rebuild within that addon scope. Keep the pending payload
+  and patch plans for retry; load the payload using the repository instance's
+  local path. A cancelled delta patch attempt keeps its plan
   (`planned`, not `fallback_full`) so the retry patches again. The rollback
   session records its state as a header manifest plus an append-only
   `journal.jsonl` (one line per registered, promoted, restored or committed
@@ -1145,9 +1173,10 @@ Keep or refresh pending cache when:
   rebuilds instead of reusing it; the watcher is suppressed while a sync that
   writes into the repository folder runs, so Foxy's own cleanup is not read as
   a user edit
-- backup and network transfer still begin only after the user confirms; the
-  reuse fast path re-probes `repo.json` and re-validates every file, so a stale
-  queue degrades to a rebuild, never silent corruption
+- backup and network transfer still begin only after the user confirms; reuse
+  re-probes `repo.json` and requires that invalidated enabled files are already
+  queued. Files outside the queue widen the pending-addon scope only to their
+  owning addons before rebuilding the plan.
 
 ### `RecheckIntegrity`
 
@@ -1380,6 +1409,8 @@ The logs should make it possible to answer:
 ## Diagnosing False Redownloads
 
 When a user reports "Foxy wants to redownload addons that are already present," it is one of these distinct causes - identify which before changing code:
+
+- **Partial install in a shared folder.** Missing-file and missing-addon ratios alone do not prove a wrong local path. For a partially present repository, the preflight requires saved local checksum or content-hash evidence on an unresolved file or an absent addon folder before pausing on the ratios. Present shared addons and a repository rollup can acquire local state through sibling propagation while the missing addons have never been installed. Missing-root and confirmed layout-mismatch checks remain independent. Guarded by `mostly_missing_shared_install_is_allowed_despite_present_local_state` and the `mostly_missing_install_with_prior_missing_*` tests.
 
 - **Layout / path mismatch (within a folder).** The `.pbo` files are on disk but under different relative paths/casing than the manifest declares, so `metadata()` on the computed `file.local_path` fails and the files count as missing. Every presence check uses the raw stored `file.local_path` string (`quick_scan/local_path_preflight.rs`, `quick_scan/file_state.rs`, the hashers under `tasks/calculate_hashes/`); `content_hash::normalize_path` only lowercases the cache key on Windows, not the FS call. `local_path_preflight.rs` detects the partial case (addon folder exists, holds ≥50% of expected files, but ZERO resolve → `layout_mismatch_suspected`) and pauses with diagnostics instead of flagging. Diagnostics log a bounded on-disk snapshot plus a recursive root walk (`locate_files_under_root_by_name`) that finds where the files actually live. A structural resolver is intentionally deferred until an affected user's logs pin the transform.
 

@@ -357,6 +357,42 @@ The GUI driver injects discrete input events. A clean scroll case is useful
 evidence, but it cannot prove that interactive hover, momentum, and DPI paths are
 free of every egui multi-pass issue.
 
+## Watching the animations
+
+`examples/ux-animations-test.example.json` is a showcase for a person to
+watch, not a check. It walks the progress animations scene by scene, for about
+four minutes:
+
+1. a Check for updates into the empty payload folder: the verification map,
+   the light running around the border, the sidebar's orb of triangles and its
+   single row of triangles, then the finished banner's flare;
+2. a 4 Mbps download, held by a `download-transferring` wait until bytes flow,
+   first behind the Updating banner, then in the update view's mana triangles,
+   including the paused state, and then the same download seen from the
+   repository list;
+3. a cancel, where the bubbles sink;
+4. a faster download to the end, for the completion surge;
+5. an integrity recheck and 6. a quick check;
+7. a repository space Recheck all, run as a row of triangle blocks.
+
+It turns `stable_render` off so the animations move, opens each scene with a
+`caption` step naming it and what to watch, holds each scene with `pause`
+steps, and saves `screenshot-<step>.png` after every step in the run
+directory, so review notes can name the frame they mean. It serves
+`testkit/origin/data/` as one origin and needs `synthetic-parts`,
+`sibling-synthetic`, `synthetic-tiny`, and `synthetic-large` there (see Local
+origin above). Close any other Foxy first and keep the window in view:
+
+```powershell
+Copy-Item .\testkit\examples\ux-animations-test.example.json .\testkit\cases\ux-animations-test.json
+cargo build -p Foxy --bin Foxy --release
+foxy-testkit run --case .\testkit\cases\ux-animations-test.json --no-build
+```
+
+Each run fills about 350 MB of its run directory (the 43 MB download, the
+database, and the screenshots); delete old runs under
+`testkit/runs/ux-animations-test/` once reviewed.
+
 ## Kit correctness
 
 The kit's own gates run from `cargo test -p foxy-testkit -p foxy-testkit-oracle`:

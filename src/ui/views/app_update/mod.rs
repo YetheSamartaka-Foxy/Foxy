@@ -5,11 +5,10 @@ mod version_browser;
 use crate::core::tasks::app_update::{
     self, AppUpdateEvent, ChangelogVersion, UpdateCheckStatus, VersionEntry,
 };
-use crate::ui::app::Foxy;
+use crate::ui::app::{ActivityBar, ActivityGlyph, ActivityIcon, BarMotion, Foxy};
 use eframe::egui;
 use eframe::egui::{
-    Align, Button, CursorIcon, Frame, Label, Layout, Margin, ProgressBar, RichText, ScrollArea, Ui,
-    Vec2,
+    Align, Button, CursorIcon, Frame, Label, Layout, Margin, RichText, ScrollArea, Ui, Vec2,
 };
 
 const BYTES_PER_MB: f64 = 1_048_576.0;

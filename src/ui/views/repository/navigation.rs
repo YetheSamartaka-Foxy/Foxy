@@ -207,6 +207,7 @@ impl Foxy {
 
     pub(super) fn handle_repository_view_keyboard_navigation(&mut self, ctx: &egui::Context) {
         if self.show_add_repository_modal
+            || self.pending_join_preflight.is_some()
             || self.pending_repository_context_confirmation.is_some()
             || self.pending_repository_space_delete_id.is_some()
             || self.pending_repository_visual_folder_edit.is_some()
@@ -218,7 +219,7 @@ impl Foxy {
             || self.pending_mission_remove_dependencies.is_some()
             || self.repository_space_selector_state.is_some()
             || self.pending_app_update_prompt
-            || self.pending_db_schema_wipe.is_some()
+            || self.database_repair_prompt_visible()
             || self.db_lock_conflict.is_some()
             || self.pending_renderer_fallback_notice
         {

@@ -12,11 +12,15 @@ mod space_settings;
 mod spaces;
 mod view;
 
-use crate::ui::app::Foxy;
+use crate::ui::app::{ActivityBar, ActivityGlyph, Foxy};
 use eframe::egui::Color32;
 use std::ffi::OsString;
 use std::path::Path;
 use std::time::Duration;
+
+pub(super) const BANNER_CORNER_RADIUS: u8 = 10;
+/// Seconds a banner's border flares when the work it reports completes.
+pub(super) const BANNER_FLARE_SECONDS: f64 = 1.2;
 
 pub(super) struct RepositoryCheckStatusBanner {
     pub(super) title: String,
@@ -26,6 +30,9 @@ pub(super) struct RepositoryCheckStatusBanner {
     pub(super) elapsed_seconds: u64,
     /// Whether the banner offers the Cancel button.
     pub(super) cancellable: bool,
+    pub(super) glyph: ActivityGlyph,
+    /// Checks map the data being verified; database work shows a plain bar.
+    pub(super) verification: bool,
 }
 
 pub(super) struct RepositoryCheckCompletionBanner {
@@ -42,6 +49,8 @@ pub(super) struct RepositoryActionBanner {
     pub(super) button_label: String,
     pub(super) button_fill: Color32,
     pub(super) action: RepositoryActionBannerAction,
+    /// A live bar under the text while the work the banner points at runs.
+    pub(super) activity: Option<ActivityBar>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,7 +70,7 @@ pub(super) enum RepositoryBannerResponse {
 pub(super) type RepositoryUiAction = Box<dyn FnOnce(&mut Foxy)>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum LaunchDispatchResult {
+pub(crate) enum LaunchDispatchResult {
     Launched,
     Deferred,
     Failed,
@@ -114,7 +123,12 @@ pub(super) fn spawn_launch_process(
     executable: &OsString,
     args: &[OsString],
     cwd: Option<&Path>,
+    steam_required: bool,
+    steam_directory: &str,
 ) -> std::io::Result<u32> {
+    if steam_required && !crate::core::steam::is_steam_running(steam_directory) {
+        return Err(std::io::Error::other("Steam is not running"));
+    }
     crate::core::utils::deelevate::spawn_unelevated(executable, args, cwd)
 }
 

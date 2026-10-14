@@ -87,18 +87,18 @@ impl Foxy {
         repo_address: &str,
     ) -> Option<(String, String)> {
         let space = self.repository_spaces.iter().find(|s| s.id == space_id)?;
-        let normalized_repo = Self::normalize_repo_url(repo_address);
+        let normalized_repo = Self::repo_url_match_key(repo_address);
         if let Some(entry) = space
             .entries
             .iter()
-            .find(|e| Self::normalize_repo_url(&e.address) == normalized_repo)
+            .find(|e| Self::repo_url_match_key(&e.address) == normalized_repo)
         {
             return Some((entry.address.clone(), space.shared_path.clone()));
         }
 
         let urls = derive_urls(repo_address)?;
-        let space_base = Self::normalize_repo_url(&space.source_base_url);
-        let repo_base = Self::normalize_repo_url(urls.base_url.trim_end_matches('/'));
+        let space_base = Self::repo_url_match_key(&space.source_base_url);
+        let repo_base = Self::repo_url_match_key(urls.base_url.trim_end_matches('/'));
         (space_base == repo_base).then(|| (repo_address.to_string(), space.shared_path.clone()))
     }
 
@@ -637,11 +637,11 @@ impl Foxy {
             .repositories
             .iter()
             .enumerate()
-            .map(|(idx, repo)| (Self::normalize_repo_url(&repo.address), idx))
+            .map(|(idx, repo)| (Self::repo_url_match_key(&repo.address), idx))
             .collect();
 
         for swifty_repo in &selected {
-            let normalized = Self::normalize_repo_url(&swifty_repo.address);
+            let normalized = Self::repo_url_match_key(&swifty_repo.address);
             if let Some(existing_idx) = repo_index_by_address.get(&normalized).copied() {
                 let space_binding = imported_space_id.as_deref().and_then(|space_id| {
                     self.swifty_space_binding_for_repo(space_id, &swifty_repo.address)
@@ -706,11 +706,11 @@ impl Foxy {
             if let Some(ref space_id) = imported_space_id
                 && let Some(space) = self.repository_spaces.iter().find(|s| s.id == *space_id)
             {
-                let normalized_repo = Self::normalize_repo_url(&repo.address);
+                let normalized_repo = Self::repo_url_match_key(&repo.address);
                 let entry_match = space
                     .entries
                     .iter()
-                    .find(|e| Self::normalize_repo_url(&e.address) == normalized_repo);
+                    .find(|e| Self::repo_url_match_key(&e.address) == normalized_repo);
 
                 if let Some(entry) = entry_match {
                     // Exact entry match - bind with entry address.
@@ -718,8 +718,8 @@ impl Foxy {
                     repo.repository_space_entry_address = Some(entry.address.clone());
                 } else if let Some(urls) = derive_urls(&repo.address) {
                     // No entry match - group under the space if the base URL matches.
-                    let space_base = Self::normalize_repo_url(&space.source_base_url);
-                    let repo_base = Self::normalize_repo_url(urls.base_url.trim_end_matches('/'));
+                    let space_base = Self::repo_url_match_key(&space.source_base_url);
+                    let repo_base = Self::repo_url_match_key(urls.base_url.trim_end_matches('/'));
                     if space_base == repo_base {
                         repo.repository_space_id = Some(space_id.clone());
                         repo.repository_space_entry_address = Some(repo.address.clone());

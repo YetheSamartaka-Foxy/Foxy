@@ -1,9 +1,46 @@
 use crate::ui::app::Foxy;
 use crate::ui::types::HelpTab;
 use eframe::egui::{
-    self, Align, Button, CursorIcon, Frame, Label, Layout, Margin, RichText, ScrollArea, Ui, Vec2,
+    self, Align, Button, CursorIcon, Frame, Label, Layout, Margin, RichText, ScrollArea, TextEdit,
+    Ui, Vec2,
 };
 use log::info;
+
+struct HelpPage {
+    title_key: &'static str,
+    intro_keys: &'static [&'static str],
+    step_keys: &'static [&'static str],
+}
+
+impl HelpPage {
+    const fn new(
+        title_key: &'static str,
+        intro_keys: &'static [&'static str],
+        step_keys: &'static [&'static str],
+    ) -> Self {
+        Self {
+            title_key,
+            intro_keys,
+            step_keys,
+        }
+    }
+
+    fn matches(&self, query: &str, translate: impl Fn(&str) -> String) -> bool {
+        let query = query.trim().to_lowercase();
+        query.is_empty()
+            || std::iter::once(&self.title_key)
+                .chain(self.intro_keys)
+                .chain(self.step_keys)
+                .any(|key| translate(key).to_lowercase().contains(&query))
+    }
+}
+
+fn selected_help_tab(current: HelpTab, tabs: &[HelpTab]) -> Option<HelpTab> {
+    tabs.iter()
+        .copied()
+        .find(|tab| *tab == current)
+        .or_else(|| tabs.first().copied())
+}
 
 impl Foxy {
     pub fn render_help_view(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
@@ -47,6 +84,38 @@ impl Foxy {
 
                 ui.separator();
 
+                let search_changed = ui
+                    .horizontal_wrapped(|ui| {
+                        let label = ui.label(self.t("Search help"));
+                        let response = ui
+                            .add(
+                                TextEdit::singleline(&mut self.help_search_query)
+                                    .id_salt("help_search")
+                                    .desired_width(280.0)
+                                    .font(egui::FontId::proportional(
+                                        self.settings_view_state.font_sizes.help_view.body as f32,
+                                    )),
+                            )
+                            .labelled_by(label.id);
+                        let cleared = ui.button(self.t("Clear")).clicked();
+                        if cleared {
+                            self.help_search_query.clear();
+                        }
+                        response.changed() || cleared
+                    })
+                    .inner;
+                ui.add_space(8.0);
+
+                let tabs: Vec<_> = HelpTab::all_tabs()
+                    .into_iter()
+                    .filter(|tab| {
+                        Self::help_page(*tab).matches(&self.help_search_query, |key| self.t(key))
+                    })
+                    .collect();
+                if let Some(tab) = selected_help_tab(self.current_help_tab, &tabs) {
+                    self.current_help_tab = tab;
+                }
+
                 let available_size = ui.available_size_before_wrap();
                 let pane_gap = 12.0;
                 let total_width = available_size.x.max(0.0);
@@ -70,14 +139,17 @@ impl Foxy {
                                     ui.set_width(tab_width - 24.0);
                                     ui.set_min_width(tab_width - 24.0);
                                     ui.set_min_height(pane_height - 24.0);
-                                    ScrollArea::vertical()
+                                    let mut scroll = ScrollArea::vertical()
                                         .id_salt("help_tab_list")
-                                        .auto_shrink([false, false])
-                                        .show(ui, |ui| {
-                                            ui.with_layout(Layout::top_down(Align::Min), |ui| {
-                                                self.render_help_tabs(ui);
-                                            });
+                                        .auto_shrink([false, false]);
+                                    if search_changed {
+                                        scroll = scroll.vertical_scroll_offset(0.0);
+                                    }
+                                    scroll.show(ui, |ui| {
+                                        ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                                            self.render_help_tabs(ui, &tabs);
                                         });
+                                    });
                                 });
                         },
                     );
@@ -97,12 +169,36 @@ impl Foxy {
                                     ui.set_width(content_width - 36.0);
                                     ui.set_min_width(content_width - 36.0);
                                     ui.set_min_height(pane_height - 36.0);
-                                    ScrollArea::vertical()
+                                    let mut scroll = ScrollArea::vertical()
                                         .id_salt(("help_content", self.current_help_tab.as_str()))
-                                        .auto_shrink([false, false])
-                                        .show(ui, |ui| {
-                                            self.render_selected_help_tab(ui);
-                                        });
+                                        .auto_shrink([false, false]);
+                                    if search_changed {
+                                        scroll = scroll.vertical_scroll_offset(0.0);
+                                    }
+                                    scroll.show(ui, |ui| {
+                                        if tabs.is_empty() {
+                                            ui.add(
+                                                Label::new(
+                                                    RichText::new(
+                                                        self.t("No help topics match your search."),
+                                                    )
+                                                    .size(
+                                                        self.settings_view_state
+                                                            .font_sizes
+                                                            .help_view
+                                                            .body
+                                                            as f32,
+                                                    ),
+                                                )
+                                                .wrap(),
+                                            );
+                                        } else {
+                                            self.render_help_page(
+                                                ui,
+                                                &Self::help_page(self.current_help_tab),
+                                            );
+                                        }
+                                    });
                                 });
                         },
                     );
@@ -111,8 +207,9 @@ impl Foxy {
         });
     }
 
-    fn render_help_tabs(&mut self, ui: &mut Ui) {
-        for tab in HelpTab::all_tabs() {
+    fn render_help_tabs(&mut self, ui: &mut Ui, tabs: &[HelpTab]) {
+        let mut responses = Vec::with_capacity(tabs.len());
+        for &tab in tabs {
             let is_selected = self.current_help_tab == tab;
             let color = if is_selected {
                 self.color_primary_accent()
@@ -120,15 +217,25 @@ impl Foxy {
                 self.color_main_bg()
             };
 
-            let tab_button = ui.add_sized(
-                Vec2::new(ui.available_width(), 40.0),
-                Button::new(
-                    RichText::new(self.t(tab.as_str()))
-                        .color(self.color_text_normal())
-                        .size(self.settings_view_state.font_sizes.help_view.tab_label as f32),
+            let tab_button = ui
+                .scope_builder(
+                    egui::UiBuilder::new().id(ui.make_persistent_id(("help_tab", tab.as_str()))),
+                    |ui| {
+                        ui.add_sized(
+                            Vec2::new(ui.available_width(), 40.0),
+                            Button::new(
+                                RichText::new(self.t(tab.as_str()))
+                                    .color(self.color_text_normal())
+                                    .size(
+                                        self.settings_view_state.font_sizes.help_view.tab_label
+                                            as f32,
+                                    ),
+                            )
+                            .fill(color),
+                        )
+                    },
                 )
-                .fill(color),
-            );
+                .inner;
 
             if tab_button.hovered() {
                 ui.ctx()
@@ -140,14 +247,31 @@ impl Foxy {
                 info!("Switched help tab to {}", tab.as_str());
             }
 
+            responses.push(tab_button);
             ui.add_space(4.0);
+        }
+
+        if let Some(index) = responses.iter().position(egui::Response::has_focus) {
+            let next_index = ui.input_mut(|input| {
+                if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
+                    index.saturating_sub(1)
+                } else if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
+                    (index + 1).min(tabs.len() - 1)
+                } else {
+                    index
+                }
+            });
+            if next_index != index {
+                self.current_help_tab = tabs[next_index];
+                responses[next_index].request_focus();
+                responses[next_index].scroll_to_me(None);
+            }
         }
     }
 
-    fn render_selected_help_tab(&self, ui: &mut Ui) {
-        match self.current_help_tab {
-            HelpTab::Overview => self.render_help_page(
-                ui,
+    fn help_page(tab: HelpTab) -> HelpPage {
+        match tab {
+            HelpTab::Overview => HelpPage::new(
                 "Overview",
                 &[
                     "Foxy keeps game mod repositories, addon selection, launch settings, downloads, and recovery tools in one desktop app. Arma 3, Total War: WARHAMMER III, and Arma Reforger are supported, and Generic game covers other Steam games.",
@@ -172,8 +296,7 @@ impl Foxy {
                     "The info icon opens About, the question mark opens this Help page, and the version number opens the changelog.",
                 ],
             ),
-            HelpTab::GettingStarted => self.render_help_page(
-                ui,
+            HelpTab::GettingStarted => HelpPage::new(
                 "Getting started",
                 &[
                     "This is the simplest first-time setup path if you only want to get a repository installed and ready to launch.",
@@ -195,8 +318,7 @@ impl Foxy {
                     "Repository cards use a denser layout and can be reordered by drag and drop, so keep the repositories you use most near the top.",
                 ],
             ),
-            HelpTab::GameSpaces => self.render_help_page(
-                ui,
+            HelpTab::GameSpaces => HelpPage::new(
                 "Game spaces",
                 &[
                     "A game space is a separate workspace for one game, with its own repositories, repository spaces, game settings, mod stores, benchmarks, and database. Exactly one game space is open at a time, and Foxy reopens the last one on the next launch.",
@@ -216,8 +338,7 @@ impl Foxy {
                     "Each game space stores its data under games/<game space> in the Foxy config directory. Only one Foxy window or command can use a game space at a time.",
                 ],
             ),
-            HelpTab::ChecksAndUpdates => self.render_help_page(
-                ui,
+            HelpTab::ChecksAndUpdates => HelpPage::new(
                 "Checks and updates",
                 &[
                     "Foxy uses different checks for different jobs. The short version is: Refresh quickly compares the remote repository hash with the local one, Quick local check inspects your local files, and Recheck repository integrity performs a full remote fetch with complete hash recalculation.",
@@ -235,8 +356,7 @@ impl Foxy {
                     "If something looks wrong after an interrupted or unusual update, start with Quick local check, then Refresh, and only use Recheck repository integrity if the normal checks do not resolve it.",
                 ],
             ),
-            HelpTab::ProfilesAndLaunch => self.render_help_page(
-                ui,
+            HelpTab::ProfilesAndLaunch => HelpPage::new(
                 "Profiles and launch",
                 &[
                     "Profiles are presets for how Arma 3 should start with a specific repository. They save time when you switch between different servers, unit setups, or optional addon combinations.",
@@ -261,8 +381,7 @@ impl Foxy {
                     "Enabled extra files are copied into the game directory before each launch. See the Steam Workshop and extra files help tab.",
                 ],
             ),
-            HelpTab::RepositorySpacesAndAddons => self.render_help_page(
-                ui,
+            HelpTab::RepositorySpacesAndAddons => HelpPage::new(
                 "Repository spaces and addons",
                 &[
                     "Repository spaces are useful when a community publishes several related repositories under one shared manifest. They help with required repositories, optional repositories, and shared paths.",
@@ -282,8 +401,7 @@ impl Foxy {
                     "Repository metadata can mark client-side addons and server-required addons so launch prompts can explain what Foxy is about to enable.",
                 ],
             ),
-            HelpTab::SteamWorkshopAndExtraFiles => self.render_help_page(
-                ui,
+            HelpTab::SteamWorkshopAndExtraFiles => HelpPage::new(
                 "Steam Workshop and extra files",
                 &[
                     "For Steam games, Foxy manages Steam Workshop mods next to repository content. Open Game space settings and choose the Steam Workshop tab while that game space is open.",
@@ -305,8 +423,7 @@ impl Foxy {
                     "Arma Reforger Workshop addons are managed by GUID on the command line with foxy game reforger, including addon freezing.",
                 ],
             ),
-            HelpTab::EditorMissions => self.render_help_page(
-                ui,
+            HelpTab::EditorMissions => HelpPage::new(
                 "Editor missions",
                 &[
                     "Editor Missions are shown inside the repository view so mission work stays close to the addons, profiles, and server setup it depends on.",
@@ -322,8 +439,7 @@ impl Foxy {
                     "Settings can hide the Editor Missions list globally, and repository settings can override that choice for a specific repository.",
                 ],
             ),
-            HelpTab::RecoveryAndTools => self.render_help_page(
-                ui,
+            HelpTab::RecoveryAndTools => HelpPage::new(
                 "Recovery and tools",
                 &[
                     "Foxy includes recovery tools for safer updates and a direct download tool for situations where you want files without full repository sync.",
@@ -342,8 +458,7 @@ impl Foxy {
                     "If something looks wrong after an interrupted or unusual update, start with Quick local check, then Refresh, and only use Recheck repository integrity if the normal checks do not resolve it.",
                 ],
             ),
-            HelpTab::SettingsAndStatus => self.render_help_page(
-                ui,
+            HelpTab::SettingsAndStatus => HelpPage::new(
                 "Settings and status",
                 &[
                     "Settings control how Foxy behaves globally. The activity log and footer controls help you understand what the app is doing and where to look next.",
@@ -370,8 +485,7 @@ impl Foxy {
                     "If you are unsure what to do next, check the repository state banner first, then the activity log, then the relevant Help category for the screen you are using.",
                 ],
             ),
-            HelpTab::Benchmarks => self.render_help_page(
-                ui,
+            HelpTab::Benchmarks => HelpPage::new(
                 "Benchmarks",
                 &[
                     "Benchmarks record how a recheck, update, or redownload performed on your computer, so you can compare runs over time or attach them when you report a performance problem.",
@@ -390,8 +504,7 @@ impl Foxy {
                     "The game space overview lists your recent benchmarks. Use Open benchmarks there to jump to the Benchmarks tab.",
                 ],
             ),
-            HelpTab::RendererAndPerformance => self.render_help_page(
-                ui,
+            HelpTab::RendererAndPerformance => HelpPage::new(
                 "Renderer and performance",
                 &[
                     "Foxy can use WGPU or Glow for the UI renderer. Auto is recommended because it allows Foxy to recover when a graphics driver or WGPU path is unstable.",
@@ -412,8 +525,7 @@ impl Foxy {
                     "To measure how a check or update performs on your computer, save it as a benchmark. See the Benchmarks help tab.",
                 ],
             ),
-            HelpTab::CommandLine => self.render_help_page(
-                ui,
+            HelpTab::CommandLine => HelpPage::new(
                 "Command line",
                 &[
                     "The same Foxy program also works as a command-line tool, so you can script checks, updates, launches, and configuration. It uses the same config directory and game spaces as the desktop app.",
@@ -432,8 +544,7 @@ impl Foxy {
                     "Use foxy ui to start the desktop app from a terminal.",
                 ],
             ),
-            HelpTab::KeyboardShortcuts => self.render_help_page(
-                ui,
+            HelpTab::KeyboardShortcuts => HelpPage::new(
                 "Keyboard shortcuts",
                 &[
                     "Foxy supports keyboard navigation throughout the interface. These shortcuts help you work faster without reaching for the mouse.",
@@ -452,8 +563,7 @@ impl Foxy {
                     "Most buttons and clickable surfaces show a pointer cursor on hover to indicate that they are interactive.",
                 ],
             ),
-            HelpTab::ThirdPartyOverlays => self.render_help_page(
-                ui,
+            HelpTab::ThirdPartyOverlays => HelpPage::new(
                 "Third-party overlays",
                 &[
                     "Third-party overlays such as NVIDIA GeForce Experience, NVIDIA App, Discord, Steam, Bandicam, and similar screen-capture or recording tools can attach to Foxy on startup and cause unwanted pop-ups, performance issues, or rendering glitches.",
@@ -470,8 +580,7 @@ impl Foxy {
                     "After changing overlay settings, fully close and relaunch Foxy so the overlay hooks do not re-attach to the running process.",
                 ],
             ),
-            HelpTab::Troubleshooting => self.render_help_page(
-                ui,
+            HelpTab::Troubleshooting => HelpPage::new(
                 "Troubleshooting",
                 &[
                     "If something is not working as expected, these steps cover the most common issues and how to resolve them.",
@@ -501,19 +610,13 @@ impl Foxy {
         }
     }
 
-    fn render_help_page(
-        &self,
-        ui: &mut Ui,
-        title_key: &str,
-        intro_keys: &[&str],
-        step_keys: &[&str],
-    ) {
+    fn render_help_page(&self, ui: &mut Ui, page: &HelpPage) {
         let fonts = &self.settings_view_state.font_sizes.help_view;
 
-        ui.heading(RichText::new(self.t(title_key)).size(fonts.section_title as f32));
+        ui.heading(RichText::new(self.t(page.title_key)).size(fonts.section_title as f32));
         ui.add_space(4.0);
 
-        for paragraph_key in intro_keys {
+        for paragraph_key in page.intro_keys {
             ui.add(Label::new(RichText::new(self.t(paragraph_key)).size(fonts.body as f32)).wrap());
             ui.add_space(8.0);
         }
@@ -525,7 +628,7 @@ impl Foxy {
         );
         ui.add_space(6.0);
 
-        for (index, step_key) in step_keys.iter().enumerate() {
+        for (index, step_key) in page.step_keys.iter().enumerate() {
             ui.horizontal_wrapped(|ui| {
                 ui.label(
                     RichText::new(format!("{}. ", index + 1))
@@ -537,5 +640,46 @@ impl Foxy {
             });
             ui.add_space(8.0);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HelpPage, selected_help_tab};
+    use crate::ui::types::HelpTab;
+
+    const PAGE: HelpPage = HelpPage::new(
+        "Checks and updates",
+        &["Verify your repository."],
+        &["Refresh remote metadata."],
+    );
+
+    #[test]
+    fn search_matches_titles_introductions_and_steps() {
+        for query in ["updates", "repository", "  REMOTE METADATA  ", "", " \t "] {
+            assert!(PAGE.matches(query, str::to_owned), "{query:?}");
+        }
+        assert!(!PAGE.matches("workshop", str::to_owned));
+    }
+
+    #[test]
+    fn search_uses_translated_unicode_text() {
+        let translate = |_: &str| "PŘÍRUČKA".to_owned();
+        assert!(PAGE.matches("příručka", translate));
+        assert!(!PAGE.matches("updates", translate));
+    }
+
+    #[test]
+    fn selection_keeps_current_match_or_uses_first_match() {
+        let tabs = [HelpTab::GameSpaces, HelpTab::Troubleshooting];
+        assert_eq!(
+            selected_help_tab(HelpTab::Troubleshooting, &tabs),
+            Some(HelpTab::Troubleshooting),
+        );
+        assert_eq!(
+            selected_help_tab(HelpTab::Overview, &tabs),
+            Some(HelpTab::GameSpaces),
+        );
+        assert_eq!(selected_help_tab(HelpTab::Overview, &[]), None);
     }
 }

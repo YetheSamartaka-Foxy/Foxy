@@ -86,11 +86,22 @@ filesystem trace; uninstrumented calls remain outside the filesystem totals.
 A UX case passes only when the scenario passes and its bracketed log slice has
 no unallowlisted WARN or ERROR entries.
 
+Stable rendering zeroes egui's animation time, which also freezes Foxy's
+progress animations. A case meant to be watched, such as the
+`ux-animations-test` showcase, sets `"stable_render": false` and paces its
+scenes with `{"command": "pause", "ms": N}` steps, which hold for that long
+while the app keeps running. It opens each scene with a
+`{"command": "caption", "title": "...", "detail": "...", "ms": N}` step: an
+English-only card over the app that names the scene and holds like a pause.
+A `{"kind": "download-transferring"}` wait holds a download scene until bytes
+flow, past the check and planning stages that come first. A UX case may also use the `repository`, `extra_repositories`, `space`,
+and `settings` fixture fields described below.
+
 ## Performance fields
 
 | Field | Required | Default | Meaning |
 | --- | --- | --- | --- |
-| `repository` | yes | none | `{name,address,path,space_id}` |
+| `repository` | yes | none | `{name,address,path,space_id}`; a generated `path` or space `shared_path` under `${RUN_DIR}` is created empty before launch, as a freshly picked folder is, so a first check does not stop at Foxy's moved-folder guard |
 | `extra_repositories` | no | `[]` | Further `{name,address,path,space_id}` entries written after `repository`; an entry with `"unreachable": true` skips the manifest probe and gets no addons (an offline host in a startup graph) |
 | `space` | no | `null` | Repository-space fixture object |
 | `operations` | yes | none | Ordered operation objects |

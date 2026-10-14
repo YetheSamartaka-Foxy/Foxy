@@ -15,6 +15,20 @@ use log::{info, warn};
 /// How often the preflight modal re-checks whether TeamSpeak or Steam started.
 const PRELAUNCH_RECHECK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1500);
 
+fn join_preflight_body<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> R {
+    let footer_reserve = 3.0 * ui.spacing().interact_size.y
+        + 2.0 * ui.text_style_height(&egui::TextStyle::Heading)
+        + 5.0 * ui.spacing().item_spacing.y
+        + 40.0;
+    let height = (ui.ctx().content_rect().height() - footer_reserve).max(1.0);
+    ScrollArea::vertical()
+        .id_salt("join_preflight_body")
+        .max_height(height)
+        .auto_shrink([false, true])
+        .show(ui, add_contents)
+        .inner
+}
+
 impl Foxy {
     pub(super) fn render_join_preflight_modal(&mut self, ctx: &egui::Context) {
         let Some(mut pending) = self.pending_join_preflight.clone() else {
@@ -36,37 +50,32 @@ impl Foxy {
         let has_dlc_changes = pending.has_dlc_changes();
         let has_addon_actions = has_addon_list_actions || has_dlc_changes;
 
-        let ts3_attention = pending.ts3_required && !pending.ts3_running;
-        let steam_attention = pending.steam_required && !pending.steam_running;
-
-        // Throttled re-check so the TeamSpeak/Steam warnings clear automatically
-        // once the respective client starts after the user clicks "Launch ...".
-        if ts3_attention || steam_attention {
+        if pending.ts3_required || pending.steam_required {
             let now = std::time::Instant::now();
             let due = self
                 .prelaunch_recheck_at
                 .is_none_or(|at| now.duration_since(at) >= PRELAUNCH_RECHECK_INTERVAL);
             if due {
                 self.prelaunch_recheck_at = Some(now);
-                if ts3_attention && crate::core::ts3_plugin::is_teamspeak_running() {
-                    pending.ts3_running = true;
-                    pending_changed = true;
-                    info!(
-                        "TeamSpeak detected running while preflight modal open for repository {}; clearing warning",
-                        pending.repo_name
-                    );
+                if pending.ts3_required {
+                    let running = crate::core::ts3_plugin::is_teamspeak_running();
+                    pending_changed |= pending.ts3_running != running;
+                    pending.ts3_running = running;
                 }
-                if steam_attention && crate::core::steam::is_steam_running() {
-                    pending.steam_running = true;
-                    pending_changed = true;
-                    info!(
-                        "Steam detected running while preflight modal open for repository {}; clearing warning",
-                        pending.repo_name
+                if pending.steam_required {
+                    let running = crate::core::steam::is_steam_running(
+                        &self.settings_view_state.steam_directory,
                     );
+                    pending_changed |= pending.steam_running != running;
+                    pending.steam_running = running;
                 }
             }
             ctx.request_repaint_after(PRELAUNCH_RECHECK_INTERVAL);
         }
+
+        let ts3_attention = pending.ts3_required && !pending.ts3_running;
+        let steam_attention = pending.steam_required && !pending.steam_running;
+        let can_launch = pending.can_launch();
 
         let title = if !has_addon_actions && steam_attention {
             self.t("Steam is not running")
@@ -95,6 +104,7 @@ impl Foxy {
             self.t("Enabled additional/external addons")
         };
 
+        let modal_width = (ctx.content_rect().width() - 40.0).clamp(1.0, 760.0);
         egui::Window::new(title)
             .frame(self.modal_window_chrome(ctx))
             .title_frame(self.modal_window_chrome(ctx))
@@ -102,8 +112,11 @@ impl Foxy {
             .collapsible(false)
             .resizable(false)
             .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-            .default_width(760.0)
+            .min_width(0.0)
+            .max_width(modal_width)
+            .default_width(modal_width)
             .show(ctx, |ui| {
+                join_preflight_body(ui, |ui| {
                 Frame::NONE
                     .fill(self.color_main_bg())
                     .stroke(egui::Stroke::new(1.0, self.color_text_gray()))
@@ -496,6 +509,7 @@ impl Foxy {
                     });
                 }
 
+                });
                 ui.add_space(12.0);
                 ui.horizontal_wrapped(|ui| {
                     let selected_local_suggestions =
@@ -539,10 +553,10 @@ impl Foxy {
                             self.t("Launch with selected addons")
                         };
                         let launch_with_btn = ui.add_enabled(
-                            has_selected_addons,
+                            has_selected_addons && (selected_missing_known_remote || can_launch),
                             Button::new(action_label),
                         );
-                        if launch_with_btn.hovered() && has_selected_addons {
+                        if launch_with_btn.hovered() && launch_with_btn.enabled() {
                             ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                         }
                         if launch_with_btn.clicked() {
@@ -562,8 +576,9 @@ impl Foxy {
                     } else {
                         self.t("Join")
                     };
-                    let launch_without_btn = ui.button(launch_without_label);
-                    if launch_without_btn.hovered() {
+                    let launch_without_btn =
+                        ui.add_enabled(can_launch, Button::new(launch_without_label));
+                    if launch_without_btn.hovered() && can_launch {
                         ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                     }
                     if launch_without_btn.clicked() {
@@ -642,6 +657,23 @@ impl Foxy {
             return;
         }
 
+        let downloading_selected = launch_with_suggestions
+            && pending
+                .known_remote
+                .iter()
+                .any(|remote| remote.selected && !remote.available);
+        if (launch_without_suggestions || launch_with_suggestions && !downloading_selected)
+            && pending.steam_required
+        {
+            pending.steam_running =
+                crate::core::steam::is_steam_running(&self.settings_view_state.steam_directory);
+            if !pending.can_launch() {
+                self.pending_join_preflight = Some(pending);
+                ctx.request_repaint();
+                return;
+            }
+        }
+
         if launch_with_suggestions {
             let selected_missing_known_remote = pending
                 .known_remote
@@ -658,7 +690,7 @@ impl Foxy {
 
             self.pending_join_preflight = None;
             let selected_repository = Self::repository_with_join_preflight_selections(&pending);
-            let result = self.launch_repository_with_steam_guard(
+            let result = self.launch_repository_with_database_guard(
                 &selected_repository,
                 Some(&pending.server),
                 &pending.repo_name,
@@ -673,13 +705,21 @@ impl Foxy {
         if launch_without_suggestions {
             self.pending_join_preflight = None;
             self.prelaunch_recheck_at = None;
+            if pending.query_server_before_join {
+                self.start_join_server_query(
+                    &pending.original_repository,
+                    &pending.server,
+                    &pending.repo_name,
+                );
+                return;
+            }
             let launch_repository = Self::repository_without_join_preflight_suggestions(&pending);
             let (server_arg, launch_label) = if pending.launch_only {
                 (None, "regular")
             } else {
                 (Some(&pending.server), "join")
             };
-            let result = self.launch_repository_with_steam_guard(
+            let result = self.launch_repository_with_database_guard(
                 &launch_repository,
                 server_arg,
                 &pending.repo_name,
@@ -902,6 +942,7 @@ impl Foxy {
                 ));
                 if let Some(error) = &pending.error {
                     ui.colored_label(self.color_text_error(), error);
+                    self.render_export_logs_button(ui);
                 }
 
                 ui.add_space(12.0);
@@ -1051,6 +1092,7 @@ impl Foxy {
                 }
                 if let Some(error) = &pending.error {
                     ui.colored_label(self.color_text_error(), error);
+                    self.render_export_logs_button(ui);
                 }
 
                 ui.add_space(12.0);
@@ -2022,6 +2064,52 @@ impl Foxy {
             }
             RepositoryContextConfirmAction::ForceRedownload(idx) => {
                 self.force_redownload_repository(idx);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn long_preflight_body_keeps_wrapped_actions_inside_viewport() {
+        for size in [egui::vec2(900.0, 600.0), egui::vec2(540.0, 380.0)] {
+            let ctx = egui::Context::default();
+            let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+            let mut actions = Vec::new();
+            for _ in 0..3 {
+                actions.clear();
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(viewport),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        ui.heading("Enable server-required addons?");
+                        join_preflight_body(ui, |ui| {
+                            for index in 0..200 {
+                                ui.label(format!("@mod_{index:02}"));
+                            }
+                        });
+                        ui.add_space(12.0);
+                        ui.horizontal_wrapped(|ui| {
+                            for label in [
+                                "Launch with selected addons",
+                                "Launch without suggested addons",
+                                "Cancel",
+                            ] {
+                                actions.push(ui.button(label).rect);
+                            }
+                        });
+                    },
+                );
+                output.textures_delta.clear();
+            }
+            assert_eq!(actions.len(), 3);
+            for action in actions {
+                assert!(viewport.contains_rect(action), "{size:?}: {action:?}");
             }
         }
     }

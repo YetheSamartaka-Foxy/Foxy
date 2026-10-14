@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use crate::core::addon_metadata::AddonDisplayNameSnapshot;
+use crate::core::addon_metadata::{AddonDisplayNameSnapshot, addon_display_name_key};
 use crate::core::arma3_server_query::{ARMA3_CREATOR_DLCS, ServerAddonRequirement};
 use crate::core::utils::fs_safety::resolve_child_dir_case_insensitive;
 use crate::ui::app::{
@@ -53,7 +53,17 @@ impl Foxy {
             .collect::<HashMap<_, _>>();
 
         if requirement_by_name.is_empty() {
-            return None;
+            let unavailable_enabled =
+                Self::unavailable_enabled_external_addons(effective, configured_repositories);
+            return (!unavailable_enabled.is_empty()).then(|| PendingJoinPreflightState {
+                unavailable_enabled,
+                ..PendingJoinPreflightState::empty(
+                    repo_name,
+                    server.clone(),
+                    effective.clone(),
+                    false,
+                )
+            });
         }
 
         let mut candidates_by_requirement = collect_disabled_local_candidates(
@@ -174,12 +184,12 @@ impl Foxy {
             unavailable_enabled,
             dlc_enable: Vec::new(),
             dlc_disable: Vec::new(),
-            // Filled in by `present_join_preflight` once the gate is evaluated.
             ts3_required: false,
             ts3_running: false,
             steam_required: false,
             steam_running: false,
             launch_only: false,
+            query_server_before_join: false,
         })
     }
 
@@ -458,7 +468,7 @@ impl Foxy {
         configured_repositories: &[Repository],
         context: KnownRemoteSearchContext<'_>,
     ) -> Vec<JoinPreflightKnownRemoteAddon> {
-        let current_repo_address = Self::normalize_repo_url(&effective.address);
+        let current_repo_key = addon_display_name_key(&effective.address, &effective.path);
         let mut rows = Vec::new();
         let mut seen = HashSet::new();
         let KnownRemoteSearchContext {
@@ -472,7 +482,7 @@ impl Foxy {
         for (repo_idx, repo) in configured_repositories.iter().enumerate() {
             if repo.address.trim().is_empty()
                 || repo.path.trim().is_empty()
-                || Self::normalize_repo_url(&repo.address) == current_repo_address
+                || addon_display_name_key(&repo.address, &repo.path) == current_repo_key
             {
                 continue;
             }
@@ -484,7 +494,7 @@ impl Foxy {
                 .map(|(name, _)| name)
             {
                 let repo_url = Self::normalize_repo_url(&repo.address);
-                let display_name = addon_display_name(display_names, &repo_url, addon_name);
+                let display_name = addon_display_name(display_names, repo, addon_name);
                 let Some((normalized, requirement)) = addon_match_keys(addon_name, display_name)
                     .into_iter()
                     .find_map(|key| {
@@ -1123,9 +1133,6 @@ fn addon_match_keys(name: &str, display_name: Option<&String>) -> Vec<String> {
     let mut keys = Vec::new();
     if let Some(display_name) = display_name {
         push_normalized_addon_keys(&mut keys, display_name);
-        if !keys.is_empty() {
-            return keys;
-        }
     }
     push_normalized_addon_keys(&mut keys, name);
     keys
@@ -1234,17 +1241,18 @@ fn addon_display_names_for_repo<'a>(
     display_names: &'a AddonDisplayNameSnapshot,
     repository: &Repository,
 ) -> Option<&'a HashMap<String, String>> {
-    display_names.get(&Foxy::normalize_repo_url(&repository.address))
+    display_names.get(&addon_display_name_key(
+        &repository.address,
+        &repository.path,
+    ))
 }
 
 fn addon_display_name<'a>(
     display_names: &'a AddonDisplayNameSnapshot,
-    repo_url: &str,
+    repository: &Repository,
     addon_name: &str,
 ) -> Option<&'a String> {
-    display_names
-        .get(repo_url)
-        .and_then(|names| names.get(addon_name))
+    addon_display_names_for_repo(display_names, repository).and_then(|names| names.get(addon_name))
 }
 
 fn requirement_match_keys(name: &str) -> Vec<String> {
@@ -1624,6 +1632,7 @@ mod tests {
             steam_required: false,
             steam_running: false,
             launch_only: false,
+            query_server_before_join: false,
         }
     }
 
@@ -1757,7 +1766,7 @@ mod tests {
     }
 
     #[test]
-    fn preflight_prefers_db_display_name_over_addon_folder_name() {
+    fn preflight_matches_db_display_name_when_folder_name_differs() {
         let repo = Repository {
             address: "https://example.invalid/repo".to_string(),
             optional_addons: vec![("@ace3".to_string(), false)],
@@ -1772,7 +1781,7 @@ mod tests {
         };
         let mut display_names = AddonDisplayNameSnapshot::new();
         display_names.insert(
-            "https://example.invalid/repo/".to_string(),
+            addon_display_name_key(&repo.address, &repo.path),
             HashMap::from([(
                 "@ace3".to_string(),
                 "Advanced Combat Environment 3.21.0".to_string(),
@@ -1791,6 +1800,190 @@ mod tests {
 
         assert_eq!(state.suggestions.len(), 1);
         assert_eq!(state.suggestions[0].addon_name, "@ace3");
+    }
+
+    #[test]
+    fn preflight_satisfies_enabled_folder_alias_with_db_display_name() {
+        let current_dir = create_temp_addon_dir("@mod_01");
+        let source_dir = create_temp_addon_dir("@mod_01");
+        for required in [true, false] {
+            let mut repo = Repository {
+                name: "MainRepo".to_string(),
+                address: "https://repo.example.invalid:8080/main/".to_string(),
+                path: current_dir.path().to_string_lossy().to_string(),
+                ..Repository::default()
+            };
+            if required {
+                repo.addons.push(("@mod_01".to_string(), true));
+            } else {
+                repo.optional_addons.push(("@mod_01".to_string(), true));
+            }
+            let source_repo = Repository {
+                name: "RepoAlpha".to_string(),
+                address: "https://repo.example.invalid:8080/alpha/".to_string(),
+                path: source_dir.path().to_string_lossy().to_string(),
+                addons: vec![("@mod_01".to_string(), true)],
+                ..Repository::default()
+            };
+            let display_names = HashMap::from([(
+                addon_display_name_key(&repo.address, &repo.path),
+                HashMap::from([("@mod_01".to_string(), "Addon Alpha".to_string())]),
+            )]);
+
+            let state = Foxy::build_join_preflight_state(
+                &repo,
+                &[repo.clone(), source_repo],
+                &RepositoryServer::default(),
+                "MainRepo",
+                &[requirement("@mod_01")],
+                &display_names,
+            );
+
+            assert!(state.is_none(), "required={required}");
+        }
+    }
+
+    #[test]
+    fn preflight_offers_disabled_folder_alias_once_before_other_repository() {
+        let current_dir = create_temp_addon_dir("@mod_01");
+        let source_dir = create_temp_addon_dir("@mod_01");
+        for required in [true, false] {
+            let mut repo = Repository {
+                name: "MainRepo".to_string(),
+                address: "https://repo.example.invalid:8080/main/".to_string(),
+                path: current_dir.path().to_string_lossy().to_string(),
+                ..Repository::default()
+            };
+            if required {
+                repo.addons.push(("@mod_01".to_string(), false));
+            } else {
+                repo.optional_addons.push(("@mod_01".to_string(), false));
+            }
+            let source_repo = Repository {
+                name: "RepoAlpha".to_string(),
+                address: "https://repo.example.invalid:8080/alpha/".to_string(),
+                path: source_dir.path().to_string_lossy().to_string(),
+                addons: vec![("@mod_01".to_string(), true)],
+                ..Repository::default()
+            };
+            let display_names = HashMap::from([(
+                addon_display_name_key(&repo.address, &repo.path),
+                HashMap::from([("@mod_01".to_string(), "Addon Alpha".to_string())]),
+            )]);
+
+            let state = Foxy::build_join_preflight_state(
+                &repo,
+                &[repo.clone(), source_repo],
+                &RepositoryServer::default(),
+                "MainRepo",
+                &[requirement("@mod_01")],
+                &display_names,
+            )
+            .expect("a disabled local folder alias should be offered");
+
+            assert_eq!(state.suggestions.len(), 1, "required={required}");
+            assert_eq!(state.suggestions[0].addon_name, "@mod_01");
+            assert_eq!(
+                state.suggestions[0].origin,
+                if required {
+                    JoinPreflightAddonOrigin::Required
+                } else {
+                    JoinPreflightAddonOrigin::Optional
+                }
+            );
+            assert!(state.ambiguous.is_empty());
+            assert!(state.known_remote.is_empty());
+            assert!(state.extra_enabled.is_empty());
+        }
+    }
+
+    #[test]
+    fn preflight_keeps_same_url_instance_display_names_separate() {
+        let current_dir = create_temp_addon_dir("@mod_01");
+        let source_dir = create_temp_addon_dir("@mod_01");
+        let repo = Repository {
+            name: "MainRepo".to_string(),
+            address: "https://repo.example.invalid:8080/repo/".to_string(),
+            path: current_dir.path().to_string_lossy().to_string(),
+            addons: vec![("@mod_01".to_string(), true)],
+            ..Repository::default()
+        };
+        let source_repo = Repository {
+            name: "RepoAlpha".to_string(),
+            path: source_dir.path().to_string_lossy().to_string(),
+            ..repo.clone()
+        };
+        let mut same_instance = repo.clone();
+        same_instance.address = repo.address.trim_end_matches('/').to_string();
+        same_instance.path = format!("{}/", repo.path.replace('\\', "/"));
+        let configured = vec![repo.clone(), same_instance, source_repo.clone()];
+        let display_names = HashMap::from([
+            (
+                addon_display_name_key(&repo.address, &repo.path),
+                HashMap::from([("@mod_01".to_string(), "Local Addon".to_string())]),
+            ),
+            (
+                addon_display_name_key(&source_repo.address, &source_repo.path),
+                HashMap::from([("@mod_01".to_string(), "Server Addon".to_string())]),
+            ),
+        ]);
+
+        assert!(
+            Foxy::build_join_preflight_state(
+                &repo,
+                &configured,
+                &RepositoryServer::default(),
+                "MainRepo",
+                &[requirement("Local Addon")],
+                &display_names,
+            )
+            .is_none()
+        );
+
+        let state = Foxy::build_join_preflight_state(
+            &repo,
+            &configured,
+            &RepositoryServer::default(),
+            "MainRepo",
+            &[requirement("Server Addon")],
+            &display_names,
+        )
+        .expect("another install of the same repository remains a known source");
+
+        assert!(state.suggestions.is_empty());
+        assert!(state.ambiguous.is_empty());
+        assert!(state.extra_enabled.is_empty());
+        assert_eq!(state.known_remote.len(), 1);
+        assert_eq!(state.known_remote[0].repository_name, "RepoAlpha");
+        assert_eq!(state.known_remote[0].repository_path, source_repo.path);
+        assert!(state.known_remote[0].available);
+    }
+
+    #[test]
+    fn preflight_does_not_offer_its_own_instance_with_normalized_path_alias() {
+        let repo_dir = tempfile::tempdir().expect("temp dir");
+        let repo = Repository {
+            name: "MainRepo".to_string(),
+            address: "https://repo.example.invalid:8080/repo/".to_string(),
+            path: repo_dir.path().to_string_lossy().to_string(),
+            addons: vec![("@mod_01".to_string(), true)],
+            ..Repository::default()
+        };
+        let mut same_instance = repo.clone();
+        same_instance.address = repo.address.trim_end_matches('/').to_string();
+        same_instance.path = format!("{}/", repo.path.replace('\\', "/"));
+
+        assert!(
+            Foxy::build_join_preflight_state(
+                &repo,
+                &[same_instance],
+                &RepositoryServer::default(),
+                "MainRepo",
+                &[requirement("@mod_01")],
+                &AddonDisplayNameSnapshot::new(),
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -1998,7 +2191,7 @@ mod tests {
         };
         let mut display_names = AddonDisplayNameSnapshot::new();
         display_names.insert(
-            "http://example.com/source/".to_string(),
+            addon_display_name_key(&source_repo.address, &source_repo.path),
             HashMap::from([(
                 "@ace3".to_string(),
                 "Advanced Combat Environment 3.21.0".to_string(),
@@ -2044,7 +2237,7 @@ mod tests {
         };
         let mut display_names = AddonDisplayNameSnapshot::new();
         display_names.insert(
-            "http://example.com/source/".to_string(),
+            addon_display_name_key(&source_repo.address, &source_repo.path),
             HashMap::from([(
                 "@ace3".to_string(),
                 "Advanced Combat Environment 3.21.0".to_string(),
@@ -2224,7 +2417,7 @@ mod tests {
         };
         let mut display_names = AddonDisplayNameSnapshot::new();
         display_names.insert(
-            "http://example.com/source/".to_string(),
+            addon_display_name_key(&source_repo.address, &source_repo.path),
             HashMap::from([(
                 "@ace3".to_string(),
                 "Advanced Combat Environment 3.21.0".to_string(),
@@ -2423,7 +2616,7 @@ mod tests {
         };
         let mut display_names = AddonDisplayNameSnapshot::new();
         display_names.insert(
-            "http://example.com/source/".to_string(),
+            addon_display_name_key(&source_repo.address, &source_repo.path),
             HashMap::from([("@burnem_redux".to_string(), "Burn Em Redux".to_string())]),
         );
 
@@ -2470,7 +2663,7 @@ mod tests {
         };
         let mut display_names = AddonDisplayNameSnapshot::new();
         display_names.insert(
-            "http://example.com/source/".to_string(),
+            addon_display_name_key(&source_repo.address, &source_repo.path),
             HashMap::from([("@burnem_redux".to_string(), "Burn Em Redux".to_string())]),
         );
 
@@ -2575,7 +2768,7 @@ mod tests {
         };
         let mut display_names = AddonDisplayNameSnapshot::new();
         display_names.insert(
-            "http://example.com/source/".to_string(),
+            addon_display_name_key(&source_repo.address, &source_repo.path),
             HashMap::from([("@burnem_redux".to_string(), "Burn Em Redux".to_string())]),
         );
 
@@ -2796,6 +2989,60 @@ mod tests {
     }
 
     #[test]
+    fn join_without_server_requirements_warns_about_missing_external_addons() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let repository = Repository {
+            external_addons: vec![(
+                "@mod_01".to_string(),
+                true,
+                dir.path().join("@mod_01").to_string_lossy().to_string(),
+            )],
+            optional_addons: vec![("@mod_02".to_string(), true)],
+            ..Repository::default()
+        };
+        let pending = Foxy::build_join_preflight_state(
+            &repository,
+            &[],
+            &RepositoryServer::default(),
+            "MainRepo",
+            &[],
+            &AddonDisplayNameSnapshot::new(),
+        )
+        .expect("missing external addons must warn without server-addon checks");
+        assert_eq!(pending.unavailable_enabled.len(), 1);
+        assert_eq!(pending.unavailable_enabled[0].addon_name, "@mod_01");
+        assert!(pending.extra_enabled.is_empty());
+        assert!(pending.can_launch());
+        assert!(!pending.query_server_before_join);
+    }
+
+    #[test]
+    fn join_without_server_requirements_keeps_available_addons_without_warning() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let addon_path = dir.path().join("@mod_01");
+        std::fs::create_dir(&addon_path).expect("addon dir");
+        let repository = Repository {
+            external_addons: vec![(
+                "@mod_01".to_string(),
+                true,
+                addon_path.to_string_lossy().to_string(),
+            )],
+            ..Repository::default()
+        };
+        assert!(
+            Foxy::build_join_preflight_state(
+                &repository,
+                &[],
+                &RepositoryServer::default(),
+                "MainRepo",
+                &[],
+                &AddonDisplayNameSnapshot::new(),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn preflight_ignores_repository_defined_client_side_optional_addon_not_reported_by_server() {
         let repo = Repository {
             optional_addons: vec![("@soundmod".to_string(), true)],
@@ -2912,7 +3159,7 @@ mod tests {
         };
         let mut display_names = AddonDisplayNameSnapshot::new();
         display_names.insert(
-            "http://example.com/current/".to_string(),
+            addon_display_name_key(&repo.address, &repo.path),
             HashMap::from([(
                 "@ace3".to_string(),
                 "Advanced Combat Environment 3.21.0".to_string(),
@@ -2955,7 +3202,7 @@ mod tests {
         };
         let mut display_names = AddonDisplayNameSnapshot::new();
         display_names.insert(
-            "http://example.com/current/".to_string(),
+            addon_display_name_key(&repo.address, &repo.path),
             HashMap::from([(
                 "@ace3".to_string(),
                 "Advanced Combat Environment 3.21.0".to_string(),

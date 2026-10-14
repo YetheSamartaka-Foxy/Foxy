@@ -217,15 +217,17 @@ impl Foxy {
                             ui.with_layout(
                                 egui::Layout::centered_and_justified(egui::Direction::TopDown),
                                 |ui| {
-                                    let yes_btn = ui.add_enabled(
+                                    let yes_btn = self.add_repair_primary_button(
+                                        ui,
+                                        tr("Yes, Wipe Database"),
                                         !sync_active,
-                                        egui::Button::new(tr("Yes, Wipe Database")),
                                     );
                                     if yes_btn.hovered() && !sync_active {
                                         ui.ctx()
                                             .output_mut(Foxy::set_pointing_cursor_output);
                                     }
                                     if yes_btn.clicked() {
+                                        self.database_wipe_in_flight = true;
                                         self.show_wipe_db_confirmation = false;
                                         let include_benchmarks = self.wipe_db_include_benchmarks;
                                         self.wipe_db_include_benchmarks = false;

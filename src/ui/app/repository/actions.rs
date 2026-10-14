@@ -199,11 +199,12 @@ impl Foxy {
         if folder_key.is_empty() {
             return Vec::new();
         }
+        let address_key = Self::repo_url_match_key(normalized_address);
         self.repository_view_state
             .repositories
             .iter()
             .filter(|repo| {
-                Self::normalize_repo_url(&repo.address) == normalized_address
+                Self::repo_url_match_key(&repo.address) == address_key
                     && repo.repository_space_id.as_deref() == space_id
                     && Self::normalize_repo_path_identity(&repo.path) == folder_key
             })
@@ -644,7 +645,7 @@ impl Foxy {
                 continue;
             }
 
-            let normalized_url = Self::normalize_repo_url(&normalized_address);
+            let normalized_url = Self::repo_url_match_key(&normalized_address);
             if !shared_path_key.is_empty()
                 && let Some(repo) =
                     self.repository_view_state
@@ -652,7 +653,7 @@ impl Foxy {
                         .iter_mut()
                         .find(|repo| {
                             repo.repository_space_id.is_none()
-                                && Self::normalize_repo_url(&repo.address) == normalized_url
+                                && Self::repo_url_match_key(&repo.address) == normalized_url
                                 && Self::normalize_repo_path_identity(&repo.path) == shared_path_key
                         })
             {

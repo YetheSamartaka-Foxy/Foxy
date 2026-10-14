@@ -104,6 +104,12 @@ impl Foxy {
                             self.color_text_error()
                         }),
                     );
+                    if !notice.success {
+                        ui.horizontal(|ui| {
+                            ui.add_space(horizontal_padding);
+                            self.render_export_logs_button(ui);
+                        });
+                    }
                     ui.separator();
                 }
 
@@ -703,7 +709,7 @@ impl Foxy {
             "generated_at={}\n",
             chrono::Local::now().to_rfc3339()
         ));
-        manifest.push_str(&format!("version={}\n", env!("CARGO_PKG_VERSION")));
+        manifest.push_str(&format!("version={}\n", crate::build_info::VERSION));
         manifest.push_str(&format!("retained_log_files={}\n", log_entries.len()));
         manifest.push_str(&format!(
             "retained_log_bytes={}\n",

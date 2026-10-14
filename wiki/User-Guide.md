@@ -4,6 +4,8 @@ Welcome to Foxy, a mod updater and launcher built for speed and reliability. Arm
 
 The same help is available inside the app: press **F1** or click the question mark in the footer.
 
+Use **Search help** to find topics by their titles and text in the current language. Select a matching topic to read it, and use **Clear** to show all topics again.
+
 ---
 
 ## Table of Contents
@@ -46,7 +48,7 @@ The footer at the bottom of the window contains:
 - An **activity log toggle** (bottom right) that shows what Foxy is doing and recent core messages, which is useful for troubleshooting.
 - An **info icon** that opens the About page.
 - A **question mark icon** that opens the in-app Help page.
-- The **version number**, which opens the changelog when clicked.
+- The **version number**, taken from the latest changelog release when Foxy is built, which opens the changelog when clicked.
 - An **update badge** when a newer Foxy version is available.
 
 ### Initial setup
@@ -102,6 +104,8 @@ Each game space stores its data under `games/<game space>` in the Foxy config di
 
 ### Upgrading from an older Foxy
 
+Windows updates preserve your saved repositories, settings, and databases. Silent installers always keep this data. During a manual install, **Delete all existing Foxy user data** starts unchecked each time and requires confirmation before removing your setup. Leave it unchecked to keep your configuration; downloaded mod folders are kept even when you explicitly reset Foxy.
+
 When you upgrade from a Foxy version without game spaces, your existing setup moves into an Arma 3 game space automatically. The previous files are kept as `.pre-gamespaces.bak` copies, so the change can be rolled back.
 
 ---
@@ -147,6 +151,8 @@ Foxy rereads each space's manifest from the server at launch and every 30 minute
 
 A repository space can define a common local folder for all its repositories. When a repository belongs to a space, its local path is inherited from the space's shared path and cannot be changed individually. Required repositories of the space are added automatically and see the same shared folder.
 
+If only some of a repository's addons are installed in the shared folder, Foxy can check it and offer to download the rest. Addons already installed by another repository do not cause a wrong-folder warning for addons that have never been downloaded. Foxy still pauses if the configured folder is missing, files appear under unexpected paths, or most content with saved local verification state has disappeared.
+
 ### Bulk operations
 
 The repository space toolbar operates on every repository in the space at once:
@@ -155,7 +161,7 @@ The repository space toolbar operates on every repository in the space at once:
 - **Quick local check** - runs a quick local content check on all repositories in the space.
 - **Update all repositories** - downloads pending updates for every repository in the space that has updates.
 
-A progress indicator in the space header shows how many repositories are done and which one is active.
+A progress indicator in the space header shows how many repositories are done and which one is active, with one block of triangles per repository.
 
 ### Scanning and moving existing repositories
 
@@ -203,7 +209,19 @@ You can cancel an active sync while Foxy is hashing or downloading. Foxy stops p
 
 ### Progress and status banners
 
-During any operation, the repository detail view shows a status banner with the operation name, the current step, a detail line, an elapsed time counter, and a progress bar when applicable. After the operation, a completed banner shows the result; dismiss it or use its action button (for example to review an update).
+During any operation, the repository detail view shows a status banner with the operation name, the current step, a detail line, and an elapsed time counter. An animated icon next to the title names the kind of work: a radar sweep for local checks, a shield scan for an integrity recheck, broadcast waves for a remote data recheck, and a turning gear for database work.
+
+Checks show a verification map under the text: each cell is a slice of the data being verified, drawn as one triangle in rows of triangles pointing up and down by turns. Cells fill from left to right as hashing progresses, the cells being read blink, freshly verified cells glow briefly, and sparkles drift up from the cells being verified. While the amount of work is not known yet, a light sweeps across the map instead. A light runs around the banner's border while the work runs. After the operation, a completed banner shows the result, and its border flares with sparkles as it appears; dismiss it or use its action button (for example to review an update).
+
+Progress bars are built from the same triangles as the verification map, side by side and pointing up and down by turns, and fill with mana in a few flat tones of the bar's color: while work runs, every filled triangle blinks on its own rhythm, bubbles of light climb through the filled rows, single triangles twinkle, and the front triangles blink and glow as they fill, shedding sparkles. When the amount of work is not known yet, a beam of light sweeps along the triangles instead. Text on a bar sits on a soft dark backing so it stays readable over bright triangles.
+
+Running work also shows outside the banner:
+
+- A repository in the sidebar shows a small round cluster of triangles that fills with mana as the operation progresses, and a single row of triangles under its name.
+- In the update view, a wave of light sweeps each mod's bar and scattered triangles pop when it finishes, and the speed history marks its newest samples while the transfer runs. A paused download's mana stands still, and on a cancel the bubbles sink while changes are rolled back.
+- A repository space runs **Recheck all** and **Update all** as a row of triangle blocks, one per repository: full for finished repositories, filling for the running one, and empty for the rest.
+
+Turn on **Reduce motion** in Application settings to stop these animations. Progress values and status text keep updating.
 
 ---
 
@@ -303,7 +321,7 @@ Lists addons the repository marks as optional. It works like the Addons tab. You
 
 External addons are mods found outside the repository: in repository-space shared paths, in additional search folders you register in Game space settings, or in your Steam Workshop content. The tab adds:
 - **Include Steam Addons** - toggles Steam Workshop addons in the list.
-- **Origin filter** and **Group by origin**.
+- **Origin filter** and **Group by origin**. An addon shared by several repositories appears when filtering by any of them, including repositories that list it as optional.
 - **State filter** (All, Enabled, Disabled).
 - A **Refresh** button that rescans every addon source.
 
@@ -337,9 +355,29 @@ When you join an Arma 3 server, Foxy reads what the server reports and can:
 
 Enabled [extra files](#extra-files-and-config-packs) are copied into the game directory before each launch.
 
+### Linux, Proton, and Wine
+
+The Windows build of **Foxy is confirmed to work on Linux under both Proton and Wine**. A native Linux build is also available; see the [installation instructions](../README.md#installation).
+
+When Windows Foxy runs under Proton or Wine, it can detect and start native Linux Steam, find its Arma 3 libraries, and launch Arma 3 through Steam's selected Proton version with the enabled mods and server settings, skipping the Arma launcher. Native, Flatpak, and Snap Steam installations are supported.
+
+1. Install Arma 3 in Steam, configure it to use Proton, and start it from Steam once to finish its initial setup.
+2. Use **Auto-detect** for the Steam directory in **Settings > Application** and the Arma 3 directory in **Game space settings**, or select their folders through Wine's mapped drives.
+3. Enable your addons and use **Launch** or **Join** as usual. Mod, profile, and editor mission paths are translated for the game's Proton prefix.
+
 ### Steam and TeamSpeak checks
 
 With **Check Steam is running before launching** turned on in Game space settings, Foxy warns when Steam is not running and offers to start it. **Check TeamSpeak is running before joining** does the same for TeamSpeak 3 when the repository ships a TS3 plugin. Repositories can override both checks.
+
+When you click **Join**, these warnings appear before Foxy checks the server and its addon requirements. Use **Launch Steam** or **Launch TeamSpeak** to start the missing client, then **Join** to continue with the server checks, or **Cancel** to stop.
+
+When the Steam check is enabled, **Launch** and **Join** stay disabled in the warning dialog until Steam is running. TeamSpeak 3, missing external addons, addon selections, and Creator DLC differences are advisory: you can continue after reviewing them. Missing external addons are also reported on Join when server-addon checking is disabled or the server reports no addons. An offline server, a failed server query, or an invalid game installation still stops the launch or join.
+
+Long addon warning lists scroll inside the dialog, with launch and cancel buttons kept below the scrolling content. Server addon matching recognizes both folder and display names, and keeps metadata separate for each local installation of a repository.
+
+If the database needs rebuilding, a separate reminder appears after these readiness and addon/DLC warnings, before each **Launch** or **Join**. The green **Wipe database and continue** button rebuilds it and then resumes your selected action. **Continue without wiping** proceeds for this action only, and **Cancel** stops it. The reminder explains that mod checks and updates stay blocked until rebuilding succeeds; see [database rebuilding](#foxy-asks-to-wipe-and-rebuild-the-database).
+
+If you disable the Steam warning, Foxy tries to start Steam automatically before launching a game that requires it. If Steam cannot start or is no longer running, the game does not launch. This requirement also applies to command-line launches and the Eden Editor; Generic games configured without a Steam App ID can launch without Steam.
 
 Foxy never runs the game with administrator rights, even if Foxy itself was started as administrator, so Discord, TeamSpeak hotkeys, and OBS capture keep working in the game window.
 
@@ -410,6 +448,7 @@ Open Settings with the gear icon or **F2**. The Settings view has these tabs: **
 - **Auto recheck repositories on launch** - refresh all repository metadata when Foxy starts.
 - **Auto quick scan for changes on launch** - run quick local checks on all repositories when Foxy starts.
 - **Hide repository image** - hide the banner image at the top of repository and repository space views.
+- **Reduce motion** - stop the blinking, bubbling, and sparkling animations on progress indicators and turn off interface transitions. Progress and status text still update. See [Progress and status banners](#progress-and-status-banners).
 - **Close after launch** / **Hide to tray after launch** - see [Launching the Game](#launching-the-game).
 
 #### Performance options
@@ -623,6 +662,10 @@ Only one Foxy window or command can use a game space at a time. If Foxy reports 
 
 After an update, the stored database may have been made by an incompatible version. Rebuilding keeps your downloaded mods on disk, and Foxy rechecks your repositories afterward. Files Foxy already verified and that have not changed are restored from its verified-hash record instead of being read again, unless you turned off **Skip unchanged files after a database reset**.
 
+Foxy checks the database itself, including leftover constraints from older versions. Updating a healthy database from 1.2.0 to 1.2.1 does not require another rebuild. If an earlier required rebuild was skipped and the database is still incompatible, Foxy asks for it again.
+
+You can dismiss the startup warning and keep using Foxy, including **Launch** and **Join**. Postponing does not remove the rebuild requirement: mod checks, updates, and background startup scans stay blocked until rebuilding succeeds. Each Launch or Join gives you another reminder after the other launch warnings, with an option to continue without wiping for that action. A failed rebuild keeps the requirement in place. Command-line mod checks and updates are blocked too, while command-line game launches remain available.
+
 ### Storage check notice
 
 At startup Foxy checks the drives behind its paths and repositories. It warns about risky setups (a FAT32 or exFAT drive, a network share, a RAM disk, a read-only drive, or paths too long for Windows) and refuses to download where files cannot be stored safely, for example a file over 4 GiB on FAT32. Move the folder to a local NTFS drive, or follow the notes in the notice.
@@ -643,6 +686,8 @@ A yellow **Legacy Protocol (MD5)** banner means the server still uses the older 
 4. As a last resort, use **Wipe repository database entries**, then refresh again.
 
 If downloads fail repeatedly, check your connection, open the repository URL in a browser, and read the activity log for the specific error.
+
+If a queued file is missing on the server (HTTP 404 or 410), Foxy stops the update and rolls back that attempt. Retry **Update** once: Foxy refreshes the server's file lists and rebuilds the plan, even when the server's repository checksum has not changed. Files that were already verified and left untouched keep their saved checksums. If the fresh plan still requests missing files, use **Recheck repository integrity** and send the log ZIP to the repository maintainer; the published files and manifests may disagree.
 
 ### Force redownload
 
@@ -672,7 +717,7 @@ Turn on **Enable benchmarks** in Settings > Benchmarks, repeat the action, save 
 
 ### Activity log and log files
 
-Open the activity log from the bottom-right footer button to see current work, recent core events, and errors. For deeper troubleshooting, use **Open log folder** or **Export logs to ZIP** in Settings > Application. Log files older than 90 days are removed automatically, and Foxy keeps up to 16 recent log files.
+Open the activity log from the bottom-right footer button to see current work, recent core events, and errors. Use **Export logs to ZIP** immediately to its left to save diagnostic logs for support. The same export button is available in the activity log, Settings > Application, startup troubleshooting notices, and several operation error dialogs. You can also use **Open log folder** in Settings > Application. Log files older than 90 days are removed automatically, and Foxy keeps up to 16 recent log files.
 
 ---
 

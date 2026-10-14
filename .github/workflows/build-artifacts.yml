@@ -156,12 +156,14 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Read version from Cargo.toml
+      - name: Read version from built executable
         if: ${{ inputs.build_installers }}
         id: version
         shell: pwsh
         run: |
-          $ver = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(.+)"').Matches.Groups[1].Value
+          $info = & "target/x86_64-pc-windows-msvc/release/Foxy.exe" version --json | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or -not $info.ok -or -not $info.data.version) { throw "Could not read Foxy release version" }
+          $ver = $info.data.version
           "app_version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           Write-Host "App version: $ver"
 
@@ -271,11 +273,11 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Read version from Cargo.toml
+      - name: Read version from built binary
         if: ${{ inputs.build_installers }}
         id: version
         run: |
-          VER=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          VER=$(dist/Foxy version --json | jq -er '.data.version')
           echo "app_version=$VER" >> "$GITHUB_OUTPUT"
           echo "App version: $VER"
 

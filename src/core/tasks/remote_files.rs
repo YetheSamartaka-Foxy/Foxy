@@ -518,6 +518,25 @@ fn zero_fetch_timing() -> FetchJsonTiming {
     }
 }
 
+async fn failed_mod_fetch(
+    context: &FoxyContext,
+    mod_parent: &FoxyMod,
+    duration: std::time::Duration,
+) -> ModRecheckStats {
+    if let Err(error) = context
+        .db()
+        .execute_retry(
+            "invalidate failed addon manifest",
+            "UPDATE addons SET remote_checksum = '' WHERE id = ?",
+            params![mod_parent.id as i64],
+        )
+        .await
+    {
+        error!("Could not invalidate failed addon manifest: {}", error);
+    }
+    empty_recheck_stats(mod_parent, zero_fetch_timing(), duration)
+}
+
 pub(crate) async fn fetch_mod_file_manifest(
     context: Arc<FoxyContext>,
     repository_parent: Arc<FoxyRepository>,
@@ -550,11 +569,9 @@ pub(crate) async fn fetch_mod_file_manifest(
                             "Unable to fetch mod files metadata (foxy + fallback): {} : {}",
                             files_metadata_url, e2
                         );
-                        return Err(empty_recheck_stats(
-                            &mod_parent,
-                            zero_fetch_timing(),
-                            mod_start.elapsed(),
-                        ));
+                        return Err(
+                            failed_mod_fetch(&context, &mod_parent, mod_start.elapsed()).await
+                        );
                     }
                 }
             }
@@ -563,11 +580,7 @@ pub(crate) async fn fetch_mod_file_manifest(
                     "Unable to fetch mod files metadata: {} : {}",
                     files_metadata_url, e
                 );
-                return Err(empty_recheck_stats(
-                    &mod_parent,
-                    zero_fetch_timing(),
-                    mod_start.elapsed(),
-                ));
+                return Err(failed_mod_fetch(&context, &mod_parent, mod_start.elapsed()).await);
             }
         };
 
@@ -694,15 +707,6 @@ pub(crate) async fn apply_mod_file_rows(
     // Perform recheck in bulk to minimize DB round-trips while still guarding SQLite with a semaphore
     let mut needs_parts: Vec<FilePartsPayload> = Vec::new();
     for (file, previous_file, parts) in all_rows_with_json {
-        let local_file_ready = file_present_with_expected_len(&file.local_path, file.length);
-        if file.remote_checksum == file.local_checksum
-            && local_file_ready
-            && context.recheck_level < RecheckLevel::FILE
-        {
-            debug!("Up-to-date: File: {}", file.remote_path);
-            continue;
-        }
-
         debug!("Recheck needed: File: {}", file.remote_path);
         needs_parts.push(FilePartsPayload {
             file,
@@ -1088,5 +1092,75 @@ mod tests {
             assert_eq!(file.remote_checksum, row.remote_checksum);
             assert_eq!(file.name, row.name);
         }
+    }
+
+    async fn assert_clean_file_refreshes_parts(previous_remote: &str, seed_part: bool) {
+        let directory = tempfile::tempdir().unwrap();
+        let local_path = directory.path().join("file.bin");
+        std::fs::write(&local_path, b"data").unwrap();
+        let mut context = FoxyContext::new(
+            crate::core::tasks::db_turso::build_test_database().await,
+            reqwest::Client::new(),
+        );
+        context.queue_download_targets = false;
+        let context = Arc::new(context);
+        let db = context.db();
+        db.execute(
+            "INSERT INTO addons (id, name, required, enabled) VALUES (1, '@mod_01', 1, 1)",
+            params![],
+        )
+        .await
+        .unwrap();
+        let mut staged = staged_file("@mod_01", "file.bin", previous_remote);
+        staged.mod_parent = Arc::new(FoxyMod {
+            id: 1,
+            ..staged.mod_parent.as_ref().clone()
+        });
+        staged.file_keys[0].local_path = local_path.to_string_lossy().replace('\\', "/");
+        staged.file_keys[0].length = 4;
+        let initial = upsert_file_rows_batch(&db, std::slice::from_ref(&staged)).await;
+        let file_id = initial.files.values().next().unwrap().id as i64;
+        db.execute(
+            "UPDATE files SET local_checksum = 'NEW' WHERE id = ?",
+            params![file_id],
+        )
+        .await
+        .unwrap();
+        if seed_part {
+            db.execute(
+                "INSERT INTO subfiles (file_id, path, local_length, local_start, remote_length, remote_start, local_checksum, remote_checksum, data_order) VALUES (?, 'old.bin', 4, 0, 4, 0, 'OLD', 'OLD', 0)",
+                params![file_id],
+            )
+            .await
+            .unwrap();
+        }
+        staged.file_keys[0].remote_checksum = "NEW".to_string();
+        staged.file_keys[0].parts = vec![ManifestPart {
+            path: "file.bin".to_string(),
+            checksum: "NEW_PART".to_string(),
+            start: 0,
+            length: 4,
+        }];
+        let upsert = upsert_file_rows_batch(&db, std::slice::from_ref(&staged)).await;
+        apply_mod_file_rows(context, staged, &upsert).await;
+        let parts = db
+            .query_all(
+                "SELECT remote_checksum FROM subfiles WHERE file_id = ?",
+                params![file_id],
+            )
+            .await
+            .unwrap();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].get_string("remote_checksum").unwrap(), "NEW_PART");
+    }
+
+    #[tokio::test]
+    async fn matching_local_file_checksum_does_not_hide_missing_parts() {
+        assert_clean_file_refreshes_parts("NEW", false).await;
+    }
+
+    #[tokio::test]
+    async fn matching_local_file_checksum_does_not_hide_changed_remote_parts() {
+        assert_clean_file_refreshes_parts("OLD", true).await;
     }
 }

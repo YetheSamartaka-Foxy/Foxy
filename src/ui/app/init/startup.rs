@@ -208,7 +208,10 @@ impl Foxy {
             benchmark_channels: Default::default(),
             pending_renderer_fallback_notice: false,
             pending_db_schema_wipe: None,
+            show_db_schema_wipe_prompt: false,
+            pending_database_launch: None,
             db_schema_wipe_recheck_all: true,
+            database_wipe_in_flight: false,
             recheck_all_after_database_wipe: false,
             db_lock_conflict: None,
             pending_low_space_notice: false,
@@ -294,6 +297,7 @@ impl Foxy {
             selected_repository_for_settings: None,
             current_repository_settings_tab: RepositorySettingsTab::Configuration,
             current_help_tab: HelpTab::Overview,
+            help_search_query: String::new(),
             current_about_tab: AboutTab::About,
             addons_filter: String::new(),
             addons_search_files: false,
@@ -572,18 +576,16 @@ impl Foxy {
             workshop_task_rx: None,
             workshop_task_worker: None,
         };
+        app.db_lock_conflict = app.claim_active_space_database();
+        if app.db_lock_conflict.is_some() {
+            return app;
+        }
+        crate::core::tasks::init_database::check_and_wipe_database();
         app.load_settings();
         app.pending_renderer_fallback_notice =
             crate::core::utils::renderer_fallback::renderer_fallback_notice_path().exists();
-        // Claim the database before anything can open it. Turso has no
-        // multi-process access, so a second window sharing one game space
-        // corrupts it silently rather than failing.
-        app.db_lock_conflict = app.claim_active_space_database();
-        // Compare the local database schema generation against this binary's.
-        // Bootstraps a sidecar for fresh/legacy databases (no prompt) and only
-        // returns Some(..) when an out-of-date database needs an explicit wipe.
-        app.pending_db_schema_wipe =
-            crate::core::tasks::db_schema_version::evaluate_and_bootstrap();
+        let _ = crate::core::tasks::db_schema_version::evaluate_and_bootstrap();
+        app.refresh_database_repair_requirement();
         app.apply_debug_modal_previews();
         if app.settings_view_state.debug_mode && !app.launch_debug_mode {
             info!("Ignoring persisted debug mode; launch with `ui --debug-mode` to enable");

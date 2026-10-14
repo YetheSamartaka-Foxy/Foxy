@@ -3,7 +3,10 @@ use super::{
     RepositoryVisualFolderRowContextAction,
 };
 use crate::core::api::SyncMode;
-use crate::ui::app::{Foxy, RepositoryListContextAction, RepositoryListRow, RepositoryListSection};
+use crate::ui::app::{
+    ActivityBar, BarMotion, Foxy, ProgressOrb, RepositoryListContextAction, RepositoryListRow,
+    RepositoryListSection,
+};
 use crate::ui::context_menu::{ContextMenuItem, attach_context_menu};
 use crate::ui::types::{FoxyView, Repository, RepositorySpaceBulkMode};
 use crate::ui::views::galley_cache;
@@ -124,8 +127,6 @@ impl Foxy {
             self.color_main_bg()
         };
         let icon = self.cached_icons.get(&icon_checksum);
-        let space_name_max_chars = if icon.is_some() { 20 } else { 24 };
-        let truncated_space_name = Self::truncate_display_name(&space_name, space_name_max_chars);
         let display_font_size = (self
             .settings_view_state
             .font_sizes
@@ -134,19 +135,20 @@ impl Foxy {
             - 6.0)
             .max(14.0);
         let text_color = self.color_text_normal();
-        let display_text = galley_cache::lazy_galley_colored(
-            ui,
-            self.repository_list_galleys.slot(row_slot, 0),
-            egui::FontId::proportional(display_font_size),
-            text_color,
-            || truncated_space_name.clone(),
-        );
         let row_height = Self::repository_list_row_height();
         let stroke_color = self.color_widget_bg();
         let toggle_fill = self.color_widget_bg();
         let toggle_width = 28.0;
         let toggle_gap = 4.0;
         let main_width = (ui.available_width() - toggle_width - toggle_gap).max(40.0);
+        let display_text = galley_cache::lazy_galley_truncated(
+            ui,
+            self.repository_list_galleys.slot(row_slot, 0),
+            egui::FontId::proportional(display_font_size),
+            text_color,
+            row_label_width(ui, main_width, icon.is_some()),
+            || space_name.clone(),
+        );
         let toggle_hover = if collapsed {
             self.t("Expand repository space")
         } else {
@@ -351,17 +353,18 @@ impl Foxy {
                 ("count", repository_count.to_string()),
             ],
         );
-        let text = galley_cache::lazy_galley_colored(
-            ui,
-            self.repository_list_galleys.slot(row_slot, 0),
-            egui::FontId::proportional(display_font_size),
-            text_color,
-            || Self::truncate_display_name(&folder_label, 24),
-        );
         let row_height = Self::repository_list_row_height();
         let toggle_width = 28.0;
         let toggle_gap = 4.0;
         let main_width = (ui.available_width() - toggle_width - toggle_gap).max(40.0);
+        let text = galley_cache::lazy_galley_truncated(
+            ui,
+            self.repository_list_galleys.slot(row_slot, 0),
+            egui::FontId::proportional(display_font_size),
+            text_color,
+            row_label_width(ui, main_width, false),
+            || folder_label,
+        );
         let (stroke_color, stroke_width) = if is_selected {
             (self.color_primary_accent(), 2.5)
         } else {
@@ -583,6 +586,16 @@ impl Foxy {
         let icon = self.cached_icons.get(&icon_checksum);
         let state = self.repo_state_for_address(&address, &repo_path);
         let active_operation_tooltip = self.active_repository_row_operation_tooltip(repo_index);
+        let (operation_progress, operation_motion) = if active_operation_tooltip.is_some() {
+            self.repository_operation_activity(repo_index)
+        } else {
+            (None, BarMotion::Still)
+        };
+        let operation_color = if is_selected {
+            crate::ui::palette::ON_STRONG_FILL
+        } else {
+            self.color_primary_accent()
+        };
 
         let state_icon = match state {
             crate::ui::types::RepoState::Synced => "\u{2705}",
@@ -640,11 +653,24 @@ impl Foxy {
                             atom_response.response.id.with("operation_status"),
                             Sense::hover(),
                         );
-                        crate::ui::app::PacedSpinner::new()
-                            .size(status_rect.width().min(status_rect.height()))
+                        ProgressOrb::new(operation_progress, operation_color)
+                            .motion(operation_motion)
                             .paint_at(ui, status_rect);
                         let _ = status_response.on_hover_text(tooltip);
                     }
+                    let row = atom_response.response.rect;
+                    ActivityBar::new(operation_progress)
+                        .fill(operation_color)
+                        .track(egui::Color32::TRANSPARENT)
+                        .rows(1)
+                        .motion(operation_motion)
+                        .paint_at(
+                            ui,
+                            egui::Rect::from_min_max(
+                                egui::pos2(row.left() + 8.0, row.bottom() - 9.0),
+                                egui::pos2(row.right() - 8.0, row.bottom() - 2.0),
+                            ),
+                        );
 
                     atom_response.response
                 } else if let Some(tex) = icon {
@@ -796,4 +822,16 @@ impl Foxy {
             *repository_context_action = Some((repo_index, action));
         }
     }
+}
+
+/// Room for a list row's label inside a button `button_width` wide, so a long
+/// name is cut short instead of widening every row below it.
+fn row_label_width(ui: &Ui, button_width: f32, with_icon: bool) -> f32 {
+    let spacing = ui.spacing();
+    let icon = if with_icon {
+        24.0 + spacing.icon_spacing
+    } else {
+        0.0
+    };
+    (button_width - 2.0 * spacing.button_padding.x - icon - 4.0).max(16.0)
 }

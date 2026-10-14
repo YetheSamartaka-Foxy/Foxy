@@ -75,6 +75,7 @@ pub(crate) struct LocalPathAvailability {
     /// (re)download would be wrong.
     pub(crate) addons_with_disk_content_unresolved: usize,
     pub(crate) had_prior_local_state: bool,
+    pub(crate) had_prior_missing_local_state: bool,
     pub(crate) sample_missing_addon_dirs: Vec<String>,
     pub(crate) sample_missing_files: Vec<String>,
     /// Sample of real on-disk file paths found inside addon folders whose
@@ -147,6 +148,7 @@ pub(crate) fn summarize_local_path_availability(tree: &Tree) -> LocalPathAvailab
     let mut existing_files_with_expected_size = 0usize;
     let mut missing_files = 0usize;
     let mut addons_with_disk_content_unresolved = 0usize;
+    let mut had_prior_missing_local_state = false;
     let mut sample_missing_addon_dirs = Vec::new();
     let mut sample_missing_files = Vec::new();
     let mut sample_unresolved_disk_paths = Vec::new();
@@ -168,6 +170,8 @@ pub(crate) fn summarize_local_path_availability(tree: &Tree) -> LocalPathAvailab
             existing_addons += 1;
         } else {
             missing_addon_dirs += 1;
+            had_prior_missing_local_state |=
+                has_state(&addon.local_checksum, &addon.local_content_hash);
             if sample_missing_addon_dirs.len() < SAMPLE_LIMIT {
                 sample_missing_addon_dirs.push(addon.local_path.clone());
             }
@@ -185,6 +189,8 @@ pub(crate) fn summarize_local_path_availability(tree: &Tree) -> LocalPathAvailab
             let path = Path::new(file.local_path.trim());
             let Ok(metadata) = crate::core::utils::profiling::fs::metadata(path) else {
                 missing_files += 1;
+                had_prior_missing_local_state |=
+                    has_state(&file.local_checksum, &file.local_content_hash);
                 if sample_missing_files.len() < SAMPLE_LIMIT {
                     sample_missing_files.push(file.local_path.clone());
                 }
@@ -193,6 +199,8 @@ pub(crate) fn summarize_local_path_availability(tree: &Tree) -> LocalPathAvailab
 
             if !metadata.is_file() {
                 missing_files += 1;
+                had_prior_missing_local_state |=
+                    has_state(&file.local_checksum, &file.local_content_hash);
                 if sample_missing_files.len() < SAMPLE_LIMIT {
                     sample_missing_files.push(file.local_path.clone());
                 }
@@ -266,6 +274,7 @@ pub(crate) fn summarize_local_path_availability(tree: &Tree) -> LocalPathAvailab
         missing_files,
         addons_with_disk_content_unresolved,
         had_prior_local_state,
+        had_prior_missing_local_state,
         sample_missing_addon_dirs,
         sample_missing_files,
         sample_unresolved_disk_paths,
@@ -552,12 +561,15 @@ pub(crate) fn suspect_local_path_mismatch(summary: &LocalPathAvailability) -> bo
         return summary.had_prior_local_state;
     }
 
-    summary
-        .missing_files
-        .saturating_mul(SUSPECT_MISSING_FILE_RATIO_DENOMINATOR)
-        >= summary
-            .expected_files
-            .saturating_mul(SUSPECT_MISSING_FILE_RATIO_NUMERATOR)
+    // Shared present addons and repository rollups do not prove missing content
+    // was previously installed.
+    summary.had_prior_missing_local_state
+        && summary
+            .missing_files
+            .saturating_mul(SUSPECT_MISSING_FILE_RATIO_DENOMINATOR)
+            >= summary
+                .expected_files
+                .saturating_mul(SUSPECT_MISSING_FILE_RATIO_NUMERATOR)
         && summary
             .missing_addon_dirs
             .saturating_mul(SUSPECT_MISSING_ADDON_RATIO_DENOMINATOR)
@@ -839,6 +851,129 @@ mod tests {
         assert_eq!(summary.existing_files, 10);
         assert_eq!(summary.missing_files, 10);
         assert!(!suspect_local_path_mismatch(&summary));
+    }
+
+    fn partial_shared_install_tree(root: &Path) -> Tree {
+        let addon_names: Vec<String> = (0..52).map(|idx| format!("@mod_{idx:02}")).collect();
+        let names: Vec<&str> = addon_names.iter().map(String::as_str).collect();
+        let mut tree = with_prior_local_state(test_tree(root, &names, 11));
+        for file_idx in 11..44 {
+            let file_name = format!("file_{file_idx}.pbo");
+            tree.mod_nodes
+                .last_mut()
+                .unwrap()
+                .files
+                .push(tree.files.len());
+            tree.files.push(FoxyModFile {
+                id: tree.files.len() as u64 + 1,
+                local_path: root
+                    .join(&addon_names[51])
+                    .join(&file_name)
+                    .display()
+                    .to_string(),
+                name: file_name,
+                length: 4,
+                ..Default::default()
+            });
+        }
+        for (addon_idx, count) in [7, 7, 6].into_iter().enumerate() {
+            fs::create_dir_all(&tree.mods[addon_idx].local_path).unwrap();
+            tree.mods[addon_idx].local_checksum = "SHAREDLOCALCHECKSUM".to_string();
+            for file_idx in tree.mod_nodes[addon_idx].files.iter().take(count) {
+                let file = &mut tree.files[*file_idx];
+                fs::write(&file.local_path, b"test").unwrap();
+                file.local_checksum = "SHAREDLOCALCHECKSUM".to_string();
+            }
+        }
+        tree
+    }
+
+    #[test]
+    fn mostly_missing_shared_install_is_allowed_despite_present_local_state() {
+        let dir = tempdir().unwrap();
+        let tree = partial_shared_install_tree(dir.path());
+
+        let summary = summarize_local_path_availability(&tree);
+
+        assert_eq!(summary.expected_addons, 52);
+        assert_eq!(summary.existing_addons, 3);
+        assert_eq!(summary.expected_files, 605);
+        assert_eq!(summary.existing_files_with_expected_size, 20);
+        assert_eq!(summary.missing_files, 585);
+        assert!(summary.had_prior_local_state);
+        assert!(!summary.had_prior_missing_local_state);
+        assert!(!suspect_local_path_mismatch(&summary));
+    }
+
+    #[test]
+    fn mostly_missing_install_without_prior_state_is_allowed() {
+        let dir = tempdir().unwrap();
+        let mut tree = partial_shared_install_tree(dir.path());
+        tree.repositories[0].local_checksum.clear();
+        for addon in &mut tree.mods {
+            addon.local_checksum.clear();
+        }
+        for file in &mut tree.files {
+            file.local_checksum.clear();
+        }
+
+        let summary = summarize_local_path_availability(&tree);
+
+        assert!(!summary.had_prior_local_state);
+        assert!(!summary.had_prior_missing_local_state);
+        assert!(!suspect_local_path_mismatch(&summary));
+    }
+
+    #[test]
+    fn mostly_missing_install_with_prior_missing_file_state_is_suspect() {
+        let dir = tempdir().unwrap();
+        let mut tree = partial_shared_install_tree(dir.path());
+        for use_content_hash in [false, true] {
+            let file = &mut tree.files[36];
+            file.local_checksum = if use_content_hash {
+                ""
+            } else {
+                "PRIORLOCALCHECKSUM"
+            }
+            .to_string();
+            file.local_content_hash = if use_content_hash {
+                "PRIORCONTENTHASH"
+            } else {
+                ""
+            }
+            .to_string();
+
+            let summary = summarize_local_path_availability(&tree);
+
+            assert!(summary.had_prior_missing_local_state);
+            assert!(suspect_local_path_mismatch(&summary));
+        }
+    }
+
+    #[test]
+    fn mostly_missing_install_with_prior_missing_addon_state_is_suspect() {
+        let dir = tempdir().unwrap();
+        let mut tree = partial_shared_install_tree(dir.path());
+        for use_content_hash in [false, true] {
+            let addon = &mut tree.mods[3];
+            addon.local_checksum = if use_content_hash {
+                ""
+            } else {
+                "PRIORLOCALCHECKSUM"
+            }
+            .to_string();
+            addon.local_content_hash = if use_content_hash {
+                "PRIORCONTENTHASH"
+            } else {
+                ""
+            }
+            .to_string();
+
+            let summary = summarize_local_path_availability(&tree);
+
+            assert!(summary.had_prior_missing_local_state);
+            assert!(suspect_local_path_mismatch(&summary));
+        }
     }
 
     #[test]
@@ -1155,6 +1290,7 @@ mod tests {
             missing_files,
             addons_with_disk_content_unresolved: 0,
             had_prior_local_state,
+            had_prior_missing_local_state: had_prior_local_state,
             sample_missing_addon_dirs: Vec::new(),
             sample_missing_files: Vec::new(),
             sample_unresolved_disk_paths: Vec::new(),

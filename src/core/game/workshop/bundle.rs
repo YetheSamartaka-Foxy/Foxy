@@ -371,7 +371,10 @@ fn extract_payloads(
         let mut file = archive
             .by_index(index)
             .map_err(|err| format!("Failed to read zip entry {}: {}", index, err))?;
-        let name = file.name().replace('\\', "/");
+        let name = file
+            .name()
+            .map_err(|err| format!("Failed to read zip entry {} name: {}", index, err))?
+            .replace('\\', "/");
         let Some(rest) = name.strip_prefix(FROZEN_PREFIX) else {
             continue;
         };

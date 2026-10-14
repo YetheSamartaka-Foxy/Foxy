@@ -6,7 +6,14 @@ use std::path::Path;
 use crate::core::db::{DbValue, FoxyDb, params};
 use crate::core::tasks::init_database::{bulk_write_chunk_rows, read_chunk_ids};
 
-pub(crate) type AddonDisplayNameSnapshot = HashMap<String, HashMap<String, String>>;
+pub(crate) type AddonDisplayNameSnapshot = HashMap<(String, String), HashMap<String, String>>;
+
+pub(crate) fn addon_display_name_key(repo_url: &str, local_path: &str) -> (String, String) {
+    (
+        crate::core::models::repository::normalize_repository_url(repo_url),
+        crate::core::utils::content_hash::normalize_path(local_path),
+    )
+}
 
 pub(crate) fn extract_addon_display_name(addon_path: &str) -> Option<String> {
     let addon_path = addon_path.trim();
@@ -194,7 +201,7 @@ pub(crate) async fn load_addon_display_name_snapshot(
 
     let rows = match db
         .query_all(
-            "SELECT r.remote_url, a.name, a.display_name
+            "SELECT r.remote_url, r.local_path, a.name, a.display_name
              FROM repositories r
              JOIN repository_addons ra ON ra.repository_id = r.id
              JOIN addons a ON a.id = ra.addon_id
@@ -214,6 +221,9 @@ pub(crate) async fn load_addon_display_name_snapshot(
         let Ok(repo_url) = row.get_string("remote_url") else {
             continue;
         };
+        let Ok(local_path) = row.get_string("local_path") else {
+            continue;
+        };
         let Ok(addon_name) = row.get_string("name") else {
             continue;
         };
@@ -224,7 +234,7 @@ pub(crate) async fn load_addon_display_name_snapshot(
             continue;
         }
         snapshot
-            .entry(repo_url)
+            .entry(addon_display_name_key(&repo_url, &local_path))
             .or_default()
             .insert(addon_name, display_name);
     }
@@ -323,6 +333,72 @@ fn read_cpp_quoted_string(bytes: &[u8], cursor: &mut usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::tasks::db_turso::build_test_database;
+
+    #[test]
+    fn display_name_keys_normalize_repository_urls_and_local_paths() {
+        assert_eq!(
+            addon_display_name_key(
+                " https://repo.example.invalid:8080/repo ",
+                "R:\\Mods\\MainRepo\\"
+            ),
+            addon_display_name_key(
+                "https://repo.example.invalid:8080/repo/",
+                "R:/Mods/MainRepo"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn display_name_snapshot_keeps_same_url_instances_separate() {
+        let db = FoxyDb::from_turso(build_test_database().await);
+        db.execute(
+            "INSERT INTO repositories (id, name, remote_url, local_path) VALUES
+             (1, 'MainRepo', 'https://repo.example.invalid:8080/repo/', 'R:/Mods/MainRepo'),
+             (2, 'RepoAlpha', 'https://repo.example.invalid:8080/repo/', 'R:/Mods/RepoAlpha')",
+            params![],
+        )
+        .await
+        .expect("seed repository instances");
+        db.execute(
+            "INSERT INTO addons (id, name, remote_path, local_path, required, display_name) VALUES
+             (11, '@mod_01', 'repo/@mod_01', 'R:/Mods/MainRepo/@mod_01', 1, 'Addon Alpha'),
+             (12, '@mod_01', 'repo/@mod_01', 'R:/Mods/RepoAlpha/@mod_01', 1, 'Addon Beta')",
+            params![],
+        )
+        .await
+        .expect("seed addon display names");
+        db.execute(
+            "INSERT INTO repository_addons (repository_id, addon_id) VALUES (1, 11), (2, 12)",
+            params![],
+        )
+        .await
+        .expect("link instance addons");
+
+        let snapshot = load_addon_display_name_snapshot(
+            &db,
+            &["https://repo.example.invalid:8080/repo/".to_string()],
+        )
+        .await;
+
+        assert_eq!(snapshot.len(), 2);
+        for (path, display_name) in [
+            ("R:/Mods/MainRepo", "Addon Alpha"),
+            ("R:/Mods/RepoAlpha/", "Addon Beta"),
+        ] {
+            assert_eq!(
+                snapshot
+                    .get(&addon_display_name_key(
+                        "https://repo.example.invalid:8080/repo",
+                        path
+                    ))
+                    .and_then(|names| names.get("@mod_01"))
+                    .map(String::as_str),
+                Some(display_name)
+            );
+        }
+        assert!(load_addon_display_name_snapshot(&db, &[]).await.is_empty());
+    }
 
     #[test]
     fn parses_mod_cpp_name_assignment() {
