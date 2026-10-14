@@ -427,6 +427,8 @@
     "Special thanks to the Task Force Roddenberry community": "ขอขอบคุณเป็นพิเศษแก่ชุมชน Task Force Roddenberry",
     "Help": "ช่วย",
     "Open help": "เปิดความช่วยเหลือ",
+    "Search help": "ค้นหาในความช่วยเหลือ",
+    "No help topics match your search.": "ไม่มีหัวข้อช่วยเหลือที่ตรงกับคำค้นของคุณ",
     "License": "สัญญาอนุญาต",
     "Licensing": "การอนุญาตให้ใช้สิทธิ",
     "Third-party licenses": "สัญญาอนุญาตของบุคคลที่สาม",
