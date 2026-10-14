@@ -25,7 +25,7 @@ It ships as a single binary with both a full desktop UI and a scriptable CLI, ru
 - **Benchmarks** - Save a recheck, update, or redownload as a benchmark with stage timings, transfer and disk charts, CPU and memory use, power source, and speed-of-light ratios, then compare two runs side by side or export one as a ZIP for support.
 - **Migration and direct-download workflows** - Guided Swifty migration preserves repositories and spaces, while direct-download mode can fetch repository, addon, or file URLs without a full database sync.
 - **One binary, two interfaces** - The same `Foxy` executable provides the desktop UI and a scriptable CLI with `--json`, `--dry-run`, `--yes`, `--quiet`, and `--no-progress` support for automation and accessible output.
-- **Cross-platform app delivery** - Native Windows and Linux builds include platform-appropriate installers plus decentralized in-app updates from self-hosted manifests or GitHub Releases, with early experimental macOS builds.
+- **Cross-platform app delivery** - Native Windows and Linux builds include platform-appropriate installers plus decentralized in-app updates from self-hosted manifests or GitHub Releases, with early experimental macOS builds. The Windows build is also confirmed to work on Linux under Proton and Wine.
 - **Customizable, accessible UI** - Themes support import/export, presets, scaling, and toast feedback. Keyboard navigation, locale-aware formatting, scalable fonts, clear status messages, non-color-only indicators, and a Reduce motion setting are built in.
 - **Broad localization** - Built-in localization bundles cover `en`, `ar`, `bg`, `bn`, `cs`, `da`, `de`, `el`, `es`, `et`, `fa`, `fi`, `fr`, `he`, `hi`, `hr`, `hu`, `id`, `it`, `ja`, `ko`, `lt`, `lv`, `nb`, `nl`, `pl`, `pt`, `pt-BR`, `ro`, `ru`, `sk`, `sl`, `sr`, `sv`, `th`, `tl`, `tr`, `uk`, `ur`, `vi`, and `zh`.
 
@@ -63,9 +63,21 @@ Download the latest release from the repository Releases page.
 
 Windows updates keep saved repositories, settings, and databases. Silent installers always preserve user data; a reset during a manual install requires a fresh selection and confirmation.
 
-Linux in-app updates use Foxy's self-extracting `.sh` installer. System installs may prompt for administrator privileges through `pkexec` when the install prefix is not writable.
+Native Linux in-app updates use Foxy's self-extracting `.sh` installer. System installs may prompt for administrator privileges through `pkexec` when the install prefix is not writable.
 
-Windows Foxy running through Wine can also detect native Linux Steam and launch Arma 3 through its selected Proton runtime. See the [launch setup](wiki/User-Guide.md#how-each-game-launches).
+### Linux, Proton, and Wine
+
+The Windows build of **Foxy is confirmed to work on Linux under both Proton and Wine**. You can also use the native Linux build with the installers above.
+
+For the Windows build, run the Windows installer and Foxy in your chosen Proton or Wine environment. To open the desktop UI from a Wine terminal, run this from Foxy's installation folder:
+
+```bash
+wine Foxy.exe ui
+```
+
+Windows Foxy can detect and start native Linux Steam, find Arma 3 across its Steam libraries, and launch the game through Steam's selected Proton runtime with your enabled mods and server settings. Native, Flatpak, and Snap Steam installations are supported.
+
+Configure Arma 3 to use Proton in Steam and start it from Steam once before launching it through Foxy. Use **Auto-detect** for the Steam and Arma 3 directories; Foxy translates mod, profile, and editor mission paths for the game's Proton prefix and skips the Arma launcher. See the [Linux launch setup](wiki/User-Guide.md#linux-proton-and-wine).
 
 ### Build from source
 

@@ -355,7 +355,15 @@ When you join an Arma 3 server, Foxy reads what the server reports and can:
 
 Enabled [extra files](#extra-files-and-config-packs) are copied into the game directory before each launch.
 
-On Linux, use the native Linux Foxy build when possible. If you run Windows Foxy through Wine, Foxy detects native Linux Steam and launches Arma 3 through Steam's selected Proton version, skipping the Arma launcher. Native, Flatpak, and Snap Steam installations are supported. Use **Auto-detect** for the Steam and Arma 3 directories, or select their folders through Wine's mapped drives. Mod, profile, and editor mission paths are translated for the game's Proton prefix. Arma 3 must be installed and configured to use Proton in Steam; start it from Steam once to finish its initial setup.
+### Linux, Proton, and Wine
+
+The Windows build of **Foxy is confirmed to work on Linux under both Proton and Wine**. A native Linux build is also available; see the [installation instructions](../README.md#installation).
+
+When Windows Foxy runs under Proton or Wine, it can detect and start native Linux Steam, find its Arma 3 libraries, and launch Arma 3 through Steam's selected Proton version with the enabled mods and server settings, skipping the Arma launcher. Native, Flatpak, and Snap Steam installations are supported.
+
+1. Install Arma 3 in Steam, configure it to use Proton, and start it from Steam once to finish its initial setup.
+2. Use **Auto-detect** for the Steam directory in **Settings > Application** and the Arma 3 directory in **Game space settings**, or select their folders through Wine's mapped drives.
+3. Enable your addons and use **Launch** or **Join** as usual. Mod, profile, and editor mission paths are translated for the game's Proton prefix.
 
 ### Steam and TeamSpeak checks
 
