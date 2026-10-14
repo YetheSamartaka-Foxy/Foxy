@@ -10,4 +10,4 @@ description = "Dev helpers: locale JSON validation and targeted translation batc
 default-run = "i18n-checker"
 
 [dependencies]
-serde_json = "1.0"
+serde_json = "1.0.154"
