@@ -703,8 +703,11 @@ fn linux_steam_running_pgrep() -> bool {
 
 #[cfg(target_os = "windows")]
 fn query_reg_value_for_path(key_path: &str, value_name: &str) -> Option<PathBuf> {
+    use std::os::windows::process::CommandExt;
+
     let output = Command::new("reg")
         .args(["query", key_path, "/v", value_name])
+        .creation_flags(winapi::um::winbase::CREATE_NO_WINDOW)
         .output()
         .ok()?;
 

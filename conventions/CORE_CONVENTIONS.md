@@ -89,7 +89,7 @@ younger than 30 days; replacing the database file loses it.
 
 \### Process launching
 
-On native Windows, Steam and TeamSpeak running checks share the Toolhelp process snapshot helper in `utils/process.rs`, matching executable names exactly without case. Do not spawn `tasklist` for these probes. Wine keeps its native-host Steam detection path.
+On native Windows, Steam, TeamSpeak and Arma 3 running checks share the Toolhelp process snapshot helper in `utils/process.rs`, matching executable names exactly without case. Do not spawn `tasklist` for these probes. Steam registry queries use `CREATE_NO_WINDOW` so automatic detection cannot flash a console or steal focus. Wine keeps its native-host Steam detection path.
 
 Windows in-app installers always receive `/MERGETASKS=!deleteuserdata`, including interactive and elevated launches, to clear a previous reset task while keeping shortcut preferences. The setup task uses `unchecked checkedonce`, and `CurPageChanged` explicitly deselects it whenever the task page opens, after Inno has restored prior choices and applied task presets. Deleting user data always requires ticking the checkbox in the current wizard. Its deletion handler refuses silent mode and requires a fresh confirmation with No as the default. An app update must never remove the Foxy data root or request a database wipe just to apply an installer fix.
 

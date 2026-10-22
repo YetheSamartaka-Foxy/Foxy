@@ -382,6 +382,8 @@ When the Steam check is enabled, **Launch** and **Join** stay disabled in the wa
 
 The warning dialog checks for Steam and TeamSpeak in the background, keeping its buttons and keyboard controls responsive while waiting for either client to start.
 
+On Windows, Steam detection and the running-client checks do not open command windows. This also applies to the Arma 3 running check before managing profiles.
+
 Long addon warning lists scroll inside the dialog, with launch and cancel buttons kept below the scrolling content. Server addon matching recognizes both folder and display names, and keeps metadata separate for each local installation of a repository.
 
 If the database needs rebuilding, a separate reminder appears after these readiness and addon/DLC warnings, before each **Launch** or **Join**. The green **Wipe database and continue** button rebuilds it and then resumes your selected action. **Continue without wiping** proceeds for this action only, and **Cancel** stops it. The reminder explains that mod checks and updates stay blocked until rebuilding succeeds; see [database rebuilding](#foxy-asks-to-wipe-and-rebuild-the-database).

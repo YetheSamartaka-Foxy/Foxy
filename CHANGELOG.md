@@ -5,6 +5,7 @@
 ## Fixed
 - Fixed updates missing published addon files and deleting manually copied files because outdated addon metadata was reused.
 - Steam and TeamSpeak launch warnings no longer freeze the interface or delay button hover and clicks while checking whether the clients are running.
+- Windows no longer opens brief command windows when detecting Steam or checking whether Arma 3 is running before managing profiles.
 
 # 1.2.1
 ## Added
