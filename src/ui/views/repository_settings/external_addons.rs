@@ -564,6 +564,14 @@ impl Foxy {
 
         if let Some((addon_name, addon_directory_path, action)) = external_addon_context_action {
             match action {
+                ExternalAddonContextAction::OpenWorkshop => {
+                    self.open_addon_workshop(
+                        ui.ctx(),
+                        &addon_name,
+                        Some(&addon_directory_path),
+                        None,
+                    );
+                }
                 ExternalAddonContextAction::OpenDirectory => {
                     if !self.open_addon_directory(&addon_name, &addon_directory_path) {
                         warn!("Failed to open addon directory for {}", addon_name);

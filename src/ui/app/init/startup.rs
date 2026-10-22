@@ -573,6 +573,7 @@ impl Foxy {
             game_space_switch_requested_at: None,
             // Steam Workshop
             workshop_view_state: crate::ui::views::workshop::WorkshopViewState::default(),
+            addon_workshop_lookups: Vec::new(),
             workshop_task_rx: None,
             workshop_task_worker: None,
         };

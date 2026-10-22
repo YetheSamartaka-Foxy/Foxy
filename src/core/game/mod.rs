@@ -1,3 +1,4 @@
+pub mod addon_workshop;
 pub mod arma3;
 pub mod extra_files;
 pub mod foxypack;
@@ -206,6 +207,17 @@ pub trait GameModule: Send + Sync {
     /// reads it from its own settings.
     fn steam_app_id_from_settings(&self, _settings: &SettingsViewState) -> Option<u32> {
         self.steam_app_id()
+    }
+
+    fn addon_workshop(
+        &self,
+        settings: &SettingsViewState,
+    ) -> Option<addon_workshop::AddonWorkshop> {
+        self.capabilities()
+            .steam_workshop
+            .then(|| self.steam_app_id_from_settings(settings))
+            .flatten()
+            .map(addon_workshop::AddonWorkshop::Steam)
     }
 
     fn repository_profile_to_profile(

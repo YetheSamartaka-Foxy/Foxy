@@ -379,6 +379,14 @@ impl Foxy {
 
             if let Some((addon_name, addon_directory_path, action)) = addon_context_action {
                 match action {
+                    AddonContextAction::OpenWorkshop => {
+                        self.open_addon_workshop(
+                            ui.ctx(),
+                            &addon_name,
+                            addon_directory_path.as_deref(),
+                            Some(repo_index),
+                        );
+                    }
                     AddonContextAction::OpenDirectory => {
                         if let Some(path) = addon_directory_path {
                             if !self.open_addon_directory(&addon_name, &path) {

@@ -330,6 +330,7 @@ impl Foxy {
         self.poll_addon_delete_results();
         self.poll_addon_force_redownload_results();
         self.poll_addon_backup_results();
+        self.poll_addon_workshop_lookups(&ctx);
         self.poll_repository_settings_addon_preload_results();
         self.maybe_warm_addon_inventory();
         self.poll_repository_addon_size_load_results();

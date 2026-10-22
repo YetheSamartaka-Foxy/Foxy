@@ -9,6 +9,7 @@ use crate::core::game::workshop::pin::{PinState, PinStatus};
 use crate::core::game::workshop::share::{self, ShareCodeOptions, ShareComparison};
 use crate::core::game::{spaces, workshop};
 use crate::ui::app::Foxy;
+use crate::ui::context_menu::{ContextMenuItem, attach_context_menu};
 use crate::ui::i18n::tr;
 
 use tasks::{WorkshopTask, WorkshopTaskContext, WorkshopTaskOutcome};
@@ -421,11 +422,28 @@ impl Foxy {
                                 }
                                 ui.vertical(|ui| {
                                     ui.horizontal(|ui| {
-                                        ui.label(
-                                            RichText::new(&title)
-                                                .strong()
-                                                .color(self.color_text_normal()),
+                                        let title_response = ui
+                                            .add(
+                                                egui::Label::new(
+                                                    RichText::new(&title)
+                                                        .strong()
+                                                        .color(self.color_text_normal()),
+                                                )
+                                                .sense(egui::Sense::click()),
+                                            )
+                                            .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                        let mut open_workshop = None;
+                                        attach_context_menu(
+                                            &title_response,
+                                            &[ContextMenuItem::new(
+                                                (),
+                                                tr("Open on Steam Workshop"),
+                                            )],
+                                            &mut open_workshop,
                                         );
+                                        if open_workshop.is_some() {
+                                            open_page = Some(workshop::workshop_url(&item.item_id));
+                                        }
                                         let (label, color) = self.workshop_pin_badge(item.state);
                                         if let Some(label) = label {
                                             ui.label(RichText::new(label).small().color(color));

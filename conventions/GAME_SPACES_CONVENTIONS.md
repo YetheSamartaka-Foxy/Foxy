@@ -158,6 +158,15 @@ warning and is for read-only use (labels, capability queries) only.
 
 ---
 
+## Addon Workshop links
+
+Addon browser links dispatch through `GameModule::addon_workshop`: Steam Workshop
+capability plus the settings-aware App ID selects Steam; Reforger overrides the
+provider. `game/addon_workshop.rs` resolves bounded local metadata, then bounded
+repository metadata requests on a worker. Browser URLs use validated nonzero
+Steam IDs or exactly 16 hexadecimal Reforger GUID digits, never metadata URLs or
+launch-only fallback IDs. Pending UI lookups are cleared on a game-space switch.
+
 ## Runtime space switching
 
 Switching happens in-process (`src/ui/app/runtime/game_space_switch.rs`):

@@ -585,6 +585,7 @@ pub struct Foxy {
     pub game_space_switch_requested_at: Option<std::time::Instant>,
     // Steam Workshop
     pub workshop_view_state: crate::ui::views::workshop::WorkshopViewState,
+    pub(crate) addon_workshop_lookups: Vec<StdReceiver<Option<String>>>,
     /// Result channel of the Workshop worker. Workshop actions download through
     /// the Steam helper subprocess or copy whole mod folders, so none of them
     /// may run on the frame loop.

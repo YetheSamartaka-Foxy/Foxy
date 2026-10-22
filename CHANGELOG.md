@@ -1,4 +1,7 @@
 # 1.2.2
+## Added
+- Right-click an addon to open its Steam Workshop or Arma Reforger Workshop page in your browser, including optional and external addons.
+
 ## Fixed
 - Fixed updates missing published addon files and deleting manually copied files because outdated addon metadata was reused.
 

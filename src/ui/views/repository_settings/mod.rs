@@ -9,6 +9,7 @@ mod export_structure;
 mod external_addon_views;
 mod external_addons;
 mod profiles;
+mod workshop_links;
 
 use crate::ui::app::{AddonDestructiveConfirmAction, Foxy, ProfileConfirmAction};
 use crate::ui::i18n::{fmt_bytes, tr, tr_fmt};
@@ -25,6 +26,7 @@ pub(super) const PROFILE_CLIPBOARD_HEADER: &str = "FOXYPROF01";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum AddonContextAction {
     OpenDirectory,
+    OpenWorkshop,
     Backup,
     RestoreBackup,
     RecheckIntegrity,
@@ -37,6 +39,7 @@ pub(super) enum AddonContextAction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ExternalAddonContextAction {
     OpenDirectory,
+    OpenWorkshop,
     ToggleStructure,
     Delete,
 }
@@ -211,6 +214,9 @@ impl Foxy {
                 });
             });
             ui.separator();
+            if !self.addon_workshop_lookups.is_empty() {
+                ui.label(tr("Loading..."));
+            }
             let mut repository_structure_export_clicked = false;
             {
                 self.ensure_repository_addon_list_cache_cached(

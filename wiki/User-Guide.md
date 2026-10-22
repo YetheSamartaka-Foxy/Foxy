@@ -309,6 +309,7 @@ Lists the addons provided by the repository. Each addon is a card with its name 
 - Turn on **Search addon files** to match the filter against files inside addon folders; matching addons expand automatically.
 - **Right-click** a card for more actions:
   - **Open addon directory**
+  - **Open on Steam Workshop** for games with Steam Workshop support, or **Open on Arma Reforger Workshop** for Reforger. Opens the addon's public page in your browser using its Workshop ID. Foxy checks local metadata first, then the repository's metadata if needed; Reforger folders ending in a Workshop GUID also work before downloading. Addons without an identifiable Workshop ID show a notice.
   - **Manual addon backup** (requires a backup directory)
   - **Restore addon backup**
   - **Recheck addon integrity**
@@ -326,6 +327,10 @@ External addons are mods found outside the repository: in repository-space share
 - **Origin filter** and **Group by origin**. An addon shared by several repositories appears when filtering by any of them, including repositories that list it as optional.
 - **State filter** (All, Enabled, Disabled).
 - A **Refresh** button that rescans every addon source.
+
+Right-click an external addon to open its Workshop page as well. External addons use their local metadata or Steam Workshop install path.
+
+In the game space's **Steam Workshop** tab, right-click a mod's name for the same action. This also works for generic games with a configured Steam App ID; the existing **Open** button provides keyboard access.
 
 ### Client-side addons
 

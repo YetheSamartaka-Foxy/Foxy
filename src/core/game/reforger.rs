@@ -42,6 +42,13 @@ const REFORGER_SCHEMA_VERSION: u32 = 1;
 pub struct ReforgerModule;
 
 impl GameModule for ReforgerModule {
+    fn addon_workshop(
+        &self,
+        _settings: &SettingsViewState,
+    ) -> Option<super::addon_workshop::AddonWorkshop> {
+        Some(super::addon_workshop::AddonWorkshop::Reforger)
+    }
+
     fn id(&self) -> &'static str {
         REFORGER_GAME_ID
     }

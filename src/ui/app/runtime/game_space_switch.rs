@@ -265,6 +265,7 @@ impl Foxy {
 
         // Steam Workshop store of the outgoing space.
         self.workshop_view_state = crate::ui::views::workshop::WorkshopViewState::default();
+        self.addon_workshop_lookups.clear();
 
         // Repository list, spaces, and folders.
         self.repository_view_state = RepositoryViewState::default();
