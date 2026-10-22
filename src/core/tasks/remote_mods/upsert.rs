@@ -464,6 +464,7 @@ pub(super) async fn process_mods_upsert(
                     && previous.required == mod_entry.required
             });
             if remote_graph_unchanged
+                && !force_mod_refresh
                 && graph_state.complete()
                 && has_content_hash
                 && context_clone.recheck_level < RecheckLevel::MOD

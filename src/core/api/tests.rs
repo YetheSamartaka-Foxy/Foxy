@@ -11,6 +11,8 @@ use crate::core::tasks::calculate_hashes::{
 };
 use std::collections::HashSet;
 
+mod forced_manifest_refresh;
+
 /// Build a fresh Turso test database (full bootstrap schema) for fixtures.
 async fn build_db() -> std::sync::Arc<turso::Database> {
     crate::core::tasks::db_turso::build_test_database().await

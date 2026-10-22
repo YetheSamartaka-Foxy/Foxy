@@ -191,6 +191,8 @@ Available from **Repository Settings > Configuration**, this performs a full rem
 
 ### Understanding the update flow
 
+Before preparing an update, Foxy refreshes the manifests for pending addons even if the repository checksum is unchanged. This lets it download files missing from older metadata and recognize manually copied files that the server publishes before cleaning up obsolete files.
+
 1. Run **Refresh** to check the remote server.
 2. If updates are available, an **Update ready** banner appears on the repository.
 3. Click the banner to open the **update view**, which shows which mods changed, how many files are affected per mod, and the total download size.

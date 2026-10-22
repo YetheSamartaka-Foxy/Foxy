@@ -1,3 +1,7 @@
+# 1.2.2
+## Fixed
+- Fixed updates missing published addon files and deleting manually copied files because outdated addon metadata was reused.
+
 # 1.2.1
 ## Added
 - The Help page now includes search across topic titles and text, making usage guidance easier to find.

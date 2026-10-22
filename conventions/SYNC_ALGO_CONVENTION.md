@@ -165,6 +165,11 @@ Prepared queues require a complete enabled-addon file graph, including part rows
 for every nonempty file. Local checksums matching newly published checksums do
 not prove that the stored remote graph is unchanged or complete.
 
+Explicit pending-addon manifest refreshes bypass both repository skip gates and
+the selected addons' unchanged-graph gate, even when published checksums match.
+Refresh those manifests before queue construction and unexpected-file cleanup;
+unselected clean addons and ordinary clean startup scans keep their fast paths.
+
 HTTP 404 and 410 during a file transfer stop the run without retrying the same
 URL or reporting user cancellation. After all transfer and hash workers settle
 and rollback finishes, invalidate the instance's enabled-addon remote checksums,

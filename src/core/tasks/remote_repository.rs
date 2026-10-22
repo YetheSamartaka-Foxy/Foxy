@@ -812,12 +812,14 @@ pub(crate) async fn remote_repository(
     let remote_graph_complete =
         repository_remote_graph_complete(&repository, has_linked_addons, has_remote_state);
 
+    let has_forced_mod_refreshes = !context.forced_mod_refreshes.is_empty();
     if should_skip_clean_remote_refresh(
         &repository,
         has_linked_addons,
         has_remote_state,
         context.recheck_level,
         force_refresh
+            || has_forced_mod_refreshes
             || !remote_addon_links_match
             || !remote_addon_versions_match
             || !repository_space_paths_match,
@@ -845,7 +847,7 @@ pub(crate) async fn remote_repository(
         local_path_unchanged,
         remote_graph_complete && remote_addon_links_match && remote_addon_versions_match,
         context.recheck_level,
-        force_refresh || !repository_space_paths_match,
+        force_refresh || has_forced_mod_refreshes || !repository_space_paths_match,
     ) {
         info!(
             "Repository {} remote graph unchanged (repo.json checksum matches stored remote checksum); using existing DB metadata for local verification",
