@@ -5,6 +5,7 @@ mod join_preflight;
 mod list_cache;
 mod maintenance;
 mod media;
+pub(crate) mod prelaunch_checks;
 mod reorder;
 mod space_actions;
 pub(crate) mod space_freshness;

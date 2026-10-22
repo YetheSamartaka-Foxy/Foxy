@@ -309,7 +309,7 @@ impl Foxy {
             ts3_gate,
             steam_gate,
         ) {
-            self.prelaunch_recheck_at = None;
+            self.prelaunch_process_checks = Default::default();
             self.pending_join_preflight = Some(preflight);
             ctx.request_repaint();
             return;
@@ -716,7 +716,7 @@ impl Foxy {
         repo_name: &str,
         addon_state: Option<crate::ui::app::PendingJoinPreflightState>,
     ) {
-        self.prelaunch_recheck_at = None;
+        self.prelaunch_process_checks = Default::default();
         let (steam_required, steam_running) = self.evaluate_steam_launch_gate(effective, repo_name);
         let mut addon_state = addon_state.or_else(|| {
             Self::build_join_preflight_state(
@@ -833,7 +833,7 @@ impl Foxy {
                 steam_attention,
                 unavailable_enabled.len()
             );
-            self.prelaunch_recheck_at = None;
+            self.prelaunch_process_checks = Default::default();
             self.pending_join_preflight = Some(crate::ui::app::PendingJoinPreflightState {
                 unavailable_enabled,
                 steam_required,

@@ -647,16 +647,7 @@ pub fn is_steam_running(steam_directory: &str) -> bool {
         if wine::is_wine() && wine::steam_launch_command(steam_directory).is_some() {
             return wine::steam_running();
         }
-        let output = Command::new("tasklist")
-            .args(["/FI", "IMAGENAME eq steam.exe", "/FO", "CSV", "/NH"])
-            .output();
-        match output {
-            Ok(out) if out.status.success() => {
-                let stdout = String::from_utf8_lossy(&out.stdout).to_lowercase();
-                stdout.contains("steam.exe")
-            }
-            _ => false,
-        }
+        crate::core::utils::process::any_process_running(&["steam.exe"]).unwrap_or(false)
     }
     #[cfg(target_os = "linux")]
     {

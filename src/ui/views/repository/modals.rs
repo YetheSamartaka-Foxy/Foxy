@@ -12,9 +12,6 @@ use eframe::egui::{
 };
 use log::{info, warn};
 
-/// How often the preflight modal re-checks whether TeamSpeak or Steam started.
-const PRELAUNCH_RECHECK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1500);
-
 fn join_preflight_body<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> R {
     let footer_reserve = 3.0 * ui.spacing().interact_size.y
         + 2.0 * ui.text_style_height(&egui::TextStyle::Heading)
@@ -32,6 +29,7 @@ fn join_preflight_body<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) 
 impl Foxy {
     pub(super) fn render_join_preflight_modal(&mut self, ctx: &egui::Context) {
         let Some(mut pending) = self.pending_join_preflight.clone() else {
+            self.prelaunch_process_checks = Default::default();
             return;
         };
 
@@ -50,27 +48,20 @@ impl Foxy {
         let has_dlc_changes = pending.has_dlc_changes();
         let has_addon_actions = has_addon_list_actions || has_dlc_changes;
 
-        if pending.ts3_required || pending.steam_required {
-            let now = std::time::Instant::now();
-            let due = self
-                .prelaunch_recheck_at
-                .is_none_or(|at| now.duration_since(at) >= PRELAUNCH_RECHECK_INTERVAL);
-            if due {
-                self.prelaunch_recheck_at = Some(now);
-                if pending.ts3_required {
-                    let running = crate::core::ts3_plugin::is_teamspeak_running();
-                    pending_changed |= pending.ts3_running != running;
-                    pending.ts3_running = running;
-                }
-                if pending.steam_required {
-                    let running = crate::core::steam::is_steam_running(
-                        &self.settings_view_state.steam_directory,
-                    );
-                    pending_changed |= pending.steam_running != running;
-                    pending.steam_running = running;
-                }
+        if let Some(status) = self.prelaunch_process_checks.poll(
+            ctx,
+            pending.ts3_required,
+            pending.steam_required,
+            &self.settings_view_state.steam_directory,
+        ) {
+            if let Some(running) = status.ts3_running {
+                pending_changed |= pending.ts3_running != running;
+                pending.ts3_running = running;
             }
-            ctx.request_repaint_after(PRELAUNCH_RECHECK_INTERVAL);
+            if let Some(running) = status.steam_running {
+                pending_changed |= pending.steam_running != running;
+                pending.steam_running = running;
+            }
         }
 
         let ts3_attention = pending.ts3_required && !pending.ts3_running;
@@ -597,7 +588,7 @@ impl Foxy {
 
         if cancel {
             self.pending_join_preflight = None;
-            self.prelaunch_recheck_at = None;
+            self.prelaunch_process_checks = Default::default();
             return;
         }
 
@@ -618,7 +609,7 @@ impl Foxy {
             }
             // Recheck promptly on the next frame so the warning clears once
             // Steam finishes starting.
-            self.prelaunch_recheck_at = None;
+            self.prelaunch_process_checks = Default::default();
             self.pending_join_preflight = Some(pending);
             return;
         }
@@ -643,7 +634,7 @@ impl Foxy {
             }
             // Recheck promptly on the next frame so the warning clears once the
             // client finishes starting.
-            self.prelaunch_recheck_at = None;
+            self.prelaunch_process_checks = Default::default();
             self.pending_join_preflight = Some(pending);
             return;
         }
@@ -651,6 +642,7 @@ impl Foxy {
         if let Some(remote) = remote_download_request {
             if self.start_join_preflight_remote_download(&pending, &remote) {
                 self.pending_join_preflight = None;
+                self.prelaunch_process_checks = Default::default();
             } else {
                 self.pending_join_preflight = Some(pending);
             }
@@ -682,6 +674,7 @@ impl Foxy {
             if selected_missing_known_remote {
                 if self.start_selected_join_preflight_remote_download(&pending) {
                     self.pending_join_preflight = None;
+                    self.prelaunch_process_checks = Default::default();
                 } else {
                     self.pending_join_preflight = Some(pending);
                 }
@@ -689,6 +682,7 @@ impl Foxy {
             }
 
             self.pending_join_preflight = None;
+            self.prelaunch_process_checks = Default::default();
             let selected_repository = Self::repository_with_join_preflight_selections(&pending);
             let result = self.launch_repository_with_database_guard(
                 &selected_repository,
@@ -704,7 +698,7 @@ impl Foxy {
 
         if launch_without_suggestions {
             self.pending_join_preflight = None;
-            self.prelaunch_recheck_at = None;
+            self.prelaunch_process_checks = Default::default();
             if pending.query_server_before_join {
                 self.start_join_server_query(
                     &pending.original_repository,

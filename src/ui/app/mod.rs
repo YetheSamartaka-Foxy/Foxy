@@ -385,10 +385,7 @@ pub struct Foxy {
     pub ts3_plugin_scan_prompt_on_update: bool,
     /// A scan requested while one was already running; starts once that lands.
     pub ts3_plugin_scan_requeued: bool,
-    /// Throttle marker for re-checking TeamSpeak- and Steam-running state while
-    /// the join/launch preflight modal is open, so those warnings auto-clear
-    /// once TS3 or Steam starts.
-    pub prelaunch_recheck_at: Option<std::time::Instant>,
+    pub(crate) prelaunch_process_checks: repository::prelaunch_checks::PrelaunchProcessChecks,
     // Core sync
     pub backend_progress_rx: Option<BroadcastReceiver<ProgressEvent>>,
     pub backend_worker: Option<std::thread::JoinHandle<()>>,

@@ -625,27 +625,10 @@ fn format_string_list(items: &[String]) -> String {
 /// Check whether a TeamSpeak 3 client process is currently running.
 #[cfg(target_os = "windows")]
 pub fn is_teamspeak_running() -> bool {
-    use std::os::windows::process::CommandExt;
-    use std::process::Command;
-    match Command::new("tasklist")
-        .creation_flags(0x08000000) // CREATE_NO_WINDOW
-        .output()
-    {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).to_lowercase();
-            let matched_processes = [
-                "ts3client_win64.exe",
-                "ts3client_win32.exe",
-                "ts3client.exe",
-            ]
-            .into_iter()
-            .filter(|process_name| stdout.contains(process_name))
-            .collect::<Vec<_>>();
-            let running = !matched_processes.is_empty();
+    match crate::core::utils::process::any_process_running(TEAMSPEAK_CLIENT_EXES) {
+        Ok(running) => {
             debug!(
-                "TeamSpeak 3 running check completed: method=tasklist status_success={} matched_processes={:?} running={}",
-                output.status.success(),
-                matched_processes,
+                "TeamSpeak 3 running check completed: method=process_snapshot running={}",
                 running
             );
             running

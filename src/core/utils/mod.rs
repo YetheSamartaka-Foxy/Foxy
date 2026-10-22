@@ -11,6 +11,8 @@ pub mod http_range;
 pub(crate) mod manifest_cache;
 pub mod platform;
 pub mod power;
+#[cfg(target_os = "windows")]
+pub(crate) mod process;
 pub mod profiling;
 pub mod renderer_fallback;
 pub mod resource_profile;

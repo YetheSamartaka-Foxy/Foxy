@@ -444,7 +444,7 @@ impl Foxy {
         // never settle and would pin the `startup-sync` busy reason.
         self.startup_sync = None;
         self.startup_quick_scan_requested = 0;
-        self.prelaunch_recheck_at = None;
+        self.prelaunch_process_checks = Default::default();
 
         // Sync/download progress and results.
         self.backend_progress_rx = None;

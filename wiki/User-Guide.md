@@ -380,6 +380,8 @@ When you click **Join**, these warnings appear before Foxy checks the server and
 
 When the Steam check is enabled, **Launch** and **Join** stay disabled in the warning dialog until Steam is running. TeamSpeak 3, missing external addons, addon selections, and Creator DLC differences are advisory: you can continue after reviewing them. Missing external addons are also reported on Join when server-addon checking is disabled or the server reports no addons. An offline server, a failed server query, or an invalid game installation still stops the launch or join.
 
+The warning dialog checks for Steam and TeamSpeak in the background, keeping its buttons and keyboard controls responsive while waiting for either client to start.
+
 Long addon warning lists scroll inside the dialog, with launch and cancel buttons kept below the scrolling content. Server addon matching recognizes both folder and display names, and keeps metadata separate for each local installation of a repository.
 
 If the database needs rebuilding, a separate reminder appears after these readiness and addon/DLC warnings, before each **Launch** or **Join**. The green **Wipe database and continue** button rebuilds it and then resumes your selected action. **Continue without wiping** proceeds for this action only, and **Cancel** stops it. The reminder explains that mod checks and updates stay blocked until rebuilding succeeds; see [database rebuilding](#foxy-asks-to-wipe-and-rebuild-the-database).

@@ -89,6 +89,8 @@ younger than 30 days; replacing the database file loses it.
 
 \### Process launching
 
+On native Windows, Steam and TeamSpeak running checks share the Toolhelp process snapshot helper in `utils/process.rs`, matching executable names exactly without case. Do not spawn `tasklist` for these probes. Wine keeps its native-host Steam detection path.
+
 Windows in-app installers always receive `/MERGETASKS=!deleteuserdata`, including interactive and elevated launches, to clear a previous reset task while keeping shortcut preferences. The setup task uses `unchecked checkedonce`, and `CurPageChanged` explicitly deselects it whenever the task page opens, after Inno has restored prior choices and applied task presets. Deleting user data always requires ticking the checkbox in the current wizard. Its deletion handler refuses silent mode and requires a fresh confirmation with No as the default. An app update must never remove the Foxy data root or request a database wipe just to apply an installer fix.
 
 Windows Foxy under Wine must use the native host Steam client when available. `core::steam::wine` detects Wine from the loaded `ntdll` export, maps native Steam roots and Linux `libraryfolders.vdf` paths through Wine's path APIs, reads the host `/proc` for Steam readiness, and uses the absolute Wine `start.exe /unix` bridge for native, Flatpak, or Snap launchers. Direct native Unix spawns have no Windows process handle, so callers must not rely on their PID or wait status. Arma launches append `-applaunch 107410`, skip the Arma launcher, and translate absolute mod/profile/mission paths to the target Proton prefix's host-root `Z:` drive. Keep the Windows Steam fallback and unelevated spawning intact.

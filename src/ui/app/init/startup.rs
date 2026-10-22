@@ -419,7 +419,7 @@ impl Foxy {
             ts3_running_cache: None,
             ts3_plugin_scan_prompt_on_update: false,
             ts3_plugin_scan_requeued: false,
-            prelaunch_recheck_at: None,
+            prelaunch_process_checks: Default::default(),
             backend_progress_rx: None,
             backend_worker: None,
             startup_pending_restore_rx: None,
