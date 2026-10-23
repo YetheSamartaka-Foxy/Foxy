@@ -215,13 +215,13 @@ During any operation, the repository detail view shows a status banner with the 
 
 Checks show a verification map under the text: each cell is a slice of the data being verified, drawn as one triangle in rows of triangles pointing up and down by turns. Cells fill from left to right as hashing progresses, the cells being read blink, freshly verified cells glow briefly, and sparkles drift up from the cells being verified. While the amount of work is not known yet, a light sweeps across the map instead. A light runs around the banner's border while the work runs. After the operation, a completed banner shows the result, and its border flares with sparkles as it appears; dismiss it or use its action button (for example to review an update).
 
-Progress bars are built from the same triangles as the verification map, side by side and pointing up and down by turns, and fill with mana in a few flat tones of the bar's color: while work runs, every filled triangle blinks on its own rhythm, bubbles of light climb through the filled rows, single triangles twinkle, and the front triangles blink and glow as they fill, shedding sparkles. When the amount of work is not known yet, a beam of light sweeps along the triangles instead. Text on a bar sits on a soft dark backing so it stays readable over bright triangles.
+While work runs, progress bars are built from the same triangles as the verification map, side by side and pointing up and down by turns, and fill with mana in a few flat tones of the bar's color: every filled triangle blinks on its own rhythm, bubbles of light climb through the filled rows, single triangles twinkle, and the front triangles blink and glow as they fill, shedding sparkles. When the amount of work is not known yet, a beam of light sweeps along the triangles instead. Idle and paused bars use solid fills. Completed downloads show solid green bars and a solid green close button. Text on a bar sits on a soft dark backing so it stays readable over bright triangles.
 
 Running work also shows outside the banner:
 
 - A repository in the sidebar shows a small round cluster of triangles that fills with mana as the operation progresses, and a single row of triangles under its name.
-- In the update view, a wave of light sweeps each mod's bar and scattered triangles pop when it finishes, and the speed history marks its newest samples while the transfer runs. A paused download's mana stands still, and on a cancel the bubbles sink while changes are rolled back.
-- A repository space runs **Recheck all** and **Update all** as a row of triangle blocks, one per repository: full for finished repositories, filling for the running one, and empty for the rest.
+- In the update view, completed mods have solid green bars, and the speed history marks its newest samples while the transfer runs. A paused download's bar has a solid fill, and on a cancel the bubbles sink while changes are rolled back.
+- A repository space runs **Recheck all** and **Update all** as a row of blocks, one per repository: solid for finished repositories, triangles filling for the running one, and empty for the rest.
 
 Turn on **Reduce motion** in Application settings to stop these animations. Progress values and status text keep updating.
 

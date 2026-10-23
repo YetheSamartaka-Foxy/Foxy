@@ -1,4 +1,3 @@
-use egui::emath::lerp;
 use egui::{
     Color32, Mesh, Rect, Response, Sense, Shape, TextStyle, Ui, Widget, WidgetInfo, WidgetType,
     vec2,
@@ -10,7 +9,7 @@ use super::map::{
     scan_light,
 };
 use super::triangles::{Tones, TriangleGrid, blink};
-use super::{Motion, bump, ease_out, fade, mix, noise, particle_life};
+use super::{Motion, bump, fade, mix, noise, particle_life};
 
 /// One bubble per this many filled triangles across, up to `MAX_BUBBLES`.
 const COLUMNS_PER_BUBBLE: usize = 5;
@@ -31,17 +30,15 @@ pub(crate) enum BarMotion {
     /// Work is being undone, such as a cancel rolling changes back: the
     /// bubbles sink.
     Backward,
-    /// Waiting on the user: the mana stands still.
+    /// Waiting on the user.
     Held,
     /// Nothing is running.
     #[default]
     Still,
 }
 
-/// A bar of triangles side by side that fill with mana: the verification
-/// map's tiling in four flat tones, with light that blinks and bubbles
-/// through it while work runs. Drop-in for `egui::ProgressBar`: same default
-/// size and track color.
+/// Triangles fill with mana while work runs; resting and completed bars use
+/// solid fills. Drop-in for `egui::ProgressBar`: same default size and track color.
 #[must_use = "You should put this widget in a ui with `ui.add(widget);`"]
 pub(crate) struct ActivityBar {
     progress: Option<f32>,
@@ -50,13 +47,11 @@ pub(crate) struct ActivityBar {
     height: Option<f32>,
     rows: usize,
     motion: BarMotion,
-    flash: Option<f32>,
     text: Option<String>,
 }
 
 impl ActivityBar {
-    /// `None` progress sweeps a beam of light along the triangles: work with
-    /// no known end.
+    /// `None` progress sweeps a beam during forward or backward motion.
     pub(crate) fn new(progress: Option<f32>) -> Self {
         Self {
             progress,
@@ -65,7 +60,6 @@ impl ActivityBar {
             height: None,
             rows: ROWS,
             motion: BarMotion::Still,
-            flash: None,
             text: None,
         }
     }
@@ -97,12 +91,6 @@ impl ActivityBar {
         self
     }
 
-    /// `0.0..1.0` through a one-shot completion surge.
-    pub(crate) fn flash(mut self, flash: Option<f32>) -> Self {
-        self.flash = flash;
-        self
-    }
-
     /// Text over the bar's left end, as `egui::ProgressBar::text` draws it.
     pub(crate) fn text(mut self, text: impl Into<String>) -> Self {
         self.text = Some(text.into());
@@ -115,12 +103,28 @@ impl ActivityBar {
         }
         let visuals = ui.visuals();
         let fill = self.fill.unwrap_or(visuals.selection.bg_fill);
-        let empty = empty_color(self.track.unwrap_or(visuals.extreme_bg_color), fill);
+        let track = self.track.unwrap_or(visuals.extreme_bg_color);
         let motion = Motion::of(ui);
-        let grid = TriangleGrid::fit(rect, self.rows, ui.ctx().pixels_per_point());
-        let live = match self.progress {
-            Some(progress) => self.paint_mana(ui, &grid, rect, fill, empty, progress, motion),
-            None => paint_scan(ui, &grid, rect, fill, empty, motion),
+        let live = if matches!(self.motion, BarMotion::Still | BarMotion::Held)
+            || self.progress.is_some_and(|progress| progress >= 1.0)
+        {
+            let rounding = visuals.widgets.inactive.corner_radius;
+            ui.painter().rect_filled(rect, rounding, track);
+            if let Some(progress) = self.progress.filter(|progress| *progress > 0.0) {
+                let filled = Rect::from_min_size(
+                    rect.min,
+                    vec2(rect.width() * progress.clamp(0.0, 1.0), rect.height()),
+                );
+                ui.painter().rect_filled(filled, rounding, fill);
+            }
+            false
+        } else {
+            let empty = empty_color(track, fill);
+            let grid = TriangleGrid::fit(rect, self.rows, ui.ctx().pixels_per_point());
+            match self.progress {
+                Some(progress) => self.paint_mana(ui, &grid, rect, fill, empty, progress, motion),
+                None => paint_scan(ui, &grid, rect, fill, empty, motion),
+            }
         };
 
         if let Some(text) = &self.text {
@@ -160,13 +164,6 @@ impl ActivityBar {
         let running = flowing && progress < 1.0;
         let animating = running && motion.animates();
         let sinking = self.motion == BarMotion::Backward;
-        let glow_scale = if running {
-            1.0
-        } else if self.motion == BarMotion::Held {
-            0.5
-        } else {
-            0.0
-        };
         let tones = Tones::new(fill, empty);
         let count = grid.count();
         let rows = grid.rows;
@@ -176,7 +173,6 @@ impl ActivityBar {
         } else {
             Vec::new()
         };
-        let surge = self.flash.map(|flash| flash.clamp(0.0, 1.0));
 
         let mut mesh = Mesh::default();
         grid.reserve(&mut mesh);
@@ -187,10 +183,8 @@ impl ActivityBar {
                     _ if progress <= 0.0 && !running => CellLook::Pending,
                     CellLook::Verified { glow } => {
                         let lit = light.get(index).copied().unwrap_or(0.0);
-                        let surge = surge
-                            .map_or(0.0, |flash| surge_light(index, column, grid.columns, flash));
                         CellLook::Verified {
-                            glow: (glow * glow_scale).max(lit).max(surge),
+                            glow: glow.max(lit),
                         }
                     }
                     look => look,
@@ -205,7 +199,7 @@ impl ActivityBar {
             let front = grid.x_at(grid.columns as f32 * progress - 1.0);
             paint_frontier_dust(ui, grid, rect, front, tones.bright, motion);
         }
-        (running || surge.is_some()) && motion.animates()
+        running && motion.animates()
     }
 }
 
@@ -307,23 +301,6 @@ fn lane(index: u32, cycle: u32, seed: u32, span: usize) -> usize {
     ((pick * span as f32) as usize).min(span.saturating_sub(1))
 }
 
-/// The completion surge's light on one triangle: a wave of light sweeps the
-/// bar, the whole bar flares and fades, and scattered triangles pop.
-fn surge_light(index: usize, column: usize, columns: usize, flash: f32) -> f32 {
-    let eased = ease_out(flash);
-    let band = (columns as f32 * 0.18).clamp(3.0, 60.0);
-    let center = lerp(-band..=(columns as f32 + band), eased);
-    let distance = (column as f32 - center) / band;
-    let wave = (-distance * distance).exp();
-    let pop = if noise(index as u32, 41) < 0.12 {
-        let delay = noise(index as u32, 42) * 0.45;
-        bump(((flash - delay) / 0.55).clamp(0.0, 1.0))
-    } else {
-        0.0
-    };
-    (0.7 * wave + 0.35 * (1.0 - eased) + pop).min(1.0)
-}
-
 /// Empty triangles: the track tinted toward the fill, or a faint fill over a
 /// clear track.
 fn empty_color(track: Color32, fill: Color32) -> Color32 {
@@ -390,14 +367,6 @@ mod tests {
     }
 
     #[test]
-    fn the_surge_sweeps_left_to_right_and_settles() {
-        let brightness = |column, flash| surge_light(1, column, 100, flash);
-        assert!(brightness(5, 0.1) > brightness(95, 0.1));
-        assert!(brightness(95, 0.8) > brightness(5, 0.8));
-        assert!(surge_light(1, 50, 100, 1.0) < 0.25);
-    }
-
-    #[test]
     fn empty_triangles_show_over_a_clear_track() {
         let fill = Color32::from_rgb(200, 100, 20);
         assert!(empty_color(Color32::TRANSPARENT, fill).a() > 0);
@@ -424,7 +393,7 @@ mod tests {
         };
         assert_eq!(repaint_delay(0.1, thin), PROGRESS_FRAME_INTERVAL);
         assert_eq!(
-            repaint_delay(0.1, || ActivityBar::new(None)),
+            repaint_delay(0.1, || ActivityBar::new(None).motion(BarMotion::Forward)),
             PROGRESS_FRAME_INTERVAL
         );
     }
@@ -437,8 +406,14 @@ mod tests {
         assert!(repaint_delay(0.1, held) > Duration::from_secs(60));
         let full = || ActivityBar::new(Some(1.0)).motion(BarMotion::Forward);
         assert!(repaint_delay(0.1, full) > Duration::from_secs(60));
+        assert!(repaint_delay(0.1, || ActivityBar::new(None)) > Duration::from_secs(60));
+        let held_unknown = || ActivityBar::new(None).motion(BarMotion::Held);
+        assert!(repaint_delay(0.1, held_unknown) > Duration::from_secs(60));
         let forward = || ActivityBar::new(Some(0.4)).motion(BarMotion::Forward);
         assert!(repaint_delay(0.0, forward) > Duration::from_secs(60));
-        assert!(repaint_delay(0.0, || ActivityBar::new(None)) > Duration::from_secs(60));
+        assert!(
+            repaint_delay(0.0, || ActivityBar::new(None).motion(BarMotion::Forward))
+                > Duration::from_secs(60)
+        );
     }
 }

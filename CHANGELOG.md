@@ -2,6 +2,9 @@
 ## Added
 - Right-click an addon to open its Steam Workshop or Arma Reforger Workshop page in your browser, including optional and external addons.
 
+## Changed
+- Progress bars show triangles only while work is running. Idle and paused bars use solid fills, and completed downloads turn solid green.
+
 ## Fixed
 - Fixed updates missing published addon files and deleting manually copied files because outdated addon metadata was reused.
 - Steam and TeamSpeak launch warnings no longer freeze the interface or delay button hover and clicks while checking whether the clients are running.

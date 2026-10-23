@@ -9,8 +9,8 @@ const MIN_SEGMENT_WIDTH: f32 = 12.0;
 const SEGMENT_GAP: f32 = 4.0;
 const HEIGHT: f32 = 16.0;
 
-/// A row of triangle blocks, one per item of a bulk run: finished items full of
-/// mana, the running one filling, the rest empty.
+/// One block per item of a bulk run: finished items solid, the running one
+/// filling with triangles, the rest empty.
 #[must_use = "You should put this widget in a ui with `ui.add(widget);`"]
 pub(crate) struct StepTrack {
     done: usize,

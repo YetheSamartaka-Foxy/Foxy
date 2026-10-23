@@ -1,9 +1,6 @@
 use super::*;
-use crate::ui::app::{paint_area_under, paint_bar_label, paint_live_marker, rise_effect};
+use crate::ui::app::{paint_area_under, paint_bar_label, paint_live_marker};
 use crate::ui::views::galley_cache;
-
-const MOD_DONE_FLASH_SECONDS: f64 = 0.9;
-const UPDATE_FINISHED_FLASH_SECONDS: f64 = 1.2;
 
 impl Foxy {
     pub fn render_repository_update_view(&mut self, ui: &mut Ui) {
@@ -23,10 +20,10 @@ impl Foxy {
         let download_finished_for_selected =
             self.download_finished && selected.is_some() && self.download_finished_repo == selected;
 
-        let progress_pct: f32 = if let Some((_, percent)) = &self.download_progress {
-            ((*percent).clamp(0.0, 1.0) * 1000.0).round() / 1000.0
-        } else if download_finished_for_selected {
+        let progress_pct: f32 = if download_finished_for_selected {
             1.0
+        } else if let Some((_, percent)) = &self.download_progress {
+            ((*percent).clamp(0.0, 1.0) * 1000.0).round() / 1000.0
         } else {
             0.0
         };
@@ -529,17 +526,10 @@ impl Foxy {
                                                         self.download_paused,
                                                         in_cancel_stage,
                                                     );
-                                                    let flash = rise_effect(
-                                                        ui,
-                                                        Id::new(("update-mod-done", &m.name)),
-                                                        mod_done,
-                                                        MOD_DONE_FLASH_SECONDS,
-                                                    );
                                                     let response = ui.add(
                                                         ActivityBar::new(Some(pct))
                                                             .fill(fill)
-                                                            .motion(motion)
-                                                            .flash(flash),
+                                                            .motion(motion),
                                                     );
                                                     paint_update_progress_bar_text_left(
                                                         ui,
@@ -780,12 +770,6 @@ impl Foxy {
                     .fill(fill_color)
                     .track(bg_color)
                     .motion(footer_motion)
-                    .flash(rise_effect(
-                        ui,
-                        Id::new("repository-update-finished"),
-                        download_finished_for_selected,
-                        UPDATE_FINISHED_FLASH_SECONDS,
-                    ))
                     .paint_at(ui, rect);
 
                 ui.painter().rect_stroke(

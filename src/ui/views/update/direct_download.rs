@@ -10,11 +10,14 @@ impl Foxy {
 
         let running = session.is_running();
         let finished_successfully = session.finished_successfully();
-        let progress_pct: f32 = self
-            .download_progress
-            .as_ref()
-            .map(|(_, percent)| (*percent).clamp(0.0, 1.0))
-            .unwrap_or(if running { 0.0 } else { 1.0 });
+        let progress_pct: f32 = if finished_successfully {
+            1.0
+        } else {
+            self.download_progress
+                .as_ref()
+                .map(|(_, percent)| (*percent).clamp(0.0, 1.0))
+                .unwrap_or(if running { 0.0 } else { 1.0 })
+        };
 
         let total_bytes = session.total_bytes;
         let downloaded_bytes = session.downloaded_bytes;
@@ -97,7 +100,11 @@ impl Foxy {
                 let motion = update_bar_motion(running, self.download_paused, false);
                 ui.add(
                     ActivityBar::new(transfer_progress(progress_pct, motion))
-                        .fill(self.color_primary_accent())
+                        .fill(if finished_successfully {
+                            self.color_success()
+                        } else {
+                            self.color_primary_accent()
+                        })
                         .motion(motion)
                         .text(format!("{:.1}%", progress_pct * 100.0)),
                 );
