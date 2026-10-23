@@ -13,7 +13,8 @@ pub mod twwh3;
 pub mod workshop;
 
 pub use launch::{
-    GameLaunchCtx, LaunchCommand, LaunchError, LaunchPlan, ResolvedMod, ServerTarget,
+    GameBuildTarget, GameLaunchCtx, LaunchCommand, LaunchError, LaunchPlan, ResolvedMod,
+    ServerTarget,
 };
 pub use profile::Profile;
 pub use registry::registry;

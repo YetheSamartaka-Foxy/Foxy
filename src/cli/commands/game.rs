@@ -251,6 +251,7 @@ fn cmd_generic_game_launch(
                 launch_args: Vec::new(),
                 mods: Vec::new(),
                 server: None,
+                game_build: None,
             },
             issues: Vec::new(),
         },

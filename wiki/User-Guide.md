@@ -80,7 +80,21 @@ A **game space** is a separate workspace for one game, with its own repositories
 | **Arma 3** | Repositories, profiles, server join, Creator DLCs, Steam Workshop, TeamSpeak 3 plugins, editor missions. |
 | **Total War: WARHAMMER III** | Repositories of `.pack` mods, Steam Workshop management, and launch through the `used_mods.txt` mods manifest, including continuing a campaign save from the command line. |
 | **Arma Reforger** | Repositories, launch with `-addons`/`-addonsDir` built from the enabled addons, server join with `-client`, and Workshop addons managed by GUID from the command line. |
-| **Generic game** | Any other Steam game: you set the executable, launch arguments, mods manifest file, and optional Steam App ID yourself. |
+| **Generic game** | Any other game: you set the executable, launch arguments, mods manifest file, and optional Steam App ID yourself. Repositories can deliver mods or the game itself (see [Custom game repositories](#custom-game-repositories)). |
+
+### Custom game repositories
+
+A Generic game space can use repositories like any other game. A repository can deliver the game itself, published with `foxy-server-backend-cli` as a custom game repository (see the Server Admin Guide), and it can also carry mods for it. When the publisher releases a new build, Foxy downloads only the parts of each file that changed and reuses the rest of the file you already have, so a small fix to a large game executable does not mean downloading the whole file again.
+
+1. Create a game space for **Generic game**.
+2. Add the repository with **Add Repository** and choose the folder to download into, then update it.
+3. Click **Launch** in the repository view. Foxy starts the game from the downloaded folder with the repository's launch parameters. It needs no Game Directory, Executable, or Steam setup, and Steam does not have to be running.
+
+The repository view shows the game in a **Game** section with the file it starts and an **Open game folder** button. The game is never listed as an addon and cannot be disabled, so it always stays up to date. Addon tabs appear in the repository settings only when the repository also has mods, or when you have added external addons; enabled ones are available to the Generic game's launch template as `{mods}`.
+
+Close the game before updating it: Windows does not let Foxy replace a running executable.
+
+From the command line, the same steps are `foxy game create "My game" --game generic` and `foxy game use <id>`, then `foxy repo add --address <url> --path <folder>`, `foxy sync --repo-name "Name" --mode download`, and `foxy launch --repo-name "Name" --execute`.
 
 ### The game space panel
 
@@ -358,7 +372,7 @@ When you join an Arma 3 server, Foxy reads what the server reports and can:
 - **Arma 3** - Foxy builds the `-mod=` line from the enabled addons and Creator DLCs and adds your launch parameters.
 - **Total War: WARHAMMER III** - Foxy writes the enabled mods to `used_mods.txt` in the game directory before launch.
 - **Arma Reforger** - Foxy builds the `-addons` and `-addonsDir` parameters from the enabled addons, and passes a selected server as `-client <address>:<port>`. Packed addon folders containing a `.gproj` and root-level `.pak` files appear in the addon list without needing an `addons` subfolder. The Arma 3 editor mission list is hidden in this game space.
-- **Generic game** - Foxy uses the executable, argument template, and mods manifest you set in Game space settings.
+- **Generic game** - Foxy uses the executable, argument template, and mods manifest you set in Game space settings. Launching from a repository adds the repository's launch parameters and offers its enabled addon folders as `{mods}`. A repository that delivers the game itself starts its downloaded executable directly instead (see [Custom game repositories](#custom-game-repositories)).
 
 Enabled [extra files](#extra-files-and-config-packs) are copied into the game directory before each launch.
 
@@ -753,7 +767,7 @@ Foxy includes a full command-line interface in the same binary (`Foxy.exe` on Wi
 | `foxy space list` | List repository spaces |
 | `foxy space sync --space-id <id> --recheck-all` | Recheck every repository in a repository space |
 | `foxy game list` / `use <id>` / `create <name> --game <game>` / `remove <id>` | Manage game spaces |
-| `foxy game launch --execute` | Launch a game space that has no repositories (Total War: WARHAMMER III, Generic game) |
+| `foxy game launch --execute` | Launch Total War: WARHAMMER III or a Generic game with its Steam Workshop mods, without a repository |
 | `foxy game reforger ...` | Manage Arma Reforger Workshop addons by GUID |
 | `foxy workshop ...` | Add, import, enable, order, freeze, share, and remove Steam Workshop items |
 | `foxy config export <file>` / `import <file>` | Export or import a `.foxypack` config pack |

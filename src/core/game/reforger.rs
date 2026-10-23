@@ -739,6 +739,7 @@ pub fn build_workshop_launch_plan(
             launch_args: Vec::new(),
             mods,
             server: None,
+            game_build: None,
         },
         addons,
         issues,
@@ -782,6 +783,7 @@ pub fn build_repository_launch_plan(
         launch_args,
         mods: resolve_repository_mods(repo),
         server,
+        game_build: None,
     })
 }
 
@@ -831,7 +833,7 @@ fn resolve_repository_mods(repo: &Repository) -> Vec<ResolvedMod> {
     mods
 }
 
-fn resolve_external_addon_dir(addon: &str, path: &str) -> Option<PathBuf> {
+pub(super) fn resolve_external_addon_dir(addon: &str, path: &str) -> Option<PathBuf> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
         return None;
@@ -1403,6 +1405,7 @@ mod tests {
                 port: "2001".to_string(),
                 password: String::new(),
             }),
+            game_build: None,
         };
         let install_dir = install.path().display().to_string();
         let ctx = GameLaunchCtx {

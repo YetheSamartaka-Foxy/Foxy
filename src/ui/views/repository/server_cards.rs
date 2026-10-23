@@ -311,6 +311,8 @@ impl Foxy {
         let repo = &self.repository_view_state.repositories[selected_idx];
         let effective = Self::build_effective_repository_snapshot(repo);
         let servers = repo.servers.clone();
+        // A downloaded game with no servers has nothing to join.
+        let launch_only = repo.game_build.is_some() && servers.is_empty();
         let join_preflight_active = self.pending_join_preflight.is_some()
             || self.pending_join_preflight_query.is_some()
             || self.pending_join_status_query.is_some();
@@ -326,8 +328,11 @@ impl Foxy {
                         .font_sizes
                         .repository_view
                         .launch_join_buttons as f32;
-                    let button_width =
-                        ((ui.available_width() - ui.spacing().item_spacing.x) * 0.5).max(0.0);
+                    let button_width = if launch_only {
+                        ui.available_width()
+                    } else {
+                        ((ui.available_width() - ui.spacing().item_spacing.x) * 0.5).max(0.0)
+                    };
                     let bs = Vec2::new(
                         button_width,
                         Self::adaptive_button_height(launch_join_font_size, 50.0),
@@ -361,6 +366,9 @@ impl Foxy {
                         } else {
                             ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                         }
+                    }
+                    if launch_only {
+                        return;
                     }
 
                     // Right button: context-sensitive

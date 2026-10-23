@@ -67,6 +67,29 @@ pub(super) fn normalize_local_path_for_compare(path: &str) -> String {
     normalized
 }
 
+/// A repository that delivers a game build shows addon tabs only for addons
+/// it actually has, so a game-only repository shows no addon tabs at all.
+pub(super) fn visible_repository_settings_tabs(repo: &Repository) -> Vec<RepositorySettingsTab> {
+    RepositorySettingsTab::all_tabs()
+        .into_iter()
+        .filter(|tab| {
+            repo.game_build.is_none()
+                || match tab {
+                    RepositorySettingsTab::Configuration => true,
+                    RepositorySettingsTab::Addons => !repo.addons.is_empty(),
+                    RepositorySettingsTab::OptionalAddons => !repo.optional_addons.is_empty(),
+                    RepositorySettingsTab::ExternalAddons => {
+                        !repo.external_addons.is_empty()
+                            || repo
+                                .profiles
+                                .iter()
+                                .any(|profile| !profile.external_addons.is_empty())
+                    }
+                }
+        })
+        .collect()
+}
+
 pub(super) fn should_wipe_cache_after_local_path_change(
     original_path: &str,
     current_path: &str,
@@ -151,6 +174,11 @@ impl Foxy {
         if repo_index >= self.repository_view_state.repositories.len() {
             self.restore_last_view_or_default();
             return;
+        }
+        let visible_tabs =
+            visible_repository_settings_tabs(&self.repository_view_state.repositories[repo_index]);
+        if !visible_tabs.contains(&self.current_repository_settings_tab) {
+            self.current_repository_settings_tab = RepositorySettingsTab::Configuration;
         }
         let current_repository_settings_tab = self.current_repository_settings_tab;
         let outer_margin = Margin {
@@ -254,7 +282,10 @@ impl Foxy {
                 let external_count = external_cache.rows.len();
                 let enabled_launch_size =
                     enabled_repository_size.saturating_add(external_cache.enabled_size_bytes);
-                let total_size_text = if enabled_launch_size != total_size {
+                // A game-only repository has no addon to enable, so a launch
+                // size and addon counts would only describe an empty list.
+                let shows_addons = visible_tabs.len() > 1;
+                let total_size_text = if shows_addons && enabled_launch_size != total_size {
                     format!(
                         "{} / {}",
                         tr_fmt("Total size: {size}", &[("size", fmt_bytes(total_size))]),
@@ -283,9 +314,13 @@ impl Foxy {
                 let external_addons_help = tr("external_addons_quick_info_help");
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
-                    ui.label(RichText::new(summary_prefix_text).color(color_text_dim));
-                    ui.label(RichText::new(external_addons_text).color(color_text_dim))
-                        .on_hover_text(external_addons_help);
+                    if shows_addons {
+                        ui.label(RichText::new(summary_prefix_text).color(color_text_dim));
+                        ui.label(RichText::new(external_addons_text).color(color_text_dim))
+                            .on_hover_text(external_addons_help);
+                    } else {
+                        ui.label(RichText::new(total_size_text).color(color_text_dim));
+                    }
                     ui.add_space(12.0);
                     let export_structure = ui.button(tr("Export Repository Structure"));
                     if export_structure.hovered() {
@@ -529,7 +564,7 @@ impl Foxy {
                         }
                     }
 
-                    let tabs = RepositorySettingsTab::all_tabs();
+                    let tabs = &visible_tabs;
                     let labels: Vec<&str> = tabs.iter().map(|t| t.as_str()).collect();
                     let selected = tabs
                         .iter()
@@ -1157,6 +1192,33 @@ impl Foxy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn game_build_repositories_show_only_addon_tabs_with_content() {
+        let mut repo = Repository::default();
+        assert_eq!(
+            visible_repository_settings_tabs(&repo),
+            RepositorySettingsTab::all_tabs().to_vec()
+        );
+
+        repo.game_build = Some(crate::ui::types::RepositoryGameBuild {
+            addon: "MyGame".to_string(),
+            executable: "MyGame.exe".to_string(),
+        });
+        assert_eq!(
+            visible_repository_settings_tabs(&repo),
+            vec![RepositorySettingsTab::Configuration]
+        );
+
+        repo.optional_addons.push(("@mod_01".to_string(), false));
+        assert_eq!(
+            visible_repository_settings_tabs(&repo),
+            vec![
+                RepositorySettingsTab::Configuration,
+                RepositorySettingsTab::OptionalAddons
+            ]
+        );
+    }
 
     #[test]
     fn normalize_local_path_for_compare_strips_trailing_separators() {

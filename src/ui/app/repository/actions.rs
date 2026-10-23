@@ -16,8 +16,8 @@ use crate::ui::app::{
 use crate::ui::i18n::tr;
 use crate::ui::types::{
     Repository, RepositoryServer, RepositorySpace, RepositorySpaceEntry,
-    apply_repo_client_parameters, apply_repo_dlc_content_from_repo_json, merge_remote_addon_list,
-    repo_json_dlc_content_value, sanitize_user_path,
+    apply_repo_client_parameters, apply_repo_dlc_content_from_repo_json, apply_repo_game_build,
+    merge_remote_addon_list, repo_json_dlc_content_value, repo_json_game_build, sanitize_user_path,
 };
 
 /// Shared HTTP client for repository-metadata fetches. A bounded timeout keeps
@@ -1159,6 +1159,10 @@ impl Foxy {
                     dlc_content,
                 );
             }
+            apply_repo_game_build(
+                &mut self.repository_view_state.repositories[repo_index],
+                repo_json_game_build(&json),
+            );
 
             let updated_repo = self.repository_view_state.repositories[repo_index].clone();
             if !updated_repo.icon_image_checksum.is_empty() {

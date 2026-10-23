@@ -327,6 +327,7 @@ impl Foxy {
                 &[
                     "The panel at the top of the sidebar shows the open game space. Click Switch to open the Game spaces list, the gear icon to open Game space settings, or the game logo to open the game space overview.",
                     "In the Game spaces list, use Create game space, choose the game, and enter a name. You can create several game spaces for the same game to keep separate setups apart.",
+                    "A Generic game space can add repositories that deliver mods or the game itself. A downloaded game appears in the Game section of the repository view instead of the addon list, and Launch starts it directly. Updates download only the changed parts of the game files.",
                     "Use Open game space to switch right away without restarting Foxy. Pending changes are saved first. Foxy does not switch while downloads or scans are running, so let them finish first.",
                     "Remove game space deletes only the Foxy workspace: its repository list, game settings, and local database. Game installs and downloaded mods stay on disk.",
                     "Game space settings show a tab for the game itself plus Profiles, Steam Workshop, Additional search folders, and TS3 Plugin. Tabs only appear when the game supports them.",

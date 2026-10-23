@@ -110,6 +110,45 @@ impl Foxy {
         self.launch_repository_with_steam_guard(effective, server, repo_name, launch_label)
     }
 
+    /// A game build the repository downloaded starts its own executable, never
+    /// a Steam install.
+    fn repository_launch_uses_steam(&self, effective: &Repository) -> bool {
+        effective.game_build.is_none()
+            && crate::core::game::registry()
+                .active()
+                .steam_app_id_from_settings(&self.settings_view_state)
+                .is_some()
+    }
+
+    fn show_game_build_launch_error(&mut self, effective: &Repository, repo_name: &str) {
+        let Some(build) = effective.game_build.as_ref() else {
+            return;
+        };
+        let repo_path = Path::new(effective.path.trim());
+        let dir = crate::core::utils::fs_safety::resolve_child_dir_case_insensitive(
+            repo_path,
+            &build.addon,
+        );
+        let message = match dir {
+            None => self.t_fmt(
+                "{game} has not been downloaded yet. Update the repository first.",
+                &[("game", repo_name.to_string())],
+            ),
+            Some(dir) if !dir.join(&build.executable).is_file() => self.t_fmt(
+                "{file} was not found in the downloaded {game} files. Recheck the repository.",
+                &[
+                    ("file", build.executable.clone()),
+                    ("game", repo_name.to_string()),
+                ],
+            ),
+            Some(_) => self.t_fmt(
+                "{game} could not be launched. Check the executable and launch settings in Game space settings.",
+                &[("game", repo_name.to_string())],
+            ),
+        };
+        self.show_error_toast(message);
+    }
+
     pub(crate) fn launch_repository_with_steam_guard(
         &mut self,
         effective: &Repository,
@@ -124,6 +163,10 @@ impl Foxy {
                     "Launching from a repository is not supported for {game}.",
                     &[("game", module.display_name().to_string())],
                 ));
+                return LaunchDispatchResult::Failed;
+            }
+            if effective.game_build.is_some() {
+                self.show_game_build_launch_error(effective, repo_name);
                 return LaunchDispatchResult::Failed;
             }
             let game = module.display_name().to_string();
@@ -157,6 +200,11 @@ impl Foxy {
                         "{game} executable not found at the configured path.",
                         &[("game", game)],
                     ));
+                } else {
+                    self.show_error_toast(self.t_fmt(
+                        "{game} could not be launched. Check the executable and launch settings in Game space settings.",
+                        &[("game", game)],
+                    ));
                 }
             }
             return LaunchDispatchResult::Failed;
@@ -165,14 +213,15 @@ impl Foxy {
         let executable = command.get_program().to_os_string();
         let args: Vec<OsString> = command.get_args().map(|arg| arg.to_os_string()).collect();
         let cwd: Option<PathBuf> = command.get_current_dir().map(Path::to_path_buf);
-        let game_name = crate::core::game::registry()
-            .active()
-            .display_name()
-            .to_string();
-        let steam_required = crate::core::game::registry()
-            .active()
-            .steam_app_id_from_settings(&self.settings_view_state)
-            .is_some();
+        let game_name = if effective.game_build.is_some() {
+            repo_name.to_string()
+        } else {
+            crate::core::game::registry()
+                .active()
+                .display_name()
+                .to_string()
+        };
+        let steam_required = self.repository_launch_uses_steam(effective);
         self.activate_extra_files_before_launch();
 
         if !steam_required || steam::is_steam_running(&self.settings_view_state.steam_directory) {
@@ -196,7 +245,9 @@ impl Foxy {
                         "Failed to launch {} for repository {}: {}",
                         game_name, repo_name, err
                     );
-                    self.show_error_toast(self.t("Failed to launch Arma 3."));
+                    self.show_error_toast(
+                        self.t_fmt("Failed to launch {game}.", &[("game", game_name.clone())]),
+                    );
                     LaunchDispatchResult::Failed
                 }
             };
@@ -789,10 +840,7 @@ impl Foxy {
     /// since Steam must be running for Arma 3 to launch. Synchronous - acceptable
     /// for a user-initiated launch/join action.
     fn evaluate_steam_launch_gate(&self, effective: &Repository, repo_name: &str) -> (bool, bool) {
-        if crate::core::game::registry()
-            .active()
-            .steam_app_id_from_settings(&self.settings_view_state)
-            .is_none()
+        if !self.repository_launch_uses_steam(effective)
             || !self.repo_check_steam_running_before_launch(effective)
         {
             return (false, false);

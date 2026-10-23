@@ -14,6 +14,17 @@ pub struct RepositoryServer {
     pub battle_eye: bool,
 }
 
+/// The published folder that holds a custom game's build, named by the
+/// repository's `repo.json` `gameBuild`. It is synced like any addon but is
+/// never listed, toggled, or passed to the game as a mod.
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Default)]
+pub struct RepositoryGameBuild {
+    /// Published folder name, as in the repository's addon manifests.
+    pub addon: String,
+    /// Executable path relative to that folder, with `/` separators.
+    pub executable: String,
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct RepositoryProfile {
     pub name: String,
@@ -155,6 +166,8 @@ pub struct Repository {
     pub external_addon_client_side: Vec<String>,
     #[serde(default)]
     pub servers: Vec<RepositoryServer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game_build: Option<RepositoryGameBuild>,
 
     /// The Arma 3 player profile name to use for this repository.
     /// None = use the auto-detected active profile (or default).
@@ -234,6 +247,7 @@ impl Default for Repository {
             external_addon_favorites: Vec::new(),
             external_addon_client_side: Vec::new(),
             servers: Vec::new(),
+            game_build: None,
             arma3_profile: None,
 
             icon_image_path: String::new(),

@@ -17,7 +17,16 @@ file is the working contract.
   `reforger`, `generic`). `generic` is the user-configured module: the player
   supplies the executable, optional Steam app id, argument template, and mods
   manifest name through its game settings, so one module covers any Steam
-  Workshop game Foxy has no dedicated module for.
+  Workshop game Foxy has no dedicated module for. It also syncs repositories.
+  A custom game repository names its build in `repo.json` `gameBuild`
+  (`{ modName, executable }`, `foxy-server-backend-cli new --game generic`);
+  the client stores it on `Repository::game_build`, strips that folder from
+  every addon list and profile (`apply_repo_game_build`, also on load), and
+  never renders it as an addon. Because sync skips disabled addons, keeping it
+  out of the lists is also what guarantees it is always downloaded. Its launch
+  plan carries a `GameBuildTarget`: the downloaded executable starts directly,
+  never through Steam, ignoring the Game Directory and Executable settings.
+  Other enabled addon folders are offered only as `{mods}`.
 - **Game module**: the Rust implementation of one game's behavior (detection,
   launch, settings schema, capabilities). Implements `GameModule`, registered in
   the static `GameRegistry`.

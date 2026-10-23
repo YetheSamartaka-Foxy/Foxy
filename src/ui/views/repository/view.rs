@@ -270,7 +270,12 @@ impl Foxy {
                                     }
 
                                     // Arma 3 profile dropdown
-                                    if !self.detected_arma3_profiles.is_empty() {
+                                    if !self.detected_arma3_profiles.is_empty()
+                                        && crate::core::game::registry()
+                                            .active()
+                                            .capabilities()
+                                            .profiles
+                                    {
                                         let a3_selected_text = format!(
                                             "{}: {}",
                                             tr("Arma 3 Profile"),
@@ -705,10 +710,14 @@ impl Foxy {
                         ui.add_space(10.0);
                     }
 
+                    self.render_repository_game_build_section(ui, selected_idx);
+
                     let (enable_server_list, enable_editor_mission_list) = {
                         let repo = &self.repository_view_state.repositories[selected_idx];
+                        // A downloaded game without servers would only show an empty list.
+                        let has_servers = repo.game_build.is_none() || !repo.servers.is_empty();
                         (
-                            self.repo_enable_server_list(repo),
+                            self.repo_enable_server_list(repo) && has_servers,
                             self.repo_enable_editor_mission_list(repo),
                         )
                     };

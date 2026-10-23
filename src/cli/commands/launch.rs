@@ -97,11 +97,16 @@ pub fn cmd_launch(cli: &CliArgs, args: LaunchArgs) -> Result<CommandSuccess, Com
         )
     })?;
 
-    let steam_status = match ensure_steam_running(&state.settings.steam_directory) {
-        Ok(SteamEnsureResult::AlreadyRunning) => "already_running",
-        Ok(SteamEnsureResult::Started) => "started",
-        Ok(SteamEnsureResult::SkippedMissingDirectory) => "not_configured_fallback",
-        Err(err) => {
+    let steam_status = match effective
+        .game_build
+        .is_none()
+        .then(|| ensure_steam_running(&state.settings.steam_directory))
+    {
+        None => "not_needed",
+        Some(Ok(SteamEnsureResult::AlreadyRunning)) => "already_running",
+        Some(Ok(SteamEnsureResult::Started)) => "started",
+        Some(Ok(SteamEnsureResult::SkippedMissingDirectory)) => "not_configured_fallback",
+        Some(Err(err)) => {
             return Err(CommandError::operation(
                 "launch",
                 format!("Failed to prepare Steam before launch: {}", err),
@@ -109,7 +114,8 @@ pub fn cmd_launch(cli: &CliArgs, args: LaunchArgs) -> Result<CommandSuccess, Com
         }
     };
 
-    if module.steam_app_id_from_settings(&state.settings).is_some()
+    if effective.game_build.is_none()
+        && module.steam_app_id_from_settings(&state.settings).is_some()
         && !crate::core::steam::is_steam_running(&state.settings.steam_directory)
     {
         return Err(CommandError::operation("launch", "Steam is not running"));

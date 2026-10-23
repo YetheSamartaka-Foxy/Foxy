@@ -20,7 +20,7 @@ It ships as a single binary with both a full desktop UI and a scriptable CLI, ru
 - **Arma 3 integrations** - Detect Steam and the Arma 3 installation automatically, manage Arma 3 profiles (detect, rename, clone, delete), recognize Steam Workshop addons, validate TeamSpeak 3 and Steam before launch, and support server quick-join flows with repo-provided launch parameters, DLC metadata, and an offer to match the Creator DLCs the server runs.
 - **Daily workflow tools** - Repository filtering, addon file search, editor mission scanning, mission open/duplicate/delete actions, dependency cleanup, scheduled rechecks, automatic downloads, and optional post-job close or shutdown actions are available from the app.
 - **Clear update visibility** - Download screens show per-addon progress, update summaries, toast notifications, transfer history graphs, adaptive speed limits, and grouped download/disk/hash performance metrics. Work in progress stays visible and alive: checks draw a sparkling map of triangles for the data being hashed, progress bars fill the same blinking triangles with flowing, bubbling mana, and the sidebar shows a round cluster of triangles per repository. **Reduce motion** turns the animations off.
-- **Game spaces** - Each supported game gets its own workspace with separate settings, repositories, stores, benchmarks, and database, switchable at runtime and remembered across launches. Arma 3 is the reference module; Total War: WARHAMMER III (`.pack` repositories and the `used_mods.txt` manifest) and Arma Reforger (`-addons`/`-addonsDir` launch and server join) ship alongside it, and a Generic game module covers other Steam games with a user-supplied executable, arguments, and mods manifest.
+- **Game spaces** - Each supported game gets its own workspace with separate settings, repositories, stores, benchmarks, and database, switchable at runtime and remembered across launches. Arma 3 is the reference module; Total War: WARHAMMER III (`.pack` repositories and the `used_mods.txt` manifest) and Arma Reforger (`-addons`/`-addonsDir` launch and server join) ship alongside it, and a Generic game module covers other games with a user-supplied executable, arguments, and mods manifest, and can download and delta-update the game build itself from a repository.
 - **Steam Workshop management** - Import Workshop items by id, URL, collection, or share code, set the load order, freeze mods against Steam updates, compare setups with a state checksum, and exchange `.foxyshare` bundles, from the game space settings or the CLI.
 - **Addon Workshop pages** - Right-click required, optional, or external addons to open their Steam Workshop or Arma Reforger Workshop page in your browser.
 - **Benchmarks** - Save a recheck, update, or redownload as a benchmark with stage timings, transfer and disk charts, CPU and memory use, power source, and speed-of-light ratios, then compare two runs side by side or export one as a ZIP for support.
@@ -314,6 +314,16 @@ prints an Arma Reforger server line instead: `-addonsDir <prefix or .> -addons
 <id,...>`, where each id is the mod's `.gproj` GUID (project ID, `ServerData.json`
 id, then folder name as fallbacks). `dlcContent` and `clientSide` are warned about
 and ignored for Reforger; the generated `repo.json` carries `"game": "reforger"`.
+
+A config with `"game": "generic"` (`new --game generic` writes one) publishes a
+custom game for Generic game spaces. `gameBuild` (`{ "folder", "executable" }`)
+names the folder holding the game build, such as a game folder or a single
+executable; clients show it as the game instead of an addon and launch its
+executable directly. It prints no server line. Its template sets `"chunking": "content"`, which
+splits files that are not PBO or PAK archives at content-defined boundaries (256 KB
+to 4 MB parts) instead of every 5 MB, so a rebuilt executable or data archive keeps
+most of its part checksums and clients download only the changed parts. Any config
+may set `chunking`; the default `fixed` output is unchanged.
 
 For local Reforger addons, keep each addon's `addon.gproj`, `.pak` files and
 resource database together; an Arma 3-style `addons/` subfolder is not required.

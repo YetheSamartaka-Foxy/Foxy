@@ -60,6 +60,15 @@ FoxyMode may use BLAKE3 for part content checksums, but the tree relationship
 is still ordered and deterministic. The expected algorithm is chosen from the
 remote checksum length where needed.
 
+Part boundaries of files that are not PBO or PAC1 archives belong to the
+server. They are 5 MB fixed spans by default, or content-defined spans
+(`"chunking": "content"` in the server config, `foxy_formats::ContentChunker`)
+whose boundaries move with inserted or removed bytes. The client never
+re-derives these spans: it hashes local bytes at the published
+`remote_start`/`remote_length`, and delta planning matches moved content
+through the checksum-and-length copy pool. Never add client logic that assumes
+plain-file parts are 5 MB or that names them by size.
+
 ### Local Tree Checksum
 
 The verified local equivalent of the remote tree checksum. It lives in
@@ -1444,9 +1453,14 @@ that guards it.
    state across that re-key (Part stage step 2), including the state a clean
    file only has implicitly (`files.local_checksum == files.remote_checksum`).
    Losing it does not fail loudly: the next update silently becomes a full
-   download of every changed file. Guarded by
+   download of every changed file. Carry matches by storage path, then by
+   display path, then by checksum and length for anything left: plain-file
+   parts are named after their end offset, so content that moved inside a
+   file keeps only its checksum. Guarded by
    `manifest_update_of_a_clean_file_keeps_a_delta_plan_possible` and the
-   `carried_state_*` tests in `remote_file_parts/batch.rs`.
+   `carried_state_*` tests in `remote_file_parts/batch.rs`
+   (`carried_state_follows_content_when_plain_file_parts_shift` for moved
+   content).
 2. **Damaged part state must recover once, and only once.** A tree hash gives
    every part that fits inside the local file a local checksum (read at the
    entry's local span, else at the remote one); only parts past the end of

@@ -279,6 +279,7 @@ fn cmd_create(
         let mut plan = planner::create(
             &mods,
             output_dir,
+            config.game,
             options.mode,
             options.prune_unused_optionals,
             options.incremental,
@@ -368,13 +369,25 @@ fn run_create(
         )?;
     }
 
+    let game_build = config.game_build.as_ref();
+    let is_game_build =
+        |m: &types::ResolvedMod| game_build.is_some_and(|b| b.mod_name == m.mod_name);
     println!(
         "Repository: {} for {} ({} required, {} optional mods)",
         config.repo_name,
         config.game.display_name(),
-        resolved_mods.iter().filter(|m| m.is_required).count(),
+        resolved_mods
+            .iter()
+            .filter(|m| m.is_required && !is_game_build(m))
+            .count(),
         resolved_mods.iter().filter(|m| !m.is_required).count(),
     );
+    if let Some(build) = game_build {
+        println!(
+            "Game build: {} (starts {})",
+            build.mod_name, build.executable
+        );
+    }
     let warnings = mod_line::game_config_warnings(&config, &resolved_mods);
     for warning in &warnings {
         log::warn!("{}", warning);
@@ -382,7 +395,7 @@ fn run_create(
     let launch_files = mod_line_files::resolve(&config, config_path);
     mod_line_files::check(&launch_files, &mod_line::launch_flags(config.game))?;
 
-    for m in &resolved_mods {
+    for m in resolved_mods.iter().filter(|m| !is_game_build(m)) {
         println!(
             "  {} [{}]",
             m.mod_name,
@@ -492,11 +505,14 @@ fn run_create(
 
     let launch_params =
         mod_line::build_launch_params(&config, &processed_mods, &resolved_mods, mod_line_options);
-    let server_line = mod_line::render_launch_params(&launch_params);
-    published::write_server_mod_line(output_dir, &server_line)?;
-    println!();
-    println!("Server mod line:");
-    println!("{server_line}");
+    let server_line =
+        (!launch_params.is_empty()).then(|| mod_line::render_launch_params(&launch_params));
+    if let Some(server_line) = &server_line {
+        published::write_server_mod_line(output_dir, server_line)?;
+        println!();
+        println!("Server mod line:");
+        println!("{server_line}");
+    }
     output::set_details(serde_json::json!({
         "output": output_dir,
         "mods": processed_mods.len(),

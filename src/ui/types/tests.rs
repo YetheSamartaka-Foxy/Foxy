@@ -904,3 +904,66 @@ fn sanitize_repository_space_paths_trims_entry_addresses() {
         "http://example.invalid/mody/Entry"
     );
 }
+
+#[test]
+fn repo_json_game_build_requires_paths_inside_the_repository() {
+    assert_eq!(
+        super::repo_json_game_build(&json!({
+            "gameBuild": {"modName": "MyGame", "executable": r"bin\game.exe"}
+        })),
+        Some(super::RepositoryGameBuild {
+            addon: "MyGame".to_string(),
+            executable: "bin/game.exe".to_string(),
+        })
+    );
+    for (addon, executable) in [
+        ("../MyGame", "game.exe"),
+        ("Sub/MyGame", "game.exe"),
+        ("MyGame", "../game.exe"),
+        ("MyGame", "C:/game.exe"),
+        ("MyGame", "/game.exe"),
+        ("MyGame", "bin//game.exe"),
+        ("", "game.exe"),
+    ] {
+        assert_eq!(
+            super::repo_json_game_build(&json!({
+                "gameBuild": {"modName": addon, "executable": executable}
+            })),
+            None,
+            "{addon} {executable}"
+        );
+    }
+    assert_eq!(super::repo_json_game_build(&json!({})), None);
+}
+
+#[test]
+fn game_build_is_removed_from_every_addon_list() {
+    let mut repo = Repository {
+        addons: vec![("mygame".to_string(), false), ("@mod_01".to_string(), true)],
+        optional_addons: vec![("MyGame".to_string(), false)],
+        profiles: vec![RepositoryProfile {
+            addons: vec![("MyGame".to_string(), false), ("@mod_01".to_string(), true)],
+            ..RepositoryProfile::default()
+        }],
+        ..Repository::default()
+    };
+
+    super::apply_repo_game_build(
+        &mut repo,
+        Some(super::RepositoryGameBuild {
+            addon: "MyGame".to_string(),
+            executable: "MyGame.exe".to_string(),
+        }),
+    );
+
+    assert_eq!(repo.addons, vec![("@mod_01".to_string(), true)]);
+    assert!(repo.optional_addons.is_empty());
+    assert_eq!(repo.profiles[0].addons, vec![("@mod_01".to_string(), true)]);
+
+    repo.addons.push(("MyGame".to_string(), true));
+    normalize_loaded_repository(&mut repo);
+    assert_eq!(repo.addons, vec![("@mod_01".to_string(), true)]);
+
+    super::apply_repo_game_build(&mut repo, None);
+    assert!(repo.game_build.is_none());
+}

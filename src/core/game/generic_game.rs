@@ -4,13 +4,16 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::core::steam;
-use crate::ui::types::SettingsViewState;
+use crate::core::utils::fs_safety::resolve_child_dir_case_insensitive;
+use crate::ui::types::{
+    Repository, RepositoryServer, SettingsViewState, split_additional_launch_params,
+};
 
 use super::generic::{RunScriptTemplateVars, render_run_script_template};
 use super::{
-    DirectorySetting, GameCapabilities, GameDetectCtx, GameLaunchCtx, GameModule,
+    DirectorySetting, GameBuildTarget, GameCapabilities, GameDetectCtx, GameLaunchCtx, GameModule,
     GameSettingsSchema, LaunchCommand, LaunchError, LaunchPlan, ResolvedMod, TextSetting,
-    ToggleSetting, workshop,
+    ToggleSetting, reforger, workshop,
 };
 
 pub const GENERIC_GAME_ID: &str = "generic";
@@ -54,8 +57,8 @@ impl GameModule for GenericGameModule {
 
     fn capabilities(&self) -> GameCapabilities {
         GameCapabilities {
-            repository_sync: false,
-            repository_launch: false,
+            repository_sync: true,
+            repository_launch: true,
             steam_workshop: true,
             client_side_addons: false,
             direct_download: true,
@@ -137,12 +140,72 @@ impl GameModule for GenericGameModule {
         }
     }
 
+    fn build_repository_launch_plan(
+        &self,
+        _settings: &SettingsViewState,
+        repo: &Repository,
+        _server: Option<&RepositoryServer>,
+    ) -> Result<LaunchPlan, LaunchError> {
+        Ok(build_repository_launch_plan(repo))
+    }
+
     fn install_dir_from_settings<'a>(&self, settings: &'a SettingsViewState) -> &'a str {
         &settings.generic_directory
     }
 
     fn steam_app_id_from_settings(&self, settings: &SettingsViewState) -> Option<u32> {
         parse_app_id(&settings.generic_steam_app_id)
+    }
+}
+
+/// A repository whose `repo.json` names a game build starts the game from that
+/// downloaded folder; any other repository starts the configured install.
+/// Enabled addon folders are only offered to the launch template as `{mods}`.
+pub fn build_repository_launch_plan(repo: &Repository) -> LaunchPlan {
+    let repo_path = Path::new(repo.path.trim());
+    let game_build = repo.game_build.as_ref().map(|build| GameBuildTarget {
+        dir: resolve_child_dir_case_insensitive(repo_path, &build.addon)
+            .unwrap_or_else(|| repo_path.join(&build.addon)),
+        executable: build.executable.clone(),
+    });
+    let mut mods = Vec::new();
+    for (addon, enabled) in repo.addons.iter().chain(repo.optional_addons.iter()) {
+        if !*enabled {
+            continue;
+        }
+        match resolve_child_dir_case_insensitive(repo_path, addon) {
+            Some(dir) => mods.push(addon_mod(addon, &dir)),
+            None => log::error!(
+                "Generic game addon folder not found in repository: {}",
+                addon
+            ),
+        }
+    }
+    for (addon, enabled, path) in &repo.external_addons {
+        if !*enabled {
+            continue;
+        }
+        match reforger::resolve_external_addon_dir(addon, path) {
+            Some(dir) => mods.push(addon_mod(addon, &dir)),
+            None => log::error!(
+                "External generic game addon folder not found: addon={}",
+                addon
+            ),
+        }
+    }
+
+    LaunchPlan {
+        launch_args: split_additional_launch_params(&repo.additional_params),
+        mods,
+        server: None,
+        game_build,
+    }
+}
+
+fn addon_mod(addon: &str, dir: &Path) -> ResolvedMod {
+    ResolvedMod {
+        id: addon.to_string(),
+        path: Some(dir.display().to_string()),
     }
 }
 
@@ -166,18 +229,28 @@ pub fn build_generic_launch(
     config: &GenericGameConfig,
     write_manifest: bool,
 ) -> Result<GenericGameLaunchBuild, LaunchError> {
-    let install_dir = ctx.install_dir.trim();
-    if install_dir.is_empty() {
-        return Err(LaunchError::InstallDirNotConfigured);
-    }
-    let install_path = Path::new(install_dir);
+    // A downloaded build is not the Steam install, so it never goes through Steam.
+    let (install_path, executable_setting, steam_app_id) = match &plan.game_build {
+        Some(build) => (build.dir.as_path(), build.executable.as_str(), None),
+        None => {
+            let install_dir = ctx.install_dir.trim();
+            if install_dir.is_empty() {
+                return Err(LaunchError::InstallDirNotConfigured);
+            }
+            (
+                Path::new(install_dir),
+                config.executable.as_str(),
+                config.steam_app_id,
+            )
+        }
+    };
     if !install_path.is_dir() {
         return Err(LaunchError::InstallDirMissing);
     }
-    if config.executable.is_empty() {
+    if executable_setting.is_empty() {
         return Err(LaunchError::GameNotConfigured);
     }
-    let executable = resolve_executable(install_path, &config.executable)
+    let executable = resolve_executable(install_path, executable_setting)
         .ok_or(LaunchError::InstallDirInvalid)?;
 
     let mut manifest = None;
@@ -222,9 +295,9 @@ pub fn build_generic_launch(
         &vars,
     )));
 
-    let (program, mut args) = match config.steam_app_id {
+    let (program, mut args) = match steam_app_id {
         Some(app_id) => {
-            let executable_names = [config.executable.as_str()];
+            let executable_names = [executable_setting];
             let launch = steam::steam_app_launch_command(
                 app_id,
                 install_path,
@@ -359,6 +432,7 @@ pub fn build_workshop_launch_plan(
             launch_args,
             mods,
             server: None,
+            game_build: None,
         },
         issues,
     })
@@ -406,6 +480,7 @@ mod tests {
                 },
             ],
             server: None,
+            game_build: None,
         };
         let install_dir_text = install_dir.display().to_string();
         let ctx = GameLaunchCtx {
@@ -452,12 +527,106 @@ mod tests {
                     launch_args: Vec::new(),
                     mods: Vec::new(),
                     server: None,
+                    game_build: None,
                 },
                 &ctx,
                 &config,
                 false
             ),
             Err(LaunchError::GameNotConfigured)
+        );
+    }
+
+    #[test]
+    fn repository_launch_plan_offers_enabled_addon_folders_as_mods() {
+        let repo_root = tempfile::tempdir().expect("repo");
+        for name in ["MyGame", "Optional", "Disabled"] {
+            fs::create_dir_all(repo_root.path().join(name)).expect("addon dir");
+        }
+        let external = tempfile::tempdir().expect("external");
+        fs::create_dir_all(external.path().join("Extra")).expect("external dir");
+        let repo = Repository {
+            path: repo_root.path().display().to_string(),
+            addons: vec![
+                ("MyGame".to_string(), true),
+                ("Disabled".to_string(), false),
+                ("Missing".to_string(), true),
+            ],
+            optional_addons: vec![("Optional".to_string(), true)],
+            external_addons: vec![(
+                "Extra".to_string(),
+                true,
+                external.path().display().to_string(),
+            )],
+            additional_params: "-windowed -fps 60".to_string(),
+            ..Repository::default()
+        };
+
+        let plan = GenericGameModule
+            .build_repository_launch_plan(&SettingsViewState::default(), &repo, None)
+            .expect("plan");
+
+        assert_eq!(plan.launch_args, vec!["-windowed", "-fps", "60"]);
+        assert_eq!(
+            plan.mods,
+            vec![
+                addon_mod("MyGame", &repo_root.path().join("MyGame")),
+                addon_mod("Optional", &repo_root.path().join("Optional")),
+                addon_mod("Extra", &external.path().join("Extra")),
+            ]
+        );
+        assert!(plan.server.is_none());
+        assert!(plan.game_build.is_none());
+        let capabilities = GenericGameModule.capabilities();
+        assert!(capabilities.repository_sync && capabilities.repository_launch);
+    }
+
+    #[test]
+    fn game_build_repository_launches_its_own_executable_without_steam() {
+        let repo_root = tempfile::tempdir().expect("repo");
+        let build_dir = repo_root.path().join("MyGame");
+        fs::create_dir_all(build_dir.join("bin")).expect("build dir");
+        fs::write(build_dir.join("bin").join("game.exe"), "").expect("exe");
+        let repo = Repository {
+            path: repo_root.path().display().to_string(),
+            game_build: Some(crate::ui::types::RepositoryGameBuild {
+                addon: "MyGame".to_string(),
+                executable: "bin/game.exe".to_string(),
+            }),
+            additional_params: "-windowed".to_string(),
+            ..Repository::default()
+        };
+        let plan = build_repository_launch_plan(&repo);
+        assert_eq!(
+            plan.game_build,
+            Some(GameBuildTarget {
+                dir: build_dir.clone(),
+                executable: "bin/game.exe".to_string(),
+            })
+        );
+
+        let ctx = GameLaunchCtx {
+            install_dir: "",
+            steam_directory: "",
+            settings: None,
+        };
+        let mut configured = config(Path::new(""), "", "");
+        configured.executable = "Other.exe".to_string();
+        configured.steam_app_id = Some(480);
+        let built = build_generic_launch(&plan, &ctx, &configured, false).expect("launch");
+        assert_eq!(built.command.program, build_dir.join("bin/game.exe"));
+        assert_eq!(built.command.args, vec!["-windowed"]);
+        assert_eq!(built.command.cwd.as_deref(), Some(build_dir.as_path()));
+
+        fs::remove_dir_all(&build_dir).expect("remove build");
+        assert_eq!(
+            build_generic_launch(
+                &build_repository_launch_plan(&repo),
+                &ctx,
+                &configured,
+                false
+            ),
+            Err(LaunchError::InstallDirMissing)
         );
     }
 

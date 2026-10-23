@@ -1,4 +1,4 @@
-use super::repository::Repository;
+use super::repository::{Repository, RepositoryGameBuild};
 use super::repository_space::RepositorySpace;
 use super::settings::SettingsViewState;
 use serde_json::Value;
@@ -126,6 +126,50 @@ pub fn apply_repo_client_parameters(repo: &mut Repository, params: &str) {
     }
 
     repo.additional_params = additional.join(" ");
+}
+
+/// The `gameBuild` of a custom game's `repo.json`. Both names come from the
+/// server, so anything that could leave the repository folder is refused.
+pub fn repo_json_game_build(json: &Value) -> Option<RepositoryGameBuild> {
+    let value = json.get("gameBuild")?;
+    let addon = value.get("modName")?.as_str()?.trim();
+    let executable = value.get("executable")?.as_str()?.trim().replace('\\', "/");
+    let safe_addon = crate::core::utils::fs_safety::is_safe_child_path(addon)
+        && !addon.contains(['/', '\\'])
+        && addon != ".";
+    let safe_executable = crate::core::utils::fs_safety::is_safe_child_path(&executable)
+        && executable
+            .split('/')
+            .all(|component| !component.is_empty() && component != ".");
+    if !safe_addon || !safe_executable {
+        log::warn!("Ignoring a repo.json gameBuild that names an unsafe path");
+        return None;
+    }
+    Some(RepositoryGameBuild {
+        addon: addon.to_string(),
+        executable,
+    })
+}
+
+/// Record the repository's game build and drop it from every addon list, so
+/// it can neither be shown nor disabled. Sync then falls back to the
+/// manifest's own `enabled` flag for it, which the server always sets.
+pub fn apply_repo_game_build(repo: &mut Repository, game_build: Option<RepositoryGameBuild>) {
+    repo.game_build = game_build;
+    strip_game_build_addon(repo);
+}
+
+pub fn strip_game_build_addon(repo: &mut Repository) {
+    let Some(game_build) = repo.game_build.as_ref() else {
+        return;
+    };
+    let is_game = |name: &String| name.eq_ignore_ascii_case(&game_build.addon);
+    repo.addons.retain(|(name, _)| !is_game(name));
+    repo.optional_addons.retain(|(name, _)| !is_game(name));
+    for profile in &mut repo.profiles {
+        profile.addons.retain(|(name, _)| !is_game(name));
+        profile.optional_addons.retain(|(name, _)| !is_game(name));
+    }
 }
 
 /// Locate the DLC list in a `repo.json`. Foxy publishes `dlcContent`; Swifty
@@ -533,6 +577,7 @@ pub fn sanitize_repository_paths(repo: &mut Repository) {
 pub fn normalize_loaded_repository(repo: &mut Repository) {
     sanitize_repository_paths(repo);
     repo.app_update_url = repo.app_update_url.trim().to_string();
+    strip_game_build_addon(repo);
 
     let master_addons = repo.addons.clone();
     let master_optional = repo.optional_addons.clone();

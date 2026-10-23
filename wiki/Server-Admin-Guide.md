@@ -11,14 +11,15 @@ This guide covers everything a server administrator needs to set up and maintain
 3. [Setting Up a Repository](#setting-up-a-repository)
 4. [Server Launch Line and Keys](#server-launch-line-and-keys)
 5. [Arma Reforger Repositories](#arma-reforger-repositories)
-6. [Repository Structure](#repository-structure)
-7. [Repository Spaces](#repository-spaces)
-8. [Checks, Previews, and Safe Publishing](#checks-previews-and-safe-publishing)
-9. [App Updates Distribution](#app-updates-distribution)
-10. [Configuration Reference](#configuration-reference)
-11. [Hosting Behind a Reverse Proxy](#hosting-behind-a-reverse-proxy)
-12. [Maintaining Repositories](#maintaining-repositories)
-13. [Troubleshooting](#troubleshooting)
+6. [Custom Game Repositories](#custom-game-repositories)
+7. [Repository Structure](#repository-structure)
+8. [Repository Spaces](#repository-spaces)
+9. [Checks, Previews, and Safe Publishing](#checks-previews-and-safe-publishing)
+10. [App Updates Distribution](#app-updates-distribution)
+11. [Configuration Reference](#configuration-reference)
+12. [Hosting Behind a Reverse Proxy](#hosting-behind-a-reverse-proxy)
+13. [Maintaining Repositories](#maintaining-repositories)
+14. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -39,7 +40,7 @@ Foxy clients connect to your repository URL, read the `repo.json` manifest, and 
 
 | Command | Purpose |
 |---------|---------|
-| `new [config.json] [--game arma3\|reforger]` | Write a blank repository config |
+| `new [config.json] [--game arma3\|reforger\|generic]` | Write a blank repository config |
 | `create <config> <output>` | Generate one repository |
 | `new-space [space.json]` | Write a blank repository space config |
 | `create-space <space.json> <output>` | Generate every repository of a space plus `repository_space.json` |
@@ -88,7 +89,7 @@ HybridMode serves both Foxy and legacy Swifty clients from the same repository. 
 foxy-server-backend-cli new config.json
 ```
 
-This writes a blank Arma 3 `config.json`. Use `new config.json --game reforger` for an Arma Reforger template. If the file already exists, the command refuses to overwrite it.
+This writes a blank Arma 3 `config.json`. Use `new config.json --game reforger` for an Arma Reforger template, or `--game generic` for a custom game (see [Custom Game Repositories](#custom-game-repositories)). If the file already exists, the command refuses to overwrite it.
 
 The Arma 3 template looks like this:
 
@@ -371,6 +372,44 @@ Ensure dependencies are available in the game's addon search roots. `-addonsDir`
 
 ---
 
+## Custom Game Repositories
+
+A repository can carry a game itself, not only mods for it. Players add it in a **Generic game** space; Foxy downloads and updates the game like any repository content, shows it as the game rather than as an addon, and **Launch** starts it from the downloaded folder. Set `"game": "generic"` in the config (`new config.json --game generic` writes a template) and name the folder that holds the build in `gameBuild`:
+
+```json
+{
+  "repoName": "MainRepo",
+  "game": "generic",
+  "chunking": "content",
+  "basePath": "R:/Mods/MainRepo",
+  "gameBuild": { "folder": "@mod_01", "executable": "Game.exe" },
+  "requiredMods": [],
+  "optionalMods": [],
+  "iconImagePath": "icon.png",
+  "repoImagePath": "repo.png",
+  "clientParameters": "",
+  "servers": []
+}
+```
+
+- `gameBuild.folder` is a folder under `basePath` (no wildcards). It can hold a single executable or a whole game tree: executable, data archives, libraries, and subfolders. It is published as a required, always-enabled entry, and players receive it as `<their repository folder>/@mod_01/`. Do not list it in `requiredMods` or `optionalMods` as well.
+- `gameBuild.executable` is the file to start, relative to that folder (`Game.exe`, or `bin/Game.exe`). It must exist when the repository is generated and must stay inside the folder. Foxy starts it directly, without Steam, with the game folder as its working directory.
+- `requiredMods` and `optionalMods` can still list mods for the game. Players see those as addons, and the Generic game's launch template receives them as `{mods}`.
+- `"chunking": "content"` places part boundaries by content instead of every 5 MB (see [File parts](#file-parts)). When a rebuilt executable or data archive gains or loses bytes, the later parts keep their checksums, so clients download only the parts around the change and copy the rest from the file they already have. Use it for game builds and other large binaries that are rebuilt between releases, such as Godot executables with an embedded data pack, or Unity and Unreal data archives.
+- No server launch line is printed and no `server_mod_line.txt` is written. `modLineFiles` is refused for a custom game, and `dlcContent` and `clientSide` are accepted with a warning and ignored.
+- `clientParameters` is passed to the game as the repository's launch parameters.
+- The generated `repo.json` carries `"game": "generic"`, `"chunking": "content"`, and `"gameBuild": { "modName": "@mod_01", "executable": "Game.exe" }`. `verify` reads `chunking` so it re-hashes the published files the same way.
+- In a repository space, a mod shared by several repositories must use the same `chunking` in each of them.
+
+```text
+foxy-server-backend-cli new "R:\Mods\MainRepo\config.json" --game generic
+foxy-server-backend-cli create "R:\Mods\MainRepo\config.json" "R:\Mods\Published\MainRepo" --atomic --yes
+```
+
+After each new build, replace the contents of the game folder with it and run the same `create` command. Players then see an update and download only the changed parts. The player side is described in the User Guide under **Custom game repositories**.
+
+---
+
 ## Repository Structure
 
 After `create`, the output directory has the following layout, depending on the generation mode.
@@ -434,6 +473,7 @@ Files are split into **parts** for fine-grained checksums and delta updates:
 - **PBO files** (Arma 3) are parsed into a `$$HEADER$$` part, one part per archived entry, and a `$$END$$` tail part, so clients patch at the entry level.
 - **PAK files** (Arma Reforger, PAC1 format) are parsed into a `$$HEADER$$` part, one part per entry, `$$GAP:n$$` parts for bytes between entries, and a `$$END$$` part.
 - **Other files** are split into 5 MB chunks. A 12 MB file becomes three parts: `filename_5000000`, `filename_10000000`, `filename_12000000`.
+- **Other files with `"chunking": "content"`** are split where their content says, into parts of 256 KB to 4 MB (about 1 MB on average). Names keep the `filename_<end offset>` form. An inserted or removed byte changes only the parts around it. PBO and PAK archives keep their per-entry parts. All Foxy clients read these parts. Changing `chunking` on an existing repository makes clients download each affected file once in full.
 - **`.srf` files** in source mod folders are skipped (they are regenerated), and so is a `foxy_addon.json` at a mod's root, so an earlier output can be reused as a source.
 
 ### The `foxyMode` field
@@ -701,7 +741,9 @@ Platform keys are `windows-x86_64`, `linux-x86_64`, and `linux-aarch64`. The cli
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `repoName` | string | yes | - | Display name of the repository |
-| `game` | string | no | `"arma3"` | `arma3` or `reforger`; selects the server launch line |
+| `game` | string | no | `"arma3"` | `arma3`, `reforger`, or `generic` (a custom game, no server launch line); selects the server launch line |
+| `chunking` | string | no | `"fixed"` | `fixed` (5 MB parts) or `content` (content-defined parts for files that are not PBO or PAK archives) |
+| `gameBuild` | object | no | omitted | `{ folder, executable }`: the folder under `basePath` holding a custom game build and the file to start in it; requires `"game": "generic"` |
 | `basePath` | string | yes | - | Root folder containing the mod folders |
 | `appUpdateUrl` | string | no | `""` | Foxy app update source written into `repo.json` |
 | `requiredMods` | array | no | `[]` | Required mod references |
@@ -759,7 +801,9 @@ When set, Foxy clients send HTTP Basic Auth headers with every request to this r
 | Field | Description |
 |-------|-------------|
 | `repoName` | Repository display name |
-| `game` | Present only for non-Arma 3 repositories, for example `"reforger"` |
+| `game` | Present only for non-Arma 3 repositories, for example `"reforger"` or `"generic"` |
+| `chunking` | `"content"` when the config uses content chunking (omitted for `fixed`) |
+| `gameBuild` | `{ modName, executable }` for a custom game build (omitted when not configured) |
 | `checksum` | Repository-level checksum (BLAKE3 in FoxyMode, SHA-1 in SwiftyMode) |
 | `foxyMode` | `"FoxyModeV1"` in FoxyMode and HybridMode |
 | `requiredMods` | Array of `{ modName, checkSum, enabled, clientSide? }` (empty in FoxyMode, MD5 in Swifty/Hybrid) |

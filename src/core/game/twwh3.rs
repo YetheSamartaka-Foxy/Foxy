@@ -229,6 +229,7 @@ pub fn build_workshop_launch_plan(
             launch_args: save_game_launch_args(save_name),
             mods,
             server: None,
+            game_build: None,
         },
         packs,
         issues,
@@ -265,6 +266,7 @@ pub fn build_repository_launch_plan(repo: &Repository) -> LaunchPlan {
         launch_args: split_additional_launch_params(&repo.additional_params),
         mods,
         server: None,
+        game_build: None,
     }
 }
 
@@ -552,6 +554,7 @@ mod tests {
                 path: Some(pack_path.display().to_string()),
             }],
             server: None,
+            game_build: None,
         };
         let install_dir_text = install_dir.display().to_string();
         let ctx = GameLaunchCtx {

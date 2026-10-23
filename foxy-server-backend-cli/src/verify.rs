@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use std::path::Path;
 
 use crate::cli::GenerationMode;
-use crate::types::ResolvedMod;
+use crate::types::{Chunking, ResolvedMod};
 use crate::{hash, output, srf};
 
 pub fn verify(output_dir: &Path) -> Result<()> {
@@ -57,6 +57,11 @@ fn verify_repo(dir: &Path) -> Result<usize> {
         true => GenerationMode::Foxy,
         false => GenerationMode::Swifty,
     };
+    let chunking: Chunking = match repo.get("chunking") {
+        Some(value) => serde_json::from_value(value.clone())
+            .context("repo.json names an unknown chunking setting")?,
+        None => Chunking::Fixed,
+    };
     let listing = foxy.as_ref().unwrap_or(&repo);
     let mut count = 0;
     let mut processed_mods = Vec::new();
@@ -78,6 +83,7 @@ fn verify_repo(dir: &Path) -> Result<usize> {
                 is_required: list == "requiredMods",
                 enabled: true,
                 client_side: false,
+                chunking,
             };
             let actual = hash::process_mods(
                 &[resolved],

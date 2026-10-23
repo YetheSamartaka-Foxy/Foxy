@@ -62,13 +62,19 @@ pub fn launch_flags(game: RepoGame) -> Vec<LaunchParam> {
             LaunchParam::token(REFORGER_ADDONS_DIR_FLAG, String::new()),
             LaunchParam::token(REFORGER_ADDONS_FLAG, String::new()),
         ],
+        RepoGame::Generic => Vec::new(),
     }
+}
+
+pub fn has_server_line(game: RepoGame) -> bool {
+    !launch_flags(game).is_empty()
 }
 
 /// The server launch parameters for a generated repository, shaped for the game
 /// the config names: Arma 3 gets `-mod=`, Arma Reforger `-addonsDir` plus
 /// `-addons`. `sources` are the resolved mods the repository was built from;
-/// Reforger mod ids are read from their `.gproj` files.
+/// Reforger mod ids are read from their `.gproj` files. A custom game has no
+/// server line, so it gets no parameters.
 pub fn build_launch_params(
     config: &RepoConfig,
     mods: &[ProcessedMod],
@@ -87,6 +93,7 @@ pub fn build_launch_params(
                 reforger_addon_ids(mods, sources, options).join(","),
             ),
         ],
+        RepoGame::Generic => Vec::new(),
     }
 }
 
@@ -98,18 +105,23 @@ pub fn render_launch_params(params: &[LaunchParam]) -> String {
         .join(" ")
 }
 
-/// Config keys that only mean something for Arma 3; a Reforger config that
-/// sets them is accepted but the operator is told they have no effect.
+/// Config keys that only mean something for Arma 3; a Reforger or custom game
+/// config that sets them is accepted but the operator is told they have no
+/// effect.
 pub fn game_config_warnings(config: &RepoConfig, sources: &[ResolvedMod]) -> Vec<String> {
     let mut warnings = Vec::new();
-    if config.game != RepoGame::Reforger {
-        return warnings;
-    }
+    let (game, client_side_reason) = match config.game {
+        RepoGame::Arma3 => return warnings,
+        RepoGame::Reforger => (
+            "Arma Reforger",
+            "an Arma Reforger server activates exactly its own mod set",
+        ),
+        RepoGame::Generic => ("a custom game", "a custom game has no server mod list"),
+    };
     if config.dlc_content.is_some() {
-        warnings.push(
-            "dlcContent lists Arma 3 Creator DLCs; Arma Reforger has none and Foxy ignores it"
-                .to_string(),
-        );
+        warnings.push(format!(
+            "dlcContent lists Arma 3 Creator DLCs; {game} has none and Foxy ignores it"
+        ));
     }
     let client_side: Vec<&str> = sources
         .iter()
@@ -118,7 +130,7 @@ pub fn game_config_warnings(config: &RepoConfig, sources: &[ResolvedMod]) -> Vec
         .collect();
     if !client_side.is_empty() {
         warnings.push(format!(
-            "clientSide is set on {}; an Arma Reforger server activates exactly its own mod set, so Foxy offers no client-side marking for it",
+            "clientSide is set on {}; {client_side_reason}, so Foxy offers no client-side marking for it",
             client_side.join(", ")
         ));
     }
@@ -313,6 +325,7 @@ mod tests {
             is_required: true,
             enabled: true,
             client_side,
+            chunking: crate::types::Chunking::Fixed,
         }
     }
 
@@ -437,6 +450,14 @@ mod tests {
         let warnings = game_config_warnings(&config, &sources);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("dlcContent"));
+
+        config.game = RepoGame::Generic;
+        assert!(build_launch_params(&config, &mods, &sources, options("")).is_empty());
+        assert!(!has_server_line(RepoGame::Generic));
+        assert!(has_server_line(RepoGame::Arma3));
+        let warnings = game_config_warnings(&config, &sources);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("a custom game"));
     }
 
     #[test]

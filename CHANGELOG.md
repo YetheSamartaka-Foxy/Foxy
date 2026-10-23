@@ -1,6 +1,8 @@
 # 1.2.2
 ## Added
 - Right-click an addon to open its Steam Workshop or Arma Reforger Workshop page in your browser, including optional and external addons.
+- Generic game spaces can now use repositories, including repositories that deliver the game itself. The game shows in its own Game section instead of the addon list, always stays up to date, and Launch starts it directly without any game directory or Steam setup. Updates to the game download only the changed parts of its files.
+- Server tool: `new --game generic` writes a config for publishing a custom game, with a `gameBuild` setting that names the game folder and the executable to start. Its new `"chunking": "content"` setting lets players download only the changed parts of rebuilt executables and data archives instead of whole files. Existing repositories are generated exactly as before.
 
 ## Changed
 - Progress bars show triangles only while work is running. Idle and paused bars use solid fills, and completed downloads turn solid green.
@@ -9,6 +11,7 @@
 - Fixed updates missing published addon files and deleting manually copied files because outdated addon metadata was reused.
 - Steam and TeamSpeak launch warnings no longer freeze the interface or delay button hover and clicks while checking whether the clients are running.
 - Windows no longer opens brief command windows when detecting Steam or checking whether Arma 3 is running before managing profiles.
+- Launch now shows an error naming the game when it cannot be started, instead of doing nothing or naming Arma 3 for every game.
 
 # 1.2.1
 ## Added

@@ -360,6 +360,7 @@ pub fn build_launch_plan(
         launch_args,
         mods,
         server,
+        game_build: None,
     })
 }
 

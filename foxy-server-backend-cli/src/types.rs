@@ -84,6 +84,9 @@ pub enum RepoGame {
     Arma3,
     /// Arma Reforger: `-addonsDir`/`-addons` line built from each mod's `.gproj` GUID.
     Reforger,
+    /// A custom game for Foxy's Generic game space: the mod folders can hold
+    /// the game build itself. No server launch line is generated.
+    Generic,
 }
 
 impl RepoGame {
@@ -91,7 +94,27 @@ impl RepoGame {
         match self {
             RepoGame::Arma3 => "Arma 3",
             RepoGame::Reforger => "Arma Reforger",
+            RepoGame::Generic => "a custom game",
         }
+    }
+}
+
+/// How files that are not PBO or PAC1 archives are split into parts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Chunking {
+    /// 5 MB parts at fixed offsets, the historical layout.
+    #[default]
+    Fixed,
+    /// Part boundaries chosen from the file content, so an inserted or removed
+    /// byte only changes the parts around it. Meant for game executables and
+    /// data archives that are rebuilt between releases.
+    Content,
+}
+
+impl Chunking {
+    pub fn is_fixed(&self) -> bool {
+        *self == Chunking::Fixed
     }
 }
 
@@ -101,6 +124,8 @@ pub struct RepoConfig {
     pub repo_name: String,
     #[serde(default)]
     pub game: RepoGame,
+    #[serde(default)]
+    pub chunking: Chunking,
     #[serde(rename = "basePath")]
     pub base_path: String,
     #[serde(rename = "appUpdateUrl", default)]
@@ -128,6 +153,28 @@ pub struct RepoConfig {
     /// directory of the config file that lists them.
     #[serde(rename = "modLineFiles", default)]
     pub mod_line_files: Vec<String>,
+    /// The folder under `basePath` that holds a custom game's build. It is
+    /// published as a required mod, and clients show it as the game instead
+    /// of an addon and launch its executable.
+    #[serde(rename = "gameBuild", default)]
+    pub game_build: Option<GameBuildConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GameBuildConfig {
+    pub folder: String,
+    /// Relative to `folder`; normalized to `/` separators on load.
+    pub executable: String,
+    /// The published folder name, filled in when the config is loaded.
+    #[serde(skip)]
+    pub mod_name: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GameBuildJson {
+    #[serde(rename = "modName")]
+    pub mod_name: String,
+    pub executable: String,
 }
 
 /// Arma 3 DLC suggestions published in `repo.json` as `dlcContent`. Config
@@ -258,6 +305,10 @@ pub struct RepoJson {
     /// Written for every game except Arma 3, whose manifests predate the key.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub game: Option<RepoGame>,
+    /// Written only for content chunking so `verify` re-hashes the same parts;
+    /// clients hash whatever part spans the manifests publish.
+    #[serde(skip_serializing_if = "Chunking::is_fixed")]
+    pub chunking: Chunking,
     pub checksum: String,
     /// Present when FoxyMode or HybridMode is used. Indicates the Foxy protocol version.
     #[serde(rename = "foxyMode", skip_serializing_if = "Option::is_none")]
@@ -284,6 +335,8 @@ pub struct RepoJson {
     pub servers: Vec<ServerEntry>,
     #[serde(rename = "dlcContent", skip_serializing_if = "Option::is_none")]
     pub dlc_content: Option<DlcContent>,
+    #[serde(rename = "gameBuild", skip_serializing_if = "Option::is_none")]
+    pub game_build: Option<GameBuildJson>,
 }
 
 #[derive(Debug, Serialize)]
@@ -387,6 +440,7 @@ pub struct ResolvedMod {
     pub is_required: bool,
     pub enabled: bool,
     pub client_side: bool,
+    pub chunking: Chunking,
 }
 
 /// A discovered file within a mod, ready for processing.
@@ -624,6 +678,7 @@ mod tests {
         let repo = RepoJson {
             repo_name: "Test".to_string(),
             game: None,
+            chunking: Chunking::Fixed,
             checksum: "CS".to_string(),
             foxy_mode: None,
             required_mods: vec![],
@@ -638,6 +693,7 @@ mod tests {
             version: "3.2.0.0".to_string(),
             servers: vec![],
             dlc_content: None,
+            game_build: None,
         };
         let json = serde_json::to_string(&repo).unwrap();
         assert!(!json.contains("foxyMode"));
@@ -649,6 +705,7 @@ mod tests {
         let repo = RepoJson {
             repo_name: "Test".to_string(),
             game: None,
+            chunking: Chunking::Fixed,
             checksum: "CS".to_string(),
             foxy_mode: None,
             required_mods: vec![],
@@ -666,6 +723,7 @@ mod tests {
                 spe: true,
                 ..DlcContent::default()
             }),
+            game_build: None,
         };
         let json = serde_json::to_string(&repo).unwrap();
         assert!(json.contains(r#""dlcContent":{"csla":false"#));
@@ -677,6 +735,7 @@ mod tests {
         let repo = RepoJson {
             repo_name: "Test".to_string(),
             game: None,
+            chunking: Chunking::Fixed,
             checksum: "CS".to_string(),
             foxy_mode: Some("FoxyModeV1".to_string()),
             required_mods: vec![],
@@ -691,6 +750,7 @@ mod tests {
             version: "3.2.0.0".to_string(),
             servers: vec![],
             dlc_content: None,
+            game_build: None,
         };
         let json = serde_json::to_string(&repo).unwrap();
         assert!(json.contains("FoxyModeV1"));
@@ -721,6 +781,7 @@ mod tests {
         let mut repo = RepoJson {
             repo_name: "Test".to_string(),
             game: None,
+            chunking: Chunking::Fixed,
             checksum: "CS".to_string(),
             foxy_mode: None,
             required_mods: vec![],
@@ -735,6 +796,7 @@ mod tests {
             version: "3.2.0.0".to_string(),
             servers: vec![],
             dlc_content: None,
+            game_build: None,
         };
         assert!(!serde_json::to_string(&repo).unwrap().contains("\"game\""));
 
@@ -743,6 +805,33 @@ mod tests {
             serde_json::to_string(&repo)
                 .unwrap()
                 .contains(r#""game":"reforger""#)
+        );
+        assert!(!serde_json::to_string(&repo).unwrap().contains("chunking"));
+
+        repo.chunking = Chunking::Content;
+        assert!(
+            serde_json::to_string(&repo)
+                .unwrap()
+                .contains(r#""chunking":"content""#)
+        );
+    }
+
+    #[test]
+    fn repo_config_chunking_defaults_to_fixed() {
+        let default: RepoConfig =
+            serde_json::from_str(r#"{"repoName":"Test","basePath":"."}"#).unwrap();
+        assert_eq!(default.chunking, Chunking::Fixed);
+        let content: RepoConfig = serde_json::from_str(
+            r#"{"repoName":"Test","basePath":".","game":"generic","chunking":"content"}"#,
+        )
+        .unwrap();
+        assert_eq!(content.game, RepoGame::Generic);
+        assert_eq!(content.chunking, Chunking::Content);
+        assert!(
+            serde_json::from_str::<RepoConfig>(
+                r#"{"repoName":"Test","basePath":".","chunking":"rolling"}"#
+            )
+            .is_err()
         );
     }
 }
