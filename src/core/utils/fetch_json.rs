@@ -38,7 +38,7 @@ pub(crate) async fn fetch_json_timed(
     context: Arc<FoxyContext>,
     url: &str,
 ) -> Result<(Value, FetchJsonTiming), Box<dyn std::error::Error + Send + Sync>> {
-    fetch_json_timed_with_cache(context, url, None).await
+    fetch_json_timed_with_cache(context, url, None, false).await
 }
 
 /// Like [`fetch_json_timed`], revalidating against the context's manifest cache.
@@ -58,13 +58,23 @@ pub(crate) async fn fetch_manifest_json_timed<T: DeserializeOwned + Send + 'stat
             });
         });
     }
-    fetch_json_timed_with_cache(context, url, cache.as_deref()).await
+    fetch_json_timed_with_cache(context, url, cache.as_deref(), false).await
+}
+
+/// Recovery must not recreate a bad graph from a stale HTTP 304 response.
+pub(crate) async fn fetch_manifest_json_timed_fresh<T: DeserializeOwned + Send + 'static>(
+    context: Arc<FoxyContext>,
+    url: &str,
+) -> Result<(T, FetchJsonTiming), Box<dyn std::error::Error + Send + Sync>> {
+    let cache = context.manifest_cache.clone();
+    fetch_json_timed_with_cache(context, url, cache.as_deref(), true).await
 }
 
 async fn fetch_json_timed_with_cache<T: DeserializeOwned + Send + 'static>(
     context: Arc<FoxyContext>,
     url: &str,
     cache: Option<&ManifestCache>,
+    fresh: bool,
 ) -> Result<(T, FetchJsonTiming), Box<dyn std::error::Error + Send + Sync>> {
     debug!("Fetching JSON from {}", url);
 
@@ -82,7 +92,7 @@ async fn fetch_json_timed_with_cache<T: DeserializeOwned + Send + 'static>(
             tokio::time::sleep(Duration::from_millis(delay)).await;
         }
 
-        match fetch_json_single(&context, url, cache).await {
+        match fetch_json_single(&context, url, cache, fresh).await {
             Ok(result) => return Ok(result),
             Err(err) => {
                 warn!(
@@ -103,19 +113,24 @@ async fn fetch_json_single<T: DeserializeOwned + Send + 'static>(
     context: &FoxyContext,
     url: &str,
     cache: Option<&ManifestCache>,
+    fresh: bool,
 ) -> Result<(T, FetchJsonTiming), Box<dyn std::error::Error + Send + Sync>> {
     let download_start = Instant::now();
-    let cached_validators = match cache {
-        Some(cache) => {
+    let cached_validators = match (cache, fresh) {
+        (_, true) => None,
+        (Some(cache), false) => {
             let (cache, key) = (cache.clone(), url.to_owned());
             tokio::task::spawn_blocking(move || cache.validators(&key))
                 .await
                 .ok()
                 .flatten()
         }
-        None => None,
+        (None, false) => None,
     };
     let mut request = context.client.get(url);
+    if fresh {
+        request = request.header(reqwest::header::CACHE_CONTROL, "no-cache");
+    }
     if let Some(validators) = cached_validators.as_ref() {
         if let Some(etag) = validators.etag.as_deref() {
             request = request.header(reqwest::header::IF_NONE_MATCH, etag);
@@ -217,7 +232,8 @@ async fn fetch_json_single<T: DeserializeOwned + Send + 'static>(
             if let Err(err) = cache.store(&key, &validators, &body) {
                 warn!("Manifest cache could not keep {key}: {err}");
             }
-        });
+        })
+        .await?;
     }
 
     Ok((
@@ -344,6 +360,94 @@ mod tests {
         (url, full)
     }
 
+    fn spawn_fresh_manifest_server(with_validators: bool) -> (String, [Arc<AtomicUsize>; 4]) {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/manifest.json", listener.local_addr().unwrap());
+        let old_validator_requests = Arc::new(AtomicUsize::new(0));
+        let current_validator_requests = Arc::new(AtomicUsize::new(0));
+        let no_cache_requests = Arc::new(AtomicUsize::new(0));
+        let fresh_conditional_requests = Arc::new(AtomicUsize::new(0));
+        let stats = [
+            old_validator_requests.clone(),
+            current_validator_requests.clone(),
+            no_cache_requests.clone(),
+            fresh_conditional_requests.clone(),
+        ];
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let old_validator_requests = old_validator_requests.clone();
+                let current_validator_requests = current_validator_requests.clone();
+                let no_cache_requests = no_cache_requests.clone();
+                let fresh_conditional_requests = fresh_conditional_requests.clone();
+                std::thread::spawn(move || {
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                            return;
+                        }
+                        let mut validator = None;
+                        let mut no_cache = false;
+                        loop {
+                            let mut header = String::new();
+                            if reader.read_line(&mut header).unwrap_or(0) == 0 {
+                                return;
+                            }
+                            let header = header.trim();
+                            if header.is_empty() {
+                                break;
+                            }
+                            if let Some((name, value)) = header.split_once(": ") {
+                                if name.eq_ignore_ascii_case("if-none-match") {
+                                    validator = Some(value.to_owned());
+                                }
+                                if name.eq_ignore_ascii_case("if-modified-since") {
+                                    validator = Some(value.to_owned());
+                                }
+                                no_cache |= name.eq_ignore_ascii_case("cache-control")
+                                    && value.eq_ignore_ascii_case("no-cache");
+                            }
+                        }
+                        if no_cache {
+                            no_cache_requests.fetch_add(1, Ordering::SeqCst);
+                            if validator.is_some() {
+                                fresh_conditional_requests.fetch_add(1, Ordering::SeqCst);
+                            }
+                        }
+                        let response = match validator.as_deref() {
+                            Some("\"v1\"") => {
+                                old_validator_requests.fetch_add(1, Ordering::SeqCst);
+                                "HTTP/1.1 304 Not Modified\r\nETag: \"v1\"\r\nContent-Length: 0\r\n\r\n".to_owned()
+                            }
+                            Some("\"v2\"") => {
+                                current_validator_requests.fetch_add(1, Ordering::SeqCst);
+                                "HTTP/1.1 304 Not Modified\r\nETag: \"v2\"\r\nContent-Length: 0\r\n\r\n".to_owned()
+                            }
+                            _ => {
+                                let body = r#"{"version":2}"#;
+                                let etag = if with_validators {
+                                    "ETag: \"v2\"\r\n"
+                                } else {
+                                    ""
+                                };
+                                format!(
+                                    "HTTP/1.1 200 OK\r\n{etag}Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                                    body.len()
+                                )
+                            }
+                        };
+                        if stream.write_all(response.as_bytes()).is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        (url, stats)
+    }
+
     #[test]
     fn a_body_parses_after_leading_bytes_and_line_breaks() {
         let body = b"\xEF\xBB\xBF{\r\n  \"files\": [1, 2]\r\n}\r\n";
@@ -409,5 +513,64 @@ mod tests {
         assert!(!timing.cached);
         assert_eq!(third, first);
         assert_eq!(full.load(Ordering::SeqCst), 2);
+    }
+
+    async fn assert_fresh_manifest_fetch(with_validators: bool) {
+        let (url, stats) = spawn_fresh_manifest_server(with_validators);
+        let space = tempfile::tempdir().unwrap();
+        let context = Arc::new(
+            FoxyContext::new(
+                crate::core::tasks::db_turso::build_test_database().await,
+                reqwest::Client::new(),
+            )
+            .with_manifest_cache(ManifestCache::in_space(space.path())),
+        );
+        let cache = context.manifest_cache.clone().unwrap();
+        cache
+            .store(
+                &url,
+                &Validators {
+                    etag: Some("\"v1\"".to_owned()),
+                    last_modified: Some("yesterday".to_owned()),
+                },
+                br#"{"version":1}"#,
+            )
+            .unwrap();
+
+        let (fresh, timing) = fetch_manifest_json_timed_fresh::<Value>(context.clone(), &url)
+            .await
+            .unwrap();
+        assert!(!timing.cached);
+        assert_eq!(fresh, serde_json::json!({"version": 2}));
+        assert_eq!(
+            cache
+                .validators(&url)
+                .and_then(|validators| validators.etag)
+                .as_deref(),
+            with_validators.then_some("\"v2\"")
+        );
+
+        let (followup, timing) = fetch_manifest_json_timed::<Value>(context, &url)
+            .await
+            .unwrap();
+        assert_eq!(timing.cached, with_validators);
+        assert_eq!(followup, fresh);
+        assert_eq!(stats[0].load(Ordering::SeqCst), 0);
+        assert_eq!(
+            stats[1].load(Ordering::SeqCst),
+            usize::from(with_validators)
+        );
+        assert_eq!(stats[2].load(Ordering::SeqCst), 1);
+        assert_eq!(stats[3].load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_fresh_manifest_fetch_bypasses_and_replaces_cached_validators() {
+        assert_fresh_manifest_fetch(true).await;
+    }
+
+    #[tokio::test]
+    async fn a_fresh_response_without_validators_retires_the_old_cache_entry() {
+        assert_fresh_manifest_fetch(false).await;
     }
 }

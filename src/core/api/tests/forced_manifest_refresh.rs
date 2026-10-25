@@ -3,6 +3,7 @@ use crate::core::api::quick_scan::{
     collect_unexpected_files_for_repo_mods, delete_unexpected_local_files,
 };
 use crate::core::tasks::remote_repository::remote_repository;
+use crate::core::utils::manifest_cache::{ManifestCache, Validators};
 use crate::ui::types::HashAlgorithmPreference;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -10,6 +11,7 @@ async fn assert_pending_manifest_refresh(
     local_checksum: &str,
     manual_copy: bool,
     fail_manifest: bool,
+    invalid_manifest: bool,
 ) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let remote_url = format!("http://{}/", listener.local_addr().unwrap());
@@ -35,6 +37,13 @@ async fn assert_pending_manifest_refresh(
                 requests.fetch_add(1, Ordering::Relaxed);
                 if fail_manifest {
                     ("404 Not Found", "{}")
+                } else if invalid_manifest {
+                    (
+                        "200 OK",
+                        r#"{"files":[{"path":"old.bin","checksum":"FILE","length":4,"parts":[{"path":"old.bin","checksum":"PART","start":0,"length":5}]}]}"#,
+                    )
+                } else if request.to_ascii_lowercase().contains("if-none-match:") {
+                    ("304 Not Modified", "")
                 } else {
                     (
                         "200 OK",
@@ -104,8 +113,15 @@ async fn assert_pending_manifest_refresh(
     }
     let obsolete_file = directory.path().join("@mod_01/obsolete.bin");
     std::fs::write(&obsolete_file, b"old").unwrap();
+    let cache = ManifestCache::in_space(directory.path());
+    cache.store(
+        &format!("{remote_url}@mod_01/mod.srf"),
+        &Validators { etag: Some("\"stale\"".to_string()), last_modified: None },
+        br#"{"files":[{"path":"old.bin","checksum":"FILE","length":4,"parts":[{"path":"old.bin","checksum":"PART","start":0,"length":4}]}]}"#,
+    ).unwrap();
     let context = Arc::new(
         FoxyContext::new(db, reqwest::Client::new())
+            .with_manifest_cache(cache)
             .with_target_local_path(&local_path)
             .with_forced_mod_refreshes(HashSet::from(["@mod_01".to_string()])),
     );
@@ -118,7 +134,7 @@ async fn assert_pending_manifest_refresh(
         HashAlgorithmPreference::PreferSwifty,
     )
     .await;
-    if fail_manifest {
+    if fail_manifest || invalid_manifest {
         assert!(metadata.is_none());
         assert!(manifest_requests.load(Ordering::Relaxed) > 0);
         assert_eq!(std::fs::read(&copied_file).unwrap(), b"data");
@@ -179,15 +195,20 @@ async fn assert_pending_manifest_refresh(
 
 #[tokio::test]
 async fn pending_manifest_refresh_preserves_published_manual_copy_with_clean_repo_checksum() {
-    assert_pending_manifest_refresh("REPO", true, false).await;
+    assert_pending_manifest_refresh("REPO", true, false, false).await;
 }
 
 #[tokio::test]
 async fn pending_manifest_refresh_queues_missing_file_with_unchanged_remote_graph() {
-    assert_pending_manifest_refresh("LOCAL", false, false).await;
+    assert_pending_manifest_refresh("LOCAL", false, false, false).await;
 }
 
 #[tokio::test]
 async fn pending_manifest_refresh_failure_refuses_stale_metadata_and_preserves_manual_copy() {
-    assert_pending_manifest_refresh("REPO", true, true).await;
+    assert_pending_manifest_refresh("REPO", true, true, false).await;
+}
+
+#[tokio::test]
+async fn pending_manifest_refresh_rejects_invalid_layout_and_preserves_manual_copy() {
+    assert_pending_manifest_refresh("REPO", true, false, true).await;
 }

@@ -10,13 +10,16 @@ use crate::core::tasks::init_database::{
 use crate::core::tasks::remote_file_parts::{
     FilePartData, FilePartsPayload, remote_file_parts_batch,
 };
-use crate::core::utils::fetch_json::{FetchJsonTiming, fetch_manifest_json_timed};
+use crate::core::utils::fetch_json::FetchJsonTiming;
 use log::{debug, error, info, warn};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Semaphore;
+
+mod manifest;
+use manifest::fetch_validated_manifest;
 
 /// Typed manifest for both mod.srf (PascalCase) and foxy_addon.json (camelCase).
 /// Uses serde aliases so one struct deserializes either format.
@@ -542,6 +545,10 @@ pub(crate) async fn fetch_mod_file_manifest(
 ) -> Result<StagedModFiles, ModRecheckStats> {
     let mod_start = Instant::now();
     let is_foxy_mode = repository_parent.foxy_mode.is_foxy();
+    let fresh = context.recheck_level >= RecheckLevel::MOD
+        || context
+            .forced_mod_refreshes
+            .contains(&mod_parent.name.to_lowercase());
 
     let files_metadata_url = if is_foxy_mode {
         format!("{}/foxy_addon.json", mod_parent.remote_path)
@@ -551,7 +558,7 @@ pub(crate) async fn fetch_mod_file_manifest(
     debug!("Loading mod files metadata from: {}", files_metadata_url);
 
     let (manifest, http_timing): (ModManifest, FetchJsonTiming) =
-        match fetch_manifest_json_timed(context.clone(), &files_metadata_url).await {
+        match fetch_validated_manifest(context.clone(), &files_metadata_url, fresh).await {
             Ok(r) => r,
             Err(e) if is_foxy_mode => {
                 // FoxyMode failed - try falling back to mod.srf (HybridMode safety net)
@@ -560,7 +567,7 @@ pub(crate) async fn fetch_mod_file_manifest(
                     "foxy_addon.json fetch failed for {}, trying mod.srf fallback: {}",
                     mod_parent.remote_path, e
                 );
-                match fetch_manifest_json_timed(context.clone(), &fallback_url).await {
+                match fetch_validated_manifest(context.clone(), &fallback_url, fresh).await {
                     Ok(r) => r,
                     Err(e2) => {
                         error!(
@@ -666,6 +673,9 @@ pub(crate) async fn apply_mod_file_rows(
                 let local_file_ready =
                     file_present_with_expected_len(&file.local_path, file.length);
                 if remote_graph_unchanged
+                    && !context
+                        .forced_mod_refreshes
+                        .contains(&mod_parent.name.to_lowercase())
                     && graph_complete
                     && local_file_ready
                     && context.recheck_level < RecheckLevel::FILE
@@ -1092,7 +1102,11 @@ mod tests {
         }
     }
 
-    async fn assert_clean_file_refreshes_parts(previous_remote: &str, seed_part: bool) {
+    async fn assert_clean_file_refreshes_parts(
+        previous_remote: &str,
+        seed_part: bool,
+        forced: bool,
+    ) {
         let directory = tempfile::tempdir().unwrap();
         let local_path = directory.path().join("file.bin");
         std::fs::write(&local_path, b"data").unwrap();
@@ -1101,6 +1115,9 @@ mod tests {
             reqwest::Client::new(),
         );
         context.queue_download_targets = false;
+        if forced {
+            context.forced_mod_refreshes.insert("@mod_01".to_string());
+        }
         let context = Arc::new(context);
         let db = context.db();
         db.execute(
@@ -1154,11 +1171,16 @@ mod tests {
 
     #[tokio::test]
     async fn matching_local_file_checksum_does_not_hide_missing_parts() {
-        assert_clean_file_refreshes_parts("NEW", false).await;
+        assert_clean_file_refreshes_parts("NEW", false, false).await;
     }
 
     #[tokio::test]
     async fn matching_local_file_checksum_does_not_hide_changed_remote_parts() {
-        assert_clean_file_refreshes_parts("OLD", true).await;
+        assert_clean_file_refreshes_parts("OLD", true, false).await;
+    }
+
+    #[tokio::test]
+    async fn forced_manifest_refresh_replaces_parts_with_unchanged_file_checksum() {
+        assert_clean_file_refreshes_parts("NEW", true, true).await;
     }
 }

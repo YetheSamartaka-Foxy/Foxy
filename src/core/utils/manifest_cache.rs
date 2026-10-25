@@ -1,7 +1,7 @@
 //! Mod manifests kept beside `database.db` with the validators the server
 //! sent, so a check after a database wipe asks the server whether each
 //! manifest changed instead of downloading all of them again. The server
-//! answers every use, so a cached body is never served stale.
+//! answers ordinary reads; forced refreshes request a fresh body.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -123,6 +123,7 @@ impl ManifestCache {
         body: &[u8],
     ) -> std::io::Result<()> {
         if validators.is_empty() {
+            self.forget(url);
             return Ok(());
         }
         std::fs::create_dir_all(&self.dir)?;
@@ -177,6 +178,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cache = ManifestCache::in_space(dir.path());
         cache.store("u/a", &Validators::default(), b"{}").unwrap();
+        assert!(cache.validators("u/a").is_none());
+        cache.store("u/a", &validators("\"old\""), b"{}").unwrap();
+        cache.store("u/a", &Validators::default(), b"[1]").unwrap();
         assert!(cache.validators("u/a").is_none());
     }
 

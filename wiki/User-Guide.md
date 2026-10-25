@@ -205,7 +205,9 @@ Available from **Repository Settings > Configuration**, this performs a full rem
 
 ### Understanding the update flow
 
-Before preparing an update, Foxy refreshes the manifests for pending addons even if the repository checksum is unchanged. This lets it download files missing from older metadata and recognize manually copied files that the server publishes before cleaning up obsolete files.
+Before preparing an update, Foxy refreshes the manifests and file-part metadata for pending addons even if the repository checksum is unchanged. These reads and integrity rechecks bypass cached HTTP validators. This lets it download files missing from older metadata and recognize manually copied files that the server publishes before cleaning up obsolete files.
+
+Foxy checks that published file parts cover the declared file size before applying a manifest. It retries inconsistent metadata with a fresh request and stops before cleanup if it remains invalid. A database wipe can reuse server-validated manifest caches, but invalid cached layouts are refreshed automatically. If fresh metadata is still inconsistent, the repository administrator must republish it. Downloaded files must pass checksum verification before the update succeeds; a failure restores the previous files and invalidates remote metadata for the next attempt.
 
 1. Run **Refresh** to check the remote server.
 2. If updates are available, an **Update ready** banner appears on the repository.

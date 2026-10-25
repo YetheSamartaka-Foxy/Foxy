@@ -20,6 +20,7 @@ use super::hashing::{
 };
 use super::remote_recovery::invalidate_remote_graph;
 use super::summary::{PipelineSummary, StageEntry};
+use super::verification::verify_downloaded_files;
 use crate::core::api::FileDiffKind;
 use crate::core::db::{DbValue, FoxyDb, params};
 use crate::core::models::download_target_file::{
@@ -3572,6 +3573,48 @@ async fn run_repository_pipeline(
             "Failed to finalize repository hash rollup for repo={}",
             normalized_repo_url
         );
+    }
+    let verification = if finalized_hashes {
+        verify_downloaded_files(context.clone(), &normalized_repo_url, &download_file_ids).await
+    } else {
+        Err(anyhow::anyhow!("Failed to finalize downloaded-file checksums"))
+    };
+    if let Err(error) = verification {
+        let message = format!("Update verification failed: {}", error);
+        error!("{}", message);
+        let rollback_error = if let Some(session) = rollback_session.as_ref() {
+            emit_progress!(ProgressEvent::Stage {
+                label: "Reverting changes".into(),
+                percent: 0.0,
+            });
+            let mut rollback = session.lock().await;
+            let restore_result = rollback.restore_all(Some(progress_tx.clone())).await;
+            forget_reverted_hashes(
+                context.clone(),
+                &rollback.touched_file_ids(),
+                "verification failure",
+            )
+            .await;
+            restore_result.err()
+        } else {
+            None
+        };
+        if let Err(error) = invalidate_remote_graph(context.clone(), &normalized_repo_url).await {
+            warn!(
+                "Could not invalidate remote metadata after verification failure: {}",
+                error
+            );
+        }
+        if let Some(error) = rollback_error {
+            let message = format!("{} Rollback also failed: {}", message, error);
+            error!("{}", message);
+            summary.log_table("failed-rollback");
+            emit_progress!(ProgressEvent::Failed(message));
+            return;
+        }
+        summary.log_table("failed-verification");
+        emit_progress!(ProgressEvent::Failed(message));
+        return;
     }
     info!("Hash stage finished in {:.2?}", hash_start.elapsed());
     // Only the files this run wrote or patched changed on disk; the rest of the

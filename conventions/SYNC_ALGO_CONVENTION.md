@@ -176,8 +176,16 @@ not prove that the stored remote graph is unchanged or complete.
 
 Explicit pending-addon manifest refreshes bypass both repository skip gates and
 the selected addons' unchanged-graph gate, even when published checksums match.
+They also bypass conditional HTTP validators and the selected files' part-graph
+reuse gate. Integrity metadata reads bypass conditional HTTP validators too.
 Refresh those manifests before queue construction and unexpected-file cleanup;
 unselected clean addons and ordinary clean startup scans keep their fast paths.
+
+Before applying an addon manifest, validate nonnegative file/part spans and
+contiguous ordered part coverage ending at the declared file length. Empty
+entries remain valid, and whole-file manifests may omit parts. Retry invalid
+metadata once without HTTP validators, including after a database wipe; reject
+an invalid fresh response before file-row upserts or unexpected-file cleanup.
 
 HTTP 404 and 410 during a file transfer stop the run without retrying the same
 URL or reporting user cancellation. After all transfer and hash workers settle
@@ -1065,6 +1073,12 @@ After patch or full download succeeds:
 5. Roll up repository checksum from ordered addons.
 6. Reuse the incremental hash tree for repository rollup, final content refresh,
    and final diff when it is already loaded.
+   Require every downloaded file to remain linked to the selected repository
+   instance and have matching nonempty local/remote checksums before refreshing
+   baselines, propagating state, committing rollback, or emitting success. On
+   verification or finalization failure, restore touched files, forget reverted
+   local hashes, invalidate remote metadata and manifest validators (even if
+   rollback fails), and report failure.
 7. If all affected tree checksums match remote, refresh content hashes for those
    files/addons/repository. Repository content hash may be refreshed only from a
    full tree or equivalent complete addon content state.
