@@ -1,0 +1,4 @@
+interface:
+  display_name: "Sync Regression Check"
+  short_description: "Check sync changes against Foxy's correctness guardrails."
+  default_prompt: "Use $foxy-sync-regression-check to assess this sync change against the repo's regression guardrails."

@@ -1,6 +1,6 @@
 ---
 name: foxy-gui-driver
-description: "Design, implement, or use Foxy's agentic GUI driver for Codex, Claude Code, or similar coding agents. Use when adding or debugging a Playwright-like desktop automation path for the egui/eframe UI: launching Foxy in GUI mode, opening FoxyView screens, inspecting visible text and accessibility state, reading FPS/performance status, simulating clicks/scroll/keyboard input, taking screenshots, detecting egui multi-pass/relayout regressions, or writing agent-driven UI smoke tests with Foxy's local harness and egui_mcp."
+description: "Drive or debug Foxy's egui desktop UI through the local agent-gui harness and egui_mcp. Use for semantic snapshots, screenshots, input simulation, accessibility checks, and FPS or relayout investigations."
 ---
 
 # Foxy GUI Driver
@@ -326,10 +326,10 @@ Remove-Item -Recurse -Force $dir
 Docs-only change to this skill:
 
 ```powershell
-py -3 "${env:USERPROFILE}\.codex\skills\.system\skill-creator\scripts\quick_validate.py" skills\foxy-gui-driver
+cargo agent-check
 ```
 
-Harness/CLI code change - follow `AGENTS.md`: targeted tests first, then `cargo fmt`, `cargo clippy --all-targets --all-features -- -D warnings`, then `cargo test`.
+Harness/CLI code change - follow `conventions/TESTING_CONVENTIONS.md`: targeted tests first, format changed code without unrelated churn, then workspace Clippy and tests. Validate the affected runtime flow in an isolated configuration.
 
 ## Example agent tasks
 

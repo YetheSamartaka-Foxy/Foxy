@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cancellation Recovery"
+  short_description: "Trace cancellation cleanup and restored Foxy state."
+  default_prompt: "Use $foxy-cancellation-recovery to trace this cancellation path and its recovery guarantees."

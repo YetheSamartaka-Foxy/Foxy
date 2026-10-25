@@ -1,0 +1,4 @@
+interface:
+  display_name: "Foxy Test Kit"
+  short_description: "Run isolated Foxy UX and performance cases"
+  default_prompt: "Use $foxy-testkit to run the requested isolated case and report its correctness and performance evidence."

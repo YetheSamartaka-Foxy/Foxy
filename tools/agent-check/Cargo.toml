@@ -1,0 +1,12 @@
+[package]
+name = "agent-check"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+publish = false
+
+[workspace]
+
+[dependencies]
+serde_yaml_ng = "0.10"
+toml = "1.0"

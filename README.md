@@ -485,11 +485,14 @@ foxy-server-backend-cli new-app-update \
 
 ## Validation
 
+Format changed Rust code without rewriting unrelated files; see [testing conventions](conventions/TESTING_CONVENTIONS.md) for the existing formatting baseline and targeted checks. Then validate the workspace:
+
 ```bash
-cargo fmt
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --workspace
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo test --locked --workspace
 ```
+
+Agent instructions, skills, and role definitions use the standalone Rust checker `cargo agent-check`. The [skill catalog](skills/README.md) documents Codex and Claude Code discovery, shared workflows, and bounded subagent roles. Standalone helpers have their own validation commands in [tools instructions](tools/AGENTS.md).
 
 ## Contributing
 

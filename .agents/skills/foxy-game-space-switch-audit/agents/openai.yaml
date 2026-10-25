@@ -1,0 +1,4 @@
+interface:
+  display_name: "Foxy Game Space Switch Audit"
+  short_description: "Check state, storage, and task isolation on switch"
+  default_prompt: "Use $foxy-game-space-switch-audit to trace space ownership across this runtime switch."

@@ -1,6 +1,6 @@
 ---
 name: foxy-testkit
-description: "Run Foxy's developer-machine test kit: UX click-through cases through the agent GUI driver, and downloader/checker/database performance cases with an append-only ledger, baselines, regression verdicts, and WAL versus MVCC comparison."
+description: "Run Foxy's isolated developer-machine UX and performance cases, including regression verdicts, calibration, ledger evidence, and WAL versus MVCC comparisons. Use for explicit testkit runs or changes."
 argument-hint: "[case name, suite filter, or 'perf'/'ux']"
 ---
 

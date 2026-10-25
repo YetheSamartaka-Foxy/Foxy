@@ -1,0 +1,4 @@
+interface:
+  display_name: "Foxy Performance Experiment"
+  short_description: "Plan and interpret controlled performance runs"
+  default_prompt: "Use $foxy-performance-experiment to define a controlled Foxy performance experiment and report comparable evidence."

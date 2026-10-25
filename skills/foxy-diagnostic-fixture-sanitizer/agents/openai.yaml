@@ -1,0 +1,4 @@
+interface:
+  display_name: "Diagnostic Fixture Sanitizer"
+  short_description: "Sanitize diagnostic fixtures without losing useful evidence."
+  default_prompt: "Use $foxy-diagnostic-fixture-sanitizer to prepare this diagnostic material for a privacy-safe Foxy fixture."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Foxy Egui Responsiveness"
+  short_description: "Measure UI frame and input responsiveness"
+  default_prompt: "Use $foxy-egui-responsiveness to reproduce and measure this Foxy UI responsiveness issue."

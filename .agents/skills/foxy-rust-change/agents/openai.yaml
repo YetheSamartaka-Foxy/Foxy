@@ -1,0 +1,5 @@
+interface:
+  display_name: "Foxy Rust Changes"
+  short_description: "Implement and validate focused Foxy Rust changes"
+  default_prompt: "Use $foxy-rust-change to trace and fix the reported Rust behavior with focused validation."
+

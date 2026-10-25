@@ -38,12 +38,15 @@ Keep this file as the compact root router. Put detailed conventions in `conventi
 - Server-side repository generator lives in `foxy-server-backend-cli/`; standalone helper tools live in `tools/`.
 - The developer-machine test kit lives in `testkit/`: three Rust workspace members (`runner/` = `foxy-testkit`, `oracle/` = `foxy-testkit-oracle`, `mutator/` = `foxy-testkit-mutate`) plus `cases/`, `ledger/`, `runs/`, and `origin/data/` (those four git-ignored; the crates, docs, and examples are tracked). The kit crates are covered by workspace clippy and `cargo test`, but the *cases* never run from `cargo test`, CI, or a hook.
 - User-facing documentation is `README.md`, `wiki/User-Guide.md` (desktop app and client CLI), `wiki/Server-Admin-Guide.md` (`foxy-server-backend-cli`, hosting, app update manifests), and the in-app Help page (`src/ui/views/help.rs`, strings in `src/ui/locales/`).
-- Shareable repo-maintained agent skills live in `skills/`; Claude Code project-skill entrypoints live in `.claude/skills/` and should point back to the repo-maintained source.
+- Shareable agent workflows live in `skills/`; Codex discovery loaders in `.agents/skills/` and Claude Code loaders in `.claude/skills/` point back there. Paired roles live in `.codex/agents/` and `.claude/agents/`.
 - Runtime data defaults to `%APPDATA%\Foxy` on Windows and can be overridden with `FOXY_CONFIG_DIR` or CLI `--config-dir`. Only app-global files (`app_settings.json`, `games.json`, logs, backups, window state) live at that root; everything else is per game space under `games/<space_id>/`.
 
 ---
 
 ## Load when needed
+- Rust implementation and compiler feedback: `skills/foxy-rust-change/SKILL.md`, then the domain conventions below.
+- Agent instructions, skill discovery, subagent roles, or their structural checker: `skills/foxy-agent-maintenance/SKILL.md` and `conventions/AGENT_WORKFLOWS.md`.
+- Specialized workflows are indexed by category in `skills/README.md`: diagnosis/reproduction, sync/database integrity, performance, desktop interaction, and platform/release work. Select the matching skill for its evidence and verification contract; keep the shared driver and testkit mechanics in their existing skills.
 - UI layout, app state, widgets, palette, fonts, or egui interaction: `conventions/UI_CONVENTIONS.md` and `src/ui/AGENTS.md`.
 - Agentic GUI automation, semantic UI snapshots, screenshots, FPS probes, simulated scroll/click/key input, or Codex/Claude desktop driver work: `skills/foxy-gui-driver/SKILL.md`, then `conventions/UI_CONVENTIONS.md` and `src/ui/AGENTS.md` if UI code changes are needed.
 - User-facing text, locales, pluralization, RTL, i18n checker changes, or exact-English fallback cleanup: `skills/foxy-locale-translator/SKILL.md` and `conventions/i18n_CONVENTIONS.md`.
@@ -99,22 +102,13 @@ Keep this file as the compact root router. Put detailed conventions in `conventi
 
 ## Autonomous subagent workflows
 
-Tool-neutral policy. Codex follows the current [Codex subagent guidance](https://learn.chatgpt.com/docs/agent-configuration/subagents.md); Claude Code applies the same rules through its `Agent` tool. Everything below holds regardless of which harness is running.
+Use the paired roles and brief/handoff contract in `conventions/AGENT_WORKFLOWS.md` when delegating. Both clients expose `explorer` (source mapping), `worker` (owned-file implementation), `reviewer` (correctness), and `async-safety-reviewer` (task/lock/cancellation safety).
 
-- Use subagents for at least two independent, bounded workstreams when parallel work improves coverage or context quality. Good uses include research, code mapping, triage, review, and focused verification.
-- Keep sequential, destructive, or overlapping work in the main agent: schema and DB changes, dependency edits, `cargo fmt`, anything touching runtime `database.db`, logs, caches, or user config.
-- The main agent owns integration, cross-cutting edits, final verification, and the answer.
-- Prefer read-only exploration with a concrete scope, expected evidence, and no unrelated edits.
-- Delegate writes only across disjoint files, assign per-file ownership, preserve user changes, and review the combined diff before handoff.
-- Wait for required results and resolve contradictions from primary evidence (the code, `sql/turso_schema.sql`, actual command output), not from a subagent summary.
-- Subagents start without the main agent's context: hand each one the relevant `conventions/` files and nested `AGENTS.md` from Load when needed, plus the invariants its scope touches.
-- Run repo validation (`cargo fmt`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test`) once in the main agent after integration, not concurrently in several subagents.
-- Say in the final response when a conclusion rests on subagent findings you did not verify yourself.
-
-Harness mapping:
-- Codex: define and invoke subagents per the guidance linked above.
-- Claude Code: use the `Agent` tool. `Explore` for read-only fan-out search, `Plan` for design, `general-purpose` for multi-step work, plus any repo-local `.claude/agents/*.md` definitions. Continue an existing agent with `SendMessage` rather than respawning a cold one.
-- Some Claude Code sessions are configured to spawn subagents only on explicit user request. When that applies, do the work single-agent and note the constraint instead of skipping scope.
+- Delegate independent bounded work when parallel investigation or separate context materially helps. Keep small, sequential, and overlapping work in the main agent; do not spawn just to fill a quota.
+- Give each child a self-contained brief with scope, relevant nested instructions/conventions, invariants, expected evidence, and a stopping condition. In Codex prefer `fork_turns: "none"`; in Claude Code use the role as `subagent_type`. Inherit session models and permissions unless the user requests otherwise.
+- Assign writes only across disjoint files and preserve user changes. Keep schema/DB changes, dependencies/lockfiles, shared module wiring, broad formatting, and runtime state in the main agent. Reuse agents for related follow-ups; avoid nested delegation by default.
+- The main agent owns integration, primary-source verification of consequential findings, final checks once after integration, and the answer. Wait for required results. Say when a conclusion relies on unverified subagent findings.
+- Follow the client's actual availability and session limits. If delegation is unavailable, complete the work single-agent and note the limitation only when relevant.
 
 ---
 
@@ -129,7 +123,8 @@ Harness mapping:
 ---
 
 ## Validation
-- Required for code changes when feasible: `cargo fmt`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test`.
+- Follow `conventions/TESTING_CONVENTIONS.md`: format changed code without unrelated churn, then `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` and `cargo test --locked --workspace` when feasible. Standalone tools use their own manifests and checks in `tools/AGENTS.md`.
+- Agent instruction, skill, or role changes also run `cargo agent-check`; instruction-only changes do not need an application build.
 - Start with targeted tests/checks close to the changed code, then run broader checks once the fix is stable.
 - Run `cargo run` only when the change affects UI startup, CLI behavior, app bootstrapping, or user-facing runtime flows.
 - If clippy reports warnings, fix safe straightforward ones. Skip only when fixing would change semantics or require risky refactoring, and note it explicitly.

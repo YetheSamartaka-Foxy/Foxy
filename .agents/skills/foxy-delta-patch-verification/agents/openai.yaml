@@ -1,0 +1,4 @@
+interface:
+  display_name: "Delta Patch Verification"
+  short_description: "Verify patch coverage, integrity, and fallback behavior."
+  default_prompt: "Use $foxy-delta-patch-verification to verify this Foxy delta-patch result or code path."

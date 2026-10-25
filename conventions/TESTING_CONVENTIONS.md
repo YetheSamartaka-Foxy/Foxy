@@ -4,12 +4,23 @@
 
 - Start with targeted checks for the code you changed, then broaden to full checks before final handoff when feasible.
 - Required final checks for code changes:
-  - `cargo fmt`
-  - `cargo clippy --all-targets --all-features -- -D warnings`
-  - `cargo test`
+  - Format changed code without rewriting unrelated files.
+  - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
+  - `cargo test --locked --workspace`
 - Run `cargo run` when the change affects UI startup, CLI behavior, app bootstrapping, or user-facing runtime flows. Skip it for docs-only changes and note that it was not needed.
-- The tree is **not** rustfmt-clean: many untouched files report `rustfmt --check` diffs. Never run a blanket `cargo fmt` over the repo - it will rewrite unrelated files and bury your change. Format only the code you touched (e.g. `cargo fmt -- <changed files>` or rely on editor format-on-save for the edited region).
+- The tree has existing formatting differences. Do not run a blanket writing `cargo fmt` over it. Use editor formatting for the changed region, or `rustfmt --edition 2024 <changed-leaf.rs>` and inspect the diff. Formatting a file with module declarations may visit child modules, so check its scope first. `cargo fmt -- <files>` does not reliably restrict Cargo's file selection. A read-only `cargo fmt --all -- --check` is safe for reporting the workspace baseline; distinguish unrelated differences from changes introduced by the task.
 - If clippy reports warnings, including pre-existing warnings in untouched files, resolve them when the fix is safe and straightforward (for example `collapsible_if`, `map_or` -> `is_none_or`, or `matches!`). Skip only when fixing would change semantics or require risky refactoring, and note that explicitly.
+
+## Selecting checks
+
+- During iteration, select the affected crate: `cargo check --locked -p Foxy --all-targets`, `cargo test --locked -p Foxy <filter>`, or the corresponding workspace package. A non-virtual workspace defaults to its root package, so an unqualified `cargo test` does not cover all members. Use `--workspace` at integration.
+- Check that filtered tests actually ran. A test filter reduces execution, not package compilation; `cargo check` also does not verify linking or runtime behavior.
+- For feature-dependent changes, test the affected feature explicitly or use `--all-features` when the combined set is valid. All-features checks do not exercise every feature combination or other platforms.
+- Standalone helpers under `tools/` have separate workspaces and lockfiles. Use their `--manifest-path` commands in `tools/AGENTS.md`; root workspace checks do not cover them. For a standalone-only change, run those checks rather than rebuilding the application.
+- For agent instructions, skills, loaders, and role changes, run `cargo agent-check` and `git diff --check`. The focused `Agent setup` CI workflow checks the helper and metadata without building Foxy. Documentation-only changes need no application build.
+- Keep Cargo builds, Clippy, and tests sequential in the main agent so shared target directories are not contended. Do not run developer-machine testkit cases from unit tests, CI, or hooks.
+
+See [Cargo package selection](https://doc.rust-lang.org/cargo/commands/cargo-check.html), [test selection](https://doc.rust-lang.org/cargo/commands/cargo-test.html), and [feature behavior](https://doc.rust-lang.org/cargo/reference/features.html).
 
 ## Unit tests
 

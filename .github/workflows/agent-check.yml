@@ -1,0 +1,52 @@
+name: Agent setup
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '**/AGENTS.md'
+      - '**/CLAUDE.md'
+      - '.agents/**'
+      - '.claude/**'
+      - '.codex/agents/**'
+      - '.cargo/config.toml'
+      - 'skills/**'
+      - 'tools/agent-check/**'
+      - 'conventions/AGENT_WORKFLOWS.md'
+      - 'conventions/TESTING_CONVENTIONS.md'
+      - '.github/workflows/agent-check.yml'
+  push:
+    paths:
+      - '**/AGENTS.md'
+      - '**/CLAUDE.md'
+      - '.agents/**'
+      - '.claude/**'
+      - '.codex/agents/**'
+      - '.cargo/config.toml'
+      - 'skills/**'
+      - 'tools/agent-check/**'
+      - 'conventions/AGENT_WORKFLOWS.md'
+      - 'conventions/TESTING_CONVENTIONS.md'
+      - '.github/workflows/agent-check.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  agent-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal --component rustfmt --component clippy
+          rustup default 1.96.0
+      - name: Check helper formatting
+        run: cargo fmt --manifest-path tools/agent-check/Cargo.toml -- --check
+      - name: Lint helper
+        run: cargo clippy --locked --manifest-path tools/agent-check/Cargo.toml --all-targets -- -D warnings
+      - name: Test helper
+        run: cargo test --locked --manifest-path tools/agent-check/Cargo.toml
+      - name: Validate agent setup
+        run: cargo agent-check

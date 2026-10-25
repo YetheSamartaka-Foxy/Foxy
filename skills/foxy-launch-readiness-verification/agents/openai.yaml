@@ -1,0 +1,4 @@
+interface:
+  display_name: "Foxy Launch Readiness Verification"
+  short_description: "Verify Launch and Join checks through dispatch"
+  default_prompt: "Use $foxy-launch-readiness-verification to trace Launch or Join readiness through its final dispatch."
