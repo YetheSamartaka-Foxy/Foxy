@@ -844,6 +844,14 @@ impl Foxy {
                     .unwrap_or_else(|| self.t("Unlimited")),
             ),
             (
+                self.t("CPU Threads"),
+                record
+                    .machine
+                    .cpu_thread_limit
+                    .map(|limit| limit.to_string())
+                    .unwrap_or_else(|| self.t("Auto")),
+            ),
+            (
                 self.t("Extended diagnostics"),
                 yes_no(record.machine.extended_diagnostics),
             ),

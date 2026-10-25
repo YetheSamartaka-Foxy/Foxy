@@ -237,9 +237,8 @@ fn cap_auto_hash_profile(
 }
 
 pub(super) fn hash_cpu_budget() -> usize {
-    let logical_cpus = std::thread::available_parallelism()
-        .map(|cpus| cpus.get())
-        .unwrap_or(CONCURRENCY_LIMIT.max(1));
+    let logical_cpus =
+        crate::core::utils::cpu_threads::cpu_threads().unwrap_or(CONCURRENCY_LIMIT.max(1));
     // Reserve ~25% of cores for the OS, UI thread, and other background work.
     // Floor of 1 ensures at least one worker even on single-core machines.
     ((logical_cpus * 3) / 4).max(1)

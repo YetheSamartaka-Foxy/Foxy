@@ -166,6 +166,25 @@ fn cmd_settings_set(
         state.settings.download_speed_limit_mbps = None;
         changed = true;
     }
+    if let Some(v) = args.cpu_safe_limits {
+        state.settings.cpu_thread_limit_safe = v;
+        changed = true;
+    }
+    if let Some(v) = args.cpu_threads {
+        state.settings.cpu_thread_limit = Some(v);
+        changed = true;
+    }
+    if args.cpu_threads_auto {
+        state.settings.cpu_thread_limit = None;
+        changed = true;
+    }
+    if let Some(threads) = state.settings.cpu_thread_limit.as_mut() {
+        let max_threads = crate::core::utils::cpu_threads::cpu_thread_limit_max(
+            state.settings.cpu_thread_limit_safe,
+            crate::core::utils::cpu_threads::detected_cpu_threads(),
+        );
+        *threads = (*threads).clamp(1, max_threads);
+    }
     crate::ui::types::normalize_settings_launch_behavior(&mut state.settings);
     if let Some(v) = args.locale {
         state.settings.locale = v.trim().to_string();

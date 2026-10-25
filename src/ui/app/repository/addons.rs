@@ -1024,8 +1024,7 @@ fn addon_directory_total_sizes(paths: &[String]) -> Vec<Option<u64>> {
     let workers = if rotational {
         1
     } else {
-        std::thread::available_parallelism()
-            .map(std::num::NonZeroUsize::get)
+        crate::core::utils::cpu_threads::cpu_threads()
             .unwrap_or(1)
             .clamp(1, ADDON_SIZE_SCAN_MAX_WORKERS)
             .min(paths.len())

@@ -110,6 +110,9 @@ impl Foxy {
         if settings_to_save.download_speed_limit_mbps == Some(0) {
             settings_to_save.download_speed_limit_mbps = Some(1);
         }
+        if settings_to_save.cpu_thread_limit == Some(0) {
+            settings_to_save.cpu_thread_limit = Some(1);
+        }
         settings_to_save.font_sizes.clamp_to_limits();
 
         settings_to_save

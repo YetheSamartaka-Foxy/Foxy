@@ -102,6 +102,13 @@ pub struct SettingsViewState {
     pub backup_directory: String,
     #[serde(default = "default_download_speed_limit_mbps")]
     pub download_speed_limit_mbps: Option<u32>,
+    /// Processor threads hashing, scanning and checking plan around; `None`
+    /// is Auto, every processor the system reports.
+    #[serde(default)]
+    pub cpu_thread_limit: Option<u32>,
+    /// Keep `cpu_thread_limit` within the processors the system reports.
+    #[serde(default = "default_cpu_thread_limit_safe")]
+    pub cpu_thread_limit_safe: bool,
     #[serde(default)]
     pub hash_io_profile: HashIoProfilePreference,
     /// After a database reset, restore files the verified-hash record proves
@@ -210,6 +217,10 @@ fn default_locale() -> String {
 
 fn default_download_speed_limit_mbps() -> Option<u32> {
     None
+}
+
+fn default_cpu_thread_limit_safe() -> bool {
+    true
 }
 
 fn default_backup_keep_latest_per_addon() -> u32 {
@@ -330,6 +341,8 @@ impl Default for SettingsViewState {
             temp_directory: String::new(),
             backup_directory: String::new(),
             download_speed_limit_mbps: default_download_speed_limit_mbps(),
+            cpu_thread_limit: None,
+            cpu_thread_limit_safe: default_cpu_thread_limit_safe(),
             hash_io_profile: HashIoProfilePreference::default(),
             trust_verified_hashes: default_trust_verified_hashes(),
             ui_renderer: UiRendererPreference::default(),
@@ -491,5 +504,21 @@ mod verified_hash_setting_tests {
             .remove("trust_verified_hashes");
         let settings: SettingsViewState = serde_json::from_value(saved).unwrap();
         assert!(settings.trust_verified_hashes);
+    }
+}
+
+#[cfg(test)]
+mod cpu_thread_setting_tests {
+    use super::SettingsViewState;
+
+    #[test]
+    fn settings_saved_before_the_option_existed_use_auto_with_safe_limits() {
+        let mut saved = serde_json::to_value(SettingsViewState::default()).unwrap();
+        let object = saved.as_object_mut().unwrap();
+        object.remove("cpu_thread_limit");
+        object.remove("cpu_thread_limit_safe");
+        let settings: SettingsViewState = serde_json::from_value(saved).unwrap();
+        assert_eq!(settings.cpu_thread_limit, None);
+        assert!(settings.cpu_thread_limit_safe);
     }
 }

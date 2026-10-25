@@ -629,6 +629,7 @@ impl Foxy {
             machine: crate::core::benchmarks::BenchmarkMachine {
                 hash_io_profile: self.settings_view_state.hash_io_profile.to_string(),
                 download_speed_limit_mbps: self.settings_view_state.download_speed_limit_mbps,
+                cpu_thread_limit: self.settings_view_state.cpu_thread_limit,
                 extended_diagnostics: self.settings_view_state.extended_diagnostics_logging,
                 ..Default::default()
             },

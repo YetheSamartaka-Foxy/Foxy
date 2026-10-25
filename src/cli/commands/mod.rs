@@ -127,6 +127,10 @@ impl AppState {
         };
         sanitize_settings(&mut settings);
         crate::core::api::set_extended_diagnostics(settings.extended_diagnostics_logging);
+        crate::core::utils::cpu_threads::set_cpu_thread_limit(
+            settings.cpu_thread_limit,
+            settings.cpu_thread_limit_safe,
+        );
 
         let mut repositories: Vec<Repository> =
             read_json_or_default(&Foxy::get_repositories_path())
@@ -303,6 +307,9 @@ fn sanitize_settings(settings: &mut SettingsViewState) {
         migrate_locale_preference(&settings.locale, settings.locale_preference_migrated);
     if settings.download_speed_limit_mbps == Some(0) {
         settings.download_speed_limit_mbps = Some(1);
+    }
+    if settings.cpu_thread_limit == Some(0) {
+        settings.cpu_thread_limit = Some(1);
     }
     settings.app_update_url = settings.app_update_url.trim().to_string();
     if settings.app_update_url.is_empty() {

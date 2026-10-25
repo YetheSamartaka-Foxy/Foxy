@@ -516,6 +516,7 @@ impl Foxy {
                     "When Foxy auto-switches to Glow, it shows a startup notice so you know why the renderer changed. Dismissing the notice clears the notice marker.",
                     "Glow provides an OpenGL fallback for systems where Vulkan, DirectX, drivers, overlays, or WGPU are unstable.",
                     "Choose a Hashing profile in Application settings: Conservative for constrained systems, Balanced for mixed systems, Aggressive for systems that can sustain high concurrency, or Auto to benchmark initial hashing work and pick the fastest profile.",
+                    "CPU Threads in Application settings sets how many processor threads Foxy plans hashing, scanning, and checking work around. Auto uses every detected thread. Safe limits keeps a manual count within the detected threads; turn it off to enter any count.",
                     "Skip unchanged files after a database reset lets Foxy trust files it already verified and that Windows shows as untouched since, instead of reading them again. An integrity recheck always reads every file.",
                     "Foxy profiles runtime memory pressure as normal, constrained, or severe, then uses that tier when choosing hashing and download concurrency.",
                     "Hash scheduling applies safe caps for automatic and manual profiles when memory is constrained or severe.",

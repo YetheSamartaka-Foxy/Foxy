@@ -3,6 +3,7 @@
 - Right-click an addon to open its Steam Workshop or Arma Reforger Workshop page in your browser, including optional and external addons.
 - Generic game spaces can now use repositories, including repositories that deliver the game itself. The game shows in its own Game section instead of the addon list, always stays up to date, and Launch starts it directly without any game directory or Steam setup. Updates to the game download only the changed parts of its files.
 - Server tool: `new --game generic` writes a config for publishing a custom game, with a `gameBuild` setting that names the game folder and the executable to start. Its new `"chunking": "content"` setting lets players download only the changed parts of rebuilt executables and data archives instead of whole files. Existing repositories are generated exactly as before.
+- CPU Threads in Application settings lets you choose how many processor threads Foxy uses for hashing, scanning, and checking. Auto keeps the current behavior and shows the detected thread count. A manual count stays within the detected threads while Safe limits is on; turn it off to enter any count up to 1024. The command line offers the same through `foxy settings set --cpu-threads`, `--cpu-threads-auto`, and `--cpu-safe-limits`, and saved benchmarks record the setting.
 
 ## Changed
 - Progress bars show triangles only while work is running. Idle and paused bars use solid fills, and completed downloads turn solid green.

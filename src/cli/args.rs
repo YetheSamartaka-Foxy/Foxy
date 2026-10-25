@@ -1198,6 +1198,21 @@ pub struct SettingsSetArgs {
     pub download_speed_limit_mbps: Option<u32>,
     #[arg(long, help = "Disable global download speed limit")]
     pub download_speed_unlimited: bool,
+    #[arg(
+        long,
+        help = "Set the processor threads hashing, scanning and checking plan around (minimum 1; kept within the detected processors while safe limits are on)"
+    )]
+    pub cpu_threads: Option<u32>,
+    #[arg(
+        long,
+        help = "Plan around every processor thread the system reports (default)"
+    )]
+    pub cpu_threads_auto: bool,
+    #[arg(
+        long,
+        help = "Keep the CPU thread count within the detected processors; false accepts any count up to 1024 (true/false)"
+    )]
+    pub cpu_safe_limits: Option<bool>,
     #[arg(long, help = "Set UI locale (for example: en, cs, system)")]
     pub locale: Option<String>,
     #[arg(long, help = "Add additional addon search folder (repeatable)")]

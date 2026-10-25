@@ -163,13 +163,17 @@ pub fn summary_text(record: &BenchmarkRecord, best: Option<&BestComparison>) -> 
     line(
         "machine",
         format!(
-            "{} | {} x{} | {:.1} GB RAM | repo storage {} | hash profile {} | power {}",
+            "{} | {} x{} | {:.1} GB RAM | repo storage {} | hash profile {} | cpu threads {} | power {}",
             record.machine.os,
             record.machine.cpu,
             record.machine.cpu_cores,
             record.machine.total_memory_bytes as f64 / 1024.0 / 1024.0 / 1024.0,
             record.machine.repository_storage_class,
             record.machine.hash_io_profile,
+            record
+                .machine
+                .cpu_thread_limit
+                .map_or_else(|| "auto".to_string(), |limit| limit.to_string()),
             record.machine.power.summary()
         ),
     );

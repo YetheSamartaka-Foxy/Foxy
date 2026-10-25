@@ -344,8 +344,7 @@ async fn refresh_content_hashes_for_tree_started(
     }
 
     let db = context.db();
-    let cpu_budget = std::thread::available_parallelism()
-        .map(|n| n.get())
+    let cpu_budget = crate::core::utils::cpu_threads::cpu_threads()
         .unwrap_or(4)
         .saturating_mul(9)
         .div_ceil(10)

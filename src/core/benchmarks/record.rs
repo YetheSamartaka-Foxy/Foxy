@@ -111,6 +111,10 @@ pub struct BenchmarkMachine {
     pub repository_storage_class: String,
     pub hash_io_profile: String,
     pub download_speed_limit_mbps: Option<u32>,
+    /// CPU Threads setting the run planned around; `None` is Auto, and on
+    /// records written before it was stored.
+    #[serde(default)]
+    pub cpu_thread_limit: Option<u32>,
     pub extended_diagnostics: bool,
     /// Power source and plan when the record was saved. Empty on records
     /// written before it was stored.

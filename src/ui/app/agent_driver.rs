@@ -3467,9 +3467,41 @@ impl Foxy {
                     json!(clamped)
                 }
             }
+            "cpu-threads" | "cpu_threads" | "cpu_thread_limit" => {
+                if trimmed.eq_ignore_ascii_case("auto") || trimmed.is_empty() {
+                    self.settings_view_state.cpu_thread_limit = None;
+                } else {
+                    let parsed: u32 = trimmed.parse().map_err(|_| {
+                        format!("Expected an integer thread count or 'auto' for cpu-threads, got '{value}'")
+                    })?;
+                    let max_threads = crate::core::utils::cpu_threads::cpu_thread_limit_max(
+                        self.settings_view_state.cpu_thread_limit_safe,
+                        crate::core::utils::cpu_threads::detected_cpu_threads(),
+                    );
+                    self.settings_view_state.cpu_thread_limit = Some(parsed.clamp(1, max_threads));
+                }
+                crate::core::utils::cpu_threads::set_cpu_thread_limit(
+                    self.settings_view_state.cpu_thread_limit,
+                    self.settings_view_state.cpu_thread_limit_safe,
+                );
+                self.mark_settings_dirty();
+                json!(self.settings_view_state.cpu_thread_limit)
+            }
+            "cpu-safe-limits" | "cpu_safe_limits" | "cpu_thread_limit_safe" => {
+                let parsed = parse_agent_gui_bool(trimmed).ok_or_else(|| {
+                    format!("Expected a boolean for cpu-safe-limits, got '{value}'")
+                })?;
+                self.settings_view_state.cpu_thread_limit_safe = parsed;
+                crate::core::utils::cpu_threads::set_cpu_thread_limit(
+                    self.settings_view_state.cpu_thread_limit,
+                    self.settings_view_state.cpu_thread_limit_safe,
+                );
+                self.mark_settings_dirty();
+                json!(parsed)
+            }
             other => {
                 return Err(format!(
-                    "Unsupported setting '{other}' (try debug-mode, show-activity-log, show-fps-counter, reduce-motion, extended-diagnostics-logging, ui-scale-percent, locale, or download-speed-limit-mbps)"
+                    "Unsupported setting '{other}' (try debug-mode, show-activity-log, show-fps-counter, reduce-motion, extended-diagnostics-logging, ui-scale-percent, locale, download-speed-limit-mbps, cpu-threads, or cpu-safe-limits)"
                 ));
             }
         };

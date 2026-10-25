@@ -55,6 +55,9 @@ impl Foxy {
                 if self.settings_view_state.download_speed_limit_mbps == Some(0) {
                     self.settings_view_state.download_speed_limit_mbps = Some(1);
                 }
+                if self.settings_view_state.cpu_thread_limit == Some(0) {
+                    self.settings_view_state.cpu_thread_limit = Some(1);
+                }
                 if self.settings_view_state.backup_max_age_days == Some(0) {
                     self.settings_view_state.backup_max_age_days = None;
                 }

@@ -128,8 +128,7 @@ pub(super) async fn resolve_addon_hashes(
     let mut fingerprint_by_key: HashMap<String, (AddonRootFingerprint, Option<String>, Duration)> =
         HashMap::new();
     if !fingerprint_candidates.is_empty() {
-        let fingerprint_concurrency = std::thread::available_parallelism()
-            .map(|n| n.get())
+        let fingerprint_concurrency = crate::core::utils::cpu_threads::cpu_threads()
             .unwrap_or(4)
             .max(1)
             .min(fingerprint_candidates.len());
@@ -247,8 +246,7 @@ pub(super) async fn resolve_addon_hashes(
         });
     }
 
-    let addon_hash_concurrency = std::thread::available_parallelism()
-        .map(|n| n.get())
+    let addon_hash_concurrency = crate::core::utils::cpu_threads::cpu_threads()
         .unwrap_or(4)
         .max(1)
         .min(unresolved_addon_hash_work.len().max(1));

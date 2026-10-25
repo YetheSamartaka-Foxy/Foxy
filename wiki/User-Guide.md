@@ -479,6 +479,7 @@ Open Settings with the gear icon or **F2**. The Settings view has these tabs: **
 #### Performance options
 
 - **Renderer** - **Auto (WGPU)** (recommended), **WGPU**, or **Glow**. Auto uses WGPU but lets Foxy switch to Glow (OpenGL) after a graphics crash. Changes take effect after a restart.
+- **CPU Threads** - the processor threads Foxy plans hashing, scanning, and checking work around. **Auto** uses every thread the system reports, which is shown next to the control as **Detected**. Untick **Auto** to enter a count yourself. **Safe limits** keeps it within the detected threads; untick it to enter any count up to 1024. From the command line, use `foxy settings set --cpu-threads <N>`, `--cpu-threads-auto`, or `--cpu-safe-limits <true|false>`.
 - **Hashing profile** - **Auto** benchmarks the first hashing work and picks the fastest profile; **Conservative**, **Balanced**, and **Aggressive** set the concurrency yourself.
 - **Skip unchanged files after a database reset** - after a database reset, trust files Foxy already verified and that Windows shows as untouched since, instead of reading them again. An integrity recheck always reads every file.
 

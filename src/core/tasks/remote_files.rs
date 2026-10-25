@@ -59,9 +59,7 @@ fn join_path(base: &str, child: &str) -> String {
 }
 
 fn part_task_limit() -> usize {
-    let cpu = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
+    let cpu = crate::core::utils::cpu_threads::cpu_threads().unwrap_or(4);
     // This path fans into DB writes in remote_file_parts_batch; keep it conservative.
     let lock_retries = sqlite_perf_snapshot().lock_retries;
     let pressure_divisor = if lock_retries >= 128 {
