@@ -162,8 +162,8 @@ pub struct BenchmarkStage {
 }
 
 /// Summary rows the sync pipeline records with the whole action's elapsed
-/// time when it exits early. They enclose the other stages, so a stage chart
-/// must not draw them as peers.
+/// time when it exits early, including names retained for older saved records.
+/// They enclose the other stages, so a stage chart must not draw them as peers.
 pub const ACTION_TOTAL_STAGES: &[&str] = &[
     "download_skip_after_quick_verify",
     "prepare_download_total",
@@ -384,9 +384,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn action_total_stages_are_the_pipeline_early_exit_totals() {
+    fn current_action_total_stages_are_the_pipeline_early_exit_totals() {
         let pipeline = include_str!("../api/sync_pipeline/pipeline.rs");
         for name in ACTION_TOTAL_STAGES {
+            if *name == "quick_verify_only" {
+                continue;
+            }
             assert!(
                 pipeline.contains(&format!("\"{name}\"")),
                 "{name} is no longer a pipeline stage"

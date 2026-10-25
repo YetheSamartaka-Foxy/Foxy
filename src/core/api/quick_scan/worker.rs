@@ -19,7 +19,7 @@ use super::readiness::{
 use super::shared_cache::QuickScanSharedCache;
 use crate::core::db::{DbValue, params};
 use crate::core::models::repository::{REPOSITORY_COLUMNS, repository_from_row};
-use crate::core::utils::fetch_json::fetch_json;
+use crate::core::utils::fetch_json::fetch_json_fresh;
 
 const STARTUP_REMOTE_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 /// Whole-stage budget for the startup remote probe.
@@ -468,7 +468,7 @@ async fn startup_remote_changed_repositories(
             let repo_json_url = format!("{}repo.json", repo_url);
             let remote_result = tokio::time::timeout(
                 STARTUP_REMOTE_CHECK_TIMEOUT,
-                fetch_json(context, &repo_json_url),
+                fetch_json_fresh(context, &repo_json_url),
             )
             .await;
             let remote_checksum = match remote_result {

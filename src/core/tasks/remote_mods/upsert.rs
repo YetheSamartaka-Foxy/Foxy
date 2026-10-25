@@ -490,8 +490,17 @@ pub(super) async fn process_mods_upsert(
             }
 
             let mod_entry = Arc::new(mod_entry);
+            let remote_version_changed = previous_mod.as_ref().is_some_and(|previous| {
+                previous.remote_checksum != mod_entry.remote_checksum
+            });
             Some(
-                fetch_mod_file_manifest(context_clone, repository_parent_clone, mod_entry).await,
+                fetch_mod_file_manifest(
+                    context_clone,
+                    repository_parent_clone,
+                    mod_entry,
+                    remote_version_changed,
+                )
+                .await,
             )
         }))
     }

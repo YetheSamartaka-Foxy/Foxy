@@ -542,10 +542,12 @@ pub(crate) async fn fetch_mod_file_manifest(
     context: Arc<FoxyContext>,
     repository_parent: Arc<FoxyRepository>,
     mod_parent: Arc<FoxyMod>,
+    remote_version_changed: bool,
 ) -> Result<StagedModFiles, ModRecheckStats> {
     let mod_start = Instant::now();
     let is_foxy_mode = repository_parent.foxy_mode.is_foxy();
-    let fresh = context.recheck_level >= RecheckLevel::MOD
+    let fresh = remote_version_changed
+        || context.recheck_level >= RecheckLevel::MOD
         || context
             .forced_mod_refreshes
             .contains(&mod_parent.name.to_lowercase());

@@ -181,6 +181,22 @@ reuse gate. Integrity metadata reads bypass conditional HTTP validators too.
 Refresh those manifests before queue construction and unexpected-file cleanup;
 unselected clean addons and ordinary clean startup scans keep their fast paths.
 
+Repository index reads used by startup, refresh, and prepared-queue validation
+request HTTP revalidation with `Cache-Control: no-cache`. A changed stored addon
+version also forces an unconditional manifest read, even when that addon was
+absent from the earlier pending scope. A prepared queue requires fresh canonical
+repository and addon versions, matching addon membership, required/optional and
+client-side flags, ordering, checksum mode, and repository-space path layout.
+Both remote-refresh skip gates also compare those addon properties so a rejected
+queue converges after the rebuild. Missing addon versions or an unavailable FoxyMode
+index cannot authorize reuse. Local cleanliness alone cannot end a download
+preparation before the remote gate.
+
+After refreshing remote metadata, union the cached pending-addon hint with the
+current instance's enabled addon tree mismatches before scoped bootstrap, local
+verification, or queue construction. A server update can add pending addons
+outside the startup payload; that payload must never hide the new work.
+
 Before applying an addon manifest, validate nonnegative file/part spans and
 contiguous ordered part coverage ending at the declared file length. Empty
 entries remain valid, and whole-file manifests may omit parts. Retry invalid
@@ -747,7 +763,8 @@ Algorithm:
      when it needs tree state
    - if scoped check is clean but cached targets exist, fall back to full quick
      verify before trusting the clean result
-   - if final quick verify is clean, clear stale targets and early exit
+   - a clean local result still continues to the remote gate before clearing
+     stale targets or reporting the update complete
 3. Run remote repository gate:
    - if remote checksum equals local checksum, early exit clean
    - if remote checksum equals stored remote checksum but local differs, skip
@@ -783,7 +800,6 @@ Algorithm:
 
 Early exits:
 
-- Clean scoped and full quick verify before remote work: stop.
 - Remote gate clean before metadata fetch: stop.
 - Post-remote quick verify clean: stop.
 - Empty download queue with no pending updates: stop.
@@ -852,10 +868,10 @@ Addon stage:
    - addon content baseline exists
    - addon is not explicitly forced by recheck level
    - recheck level does not require addon refresh
-8. In download mode, pending local mismatches may scope local verification and
-   queue rebuilds to pending addon names, but they must not force a network
-   manifest fetch when that addon's remote checksum and stored graph are
-   unchanged.
+8. In download preparation, pending addon names force a fresh manifest fetch
+   even when their published checksums match the stored graph. A changed stored
+   addon version also bypasses cached HTTP validators, including for addons
+   outside the earlier pending scope. Other unchanged addons keep their graph.
 
 File stage:
 

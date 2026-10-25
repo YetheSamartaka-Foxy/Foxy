@@ -13,7 +13,7 @@ const FETCH_JSON_TIMEOUT: Duration = Duration::from_secs(120);
 /// gzip streams or malformed servers sending unbounded data.
 const FETCH_JSON_MAX_BODY_SIZE: usize = 200 * 1024 * 1024;
 
-/// Timing breakdown from a `fetch_json_timed` call.
+/// Timing breakdown for a JSON metadata fetch.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct FetchJsonTiming {
     /// Time to send the HTTP request and read the full response body.
@@ -26,22 +26,15 @@ pub(crate) struct FetchJsonTiming {
     pub cached: bool,
 }
 
-pub(crate) async fn fetch_json(
+pub(crate) async fn fetch_json_fresh(
     context: Arc<FoxyContext>,
     url: &str,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    let (value, _timing) = fetch_json_timed(context, url).await?;
+    let (value, _) = fetch_json_timed_with_cache(context, url, None, true).await?;
     Ok(value)
 }
 
-pub(crate) async fn fetch_json_timed(
-    context: Arc<FoxyContext>,
-    url: &str,
-) -> Result<(Value, FetchJsonTiming), Box<dyn std::error::Error + Send + Sync>> {
-    fetch_json_timed_with_cache(context, url, None, false).await
-}
-
-/// Like [`fetch_json_timed`], revalidating against the context's manifest cache.
+/// Revalidate an addon manifest against the context's manifest cache.
 pub(crate) async fn fetch_manifest_json_timed<T: DeserializeOwned + Send + 'static>(
     context: Arc<FoxyContext>,
     url: &str,

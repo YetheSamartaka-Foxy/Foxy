@@ -44,7 +44,9 @@ use crate::core::tasks::download_files::{
 use crate::core::tasks::purge_repository::purge_repository_instance;
 use crate::core::tasks::remote_file_parts::flush_deferred_part_inserts;
 use crate::core::tasks::remote_reachability::ensure_remote_repository_reachable;
-use crate::core::tasks::remote_repository::{probe_remote_repository_checksum, remote_repository};
+use crate::core::tasks::remote_repository::{
+    probe_prepared_repository_checksum, remote_repository,
+};
 use crate::core::tasks::truncate_download_targets::{
     prune_verified_download_targets, truncate_all_download_tables,
 };
@@ -822,8 +824,7 @@ async fn reconcile_target_repository_local_checksum(
 ///   is non-empty and differs from `local_checksum`),
 /// - a confirmation preflight left a pending-update payload behind,
 /// - a prepared download queue already exists for this repository instance, and
-/// - a cheap `repo.json` re-probe shows the remote repository checksum is
-///   unchanged since the queue was built.
+/// - fresh repository indexes match the prepared repository and addon versions.
 ///
 /// Files invalidated by shared rollback must be covered by the queue.
 async fn can_reuse_prepared_download_queue(
@@ -858,9 +859,8 @@ async fn can_reuse_prepared_download_queue(
     if !prepared_remote_graph_is_complete(context.clone(), repo.id).await {
         return false;
     }
-    // Confirm the remote repository has not changed since the queue was built.
     let probed =
-        probe_remote_repository_checksum(context, repo_url, hash_algorithm_preference).await;
+        probe_prepared_repository_checksum(context, &repo, hash_algorithm_preference).await;
     prepared_queue_reuse_is_safe(
         &repo.remote_checksum,
         &repo.local_checksum,
@@ -906,6 +906,24 @@ async fn prepared_remote_graph_is_complete(context: Arc<FoxyContext>, repository
             .await,
         Ok(None)
     )
+}
+
+async fn pending_remote_addon_scope(
+    context: Arc<FoxyContext>,
+    repo_url: &str,
+) -> Result<HashSet<String>, crate::core::db::DbErr> {
+    let repository = load_repository_by_remote_url(context.clone(), repo_url).await?;
+    context
+        .db()
+        .query_all(
+            "SELECT a.name FROM repository_addons ra JOIN addons a ON a.id = ra.addon_id \
+         WHERE ra.repository_id = ? AND a.enabled = 1 AND a.local_checksum != a.remote_checksum",
+            params![repository.id as i64],
+        )
+        .await?
+        .into_iter()
+        .map(|row| row.get_string("name").map(|name| name.to_lowercase()))
+        .collect()
 }
 
 /// Whether a genuine pending update is recorded for an instance: the remote
@@ -1217,7 +1235,7 @@ async fn run_repository_pipeline(
     // verify; for a reused confirmation queue it is loaded from the prepared
     // pending-update payload instead.
     let mut mods: Vec<ModDiffSummary> = Vec::new();
-    let cached_pending_scope =
+    let mut cached_pending_scope =
         pending_update_mod_scope(context.clone(), &normalized_repo_url).await;
 
     if *cancel_rx.borrow() {
@@ -1230,11 +1248,6 @@ async fn run_repository_pipeline(
         return;
     }
 
-    // Fast path: a Download that immediately follows a confirmation preflight can
-    // reuse the queue that preflight already built, as long as the remote
-    // repository checksum and local-path identity are unchanged. This skips the
-    // redundant remote refresh, hash bootstrap, quick verify and queue rebuild
-    // (the second ~7s pass) and goes straight to backup + transfer.
     if mode == SyncMode::Download && discard_prepared_queue {
         info!(
             "Prepared download queue discarded for repo={}: the repository folder changed after it was built",
@@ -1255,7 +1268,7 @@ async fn run_repository_pipeline(
         mods = load_pending_update_mods(context.clone(), &normalized_repo_url).await;
         if mods.iter().any(|m| m.needs_update) {
             info!(
-                "Reusing confirmation-prepared download queue for repo={} (remote checksum unchanged; skipping remote refresh, hash bootstrap and queue rebuild)",
+                "Reusing confirmation-prepared download queue for repo={} (repository and addon versions unchanged; skipping remote refresh, hash bootstrap and queue rebuild)",
                 normalized_repo_url
             );
             emit_progress!(ProgressEvent::Diff { mods: mods.clone() });
@@ -1345,30 +1358,9 @@ async fn run_repository_pipeline(
                 "No cached download targets for repo={}, rebuilding from remote recheck",
                 normalized_repo_url
             );
-        } else if !force_redownload && !has_quick_updates {
-            info!(
-                "Quick verify found no updates for repo={}, skipping download and clearing cached queue",
-                normalized_repo_url
-            );
-            if let Err(err) = truncate_all_download_tables(context.clone()).await {
-                warn!(
-                    "Failed to clear cached download queue after clean quick verify: {}",
-                    err
-                );
-            }
-            summary.push(
-                StageEntry::new("quick_verify_only", overall_start.elapsed())
-                    .with("updates", false),
-            );
-            summary.log_table("early-exit-clean");
-            emit_progress!(ProgressEvent::Diff { mods: quick_diffs });
-            emit_progress!(ProgressEvent::Finished);
-            return;
         } else {
-            // Local quick verification changed checksum state in DB, so stale cached targets can be
-            // inaccurate. Rebuild queue from remote recheck for correctness.
             info!(
-                "Cached targets exist for repo={} but quick verify found updates; forcing queue rebuild",
+                "Cached targets exist for repo={}; checking current remote metadata before rebuilding the queue",
                 normalized_repo_url
             );
         }
@@ -1722,8 +1714,7 @@ async fn run_repository_pipeline(
         return;
     }
 
-    // Recheck against remote. Skipped entirely when reusing a confirmation-prepared
-    // queue: the repo.json re-probe already confirmed the remote is unchanged.
+    // Reuse has already validated fresh repository and addon indexes.
     let mut remote_recheck_elapsed = None;
     let repo_metadata = if reuse_prepared_queue {
         None
@@ -1820,6 +1811,38 @@ async fn run_repository_pipeline(
             is_foxy: metadata.foxy_mode.is_foxy(),
             app_update_url: metadata.app_update_url.clone(),
         });
+    }
+
+    if !reuse_prepared_queue && (builds_download_plan || cached_pending_scope.is_some()) {
+        match pending_remote_addon_scope(context.clone(), &normalized_repo_url).await {
+            Ok(remote_scope) => {
+                let scope = if builds_download_plan {
+                    Some(&mut quick_update_mod_names)
+                } else {
+                    cached_pending_scope.as_mut()
+                };
+                if let Some(scope) = scope {
+                    let previous_count = scope.len();
+                    scope.extend(remote_scope);
+                    if scope.len() > previous_count {
+                        info!(
+                            "Expanded pending addon scope after remote refresh: previous={} current={}",
+                            previous_count,
+                            scope.len()
+                        );
+                    }
+                }
+            }
+            Err(error) => {
+                let message = format!(
+                    "Could not determine pending addons after remote refresh: {}",
+                    error
+                );
+                summary.log_table("failed-remote-scope");
+                emit_progress!(ProgressEvent::Failed(message));
+                return;
+            }
+        }
     }
 
     let recheck_completed_label = if mode == SyncMode::RemoteRefreshOnly {
@@ -3836,6 +3859,10 @@ pub fn spawn_repository_sync(
 #[cfg(test)]
 #[path = "rollback_tests.rs"]
 mod rollback_tests;
+
+#[cfg(test)]
+#[path = "prepared_queue_tests.rs"]
+mod prepared_queue_tests;
 
 #[cfg(test)]
 mod tests {

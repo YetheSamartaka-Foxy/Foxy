@@ -12,6 +12,7 @@ async fn assert_pending_manifest_refresh(
     manual_copy: bool,
     fail_manifest: bool,
     invalid_manifest: bool,
+    changed_addon_version: bool,
 ) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let remote_url = format!("http://{}/", listener.local_addr().unwrap());
@@ -85,7 +86,11 @@ async fn assert_pending_manifest_refresh(
             &format!("{remote_url}{name}"),
             &addon_path,
             "ADDON",
-            "ADDON",
+            if changed_addon_version && id == 1 {
+                "OLD"
+            } else {
+                "ADDON"
+            },
             "CONTENT",
             true,
         )
@@ -123,7 +128,11 @@ async fn assert_pending_manifest_refresh(
         FoxyContext::new(db, reqwest::Client::new())
             .with_manifest_cache(cache)
             .with_target_local_path(&local_path)
-            .with_forced_mod_refreshes(HashSet::from(["@mod_01".to_string()])),
+            .with_forced_mod_refreshes(if changed_addon_version {
+                HashSet::new()
+            } else {
+                HashSet::from(["@mod_01".to_string()])
+            }),
     );
     let metadata = remote_repository(
         context.clone(),
@@ -195,20 +204,25 @@ async fn assert_pending_manifest_refresh(
 
 #[tokio::test]
 async fn pending_manifest_refresh_preserves_published_manual_copy_with_clean_repo_checksum() {
-    assert_pending_manifest_refresh("REPO", true, false, false).await;
+    assert_pending_manifest_refresh("REPO", true, false, false, false).await;
 }
 
 #[tokio::test]
 async fn pending_manifest_refresh_queues_missing_file_with_unchanged_remote_graph() {
-    assert_pending_manifest_refresh("LOCAL", false, false, false).await;
+    assert_pending_manifest_refresh("LOCAL", false, false, false, false).await;
 }
 
 #[tokio::test]
 async fn pending_manifest_refresh_failure_refuses_stale_metadata_and_preserves_manual_copy() {
-    assert_pending_manifest_refresh("REPO", true, true, false).await;
+    assert_pending_manifest_refresh("REPO", true, true, false, false).await;
 }
 
 #[tokio::test]
 async fn pending_manifest_refresh_rejects_invalid_layout_and_preserves_manual_copy() {
-    assert_pending_manifest_refresh("REPO", true, false, true).await;
+    assert_pending_manifest_refresh("REPO", true, false, true, false).await;
+}
+
+#[tokio::test]
+async fn changed_addon_version_bypasses_stale_manifest_cache_outside_pending_scope() {
+    assert_pending_manifest_refresh("REPO", true, false, false, true).await;
 }

@@ -12,7 +12,7 @@ use crate::core::tasks::init_database::{DB_WRITE_PERMITS, DB_WRITE_SEMAPHORE};
 use crate::core::tasks::remote_mods::{
     RemoteRebuildWork, remote_mods_with_data, resolve_mod_local_path,
 };
-use crate::core::utils::fetch_json::fetch_json;
+use crate::core::utils::fetch_json::fetch_json_fresh;
 use crate::core::utils::speed_of_light::{SolLight, op_id_extra, sol_line};
 use crate::ui::types::HashAlgorithmPreference;
 use log::{debug, error, info, warn};
@@ -20,6 +20,9 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+mod prepared;
+pub(crate) use prepared::probe_prepared_repository_checksum;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -446,69 +449,6 @@ async fn repository_part_rows_exist(context: Arc<FoxyContext>, repository_id: i6
     }
 }
 
-/// Cheaply fetch the repository's canonical remote checksum without touching the
-/// DB or rebuilding any metadata graph. Mirrors how [`remote_repository`] derives
-/// the stored `remote_checksum`: it reads `repo.json`, and for FoxyMode repos
-/// prefers the deterministic BLAKE3 checksum published in `foxy_addons.json`.
-///
-/// Used as a fast freshness gate before reusing a confirmation-prepared download
-/// queue: if this checksum still equals the stored `remote_checksum`, the remote
-/// repository has not changed since the queue was built.
-pub(crate) async fn probe_remote_repository_checksum(
-    context: Arc<FoxyContext>,
-    repository_url: &str,
-    hash_algorithm_preference: HashAlgorithmPreference,
-) -> Option<String> {
-    let normalized_url = crate::core::models::repository::normalize_repository_url(repository_url);
-    let repo_url = format!("{}repo.json", normalized_url);
-
-    let data = match fetch_json(context.clone(), &repo_url).await {
-        Ok(d) => d,
-        Err(e) => {
-            warn!("Remote checksum probe failed to fetch {} : {}", repo_url, e);
-            return None;
-        }
-    };
-
-    let checksum = data
-        .get("checksum")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    let remote_foxy_mode = FoxyMode::from_db_str(
-        data.get("foxyMode")
-            .and_then(Value::as_str)
-            .unwrap_or_default(),
-    );
-    let foxy_mode = if hash_algorithm_preference == HashAlgorithmPreference::PreferSwifty
-        && remote_foxy_mode.is_foxy()
-    {
-        FoxyMode::None
-    } else {
-        remote_foxy_mode
-    };
-
-    if foxy_mode.is_foxy() {
-        let foxy_addons_url = format!("{}foxy_addons.json", normalized_url);
-        if let Ok(foxy_data) = fetch_json(context.clone(), &foxy_addons_url).await
-            && let Some(foxy_checksum) = foxy_data
-                .get("checksum")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|candidate| !candidate.is_empty())
-        {
-            return Some(foxy_checksum.to_string());
-        }
-    }
-
-    if checksum.is_empty() {
-        None
-    } else {
-        Some(checksum)
-    }
-}
-
 /// Emit the `SOL op=remote_refresh` action record (conventions/SPEED_OF_LIGHT.md,
 /// O5): one line per refresh with its branch as `outcome`, the index requests
 /// it made, and the manifest work when the graph was rebuilt.
@@ -564,7 +504,7 @@ pub(crate) async fn remote_repository(
     let repo_url = format!("{}repo.json", normalized_url);
     info!("Loading repository metadata from: {}", repo_url);
 
-    let data = match fetch_json(context.clone(), &repo_url).await {
+    let data = match fetch_json_fresh(context.clone(), &repo_url).await {
         Ok(d) => d,
         Err(e) => {
             error!(
@@ -644,7 +584,7 @@ pub(crate) async fn remote_repository(
             "FoxyMode detected - loading mod metadata from: {}",
             foxy_addons_url
         );
-        match fetch_json(context.clone(), &foxy_addons_url).await {
+        match fetch_json_fresh(context.clone(), &foxy_addons_url).await {
             Ok(foxy_data) => {
                 if let Some(foxy_checksum) = foxy_data
                     .get("checksum")
@@ -753,6 +693,10 @@ pub(crate) async fn remote_repository(
         .as_ref()
         .zip(linked_addon_checksums.as_ref())
         .is_none_or(|(remote, stored)| remote_addon_checksums_match(remote, stored));
+    let remote_addon_properties_match =
+        prepared::addon_properties_match(&context, repository.id, remote_mods_data)
+            .await
+            .unwrap_or(true);
     if remote_addon_links_match && !remote_addon_versions_match {
         info!(
             "Repository {} addon checksums differ from the remote addon list; forcing metadata rebuild",
@@ -822,6 +766,7 @@ pub(crate) async fn remote_repository(
             || has_forced_mod_refreshes
             || !remote_addon_links_match
             || !remote_addon_versions_match
+            || !remote_addon_properties_match
             || !repository_space_paths_match,
     ) {
         info!("Up-to-date: Repository {}.", repository.remote_url.clone());
@@ -845,7 +790,10 @@ pub(crate) async fn remote_repository(
         &remote_checksum,
         previous_remote_checksum.as_deref(),
         local_path_unchanged,
-        remote_graph_complete && remote_addon_links_match && remote_addon_versions_match,
+        remote_graph_complete
+            && remote_addon_links_match
+            && remote_addon_versions_match
+            && remote_addon_properties_match,
         context.recheck_level,
         force_refresh || has_forced_mod_refreshes || !repository_space_paths_match,
     ) {
