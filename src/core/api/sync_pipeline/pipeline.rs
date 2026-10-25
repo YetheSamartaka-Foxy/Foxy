@@ -3736,8 +3736,7 @@ pub fn spawn_repository_sync(
         let mut repaint_rx = progress_tx.subscribe();
         std::thread::spawn(move || {
             // The progress banner redraws at the spinner's pace; faster only costs frames.
-            const REPAINT_THROTTLE: Duration = crate::ui::app::PROGRESS_FRAME_INTERVAL;
-            let mut last_repaint = Instant::now() - REPAINT_THROTTLE;
+            let mut last_repaint = Instant::now() - crate::ui::app::progress_frame_interval();
 
             loop {
                 match repaint_rx.blocking_recv() {
@@ -3746,7 +3745,8 @@ pub fn spawn_repository_sync(
                         let elapsed = now.duration_since(last_repaint);
                         // Through the pacing helper even when due: a plain immediate
                         // request makes egui draw two frames.
-                        let wait = REPAINT_THROTTLE.saturating_sub(elapsed);
+                        let wait =
+                            crate::ui::app::progress_frame_interval().saturating_sub(elapsed);
                         crate::ui::app::request_frame_after(&repaint_ctx, wait);
                         if wait.is_zero() {
                             last_repaint = now;
@@ -3766,7 +3766,8 @@ pub fn spawn_repository_sync(
             .map(|(name, enabled)| (name.to_lowercase(), enabled))
             .collect();
         info!("Spawning repository sync worker for mode {:?}", mode);
-        let rt = match Builder::new_multi_thread().enable_all().build() {
+        crate::core::utils::work_priority::apply_to_current_thread();
+        let rt = match crate::core::utils::work_priority::work_runtime_builder().build() {
             Ok(rt) => rt,
             Err(err) => {
                 error!("Failed to build tokio runtime for repository sync: {}", err);

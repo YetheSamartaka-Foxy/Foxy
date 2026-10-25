@@ -115,6 +115,14 @@ pub struct BenchmarkMachine {
     /// records written before it was stored.
     #[serde(default)]
     pub cpu_thread_limit: Option<u32>,
+    /// Work priority setting; empty on records written before it was stored.
+    #[serde(default)]
+    pub work_priority: String,
+    #[serde(default)]
+    pub low_disk_priority: bool,
+    /// Forced memory pressure level, or empty for Auto.
+    #[serde(default)]
+    pub memory_pressure_override: String,
     pub extended_diagnostics: bool,
     /// Power source and plan when the record was saved. Empty on records
     /// written before it was stored.

@@ -1,12 +1,10 @@
 use std::time::Duration;
 
-use std::sync::LazyLock;
-
 use log::{debug, info, warn};
-use reqwest::blocking::Client;
 use serde_json::Value;
 use sha1::{Digest, Sha1};
 
+use crate::core::utils::proxy::SharedBlockingClient;
 use crate::ui::app::repository::space_freshness::repository_space_manifest_checksum;
 use crate::ui::app::{
     FetchedRepositorySpace, Foxy, PendingRepositoryDuplicateAddAction,
@@ -24,12 +22,8 @@ use crate::ui::types::{
 /// a slow or unreachable server from blocking the worker thread indefinitely
 /// (the previous default-`reqwest::blocking::get` had no timeout, which is what
 /// let a dead server hang for ~20s before erroring).
-static REPO_METADATA_HTTP_CLIENT: LazyLock<Client> = LazyLock::new(|| {
-    Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()
-        .expect("failed to build repository metadata HTTP client: check TLS/system configuration")
-});
+static REPO_METADATA_HTTP_CLIENT: SharedBlockingClient =
+    SharedBlockingClient::new(|builder| builder.timeout(Duration::from_secs(15)));
 
 const REPO_METADATA_MAX_ATTEMPTS: u32 = 3;
 const REPO_METADATA_RETRY_BACKOFF: Duration = Duration::from_millis(750);
@@ -41,6 +35,7 @@ fn fetch_json_with_retry(url: &str) -> Result<Value, String> {
     let mut last_error = String::new();
     for attempt in 1..=REPO_METADATA_MAX_ATTEMPTS {
         match REPO_METADATA_HTTP_CLIENT
+            .client()
             .get(url)
             .send()
             .and_then(reqwest::blocking::Response::error_for_status)
@@ -379,7 +374,7 @@ impl Foxy {
         let mut parse_error: Option<String> = None;
 
         for manifest_url in candidates {
-            let response = match REPO_METADATA_HTTP_CLIENT.get(&manifest_url).send() {
+            let response = match REPO_METADATA_HTTP_CLIENT.client().get(&manifest_url).send() {
                 Ok(response) => response,
                 Err(err) => {
                     debug!(

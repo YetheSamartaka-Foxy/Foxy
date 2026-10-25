@@ -3512,7 +3512,10 @@ impl Foxy {
     /// Serialize the live, effective settings the running app currently holds.
     /// Mirrors `settings show` but reads in-memory state rather than the file.
     fn agent_gui_settings_value(&self) -> Value {
-        serde_json::to_value(&self.settings_view_state).unwrap_or_else(|_| json!({}))
+        let mut settings =
+            serde_json::to_value(&self.settings_view_state).unwrap_or_else(|_| json!({}));
+        crate::core::utils::proxy::redact_settings_value(&mut settings);
+        settings
     }
 
     fn agent_gui_progress_value(&self) -> Value {

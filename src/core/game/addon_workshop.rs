@@ -81,7 +81,7 @@ impl AddonWorkshop {
             return Some(reforger_url(&id));
         }
         let repository_url = repository_url?;
-        let client = reqwest::blocking::Client::builder()
+        let client = crate::core::utils::proxy::blocking_client_builder()
             .connect_timeout(Duration::from_secs(3))
             .timeout(Duration::from_secs(5))
             .build()

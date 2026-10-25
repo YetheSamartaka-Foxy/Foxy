@@ -1213,6 +1213,51 @@ pub struct SettingsSetArgs {
         help = "Keep the CPU thread count within the detected processors; false accepts any count up to 1024 (true/false)"
     )]
     pub cpu_safe_limits: Option<bool>,
+    #[arg(
+        long,
+        value_enum,
+        help = "Processor priority of the threads that hash, scan, check and download (Windows)"
+    )]
+    pub work_priority: Option<WorkPriorityArg>,
+    #[arg(
+        long,
+        help = "Run work threads in Windows background mode, which lowers their disk and memory priority (true/false)"
+    )]
+    pub low_disk_priority: Option<bool>,
+    #[arg(
+        long,
+        value_enum,
+        help = "Storage type assumed for every drive instead of the detected one"
+    )]
+    pub storage_type: Option<StorageTypeArg>,
+    #[arg(
+        long,
+        value_enum,
+        help = "Memory pressure level assumed instead of the measured one"
+    )]
+    pub memory_pressure: Option<MemoryPressureArg>,
+    #[arg(long, value_enum, help = "How HTTP requests reach the network")]
+    pub proxy_mode: Option<ProxyModeArg>,
+    #[arg(
+        long,
+        help = "Set the manual proxy address, for example http://proxy.example:8080; credentials go in --proxy-username and --proxy-password, and an empty value clears it"
+    )]
+    pub proxy_url: Option<String>,
+    #[arg(
+        long,
+        help = "Set the manual proxy user name; an empty value clears it"
+    )]
+    pub proxy_username: Option<String>,
+    #[arg(
+        long,
+        help = "Set the manual proxy password, stored as plain text; other local programs can read command lines, so prefer the Settings view"
+    )]
+    pub proxy_password: Option<String>,
+    #[arg(
+        long,
+        help = "Comma-separated hosts, domains or IP ranges reached without the proxy"
+    )]
+    pub proxy_bypass: Option<String>,
     #[arg(long, help = "Set UI locale (for example: en, cs, system)")]
     pub locale: Option<String>,
     #[arg(long, help = "Add additional addon search folder (repeatable)")]
@@ -1296,6 +1341,44 @@ pub struct RepoSyncArgs {
     pub selector: RepoSelectorArgs,
     #[arg(long, help = "Synchronization mode")]
     pub mode: RepoSyncMode,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug)]
+pub enum WorkPriorityArg {
+    #[value(help = "Compete with other programs as usual")]
+    Normal,
+    #[value(help = "Let programs at normal priority, such as a running game, go first")]
+    BelowNormal,
+    #[value(help = "Run only when the processor has nothing else to do")]
+    Lowest,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug)]
+pub enum StorageTypeArg {
+    #[value(help = "Detect each drive's type")]
+    Auto,
+    Ssd,
+    Hdd,
+    Removable,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug)]
+pub enum MemoryPressureArg {
+    #[value(help = "Measure free memory before each check and download")]
+    Auto,
+    Normal,
+    Constrained,
+    Severe,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug)]
+pub enum ProxyModeArg {
+    #[value(help = "Windows proxy settings and the HTTP_PROXY/HTTPS_PROXY variables")]
+    System,
+    #[value(help = "Connect directly")]
+    None,
+    #[value(help = "The proxy set with --proxy-url")]
+    Manual,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug)]

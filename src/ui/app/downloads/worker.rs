@@ -4,7 +4,6 @@ use std::path::PathBuf;
 use std::sync::mpsc::Sender as StdSender;
 use std::time::{Duration, Instant};
 
-use reqwest::blocking::Client;
 use tokio::sync::watch;
 
 use crate::core::utils::format::{sanitize_log_path, sanitize_log_url};
@@ -37,7 +36,7 @@ impl Foxy {
                 false
             }
         };
-        let client = match Client::builder().build() {
+        let client = match crate::core::utils::proxy::blocking_client_builder().build() {
             Ok(client) => client,
             Err(err) => {
                 log::error!(

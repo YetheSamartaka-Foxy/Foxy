@@ -127,10 +127,7 @@ impl AppState {
         };
         sanitize_settings(&mut settings);
         crate::core::api::set_extended_diagnostics(settings.extended_diagnostics_logging);
-        crate::core::utils::cpu_threads::set_cpu_thread_limit(
-            settings.cpu_thread_limit,
-            settings.cpu_thread_limit_safe,
-        );
+        crate::core::utils::runtime_settings::apply_runtime_settings(&settings);
 
         let mut repositories: Vec<Repository> =
             read_json_or_default(&Foxy::get_repositories_path())

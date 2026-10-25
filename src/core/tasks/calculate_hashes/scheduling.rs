@@ -11,7 +11,7 @@ use crate::core::utils::speed_of_light::{SolLight, op_id_extra, sol_line};
 use crate::ui::types::HashIoProfilePreference;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 use sysinfo::Disks;
 
@@ -476,10 +476,46 @@ fn refresh_storage_class_mounts() -> StorageClassMounts {
         .collect()
 }
 
+/// Storage class the user's setting forces for every drive; 0 means Auto.
+static STORAGE_CLASS_OVERRIDE: AtomicU8 = AtomicU8::new(0);
+
+fn encode_storage_class(class: Option<HashStorageClass>) -> u8 {
+    match class {
+        None | Some(HashStorageClass::Unknown) => 0,
+        Some(HashStorageClass::Ssd) => 1,
+        Some(HashStorageClass::Hdd) => 2,
+        Some(HashStorageClass::Removable) => 3,
+    }
+}
+
+fn decode_storage_class(encoded: u8) -> Option<HashStorageClass> {
+    match encoded {
+        1 => Some(HashStorageClass::Ssd),
+        2 => Some(HashStorageClass::Hdd),
+        3 => Some(HashStorageClass::Removable),
+        _ => None,
+    }
+}
+
+/// Classify every drive as `class` instead of detecting it, or detect again
+/// with `None`.
+pub(crate) fn set_storage_class_override(class: Option<HashStorageClass>) {
+    let encoded = encode_storage_class(class);
+    if STORAGE_CLASS_OVERRIDE.swap(encoded, Ordering::Relaxed) != encoded {
+        match decode_storage_class(encoded) {
+            Some(class) => info!("Storage type forced to {class} for every drive"),
+            None => info!("Storage type set to auto-detect"),
+        }
+    }
+}
+
 pub(crate) fn detect_storage_class_for_path(path: &str) -> HashStorageClass {
     let path = path.trim();
     if path.is_empty() {
         return HashStorageClass::Unknown;
+    }
+    if let Some(class) = decode_storage_class(STORAGE_CLASS_OVERRIDE.load(Ordering::Relaxed)) {
+        return class;
     }
     let path = Path::new(path);
     storage_class_mounts()
@@ -2968,6 +3004,25 @@ mod tests {
     }
 
     // ── hash_cpu_budget ─────────────────────────────────────────────────
+
+    #[test]
+    fn storage_overrides_round_trip_and_unknown_means_auto() {
+        for class in [
+            HashStorageClass::Ssd,
+            HashStorageClass::Hdd,
+            HashStorageClass::Removable,
+        ] {
+            assert_eq!(
+                decode_storage_class(encode_storage_class(Some(class))),
+                Some(class)
+            );
+        }
+        assert_eq!(decode_storage_class(encode_storage_class(None)), None);
+        assert_eq!(
+            decode_storage_class(encode_storage_class(Some(HashStorageClass::Unknown))),
+            None
+        );
+    }
 
     #[test]
     fn hash_cpu_budget_is_at_least_one() {

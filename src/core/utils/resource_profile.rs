@@ -1,4 +1,35 @@
+use std::sync::atomic::{AtomicU8, Ordering};
+
 use sysinfo::System;
+
+/// Pressure the user's memory setting forces; 0 means Auto.
+static PRESSURE_OVERRIDE: AtomicU8 = AtomicU8::new(0);
+
+/// Force a pressure tier for every later [`ResourceProfile::sample`], or `None`
+/// to use the sampled one.
+pub(crate) fn set_pressure_override(pressure: Option<ResourcePressure>) {
+    let encoded = match pressure {
+        None => 0,
+        Some(ResourcePressure::Normal) => 1,
+        Some(ResourcePressure::Constrained) => 2,
+        Some(ResourcePressure::Severe) => 3,
+    };
+    if PRESSURE_OVERRIDE.swap(encoded, Ordering::Relaxed) != encoded {
+        match pressure {
+            Some(pressure) => log::info!("Memory pressure forced to {pressure}"),
+            None => log::info!("Memory pressure set to auto"),
+        }
+    }
+}
+
+fn pressure_override() -> Option<ResourcePressure> {
+    match PRESSURE_OVERRIDE.load(Ordering::Relaxed) {
+        1 => Some(ResourcePressure::Normal),
+        2 => Some(ResourcePressure::Constrained),
+        3 => Some(ResourcePressure::Severe),
+        _ => None,
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ResourcePressure {
@@ -23,6 +54,8 @@ pub(crate) struct ResourceProfile {
     pub(crate) total_memory: u64,
     pub(crate) available_memory: u64,
     pub(crate) used_swap: u64,
+    /// `pressure` came from the user's setting, not from the memory figures.
+    pub(crate) pressure_overridden: bool,
 }
 
 impl ResourceProfile {
@@ -34,6 +67,15 @@ impl ResourceProfile {
             system.available_memory(),
             system.used_swap(),
         )
+        .with_pressure_override(pressure_override())
+    }
+
+    fn with_pressure_override(mut self, pressure: Option<ResourcePressure>) -> Self {
+        if let Some(pressure) = pressure {
+            self.pressure = pressure;
+            self.pressure_overridden = true;
+        }
+        self
     }
 
     pub(crate) fn from_memory(total_memory: u64, available_memory: u64, used_swap: u64) -> Self {
@@ -57,13 +99,19 @@ impl ResourceProfile {
             total_memory,
             available_memory,
             used_swap,
+            pressure_overridden: false,
         }
     }
 
     pub(crate) fn summary(&self) -> String {
         format!(
-            "pressure={} total={} available={} swap_used={}",
+            "pressure={}{} total={} available={} swap_used={}",
             self.pressure,
+            if self.pressure_overridden {
+                " (override)"
+            } else {
+                ""
+            },
             format_bytes(self.total_memory),
             format_bytes(self.available_memory),
             format_bytes(self.used_swap)
@@ -102,6 +150,16 @@ mod tests {
     fn very_low_available_memory_is_severe() {
         let profile = ResourceProfile::from_memory(16 * 1024 * 1024 * 1024, 1024 * 1024 * 1024, 0);
         assert_eq!(profile.pressure, ResourcePressure::Severe);
+    }
+
+    #[test]
+    fn an_override_replaces_the_sampled_pressure_and_says_so() {
+        let sampled =
+            ResourceProfile::from_memory(32 * 1024 * 1024 * 1024, 16 * 1024 * 1024 * 1024, 0);
+        assert_eq!(sampled.with_pressure_override(None), sampled);
+        let forced = sampled.with_pressure_override(Some(ResourcePressure::Severe));
+        assert_eq!(forced.pressure, ResourcePressure::Severe);
+        assert!(forced.summary().starts_with("pressure=severe (override) "));
     }
 
     #[test]

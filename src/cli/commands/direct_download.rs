@@ -42,12 +42,14 @@ pub fn cmd_direct_download(
         ));
     }
 
-    let client = Client::builder().build().map_err(|e| {
-        CommandError::operation(
-            "direct-download",
-            format!("Failed to initialize HTTP client: {}", e),
-        )
-    })?;
+    let client = crate::core::utils::proxy::blocking_client_builder()
+        .build()
+        .map_err(|e| {
+            CommandError::operation(
+                "direct-download",
+                format!("Failed to initialize HTTP client: {}", e),
+            )
+        })?;
     let plan = build_direct_download_plan(&client, &source_url, &destination).map_err(|e| {
         CommandError::operation("direct-download", format!("Failed to build plan: {}", e))
     })?;

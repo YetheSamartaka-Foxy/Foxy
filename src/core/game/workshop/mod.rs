@@ -732,7 +732,7 @@ pub fn workshop_url(item_id: &str) -> String {
 }
 
 pub fn fetch_published_file_details(ids: &[String]) -> Result<Vec<WorkshopMetadata>, String> {
-    let client = reqwest::blocking::Client::new();
+    let client = crate::core::utils::proxy::blocking_client();
     let mut out = Vec::new();
     for chunk in ids.chunks(MAX_WEB_API_IDS_PER_REQUEST) {
         if chunk.is_empty() {
@@ -776,7 +776,7 @@ pub fn fetch_published_file_details(ids: &[String]) -> Result<Vec<WorkshopMetada
 }
 
 pub fn fetch_collection_children(collection_ids: &[String]) -> Result<Vec<String>, String> {
-    let client = reqwest::blocking::Client::new();
+    let client = crate::core::utils::proxy::blocking_client();
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     for chunk in collection_ids.chunks(MAX_WEB_API_IDS_PER_REQUEST) {

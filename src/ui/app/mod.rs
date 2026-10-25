@@ -18,7 +18,12 @@ pub(crate) use ui_helpers::activity::{
     paint_area_under, paint_bar_label, paint_border_beam, paint_border_flare, paint_live_marker,
     rise_effect, transfer_progress,
 };
-pub(crate) use ui_helpers::spinner::{PROGRESS_FRAME_INTERVAL, PacedSpinner, request_frame_after};
+#[cfg(test)]
+pub(crate) use ui_helpers::spinner::PROGRESS_FRAME_INTERVAL;
+pub(crate) use ui_helpers::spinner::{
+    PacedSpinner, progress_frame_interval, progress_frame_interval_override, request_frame_after,
+    set_progress_frame_rate,
+};
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;

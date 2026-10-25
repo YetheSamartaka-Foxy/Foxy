@@ -1,4 +1,7 @@
-use super::enums::{AppUpdateMode, HashIoProfilePreference, UiRendererPreference};
+use super::enums::{
+    AppUpdateMode, HashIoProfilePreference, MemoryPressurePreference, ProxyMode,
+    StorageTypePreference, UiRendererPreference, WorkPriorityPreference,
+};
 use super::repository::{ActiveUpdateSession, UpdateSummaryNotice};
 use super::scheduling::ScheduledJob;
 use crate::ui::fonts::FontSizes;
@@ -109,6 +112,32 @@ pub struct SettingsViewState {
     /// Keep `cpu_thread_limit` within the processors the system reports.
     #[serde(default = "default_cpu_thread_limit_safe")]
     pub cpu_thread_limit_safe: bool,
+    #[serde(default)]
+    pub work_priority: WorkPriorityPreference,
+    /// Run work threads in Windows background mode, which lowers their disk
+    /// and memory priority.
+    #[serde(default)]
+    pub low_disk_priority: bool,
+    #[serde(default)]
+    pub storage_type_override: StorageTypePreference,
+    #[serde(default)]
+    pub memory_pressure_override: MemoryPressurePreference,
+    /// Frames per second while progress animates; `None` is Auto.
+    #[serde(default)]
+    pub progress_frame_rate: Option<u32>,
+    #[serde(default)]
+    pub proxy_mode: ProxyMode,
+    /// Manual proxy address, without credentials.
+    #[serde(default)]
+    pub proxy_url: String,
+    #[serde(default)]
+    pub proxy_username: String,
+    /// Stored as plain text in `app_settings.json`; never logged or printed.
+    #[serde(default)]
+    pub proxy_password: String,
+    /// Comma-separated hosts, domains, or IP ranges reached without the proxy.
+    #[serde(default)]
+    pub proxy_bypass: String,
     #[serde(default)]
     pub hash_io_profile: HashIoProfilePreference,
     /// After a database reset, restore files the verified-hash record proves
@@ -343,6 +372,16 @@ impl Default for SettingsViewState {
             download_speed_limit_mbps: default_download_speed_limit_mbps(),
             cpu_thread_limit: None,
             cpu_thread_limit_safe: default_cpu_thread_limit_safe(),
+            work_priority: WorkPriorityPreference::default(),
+            low_disk_priority: false,
+            storage_type_override: StorageTypePreference::default(),
+            memory_pressure_override: MemoryPressurePreference::default(),
+            progress_frame_rate: None,
+            proxy_mode: ProxyMode::default(),
+            proxy_url: String::new(),
+            proxy_username: String::new(),
+            proxy_password: String::new(),
+            proxy_bypass: String::new(),
             hash_io_profile: HashIoProfilePreference::default(),
             trust_verified_hashes: default_trust_verified_hashes(),
             ui_renderer: UiRendererPreference::default(),
@@ -520,5 +559,44 @@ mod cpu_thread_setting_tests {
         let settings: SettingsViewState = serde_json::from_value(saved).unwrap();
         assert_eq!(settings.cpu_thread_limit, None);
         assert!(settings.cpu_thread_limit_safe);
+    }
+}
+
+#[cfg(test)]
+mod resource_setting_tests {
+    use super::SettingsViewState;
+    use crate::ui::types::{
+        MemoryPressurePreference, ProxyMode, StorageTypePreference, WorkPriorityPreference,
+    };
+
+    #[test]
+    fn settings_saved_before_the_options_existed_keep_current_behavior() {
+        let mut saved = serde_json::to_value(SettingsViewState::default()).unwrap();
+        let object = saved.as_object_mut().unwrap();
+        for key in [
+            "work_priority",
+            "low_disk_priority",
+            "storage_type_override",
+            "memory_pressure_override",
+            "progress_frame_rate",
+            "proxy_mode",
+            "proxy_url",
+            "proxy_username",
+            "proxy_password",
+            "proxy_bypass",
+        ] {
+            object.remove(key);
+        }
+        let settings: SettingsViewState = serde_json::from_value(saved).unwrap();
+        assert_eq!(settings.work_priority, WorkPriorityPreference::Normal);
+        assert!(!settings.low_disk_priority);
+        assert_eq!(settings.storage_type_override, StorageTypePreference::Auto);
+        assert_eq!(
+            settings.memory_pressure_override,
+            MemoryPressurePreference::Auto
+        );
+        assert_eq!(settings.progress_frame_rate, None);
+        assert_eq!(settings.proxy_mode, ProxyMode::System);
+        assert!(settings.proxy_url.is_empty());
     }
 }

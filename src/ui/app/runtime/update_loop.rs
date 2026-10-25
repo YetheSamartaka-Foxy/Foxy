@@ -218,7 +218,10 @@ impl Foxy {
             Self::merge_repaint_interval(&mut interval, scheduler_interval);
         }
 
-        interval
+        match crate::ui::app::progress_frame_interval_override() {
+            Some(cap) => interval.map(|interval| interval.max(cap)),
+            None => interval,
+        }
     }
 
     pub fn update(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
@@ -386,7 +389,11 @@ impl Foxy {
         if self.needs_repaint {
             // One 60 Hz frame later, not at once: while progress events keep
             // arriving, an immediate repaint chains frames at the display rate.
-            crate::ui::app::request_frame_after(&ctx, STATE_CHANGE_REPAINT_DELAY);
+            let delay = crate::ui::app::progress_frame_interval_override()
+                .map_or(STATE_CHANGE_REPAINT_DELAY, |cap| {
+                    cap.max(STATE_CHANGE_REPAINT_DELAY)
+                });
+            crate::ui::app::request_frame_after(&ctx, delay);
             self.needs_repaint = false;
         } else if let Some(repaint_interval) = self.next_visible_repaint_interval() {
             ctx.request_repaint_after(repaint_interval);

@@ -1,7 +1,11 @@
 use super::{AppState, CommandError, CommandSuccess};
-use crate::cli::args::{CliArgs, SettingsCommand, SettingsSetArgs};
+use crate::cli::args::{
+    CliArgs, MemoryPressureArg, ProxyModeArg, SettingsCommand, SettingsSetArgs, StorageTypeArg,
+    WorkPriorityArg,
+};
 use crate::cli::exit_codes;
 use crate::ui::types::{
+    MemoryPressurePreference, ProxyMode, StorageTypePreference, WorkPriorityPreference,
     additional_folder_alias_key, sanitize_additional_folder_alias, sanitize_user_path,
 };
 use serde_json::json;
@@ -13,13 +17,17 @@ pub fn run_settings_command(
 ) -> Result<CommandSuccess, CommandError> {
     let mut state = AppState::load()?;
     match command {
-        SettingsCommand::Show => Ok(CommandSuccess {
-            action: "settings.show".to_string(),
-            message: serde_json::to_string_pretty(&state.settings)
-                .unwrap_or_else(|_| "{}".to_string()),
-            data: json!(state.settings),
-            exit_code: exit_codes::SUCCESS,
-        }),
+        SettingsCommand::Show => {
+            let mut settings = json!(state.settings);
+            crate::core::utils::proxy::redact_settings_value(&mut settings);
+            Ok(CommandSuccess {
+                action: "settings.show".to_string(),
+                message: serde_json::to_string_pretty(&settings)
+                    .unwrap_or_else(|_| "{}".to_string()),
+                data: settings,
+                exit_code: exit_codes::SUCCESS,
+            })
+        }
         SettingsCommand::Set(args) => cmd_settings_set(cli, &mut state, *args),
         SettingsCommand::Reset => {
             if cli.dry_run {
@@ -178,6 +186,65 @@ fn cmd_settings_set(
         state.settings.cpu_thread_limit = None;
         changed = true;
     }
+    if let Some(v) = args.work_priority {
+        state.settings.work_priority = match v {
+            WorkPriorityArg::Normal => WorkPriorityPreference::Normal,
+            WorkPriorityArg::BelowNormal => WorkPriorityPreference::BelowNormal,
+            WorkPriorityArg::Lowest => WorkPriorityPreference::Lowest,
+        };
+        changed = true;
+    }
+    if let Some(v) = args.low_disk_priority {
+        state.settings.low_disk_priority = v;
+        changed = true;
+    }
+    if let Some(v) = args.storage_type {
+        state.settings.storage_type_override = match v {
+            StorageTypeArg::Auto => StorageTypePreference::Auto,
+            StorageTypeArg::Ssd => StorageTypePreference::Ssd,
+            StorageTypeArg::Hdd => StorageTypePreference::Hdd,
+            StorageTypeArg::Removable => StorageTypePreference::Removable,
+        };
+        changed = true;
+    }
+    if let Some(v) = args.memory_pressure {
+        state.settings.memory_pressure_override = match v {
+            MemoryPressureArg::Auto => MemoryPressurePreference::Auto,
+            MemoryPressureArg::Normal => MemoryPressurePreference::Normal,
+            MemoryPressureArg::Constrained => MemoryPressurePreference::Constrained,
+            MemoryPressureArg::Severe => MemoryPressurePreference::Severe,
+        };
+        changed = true;
+    }
+    if let Some(v) = args.proxy_mode {
+        state.settings.proxy_mode = match v {
+            ProxyModeArg::System => ProxyMode::System,
+            ProxyModeArg::None => ProxyMode::None,
+            ProxyModeArg::Manual => ProxyMode::Manual,
+        };
+        changed = true;
+    }
+    if let Some(v) = args.proxy_url {
+        let url = v.trim().to_string();
+        if !url.is_empty() {
+            crate::core::utils::proxy::validate_proxy_url(&url)
+                .map_err(|reason| CommandError::validation("settings.set", reason))?;
+        }
+        state.settings.proxy_url = url;
+        changed = true;
+    }
+    if let Some(v) = args.proxy_username {
+        state.settings.proxy_username = v.trim().to_string();
+        changed = true;
+    }
+    if let Some(v) = args.proxy_password {
+        state.settings.proxy_password = v;
+        changed = true;
+    }
+    if let Some(v) = args.proxy_bypass {
+        state.settings.proxy_bypass = v.trim().to_string();
+        changed = true;
+    }
     if let Some(threads) = state.settings.cpu_thread_limit.as_mut() {
         let max_threads = crate::core::utils::cpu_threads::cpu_thread_limit_max(
             state.settings.cpu_thread_limit_safe,
@@ -314,11 +381,13 @@ fn cmd_settings_set(
     }
 
     super::sanitize_settings(&mut state.settings);
+    let mut settings = json!(state.settings);
+    crate::core::utils::proxy::redact_settings_value(&mut settings);
     if cli.dry_run {
         return Ok(CommandSuccess {
             action: "settings.set".to_string(),
             message: "Dry-run: settings update previewed".to_string(),
-            data: json!({"settings": state.settings, "dry_run": true}),
+            data: json!({"settings": settings, "dry_run": true}),
             exit_code: exit_codes::SUCCESS,
         });
     }
@@ -327,7 +396,7 @@ fn cmd_settings_set(
     Ok(CommandSuccess {
         action: "settings.set".to_string(),
         message: "Settings updated".to_string(),
-        data: json!(state.settings),
+        data: settings,
         exit_code: exit_codes::SUCCESS,
     })
 }

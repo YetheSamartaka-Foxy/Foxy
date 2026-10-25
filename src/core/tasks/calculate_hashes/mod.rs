@@ -71,7 +71,7 @@ pub(crate) use propagation::{
 };
 pub(crate) use scheduling::{
     AddonHashMetrics, HashStorageClass, detect_storage_class_for_path,
-    invalidate_storage_class_cache,
+    invalidate_storage_class_cache, set_storage_class_override,
 };
 pub(crate) use segment_verified::{
     PatchedFileSegments, PatchedSegment, apply_segment_verified_files,

@@ -469,6 +469,7 @@ Open Settings with the gear icon or **F2**. The Settings view has these tabs: **
 
 - **Language** - System (auto-detect) or one of more than 40 bundled languages, including right-to-left languages.
 - **Download Speed Limit** - a maximum download speed in Mbps, or **Unlimited**.
+- **Proxy** - how Foxy reaches repositories, app updates, Steam Workshop details, and images. **System proxy settings** (the default) uses the proxy set in Windows or in the `HTTP_PROXY` and `HTTPS_PROXY` environment variables. **No proxy** connects directly. **Manual proxy** uses an HTTP or HTTPS proxy you enter, such as `http://proxy.example:8080`, with an optional user name and password and a comma-separated list of hosts to connect to directly. The password is stored in Foxy's settings file as plain text and is hidden from `foxy settings show`. SOCKS proxies are not supported. From the command line, use `foxy settings set --proxy-mode <system|none|manual>`, `--proxy-url`, `--proxy-username`, `--proxy-password`, and `--proxy-bypass`.
 - **Auto backup addons before update** - back up addons before any download.
 - **Auto recheck repositories on launch** - refresh all repository metadata when Foxy starts.
 - **Auto quick scan for changes on launch** - run quick local checks on all repositories when Foxy starts.
@@ -480,6 +481,13 @@ Open Settings with the gear icon or **F2**. The Settings view has these tabs: **
 
 - **Renderer** - **Auto (WGPU)** (recommended), **WGPU**, or **Glow**. Auto uses WGPU but lets Foxy switch to Glow (OpenGL) after a graphics crash. Changes take effect after a restart.
 - **CPU Threads** - the processor threads Foxy plans hashing, scanning, and checking work around. **Auto** uses every thread the system reports, which is shown next to the control as **Detected**. Untick **Auto** to enter a count yourself. **Safe limits** keeps it within the detected threads; untick it to enter any count up to 1024. From the command line, use `foxy settings set --cpu-threads <N>`, `--cpu-threads-auto`, or `--cpu-safe-limits <true|false>`.
+- **Work priority** (Windows) - processor priority of the threads that hash, scan, check, and download: **Normal**, **Below normal** (a running game gets the processor first), or **Lowest** (Foxy works only when the processor is otherwise idle). The interface and the programs Foxy launches, such as the game, keep normal priority. Command line: `--work-priority <normal|below-normal|lowest>`.
+- **Low disk priority** (Windows) - runs those threads in Windows background mode, which lowers their disk and memory priority so games and other programs load faster while Foxy checks or downloads. Command line: `--low-disk-priority <true|false>`.
+- **Storage type** - Foxy chooses how many files to read at once from each drive's type. **Auto-detect** is the default; choose **SSD**, **HDD**, or **Removable drive** when detection is wrong, for example a USB SSD detected as removable. The choice applies to every drive. Command line: `--storage-type <auto|ssd|hdd|removable>`.
+- **Memory pressure** - Foxy lowers hashing and download concurrency when memory runs low. **Auto** measures free memory before each check and download; **Normal**, **Constrained**, and **Severe** force a level. Command line: `--memory-pressure <auto|normal|constrained|severe>`.
+- **Progress frame rate** - how many frames per second Foxy draws while work shows progress: **Auto (30 fps)**, 20, 10, or 5 fps. Lower values use less processor time.
+
+None of these needs a restart: storage type and memory pressure apply from the next check or download, and the two priorities apply as soon as Foxy's work threads next wake. Saved benchmarks record the CPU Threads, work priority, low disk priority, and memory pressure settings, and the repository storage type they ran with.
 - **Hashing profile** - **Auto** benchmarks the first hashing work and picks the fastest profile; **Conservative**, **Balanced**, and **Aggressive** set the concurrency yourself.
 - **Skip unchanged files after a database reset** - after a database reset, trust files Foxy already verified and that Windows shows as untouched since, instead of reading them again. An integrity recheck always reads every file.
 

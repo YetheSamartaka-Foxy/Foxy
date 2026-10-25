@@ -4,20 +4,16 @@ use std::time::{Duration, Instant};
 
 use log::{debug, warn};
 use md5::Md5;
-use reqwest::blocking::Client;
 use sha1::{Digest, Sha1};
 
+use crate::core::utils::proxy::SharedBlockingClient;
 use crate::ui::app::{DecodedImagePayload, Foxy, ImageLoadResult};
 use crate::ui::types::{RepositoryServer, ServerOnlineStatus};
 
 /// Shared HTTP client for image downloads, enabling TLS session reuse and
 /// connection pooling across all image fetch operations.
-static IMAGE_HTTP_CLIENT: std::sync::LazyLock<Client> = std::sync::LazyLock::new(|| {
-    Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .expect("failed to build shared image HTTP client: check TLS/system configuration")
-});
+static IMAGE_HTTP_CLIENT: SharedBlockingClient =
+    SharedBlockingClient::new(|builder| builder.timeout(Duration::from_secs(10)));
 
 impl Foxy {
     /// Resolve the A2S query port for a listed game port through the active
@@ -245,7 +241,7 @@ impl Foxy {
     fn fetch_image_bytes_with_retry(full_url: &str) -> Result<Vec<u8>, String> {
         const IMAGE_FETCH_RETRIES: usize = 2;
 
-        let client = &*IMAGE_HTTP_CLIENT;
+        let client = IMAGE_HTTP_CLIENT.client();
 
         let mut last_error = String::new();
         for attempt in 1..=IMAGE_FETCH_RETRIES {

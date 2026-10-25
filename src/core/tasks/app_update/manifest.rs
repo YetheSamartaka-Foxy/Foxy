@@ -40,7 +40,9 @@ pub async fn fetch_manifest(base_url: &str) -> Result<UpdateManifest> {
     let url = format!("{}/foxy-app-updater.json", base_url.trim_end_matches('/'));
     log::info!("Fetching update manifest from {}", sanitize_log_url(&url));
 
-    let response = reqwest::get(&url)
+    let response = crate::core::utils::proxy::client()
+        .get(&url)
+        .send()
         .await
         .with_context(|| format!("Failed to fetch update manifest from {}", url))?;
 
@@ -95,7 +97,9 @@ pub async fn fetch_changelog(base_url: &str, changelog_path: &str) -> Result<Cha
     );
     log::debug!("Fetching changelog from {}", sanitize_log_url(&url));
 
-    let response = reqwest::get(&url)
+    let response = crate::core::utils::proxy::client()
+        .get(&url)
+        .send()
         .await
         .with_context(|| format!("Failed to fetch changelog from {}", url))?;
 

@@ -25,7 +25,7 @@ use std::ops::RangeInclusive;
 use egui::emath::lerp;
 use egui::{Color32, Id, Pos2, Rect, Ui, vec2};
 
-use super::spinner::{PROGRESS_FRAME_INTERVAL, request_frame_after};
+use super::spinner::{progress_frame_interval, request_frame_after};
 use crate::ui::app::Foxy;
 
 /// The animation clock of one frame. Reduce motion zeroes egui's animation
@@ -75,7 +75,7 @@ impl Motion {
     /// Ask for the next animation frame while `rect` is on screen.
     pub(crate) fn keep_alive(self, ui: &Ui, rect: Rect) {
         if self.animate && ui.is_rect_visible(rect) {
-            request_frame_after(ui.ctx(), PROGRESS_FRAME_INTERVAL);
+            request_frame_after(ui.ctx(), progress_frame_interval());
         }
     }
 }

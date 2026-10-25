@@ -1,6 +1,5 @@
-use crate::core::utils::cpu_threads;
 use crate::ui::app::Foxy;
-use crate::ui::i18n::{tr, tr_fmt};
+use crate::ui::i18n::tr;
 use crate::ui::types::{HashIoProfilePreference, UiRendererPreference};
 use eframe::egui::{self, Button, RichText, TextEdit, Ui, Vec2};
 use log::{info, warn};
@@ -60,7 +59,7 @@ impl Foxy {
         response
     }
 
-    /// Language selector, download speed limit, CPU threads, checkboxes (auto-backup, auto-apply, auto-recheck,
+    /// Language selector, download speed limit, proxy, resource usage, checkboxes (auto-backup, auto-apply, auto-recheck,
     /// auto-quick-scan), open config/logs buttons, reset, debug windows, close/hide-after-launch,
     /// and wipe database (dev).
     pub(super) fn render_application_settings_general(
@@ -245,86 +244,10 @@ impl Foxy {
         });
         ui.separator();
 
-        // CPU threads
-        ui.horizontal(|ui| {
-            ui.add_space(horizontal_padding);
-            let threads_label = ui.label(tr("CPU Threads")).on_hover_text(tr(
-                "Processor threads Foxy plans hashing, scanning and checking work around. Auto uses every thread the system reports.",
-            ));
+        self.render_application_settings_proxy(ui, horizontal_padding, changed);
+        ui.separator();
 
-            let detected = cpu_threads::detected_cpu_threads();
-            let mut cpu_changed = false;
-            let mut auto = self.settings_view_state.cpu_thread_limit.is_none();
-            let auto_checkbox = Self::ui_state_checkbox(ui, &mut auto, tr("Auto"))
-                .on_hover_text(tr("Use every processor thread the system reports."));
-            if auto_checkbox.changed() {
-                self.settings_view_state.cpu_thread_limit = if auto {
-                    None
-                } else {
-                    Some(cpu_threads::cpu_thread_limit_max(true, detected))
-                };
-                cpu_changed = true;
-            }
-            if auto_checkbox.hovered() {
-                ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
-            }
-
-            if !auto {
-                let safe_checkbox = Self::ui_state_checkbox(
-                    ui,
-                    &mut self.settings_view_state.cpu_thread_limit_safe,
-                    tr("Safe limits"),
-                )
-                .on_hover_text(tr(
-                    "Keep the thread count within the processor threads detected on this computer. Turn off to enter any value.",
-                ));
-                if safe_checkbox.changed() {
-                    cpu_changed = true;
-                }
-                if safe_checkbox.hovered() {
-                    ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
-                }
-
-                let max_threads = cpu_threads::cpu_thread_limit_max(
-                    self.settings_view_state.cpu_thread_limit_safe,
-                    detected,
-                );
-                let thread_limit = self.settings_view_state.cpu_thread_limit.get_or_insert(1);
-                let clamped = (*thread_limit).clamp(1, max_threads);
-                if clamped != *thread_limit {
-                    *thread_limit = clamped;
-                    cpu_changed = true;
-                }
-                let thread_input = ui
-                    .add(egui::DragValue::new(thread_limit).range(1..=max_threads))
-                    .labelled_by(threads_label.id);
-                if thread_input.changed() {
-                    cpu_changed = true;
-                }
-                if thread_input.hovered() {
-                    ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
-                }
-            }
-
-            if let Some(detected) = detected {
-                ui.label(
-                    RichText::new(tr_fmt(
-                        "Detected: {count}",
-                        &[("count", detected.to_string())],
-                    ))
-                    .color(self.color_text_dim()),
-                );
-            }
-
-            if cpu_changed {
-                cpu_threads::set_cpu_thread_limit(
-                    self.settings_view_state.cpu_thread_limit,
-                    self.settings_view_state.cpu_thread_limit_safe,
-                );
-                *changed = true;
-            }
-            ui.add_space(horizontal_padding);
-        });
+        self.render_application_settings_resources(ui, horizontal_padding, changed);
         ui.separator();
 
         // Hashing profile

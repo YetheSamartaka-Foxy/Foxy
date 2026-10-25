@@ -898,10 +898,8 @@ impl Foxy {
         crate::core::api::set_extended_diagnostics(
             self.settings_view_state.extended_diagnostics_logging,
         );
-        crate::core::utils::cpu_threads::set_cpu_thread_limit(
-            self.settings_view_state.cpu_thread_limit,
-            self.settings_view_state.cpu_thread_limit_safe,
-        );
+        crate::core::utils::runtime_settings::apply_runtime_settings(&self.settings_view_state);
+        crate::ui::app::set_progress_frame_rate(self.settings_view_state.progress_frame_rate);
         if !self.settings_view_state.show_memory_diagnostics_icon {
             self.show_memory_diagnostics_window = false;
         }

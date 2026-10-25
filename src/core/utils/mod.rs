@@ -15,9 +15,12 @@ pub mod power;
 #[cfg(target_os = "windows")]
 pub(crate) mod process;
 pub mod profiling;
+pub mod proxy;
 pub mod renderer_fallback;
 pub mod resource_profile;
 pub mod resource_sampler;
+pub mod runtime_settings;
 pub mod speed_of_light;
 pub mod storage_compat;
 pub mod thread_cpu;
+pub mod work_priority;

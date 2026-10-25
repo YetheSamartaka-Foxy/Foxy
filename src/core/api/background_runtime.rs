@@ -19,10 +19,9 @@ pub(crate) fn background_runtime() -> Option<&'static Runtime> {
     static RUNTIME: OnceLock<Option<Runtime>> = OnceLock::new();
     RUNTIME
         .get_or_init(|| {
-            tokio::runtime::Builder::new_multi_thread()
+            crate::core::utils::work_priority::work_runtime_builder()
                 .worker_threads(2)
                 .thread_name("foxy-background")
-                .enable_all()
                 .build()
                 .map_err(|err| {
                     warn!("Failed to build shared background runtime: {}", err);

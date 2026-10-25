@@ -642,7 +642,8 @@ impl Foxy {
         self.addon_hash_recalc_in_flight = true;
         self.needs_repaint = true;
         std::thread::spawn(move || {
-            let outcome = match Runtime::new() {
+            crate::core::utils::work_priority::apply_to_current_thread();
+            let outcome = match crate::core::utils::work_priority::work_runtime_builder().build() {
                 Ok(rt) => rt
                     .block_on(api::recalculate_hashes_for_addon_by_name(
                         &worker_url,

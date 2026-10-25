@@ -41,10 +41,10 @@ pub async fn download_installer(
 
     log::info!("Downloading installer from {}", sanitize_log_url(&url));
 
-    let client = reqwest::Client::builder()
+    let client = crate::core::utils::proxy::client_builder()
         .connect_timeout(Duration::from_secs(15))
         .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
+        .unwrap_or_else(|_| crate::core::utils::proxy::client());
 
     let mut downloaded: u64 = 0;
     let mut total_size = platform_entry.installer_size;
