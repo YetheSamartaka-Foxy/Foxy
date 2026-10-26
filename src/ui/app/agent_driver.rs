@@ -5236,6 +5236,7 @@ impl Foxy {
                     })?
                     .to_string();
                 self.agent_gui_apply_profile(index, &profile)?;
+                self.save_repositories();
             }
             "start-sync" => {
                 let index = self.agent_gui_resolve_repo_index(params)?;
@@ -5386,7 +5387,7 @@ impl Foxy {
             }
             "pause-download" => self.set_download_paused(true),
             "resume-download" => self.set_download_paused(false),
-            "cancel-download" => self.cancel_sync(),
+            "cancel-download" => self.cancel_sync_and_queued_runs(),
             "switch-game-space" => {
                 let space_id = params
                     .get("game-space")

@@ -35,6 +35,28 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     result
 }
 
+/// Copy a configuration file that could not be read or parsed to
+/// `<name>.unreadable`, so the next save of a default or partial state cannot
+/// destroy the only copy. Returns the copy's path when the copy succeeded.
+pub fn preserve_unreadable_file(path: &Path) -> Option<PathBuf> {
+    let mut copy = path.as_os_str().to_owned();
+    copy.push(".unreadable");
+    let copy = PathBuf::from(copy);
+    match fs::copy(path, &copy) {
+        Ok(_) => Some(copy),
+        Err(err) => {
+            log::warn!(
+                "Could not keep a copy of unreadable {}: {}",
+                path.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                err
+            );
+            None
+        }
+    }
+}
+
 /// Validate that `child` is a safe path component to join under `base`.
 ///
 /// Rejects directory traversal (`..`), absolute paths, NTFS stream separators (`:`),
@@ -193,6 +215,20 @@ mod tests {
         assert!(is_safe_child_path("my-mod"));
         assert!(is_safe_child_path("addon_v2"));
         assert!(is_safe_child_path("dir/subdir/file.txt"));
+    }
+
+    #[test]
+    fn an_unreadable_config_file_is_copied_aside_before_it_can_be_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("repositories.json");
+        fs::write(&path, b"[{\"name\": ").unwrap();
+        let copy = preserve_unreadable_file(&path).unwrap();
+        assert!(
+            copy.to_string_lossy()
+                .ends_with("repositories.json.unreadable")
+        );
+        assert_eq!(fs::read(&copy).unwrap(), b"[{\"name\": ");
+        assert!(preserve_unreadable_file(&dir.path().join("missing.json")).is_none());
     }
 
     #[test]

@@ -34,6 +34,89 @@ pub struct RepositorySpaceBulkProgress {
     pub completed_repo_urls: HashSet<String>,
 }
 
+impl RepositorySpaceBulkProgress {
+    /// Count one member's outcome. Returns false when the URL is not a pending
+    /// target of this run, so a repeated or foreign completion changes nothing.
+    pub fn record(&mut self, repo_url: &str, succeeded: bool, had_updates: bool) -> bool {
+        if !self.target_repo_urls.contains(repo_url) || self.completed_repo_urls.contains(repo_url)
+        {
+            return false;
+        }
+        self.completed_repo_urls.insert(repo_url.to_string());
+        self.completed_count += 1;
+        if succeeded {
+            self.succeeded_count += 1;
+            if self.mode == RepositorySpaceBulkMode::RecheckAll {
+                if had_updates {
+                    self.updates_available_count += 1;
+                } else {
+                    self.up_to_date_count += 1;
+                }
+            }
+        } else {
+            self.failed_count += 1;
+        }
+        true
+    }
+
+    /// Take a removed member out of the run, whether or not it already finished,
+    /// so the remaining members can still complete it.
+    pub fn remove_target(&mut self, repo_url: &str) {
+        if !self.target_repo_urls.remove(repo_url) {
+            return;
+        }
+        self.total_count = self.total_count.saturating_sub(1);
+        if self.completed_repo_urls.remove(repo_url) {
+            self.completed_count = self.completed_count.saturating_sub(1);
+        }
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.completed_count >= self.total_count
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn progress(urls: &[&str]) -> RepositorySpaceBulkProgress {
+        RepositorySpaceBulkProgress {
+            space_id: "space".into(),
+            mode: RepositorySpaceBulkMode::UpdateAll,
+            total_count: urls.len(),
+            completed_count: 0,
+            succeeded_count: 0,
+            failed_count: 0,
+            updates_available_count: 0,
+            up_to_date_count: 0,
+            current_repo_name: None,
+            target_repo_urls: urls.iter().map(|url| url.to_string()).collect(),
+            completed_repo_urls: HashSet::new(),
+        }
+    }
+
+    #[test]
+    fn removing_a_finished_member_still_lets_the_run_complete() {
+        let mut run = progress(&["a/", "b/"]);
+        assert!(run.record("a/", true, false));
+        run.remove_target("a/");
+        assert!(!run.is_finished());
+        assert!(run.record("b/", true, false));
+        assert!(run.is_finished());
+    }
+
+    #[test]
+    fn repeated_and_foreign_completions_are_ignored() {
+        let mut run = progress(&["a/", "b/"]);
+        assert!(run.record("a/", false, false));
+        assert!(!run.record("a/", true, false));
+        assert!(!run.record("other/", true, false));
+        assert_eq!((run.completed_count, run.failed_count), (1, 1));
+        assert!(!run.is_finished());
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct RepositorySpaceEntry {
     pub name: String,

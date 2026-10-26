@@ -68,6 +68,7 @@ impl Foxy {
                 }
                 Err(err) => {
                     error!("Failed to parse repositories.json: {}", err);
+                    self.report_unreadable_config(&path);
                 }
             },
             Err(err) if err.kind() == ErrorKind::NotFound => {
@@ -77,8 +78,10 @@ impl Foxy {
             }
             Err(err) => {
                 error!("Failed to read repositories.json: {}", err);
+                self.report_unreadable_config(&path);
             }
         }
+        self.reset_addon_selection_baseline();
     }
 
     pub fn save_repositories(&mut self) {
@@ -385,9 +388,7 @@ impl Foxy {
             .repository_view_state
             .repositories
             .iter()
-            .enumerate()
-            .map(|(repo_index, repo)| StartupPendingUpdateRestoreRequest {
-                repo_index,
+            .map(|repo| StartupPendingUpdateRestoreRequest {
                 repo_name: repo.name.clone(),
                 repo_url: Self::normalize_repo_url(&repo.address),
                 repo_path: repo.path.clone(),
@@ -426,7 +427,7 @@ impl Foxy {
                                         mods.iter().filter(|m| m.needs_update).count()
                                     );
                                     restored.push(StartupPendingUpdateRestoreRecord {
-                                        repo_index: request.repo_index,
+                                        repo_path: request.repo_path.clone(),
                                         repo_url: request.repo_url,
                                         state: RepoState::PendingUpdate,
                                         mods: Some(mods),
@@ -447,7 +448,7 @@ impl Foxy {
                                         );
                                     }
                                     restored.push(StartupPendingUpdateRestoreRecord {
-                                        repo_index: request.repo_index,
+                                        repo_path: request.repo_path.clone(),
                                         repo_url: request.repo_url,
                                         state: RepoState::Synced,
                                         mods: None,
@@ -475,7 +476,7 @@ impl Foxy {
                                     );
                                 }
                                 restored.push(StartupPendingUpdateRestoreRecord {
-                                    repo_index: request.repo_index,
+                                    repo_path: request.repo_path.clone(),
                                     repo_url: request.repo_url,
                                     state: RepoState::Unknown,
                                     mods: None,
@@ -486,7 +487,7 @@ impl Foxy {
                         }
                     }
                     Ok(None) => restored.push(StartupPendingUpdateRestoreRecord {
-                        repo_index: request.repo_index,
+                        repo_path: request.repo_path.clone(),
                         repo_url: request.repo_url,
                         state: RepoState::Unknown,
                         mods: None,
@@ -500,7 +501,7 @@ impl Foxy {
                             err
                         );
                         restored.push(StartupPendingUpdateRestoreRecord {
-                            repo_index: request.repo_index,
+                            repo_path: request.repo_path.clone(),
                             repo_url: request.repo_url,
                             state: RepoState::Unknown,
                             mods: None,
@@ -532,18 +533,17 @@ impl Foxy {
             let mut verify_urls = Vec::new();
             let mut first_pending: Option<(usize, Vec<ModDiffSummary>)> = None;
             for record in records {
-                let Some((repo_address, repo_path)) = self
-                    .repository_view_state
-                    .repositories
-                    .get(record.repo_index)
-                    .map(|repo| (repo.address.clone(), repo.path.clone()))
-                else {
+                let Some(repo_index) = self.repo_index_by_instance(
+                    &record.repo_url,
+                    &Self::repo_instance_path_key(&record.repo_path),
+                ) else {
                     continue;
                 };
+                let (repo_address, repo_path) = {
+                    let repo = &self.repository_view_state.repositories[repo_index];
+                    (repo.address.clone(), repo.path.clone())
+                };
                 let normalized_url = Self::normalize_repo_url(&repo_address);
-                if normalized_url != record.repo_url {
-                    continue;
-                }
 
                 let state =
                     if record.state == RepoState::PendingUpdate && record.verify_with_quick_scan {
@@ -571,7 +571,7 @@ impl Foxy {
                             && first_pending.is_none()
                             && let Some(mods) = record.mods
                         {
-                            first_pending = Some((record.repo_index, mods));
+                            first_pending = Some((repo_index, mods));
                         }
                     }
                 } else {
@@ -636,10 +636,8 @@ impl Foxy {
 
     /// Resolve a repository instance by both its normalized URL and download
     /// folder. `local_path_key` must already be normalized via
-    /// [`Self::repo_instance_path_key`]. Falls back to a URL-only match when no
-    /// instance shares the folder (e.g. a result that predates a folder change),
-    /// so a single-instance repository keeps working.
-    pub(crate) fn repo_index_by_url_and_path(
+    /// [`Self::repo_instance_path_key`].
+    pub(crate) fn repo_index_by_instance(
         &self,
         normalized_url: &str,
         local_path_key: &str,
@@ -651,7 +649,23 @@ impl Foxy {
                 Self::normalize_repo_url(&repo.address) == normalized_url
                     && Self::repo_instance_path_key(&repo.path) == local_path_key
             })
-            .or_else(|| self.repo_index_by_normalized_url(normalized_url))
+    }
+
+    /// [`Self::repo_index_by_instance`], falling back to a URL-only match when
+    /// no instance shares the folder (e.g. a result that predates a folder
+    /// change) and exactly one instance has the URL, so a single-instance
+    /// repository keeps working without a result landing on another folder's copy.
+    pub(crate) fn repo_index_by_url_and_path(
+        &self,
+        normalized_url: &str,
+        local_path_key: &str,
+    ) -> Option<usize> {
+        self.repo_index_by_instance(normalized_url, local_path_key)
+            .or_else(|| {
+                unique_position(self.repository_view_state.repositories.iter(), |repo| {
+                    Self::normalize_repo_url(&repo.address) == normalized_url
+                })
+            })
     }
 
     pub fn load_cached_updates_for_repo(&mut self, repo_index: usize) {
@@ -759,7 +773,15 @@ impl Foxy {
                 open_modal_when_pending,
                 outcome,
             } = result;
-            self.pending_cached_update_loads.remove(&repo_url);
+            // A game-space switch clears the pending set; a load dispatched in
+            // the previous space must not open its diff in this one.
+            if !self.pending_cached_update_loads.remove(&repo_url) {
+                debug!(
+                    "Discarding a cached update load dispatched before a game space switch: {}",
+                    repo_url
+                );
+                continue;
+            }
 
             // The list may have changed while the load was in flight; re-resolve
             // by URL + folder and discard the result if the repository is gone.
@@ -833,6 +855,23 @@ impl Foxy {
             self.needs_repaint = true;
         }
     }
+}
+
+/// Position of the only item matching `predicate`; `None` when none or several match.
+fn unique_position<T>(
+    items: impl Iterator<Item = T>,
+    mut predicate: impl FnMut(&T) -> bool,
+) -> Option<usize> {
+    let mut found = None;
+    for (index, item) in items.enumerate() {
+        if predicate(&item) {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(index);
+        }
+    }
+    found
 }
 
 fn update_session_id() -> String {
@@ -929,6 +968,14 @@ fn load_cached_update_outcome(normalized_url: &str, local_path: &str) -> CachedU
 mod tests {
     use super::*;
     use crate::core::api::{FileDiffSummary, ModDiffSummary};
+
+    #[test]
+    fn url_fallback_only_resolves_a_single_copy() {
+        let urls = ["a/", "b/", "a/"];
+        assert_eq!(unique_position(urls.iter(), |url| **url == "b/"), Some(1));
+        assert_eq!(unique_position(urls.iter(), |url| **url == "a/"), None);
+        assert_eq!(unique_position(urls.iter(), |url| **url == "c/"), None);
+    }
 
     fn mod_summary(name: &str, needs_update: bool, files: usize) -> ModDiffSummary {
         use crate::core::api::FileDiffKind;

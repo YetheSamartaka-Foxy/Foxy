@@ -18,6 +18,7 @@ pub(crate) type SharedRollbackSession = Arc<Mutex<UpdateRollbackSession>>;
 const ROLLBACK_DIR_NAME: &str = "update-rollback";
 const MANIFEST_FILE_NAME: &str = "manifest.json";
 const JOURNAL_FILE_NAME: &str = "journal.jsonl";
+const OWNER_LOCK_FILE_NAME: &str = "owner.lock";
 const SIDECAR_BAK_SUFFIX: &str = ".foxy.bak";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -57,6 +58,9 @@ pub(crate) struct UpdateRollbackSession {
     /// Position of each target path in `manifest.entries`.
     index: HashMap<PathBuf, usize>,
     journal: Option<fs::File>,
+    /// Exclusive lock held for the session's life, so a Foxy started for another
+    /// game space (sessions share the temp folder) leaves a live session alone.
+    owner_lock: Option<std::fs::File>,
 }
 
 fn apply_event(
@@ -65,12 +69,14 @@ fn apply_event(
     event: JournalEvent,
 ) {
     match event {
-        JournalEvent::Register { entry } => {
-            if !index.contains_key(&entry.target_path) {
+        JournalEvent::Register { entry } => match index.get(&entry.target_path) {
+            // Re-registered after a restore: the new sidecar replaces the consumed one.
+            Some(&position) => manifest.entries[position] = entry,
+            None => {
                 index.insert(entry.target_path.clone(), manifest.entries.len());
                 manifest.entries.push(entry);
             }
-        }
+        },
         JournalEvent::Promoted { target_path } => {
             if let Some(entry) = index
                 .get(&target_path)
@@ -130,6 +136,7 @@ async fn load_session(session_dir: PathBuf) -> Option<UpdateRollbackSession> {
         manifest,
         index,
         journal: None,
+        owner_lock: None,
     })
 }
 
@@ -172,12 +179,14 @@ impl UpdateRollbackSession {
                     sanitize_log_path(&session_dir)
                 )
             })?;
+        let owner_lock = acquire_owner_lock(&session_dir);
         let session = Self {
             session_dir,
             manifest_path,
             manifest,
             index: HashMap::new(),
             journal: Some(journal),
+            owner_lock,
         };
         session.persist_manifest().await?;
         Ok(session)
@@ -193,6 +202,9 @@ impl UpdateRollbackSession {
         };
 
         while let Some(entry) = sessions.next_entry().await? {
+            if session_owned_by_live_process(&entry.path()) {
+                continue;
+            }
             let Some(session) = load_session(entry.path()).await else {
                 continue;
             };
@@ -346,6 +358,8 @@ impl UpdateRollbackSession {
     }
 
     pub(crate) async fn commit(&mut self) -> anyhow::Result<()> {
+        // Windows cannot remove the folder while the lock file is open.
+        self.owner_lock = None;
         self.record(JournalEvent::Committed).await?;
         discard_sidecars(&self.manifest.entries).await?;
         remove_dir_if_exists(&self.session_dir)
@@ -390,7 +404,13 @@ impl UpdateRollbackSession {
     }
 
     async fn prepare_replace(&mut self, file_id: u64, target_path: &Path) -> anyhow::Result<()> {
-        if self.entry_for_target(target_path).is_some() {
+        // A restored entry put the original back and consumed its sidecar (a
+        // patch that failed verification, a promote retried after a failure),
+        // so the next replace needs a fresh sidecar or a later revert loses the file.
+        if self
+            .entry_for_target(target_path)
+            .is_some_and(|entry| !entry.restored)
+        {
             return Ok(());
         }
 
@@ -466,6 +486,29 @@ impl UpdateRollbackSession {
             )
         })
     }
+}
+
+fn acquire_owner_lock(session_dir: &Path) -> Option<std::fs::File> {
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(session_dir.join(OWNER_LOCK_FILE_NAME))
+        .ok()?;
+    lock.try_lock().ok()?;
+    Some(lock)
+}
+
+/// A session folder whose owner lock another open handle still holds. Sessions
+/// from before the lock existed have no lock file and count as stale.
+fn session_owned_by_live_process(session_dir: &Path) -> bool {
+    let Ok(lock) = std::fs::OpenOptions::new()
+        .write(true)
+        .open(session_dir.join(OWNER_LOCK_FILE_NAME))
+    else {
+        return false;
+    };
+    matches!(lock.try_lock(), Err(std::fs::TryLockError::WouldBlock))
 }
 
 fn sidecar_bak_path(target: &Path) -> PathBuf {
@@ -653,6 +696,69 @@ mod tests {
         assert_eq!(fs::read(&target).await.unwrap(), b"original");
         assert!(!sidecar_bak_path(&target).exists());
         assert!(session.touched_file_ids().contains(&7));
+    }
+
+    #[tokio::test]
+    async fn stale_cleanup_leaves_a_session_another_owner_still_holds() {
+        let dir = tempdir().unwrap();
+        let rollback_root = dir.path().join("tmp");
+        let target = dir.path().join("addon.pbo");
+        let staged = dir.path().join("addon.pbo.foxy.part");
+        fs::write(&target, b"original").await.unwrap();
+        fs::write(&staged, b"updated").await.unwrap();
+
+        let mut live = UpdateRollbackSession::new(&rollback_root, "https://example.test/")
+            .await
+            .unwrap();
+        live.promote_file(7, &staged, &target).await.unwrap();
+
+        // Another game space's Foxy starting up runs the same cleanup.
+        UpdateRollbackSession::cleanup_stale_sessions(&rollback_root, None)
+            .await
+            .unwrap();
+        assert!(live.session_dir.exists());
+        assert!(sidecar_bak_path(&target).exists());
+        live.restore_all(None).await.unwrap();
+        assert_eq!(fs::read(&target).await.unwrap(), b"original");
+
+        let session_dir = live.session_dir.clone();
+        drop(live);
+        UpdateRollbackSession::cleanup_stale_sessions(&rollback_root, None)
+            .await
+            .unwrap();
+        assert!(!session_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn a_replace_after_a_restore_keeps_a_sidecar_for_the_final_revert() {
+        let dir = tempdir().unwrap();
+        let rollback_root = dir.path().join("tmp");
+        let target = dir.path().join("addon.pbo");
+        let patched = dir.path().join("addon.pbo.foxy.tmp");
+        let downloaded = dir.path().join("addon.pbo.foxy.part");
+        fs::write(&target, b"original").await.unwrap();
+        fs::write(&patched, b"bad patch").await.unwrap();
+        fs::write(&downloaded, b"full download").await.unwrap();
+
+        let mut session = UpdateRollbackSession::new(&rollback_root, "https://example.test/")
+            .await
+            .unwrap();
+        // A patch that fails verification is restored, then the full download
+        // of the same file replaces it again before the update is cancelled.
+        session.promote_file(7, &patched, &target).await.unwrap();
+        session.restore_entry(7, &target).await.unwrap();
+        assert_eq!(fs::read(&target).await.unwrap(), b"original");
+        session.promote_file(7, &downloaded, &target).await.unwrap();
+        assert_eq!(fs::read(&target).await.unwrap(), b"full download");
+
+        let replayed = load_session(session.session_dir.clone()).await.unwrap();
+        assert_eq!(replayed.manifest.entries.len(), 1);
+        assert!(replayed.manifest.entries[0].promoted);
+        assert!(!replayed.manifest.entries[0].restored);
+
+        session.restore_all(None).await.unwrap();
+        assert_eq!(fs::read(&target).await.unwrap(), b"original");
+        assert!(!sidecar_bak_path(&target).exists());
     }
 
     #[tokio::test]

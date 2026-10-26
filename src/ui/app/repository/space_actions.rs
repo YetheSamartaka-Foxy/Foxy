@@ -299,42 +299,24 @@ impl Foxy {
             return;
         };
         let repo_url = Self::normalize_repo_url(&repo.address);
+        let repo_space_id = repo.repository_space_id.clone();
 
         let completion_summary: Option<(RepositorySpaceBulkMode, usize, usize, usize, usize)> = {
             let Some(progress) = self.repository_space_bulk_progress.as_mut() else {
                 return;
             };
-            if progress.completed_repo_urls.contains(&repo_url) {
+            // A same-URL copy outside the space is a different instance.
+            if repo_space_id.as_deref() != Some(progress.space_id.as_str()) {
                 return;
             }
-            if !progress.target_repo_urls.contains(&repo_url) {
+            if mode != Some(Self::sync_mode_for_bulk_mode(progress.mode)) {
                 return;
             }
-
-            let expected_mode = match progress.mode {
-                RepositorySpaceBulkMode::RecheckAll => SyncMode::RemoteRefreshOnly,
-                RepositorySpaceBulkMode::UpdateAll => SyncMode::Download,
-            };
-            if mode != Some(expected_mode) {
+            if !progress.record(&repo_url, finished_successfully, had_updates) {
                 return;
             }
 
-            progress.completed_repo_urls.insert(repo_url);
-            progress.completed_count += 1;
-            if finished_successfully {
-                progress.succeeded_count += 1;
-                if progress.mode == RepositorySpaceBulkMode::RecheckAll {
-                    if had_updates {
-                        progress.updates_available_count += 1;
-                    } else {
-                        progress.up_to_date_count += 1;
-                    }
-                }
-            } else {
-                progress.failed_count += 1;
-            }
-
-            if progress.completed_count >= progress.total_count {
+            if progress.is_finished() {
                 progress.current_repo_name = None;
                 Some((
                     progress.mode,
@@ -392,13 +374,29 @@ impl Foxy {
             let Some(repo) = self.repository_view_state.repositories.get(repo_idx) else {
                 continue;
             };
+            let repo_url = Self::normalize_repo_url(&repo.address);
             if repo.repository_space_id.as_deref() != Some(space_id.as_str()) {
+                // Detached since it was queued: no longer part of the run.
+                if let Some(progress) = self
+                    .repository_space_bulk_progress
+                    .as_mut()
+                    .filter(|progress| progress.space_id == space_id)
+                {
+                    progress.remove_target(&repo_url);
+                }
+                self.finish_repository_space_bulk_if_done();
                 continue;
             }
             if repo.address.trim().is_empty() || repo.path.trim().is_empty() {
                 warn!(
                     "Skipping queued repository-space sync for {} due to incomplete configuration",
                     repo.name
+                );
+                self.record_repository_space_bulk_completion(
+                    Some(repo_idx),
+                    Some(mode),
+                    false,
+                    false,
                 );
                 continue;
             }
@@ -413,6 +411,56 @@ impl Foxy {
                 );
                 break;
             }
+            // Refused to start (unwritable folder, pending purge): count it, or
+            // the run never reaches its total and the space stays locked.
+            warn!(
+                "Queued repository-space sync for {} could not start; counting it as failed",
+                repo_name
+            );
+            self.record_repository_space_bulk_completion(Some(repo_idx), Some(mode), false, false);
+        }
+    }
+
+    /// Clear a run whose remaining members were all taken out of it.
+    fn finish_repository_space_bulk_if_done(&mut self) {
+        if self
+            .repository_space_bulk_progress
+            .as_ref()
+            .is_some_and(|progress| progress.total_count == 0)
+        {
+            self.repository_space_bulk_progress = None;
+        }
+    }
+
+    /// The user's Cancel stops the run the cancelled sync belongs to, not just
+    /// that one repository: the folder and space queues are dropped and an
+    /// active scheduled job ends without its post-action.
+    pub(in crate::ui::app) fn drop_queued_repository_runs(&mut self) {
+        let dropped_folder = self.repository_visual_folder_sync_queue.len();
+        self.repository_visual_folder_sync_queue.clear();
+        let dropped_space: Vec<_> = self.repository_space_sync_queue.drain(..).collect();
+        for (space_id, repo_idx, _) in &dropped_space {
+            let Some(repo) = self.repository_view_state.repositories.get(*repo_idx) else {
+                continue;
+            };
+            let repo_url = Self::normalize_repo_url(&repo.address);
+            if let Some(progress) = self
+                .repository_space_bulk_progress
+                .as_mut()
+                .filter(|progress| &progress.space_id == space_id)
+            {
+                progress.remove_target(&repo_url);
+            }
+        }
+        self.finish_repository_space_bulk_if_done();
+        let cancelled_job = self.cancel_scheduled_job_run();
+        if dropped_folder > 0 || !dropped_space.is_empty() || cancelled_job {
+            info!(
+                "Cancel stopped queued work: folder_entries={} space_entries={} scheduled_job={}",
+                dropped_folder,
+                dropped_space.len(),
+                cancelled_job
+            );
         }
     }
 

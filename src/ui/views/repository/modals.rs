@@ -2004,11 +2004,13 @@ impl Foxy {
                             ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                         }
                         if self.delete_repository_delete_files {
-                            ui.label(
-                                self.t(
+                            if let Some(note) = self.delete_files_kept_note(repo_idx) {
+                                ui.label(egui::RichText::new(note).color(self.color_warn()));
+                            } else {
+                                ui.label(self.t(
                                     "This will also delete downloaded files for this repository.",
-                                ),
-                            );
+                                ));
+                            }
                         }
                     }
                     if matches!(

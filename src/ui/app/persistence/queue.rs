@@ -251,6 +251,7 @@ impl Foxy {
     }
 
     fn queue_repositories_save(&mut self) {
+        self.queue_checks_for_changed_addon_selections();
         let revision = self.repositories_revision;
         let request = PersistenceRequest::SaveRepositories {
             revision,

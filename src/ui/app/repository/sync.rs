@@ -68,6 +68,10 @@ impl Foxy {
         prepare_download_plan: bool,
         force_full_downloads: bool,
     ) {
+        if self.close_requested_at.is_some() {
+            warn!("Sync request ignored: Foxy is closing");
+            return;
+        }
         if self.block_database_update_request() {
             return;
         }
@@ -172,6 +176,7 @@ impl Foxy {
             self.direct_download_update_view = false;
             self.syncing_repository = Some(repo_idx);
             self.current_sync_mode = Some(mode);
+            self.note_addon_selection_synced(repo_idx);
             if Self::sync_writes_repository_files(mode, prepare_download_plan) {
                 self.suppress_fs_watch_for_active_download();
             }
@@ -784,6 +789,15 @@ impl Foxy {
             }
         };
 
+        if self.is_repository_db_wipe_pending(&repo.address) {
+            warn!(
+                "Addon force redownload ignored: repository {} has a database wipe in progress",
+                repo.name
+            );
+            self.show_error_toast(self.t("Repository database wipe in progress"));
+            return false;
+        }
+
         let repo_path = repo.path.trim();
         if repo_path.is_empty() {
             warn!(
@@ -942,9 +956,15 @@ impl Foxy {
             return;
         };
 
-        if self.repository_sync_active() || self.is_direct_download_running() {
+        // A pending wipe of the repository refuses the download that has to
+        // follow, so deleting the folder now would leave the addon missing.
+        if self.repository_sync_active()
+            || self.is_direct_download_running()
+            || self.is_repository_db_wipe_pending(&repo_address)
+            || self.close_requested_at.is_some()
+        {
             warn!(
-                "Addon force redownload cancelled for {} in {}: sync worker became active during the connection check",
+                "Addon force redownload cancelled for {} in {}: a sync or database wipe became active during the connection check",
                 addon_name, repo_name
             );
             self.show_error_toast(self.t("Operation cancelled"));

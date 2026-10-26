@@ -1011,7 +1011,15 @@ impl Foxy {
     /// Drain completed background metadata fetches and apply them on the UI thread.
     pub(in crate::ui::app) fn poll_repo_metadata_results(&mut self, ctx: &egui::Context) {
         while let Ok(result) = self.repo_metadata_result_rx.try_recv() {
-            self.pending_repo_metadata_jobs.remove(&result.repo_address);
+            // A game-space switch clears the pending set; a fetch dispatched in
+            // the previous space must not rewrite a same-address repository here.
+            if !self.pending_repo_metadata_jobs.remove(&result.repo_address) {
+                debug!(
+                    "Discarding repository metadata fetched before a game space switch: {}",
+                    result.repo_name
+                );
+                continue;
+            }
             self.apply_repository_metadata(result, ctx);
         }
     }

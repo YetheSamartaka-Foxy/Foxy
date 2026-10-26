@@ -38,6 +38,7 @@ impl Foxy {
                     Ok(settings) => settings,
                     Err(err) => {
                         log::error!("Failed to parse settings: {}", err);
+                        self.report_unreadable_settings();
                         return;
                     }
                 };
@@ -120,6 +121,7 @@ impl Foxy {
             }
             Err(err) => {
                 error!("Failed to load settings: {}", err);
+                self.report_unreadable_settings();
             }
         }
 

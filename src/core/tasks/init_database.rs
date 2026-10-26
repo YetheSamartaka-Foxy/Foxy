@@ -722,6 +722,17 @@ pub fn check_and_wipe_database() {
 /// the existing engine handle.
 pub async fn wipe_database_live() -> Result<(), String> {
     let (path, db) = crate::core::tasks::db_turso::init_turso_database_with_path().await;
+    // The tables are dropped one by one, so a kill part-way leaves a database
+    // that opens as healthy with some rows gone and others kept. The marker
+    // makes the next start finish the wipe by deleting the files instead.
+    let marker_path = path
+        .parent()
+        .map(|dir| dir.join(crate::core::tasks::db_turso::WIPE_MARKER_FILE_NAME));
+    if let Some(marker_path) = marker_path.as_ref()
+        && let Err(err) = fs::write(marker_path, b"")
+    {
+        log::warn!("Could not mark the database wipe as in progress: {}", err);
+    }
     crate::core::tasks::db_turso::wipe_and_rebuild_live(&db)
         .await
         .map_err(|e| format!("Failed to wipe Turso database: {e}"))?;
@@ -737,5 +748,11 @@ pub async fn wipe_database_live() -> Result<(), String> {
         ));
     }
     crate::core::tasks::db_schema_version::mark_wiped();
+    if let Some(marker_path) = marker_path.as_ref()
+        && let Err(err) = fs::remove_file(marker_path)
+        && err.kind() != std::io::ErrorKind::NotFound
+    {
+        log::warn!("Could not clear the database wipe marker: {}", err);
+    }
     Ok(())
 }

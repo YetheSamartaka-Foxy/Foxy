@@ -17,7 +17,9 @@ use serde::{Deserialize, Serialize};
 /// A job that fires more than this many seconds after its scheduled time (for
 /// example because Foxy was closed when it was due) is treated as missed rather
 /// than run late. This keeps a stale "download then shut down" job from firing
-/// hours after the fact on the next launch.
+/// hours after the fact on the next launch. Time a due job spends waiting for
+/// other work while Foxy runs does not count (see
+/// [`ScheduledJob::due_state_with_hold`]).
 pub const SCHEDULER_MISSED_GRACE_SECS: i64 = 10 * 60;
 
 /// Seconds the cancellable countdown overlay is shown before a post-action
@@ -97,8 +99,8 @@ pub enum DueState {
     NotDue,
     /// The job is due; `fire_ms` is the scheduled instant that triggered it.
     Due { fire_ms: u64 },
-    /// The scheduled instant passed while the app was not running; record it as
-    /// missed without executing. `fire_ms` is that instant.
+    /// The scheduled instant is more than the grace window in the past; record
+    /// it as missed without executing. `fire_ms` is that instant.
     Missed { fire_ms: u64 },
 }
 
@@ -242,6 +244,37 @@ impl ScheduledJob {
         } else {
             DueState::Due { fire_ms }
         }
+    }
+
+    /// Like [`Self::due_state`], but an occurrence Foxy already saw due and held
+    /// back for other work stays due past the grace window.
+    pub fn due_state_with_hold(&self, now: DateTime<Local>, held_fire_ms: Option<u64>) -> DueState {
+        match self.due_state(now) {
+            DueState::Missed { fire_ms } if held_fire_ms == Some(fire_ms) => {
+                DueState::Due { fire_ms }
+            }
+            other => other,
+        }
+    }
+}
+
+/// The scheduler did not tick for longer than the grace window: the computer
+/// slept or Foxy was suspended, so held-back jobs lose their claim to run late.
+pub fn scheduler_paused_between(previous_tick: DateTime<Local>, now: DateTime<Local>) -> bool {
+    (now - previous_tick).num_seconds() > SCHEDULER_MISSED_GRACE_SECS
+}
+
+/// Why a job's occurrence was missed, for the log.
+pub fn missed_run_reason(
+    previous_tick: Option<DateTime<Local>>,
+    now: DateTime<Local>,
+) -> &'static str {
+    match previous_tick {
+        None => "Foxy was not running at its scheduled time",
+        Some(previous) if scheduler_paused_between(previous, now) => {
+            "the computer was asleep or Foxy was paused at its scheduled time"
+        }
+        Some(_) => "it was enabled or changed after its scheduled time had passed",
     }
 }
 
@@ -511,6 +544,48 @@ mod tests {
                 fire_ms: local_to_unix_ms(fire)
             }
         );
+    }
+
+    #[test]
+    fn a_held_back_occurrence_stays_due_past_the_grace_window() {
+        let now = at(2026, 6, 30, 12, 0);
+        let fire = now - Duration::hours(2);
+        let fire_ms = local_to_unix_ms(fire);
+        let job = once_job(fire);
+        assert_eq!(
+            job.due_state_with_hold(now, Some(fire_ms)),
+            DueState::Due { fire_ms }
+        );
+        assert_eq!(
+            job.due_state_with_hold(now, None),
+            DueState::Missed { fire_ms }
+        );
+        assert_eq!(
+            job.due_state_with_hold(now, Some(fire_ms - 1)),
+            DueState::Missed { fire_ms }
+        );
+
+        let mut done = job.clone();
+        done.last_run_unix_ms = Some(fire_ms);
+        assert_eq!(
+            done.due_state_with_hold(now, Some(fire_ms)),
+            DueState::NotDue
+        );
+    }
+
+    #[test]
+    fn a_missed_run_names_why_foxy_could_not_run_it() {
+        let now = at(2026, 6, 30, 12, 0);
+        assert_eq!(
+            missed_run_reason(None, now),
+            "Foxy was not running at its scheduled time"
+        );
+        let slept = now - Duration::minutes(SCHEDULER_MISSED_GRACE_SECS / 60 + 1);
+        assert!(scheduler_paused_between(slept, now));
+        assert!(missed_run_reason(Some(slept), now).contains("asleep"));
+        let ticking = now - Duration::seconds(30);
+        assert!(!scheduler_paused_between(ticking, now));
+        assert!(missed_run_reason(Some(ticking), now).contains("enabled or changed"));
     }
 
     #[test]

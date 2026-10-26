@@ -9,25 +9,26 @@
 //!
 //! Design notes / safety:
 //! - Single-flight: only one job runs at a time, and never while a manual sync,
-//!   direct download, repository purge, or schema wipe is active.
+//!   direct download, repository purge, or schema wipe is active. A job that
+//!   falls due meanwhile is held and starts as soon as that work finishes.
 //! - The scheduler only fires while Foxy is running. A job whose time passed
-//!   while the app was closed is recorded as missed (not run late) once it is
-//!   outside the grace window, so a stale "download then shut down" job never
-//!   fires hours after the fact.
+//!   while the app was closed or the computer slept is recorded as missed (not
+//!   run late) once it is outside the grace window, so a stale "download then
+//!   shut down" job never fires hours after the fact.
 //! - Post-actions wait out a cancellable countdown overlay; PC shutdown also
 //!   uses the OS `shutdown /t` timer as a second, independent abort path.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use chrono::{DateTime, Local};
+use chrono::Local;
 use log::{info, warn};
 
 use crate::core::api::SyncMode;
 use crate::ui::app::Foxy;
 use crate::ui::types::{
     DueState, JobRunOutcome, JobRunResult, JobSchedule, JobTarget, POST_ACTION_COUNTDOWN_SECS,
-    PostAction, RepoInstanceKey, RepoState,
+    PostAction, RepoInstanceKey, RepoState, missed_run_reason, scheduler_paused_between,
 };
 
 /// Which stage of the pipeline an in-progress run is on.
@@ -61,6 +62,9 @@ pub struct ScheduledJobRun {
     succeeded: usize,
     failed: usize,
     skipped: usize,
+    /// The user cancelled the run's sync; the rest of the run and its
+    /// post-action are dropped.
+    cancelled: bool,
 }
 
 impl ScheduledJobRun {
@@ -80,6 +84,23 @@ pub struct PendingPostAction {
     pub action: PostAction,
     pub job_name: String,
     pub deadline: Instant,
+    /// The countdown ended while other work was running; it restarts once the
+    /// work finishes so closing or shutting down never interrupts a download.
+    pub deferred_for_work: bool,
+}
+
+/// A due occurrence waiting for other work to finish before it starts.
+#[derive(Debug, Clone)]
+pub struct HeldScheduledJob {
+    pub fire_ms: u64,
+    pub job_name: String,
+    pub reason: &'static str,
+}
+
+/// Whether the post-action may run: a cancelled run never runs it, and with
+/// "only on success" every target must have run and succeeded.
+fn post_action_allowed(run: &ScheduledJobRun) -> bool {
+    !run.cancelled && (!run.post_action_only_on_success || (run.failed == 0 && run.skipped == 0))
 }
 
 fn now_unix_ms() -> u64 {
@@ -122,16 +143,25 @@ impl Foxy {
             return;
         }
 
-        self.process_scheduled_post_action(ctx);
-
-        // While a post-action counts down, do not advance or start jobs.
-        if self.scheduler_pending_post_action.is_some() {
-            return;
+        let now = Local::now();
+        let previous_tick = self.scheduler_last_tick_at.replace(now);
+        if let Some(previous) = previous_tick
+            && scheduler_paused_between(previous, now)
+            && !self.scheduler_held_jobs.is_empty()
+        {
+            warn!(
+                "Scheduler did not run for {} min (the computer slept or Foxy was paused); {} held-back job(s) can no longer start late",
+                (now - previous).num_minutes(),
+                self.scheduler_held_jobs.len()
+            );
+            self.scheduler_held_jobs.clear();
         }
 
-        if self.scheduler_active_run.is_some() {
+        self.process_scheduled_post_action(ctx);
+
+        // While a post-action counts down, do not advance the run.
+        if self.scheduler_pending_post_action.is_none() && self.scheduler_active_run.is_some() {
             self.advance_scheduled_job_run();
-            return;
         }
 
         // Never begin new work while the app is shutting down.
@@ -139,19 +169,66 @@ impl Foxy {
             return;
         }
 
-        let now = Local::now();
-        let Some((job_idx, due)) = self.find_due_scheduled_job(now) else {
-            return;
-        };
-        match due {
-            DueState::Missed { fire_ms } => self.mark_scheduled_job_missed(job_idx, fire_ms),
-            DueState::Due { fire_ms } => {
-                if self.scheduled_job_blocked() {
-                    return; // defer; retried on a later tick
-                }
-                self.begin_scheduled_job_run(job_idx, fire_ms);
+        let block_reason = self.scheduled_job_block_reason();
+        let running_job_id = self
+            .scheduler_active_run
+            .as_ref()
+            .map(|run| run.job_id.clone());
+        let mut due_jobs = Vec::new();
+        let mut missed_jobs = Vec::new();
+        for (idx, job) in self.settings_view_state.scheduled_jobs.iter().enumerate() {
+            if running_job_id.as_deref() == Some(job.id.as_str()) {
+                continue;
             }
-            DueState::NotDue => {}
+            let held_fire_ms = self
+                .scheduler_held_jobs
+                .get(&job.id)
+                .map(|held| held.fire_ms);
+            match job.due_state_with_hold(now, held_fire_ms) {
+                DueState::NotDue => {}
+                DueState::Due { fire_ms } => due_jobs.push((idx, job.id.clone(), fire_ms)),
+                DueState::Missed { fire_ms } => missed_jobs.push((idx, fire_ms)),
+            }
+        }
+        self.scheduler_held_jobs.retain(|id, held| {
+            due_jobs
+                .iter()
+                .any(|(_, due_id, fire_ms)| due_id == id && *fire_ms == held.fire_ms)
+        });
+
+        let missed_reason = missed_run_reason(previous_tick, now);
+        for (job_idx, fire_ms) in missed_jobs {
+            self.mark_scheduled_job_missed(job_idx, fire_ms, missed_reason);
+        }
+
+        match block_reason {
+            Some(reason) => {
+                for (job_idx, job_id, fire_ms) in due_jobs {
+                    if self.scheduler_held_jobs.contains_key(&job_id) {
+                        continue;
+                    }
+                    let job_name = self.settings_view_state.scheduled_jobs[job_idx]
+                        .name
+                        .clone();
+                    info!(
+                        "Scheduled job '{}' is due and waits until {} finishes",
+                        job_name, reason
+                    );
+                    self.scheduler_held_jobs.insert(
+                        job_id,
+                        HeldScheduledJob {
+                            fire_ms,
+                            job_name,
+                            reason,
+                        },
+                    );
+                }
+            }
+            None => {
+                if let Some((job_idx, _, fire_ms)) = due_jobs.into_iter().next() {
+                    self.begin_scheduled_job_run(job_idx, fire_ms);
+                }
+            }
         }
     }
 
@@ -161,6 +238,10 @@ impl Foxy {
     pub(in crate::ui::app) fn scheduler_repaint_interval(&self) -> Option<Duration> {
         if self.scheduler_pending_post_action.is_some() || self.scheduler_active_run.is_some() {
             return Some(Duration::from_millis(250));
+        }
+        // Held jobs need steady ticks: a long silent gap reads as a sleeping PC.
+        if !self.scheduler_held_jobs.is_empty() {
+            return Some(Duration::from_secs(5));
         }
         let now = Local::now();
         let mut soonest: Option<chrono::Duration> = None;
@@ -181,34 +262,31 @@ impl Foxy {
         Some(Duration::from_millis(millis))
     }
 
-    /// True while any condition makes it unsafe to start a scheduled sync.
-    fn scheduled_job_blocked(&self) -> bool {
-        self.repository_sync_active()
-            || self.is_direct_download_running()
-            || !self.pending_repository_db_wipes.is_empty()
-            || self.pending_db_schema_wipe.is_some()
-            || self.db_lock_conflict.is_some()
-    }
-
-    fn find_due_scheduled_job(&self, now: DateTime<Local>) -> Option<(usize, DueState)> {
-        for (idx, job) in self.settings_view_state.scheduled_jobs.iter().enumerate() {
-            match job.due_state(now) {
-                DueState::NotDue => {}
-                other => return Some((idx, other)),
-            }
+    /// The work that makes it unsafe to start a scheduled job now, for the log.
+    fn scheduled_job_block_reason(&self) -> Option<&'static str> {
+        if self.scheduler_active_run.is_some() || self.scheduler_pending_post_action.is_some() {
+            Some("another scheduled job")
+        } else if self.repository_sync_active() {
+            Some("the running check or update")
+        } else if self.is_direct_download_running() {
+            Some("the running direct download")
+        } else if !self.pending_repository_db_wipes.is_empty() {
+            Some("the running repository database wipe")
+        } else if self.pending_db_schema_wipe.is_some() {
+            Some("the database rebuild")
+        } else if self.db_lock_conflict.is_some() {
+            Some("the other Foxy holding the database")
+        } else {
+            None
         }
-        None
     }
 
-    fn mark_scheduled_job_missed(&mut self, job_idx: usize, fire_ms: u64) {
+    fn mark_scheduled_job_missed(&mut self, job_idx: usize, fire_ms: u64, reason: &str) {
         let Some(job) = self.settings_view_state.scheduled_jobs.get(job_idx) else {
             return;
         };
         let (id, name) = (job.id.clone(), job.name.clone());
-        warn!(
-            "Scheduled job '{}' missed its run (Foxy was not running within the grace window)",
-            name
-        );
+        warn!("Scheduled job '{}' missed its run: {}", name, reason);
         self.record_scheduled_job_result(&id, fire_ms, JobRunOutcome::Missed, 0, 0, 0);
     }
 
@@ -219,7 +297,7 @@ impl Foxy {
             self.show_error_toast(self.t("A scheduled job is already running."));
             return false;
         }
-        if self.scheduled_job_blocked() {
+        if self.scheduled_job_block_reason().is_some() {
             self.show_error_toast(
                 self.t("Cannot start the job while another sync is in progress."),
             );
@@ -249,6 +327,14 @@ impl Foxy {
         else {
             return;
         };
+        if let Some(held) = self.scheduler_held_jobs.remove(&job.id) {
+            info!(
+                "Scheduled job '{}' starting {} min after its scheduled time; it waited for {}",
+                job.name,
+                now_unix_ms().saturating_sub(held.fire_ms) / 60_000,
+                held.reason
+            );
+        }
         let targets = self.resolve_scheduled_targets(&job.target);
         if targets.is_empty() {
             warn!(
@@ -295,7 +381,19 @@ impl Foxy {
             succeeded: 0,
             failed: 0,
             skipped: 0,
+            cancelled: false,
         });
+    }
+
+    /// Stop the active run after its current sync; returns whether one was running.
+    pub(in crate::ui::app) fn cancel_scheduled_job_run(&mut self) -> bool {
+        let Some(run) = self.scheduler_active_run.as_mut() else {
+            return false;
+        };
+        run.cancelled = true;
+        run.queue.clear();
+        run.stage = JobRunStage::Finalize;
+        true
     }
 
     /// Resolve a job target to concrete `(remote_url, local_path)` instances.
@@ -344,9 +442,12 @@ impl Foxy {
                 let Some(run) = self.scheduler_active_run.as_mut() else {
                     return;
                 };
-                // The completion hook clears in_flight; clear defensively in case
-                // a dispatched sync never reported back.
-                run.in_flight = None;
+                // The completion hook clears in_flight. A dispatched sync that
+                // ended without a matching completion has no known outcome, so
+                // it counts as failed rather than vanishing from the totals.
+                if run.in_flight.take().is_some() {
+                    run.failed += 1;
+                }
                 match run.stage {
                     JobRunStage::Recheck => match run.queue.pop_front() {
                         Some(target) => SchedStep::Dispatch(target, SyncMode::RemoteRefreshOnly),
@@ -410,7 +511,8 @@ impl Foxy {
     fn start_scheduled_sync(&mut self, target: &RepoInstanceKey, mode: SyncMode) -> bool {
         let normalized_url = Self::normalize_repo_url(&target.remote_url);
         let path_key = Self::repo_instance_path_key(&target.local_path);
-        let Some(idx) = self.repo_index_by_url_and_path(&normalized_url, &path_key) else {
+        // Strict: an unattended job must never run on another folder's copy.
+        let Some(idx) = self.repo_index_by_instance(&normalized_url, &path_key) else {
             warn!(
                 "Scheduled job target no longer exists; skipping {}",
                 normalized_url
@@ -495,15 +597,17 @@ impl Foxy {
             run.skipped,
         );
 
+        // A target that could not start did not succeed either.
+        let not_succeeded = run.failed + run.skipped;
         let summary = self.t_fmt(
             "Scheduled job '{name}' finished: {ok} updated, {failed} failed",
             &[
                 ("name", run.job_name.clone()),
                 ("ok", run.succeeded.to_string()),
-                ("failed", run.failed.to_string()),
+                ("failed", not_succeeded.to_string()),
             ],
         );
-        if run.failed > 0 {
+        if not_succeeded > 0 {
             self.show_error_toast(summary);
         } else {
             self.show_success_toast(summary);
@@ -512,14 +616,16 @@ impl Foxy {
         if run.post_action == PostAction::None {
             return;
         }
-        if run.post_action_only_on_success && run.failed > 0 {
+        if !post_action_allowed(&run) {
             warn!(
-                "Scheduled job '{}' skipping post-action {:?}: {} operation(s) failed",
-                run.job_name, run.post_action, run.failed
+                "Scheduled job '{}' skipping post-action {:?}: cancelled={} failed={} skipped={}",
+                run.job_name, run.post_action, run.cancelled, run.failed, run.skipped
             );
-            self.show_error_toast(
-                self.t("Scheduled post-action skipped because some operations failed."),
-            );
+            if !run.cancelled {
+                self.show_error_toast(
+                    self.t("Scheduled post-action skipped because some operations failed."),
+                );
+            }
             return;
         }
 
@@ -531,6 +637,7 @@ impl Foxy {
             action: run.post_action,
             job_name: run.job_name,
             deadline: Instant::now() + Duration::from_secs(POST_ACTION_COUNTDOWN_SECS),
+            deferred_for_work: false,
         });
     }
 
@@ -562,9 +669,24 @@ impl Foxy {
     }
 
     fn process_scheduled_post_action(&mut self, ctx: &egui::Context) {
-        let Some(pending) = self.scheduler_pending_post_action.as_ref() else {
+        let work_running = self.repository_sync_active() || self.is_direct_download_running();
+        let Some(pending) = self.scheduler_pending_post_action.as_mut() else {
             return;
         };
+        if work_running {
+            if Instant::now() >= pending.deadline {
+                if !pending.deferred_for_work {
+                    info!(
+                        "Scheduled post-action {:?} for job '{}' waits for running work to finish",
+                        pending.action, pending.job_name
+                    );
+                }
+                pending.deferred_for_work = true;
+                pending.deadline = Instant::now() + Duration::from_secs(POST_ACTION_COUNTDOWN_SECS);
+            }
+            ctx.request_repaint_after(Duration::from_millis(250));
+            return;
+        }
         if Instant::now() >= pending.deadline {
             let action = pending.action;
             self.scheduler_pending_post_action = None;
@@ -692,5 +814,49 @@ impl Foxy {
         } else {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn finished_run(only_on_success: bool) -> ScheduledJobRun {
+        ScheduledJobRun {
+            job_id: "job".into(),
+            job_name: "Nightly".into(),
+            fire_ms: 0,
+            post_action: PostAction::ShutdownPc,
+            post_action_only_on_success: only_on_success,
+            download: true,
+            targets: Vec::new(),
+            stage: JobRunStage::Finalize,
+            queue: VecDeque::new(),
+            in_flight: None,
+            succeeded: 1,
+            failed: 0,
+            skipped: 0,
+            cancelled: false,
+        }
+    }
+
+    #[test]
+    fn a_target_that_never_started_blocks_an_only_on_success_post_action() {
+        let mut run = finished_run(true);
+        assert!(post_action_allowed(&run));
+        run.skipped = 1;
+        assert!(!post_action_allowed(&run));
+        run.skipped = 0;
+        run.failed = 1;
+        assert!(!post_action_allowed(&run));
+    }
+
+    #[test]
+    fn a_cancelled_run_never_runs_its_post_action() {
+        let mut run = finished_run(false);
+        run.failed = 3;
+        assert!(post_action_allowed(&run));
+        run.cancelled = true;
+        assert!(!post_action_allowed(&run));
     }
 }

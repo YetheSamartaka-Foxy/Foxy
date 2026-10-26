@@ -37,7 +37,12 @@ impl Foxy {
             || !self.pending_repository_db_wipes.is_empty()
             || !self.pending_addon_deletes.is_empty()
             || !self.pending_addon_force_redownloads.is_empty()
-            || self.scheduler_active_run.is_some();
+            || self.scheduler_active_run.is_some()
+            // A Workshop task resolves its space folder once and keeps writing there.
+            || self
+                .workshop_task_worker
+                .as_ref()
+                .is_some_and(|handle| !handle.is_finished());
         busy.then_some("Finish downloads and scans before switching game spaces.")
     }
 
@@ -177,8 +182,9 @@ impl Foxy {
         self.pending_db_schema_wipe = None;
         self.refresh_database_repair_requirement();
         self.load_repositories();
-        self.load_repository_spaces();
-        self.reconcile_repository_space_paths();
+        if self.load_repository_spaces() {
+            self.reconcile_repository_space_paths();
+        }
         self.load_repository_visual_folders();
         info!(
             "Game space state loaded: repositories={} repository_spaces={}",
@@ -453,6 +459,9 @@ impl Foxy {
         self.frame_cost_at_sync_start = None;
         self.syncing_repository = None;
         self.scheduler_active_run = None;
+        self.scheduler_held_jobs.clear();
+        self.addon_selection_baseline.clear();
+        self.pending_addon_selection_checks.clear();
         self.scheduler_pending_post_action = None;
         self.pending_update_cache.clear();
         self.clear_mod_diff_cache();
@@ -568,6 +577,9 @@ const APP_GLOBAL_FOXY_FIELDS: &[&str] = &[
     // once per launch.
     "startup_diagnostics_rx",
     "close_requested_at",
+    "close_worker_wait_started_at",
+    // Tick history spans spaces; a switch is no sleep gap.
+    "scheduler_last_tick_at",
     "current_view",
     "last_view",
     "main_view_state",

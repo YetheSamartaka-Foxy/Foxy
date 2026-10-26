@@ -19,6 +19,28 @@
 - Steam and TeamSpeak launch warnings no longer freeze the interface or delay button hover and clicks while checking whether the clients are running.
 - Windows no longer opens brief command windows when detecting Steam or checking whether Arma 3 is running before managing profiles.
 - Launch now shows an error naming the game when it cannot be started, instead of doing nothing or naming Arma 3 for every game.
+- Updates no longer report success while a mod file is missing. A file deleted or replaced after a check is now noticed and repaired by the update, even when the server did not change its addon.
+- Updating a repository no longer deletes the saved patch plans of repositories in other game spaces, which made their next update download whole files.
+- Updating while the game is running now stops before downloading anything and names a file the game keeps open, instead of downloading everything and then rolling back with a generic error. If the game starts during an update, the update stops and restores the previous files.
+- An update whose patch failed and fell back to a full download now restores the original file when it is later cancelled or fails, instead of deleting it.
+- Closing Foxy during an update now cancels it and restores the previous files before the window closes, instead of leaving a mix of old and new files.
+- Starting Foxy in another game space no longer discards the restore data of an update that is still running.
+- Cancel now stops the whole folder, repository space, or scheduled run instead of only the repository in progress.
+- Deleting, reordering, or cloning a repository during a folder or repository space Update all no longer starts the next update on the wrong repository.
+- Repository space Update all and Recheck all no longer stay stuck with disabled buttons when a repository cannot start, is removed from the space or deleted, or stops without reporting a result.
+- Scheduled jobs that fall due while a check, update, or another job is running now wait and start as soon as that work finishes, instead of being recorded as missed. A job is missed only when Foxy was closed or the computer was asleep, and the log says which. The Scheduling tab shows a job that is waiting.
+- A scheduled close or shutdown limited to runs where everything succeeded no longer runs when some repositories could not start. Scheduled post-actions also no longer interrupt a running download and never run after the job was cancelled.
+- Enabling or disabling addons, or switching to a profile with a different selection, now runs a quick local check of that repository. A repository no longer shows Up to date while a newly enabled addon is missing.
+- Check results, scheduled jobs, and pending updates restored at startup no longer land on another folder's copy of the same repository, or on a different repository after one was deleted or reordered.
+- A repository's address and local path are now locked while it is being checked, updated, or wiped. Changing them during that work could attach the results to the wrong folder and wipe data the running work still needed.
+- Moving or deleting a cloned repository no longer wipes the original's data, and deleting one of two copies of a repository no longer leaves its records behind.
+- Delete files now shows a warning in the confirmation when another repository in your list uses the same address, because the files are kept in that case. Previously nothing was deleted and nothing said so.
+- Wiping a repository's database during its quick local check, or redownloading a single addon while a wipe is pending, is now refused instead of restoring stale results or deleting the addon folder without downloading it again.
+- Deleting a repository while another one is updating no longer clears that update's progress and summary.
+- Results that arrive after switching game spaces are no longer applied to the new space, and a running Steam Workshop task now has to finish before you can switch.
+- A database compaction interrupted by a crash or power loss no longer starts Foxy with an empty database; the original is restored. An interrupted full database wipe now finishes on the next start instead of leaving a half-wiped database that looked healthy.
+- Unreadable repository, repository space, folder, or settings files are no longer overwritten on the next save. Foxy keeps a copy ending in `.unreadable` and tells you, and a read error no longer removes every repository from its repository space.
+- Command line: `foxy repo wipe-db` and `foxy repo force-redownload` no longer wipe the records of another folder's copy of the same repository.
 
 # 1.2.1
 ## Added

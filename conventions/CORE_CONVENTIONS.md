@@ -64,7 +64,7 @@ younger than 30 days; replacing the database file loses it.
 
 \- A repository row is identified by the composite `(remote_url, local_path)`, not by URL alone (migration 21, `upsert_repository_entry` `on_conflict`). The same URL downloaded to two folders is two independent rows. `addons`/`files` are per-instance too: conflict-keyed on `(Name, RemotePath, LocalPath)`; `remote_files.rs` separates "matching remote paths but different local paths".
 
-\- Any DELETE/purge/wipe must be scoped by `local_path` unless it is intentionally URL-wide. `purge_repository_internal` takes `scope_local_path: Option<&str>`; `purge_repository_db_only_by_url_and_path` and `Foxy::wipe_repository_database_entries_by_url_and_path` exist for the scoped path. A `WHERE remote_url = ?` wipe will destroy a same-URL sibling in another folder (this caused real data loss). Only delete-repo uses URL-wide, and only when no other UI repo uses the URL.
+\- Any DELETE/purge/wipe must be scoped by `local_path` unless it is intentionally URL-wide. `purge_repository_internal` takes `scope_local_path: Option<&str>`; `purge_repository_db_only_by_url_and_path` and `Foxy::wipe_repository_database_entries_by_url_and_path` exist for the scoped path. A `WHERE remote_url = ?` wipe will destroy a same-URL sibling in another folder (this caused real data loss). Only delete-repo uses URL-wide, and only when no other UI repo uses the URL; when another folder's copy keeps the URL, deleting a repository wipes only its own `(url, path)` rows, and when a clone still uses the same folder, nothing. Changing a folder in Repository Settings follows the same rule for the old folder's rows.
 
 \- `pending_updates` is composite-keyed `(repository_url, local_path)`; read/write through `context.target_local_path`. Quick-scan expands each input URL to its DB instances (`load_repository_instance_paths`) and scans each with a path-scoped `FoxyContext`.
 
@@ -86,6 +86,20 @@ younger than 30 days; replacing the database file loses it.
 \- Writability is tested by writing, not by reading metadata: `fs_safety::directory_is_writable` creates and removes a probe file, and `destination_is_writable` tests the nearest existing ancestor of a folder that does not exist yet. Windows ACLs and read-only mounts are invisible to metadata. Sync checks the repository folder and extra-file activation checks its destination this way before any write, and each reports an unwritable path through a toast instead of failing deep in a copy.
 
 \- A force redownload (repository or addon, GUI and CLI) first probes the repository's `repo.json` with a bounded request and aborts with local files intact when it cannot be reached. Never purge or delete before that probe succeeds, and keep the addon probe off the UI thread.
+
+\### Interrupted work and replaced files
+
+\- Every replace of a repository file goes through the update rollback session. A target another process holds open without delete sharing (a running game keeps its PBOs open that way) refuses the rename aside, so the download orchestrator probes existing targets with delete access before the first transfer (`download_files::failure::find_targets_in_use`, re-probed once to skip brief antivirus holds) and refuses with `TargetsInUse`; a promote that still fails that way mid-transfer stops the run through `DownloadStop::target_held_open` and reports the same error after the rollback. Never retry such a file in place.
+
+\- A rollback entry that was restored (a patch that failed verification, a promote retried after a failure) has consumed its `.foxy.bak` sidecar. The next replace of the same target registers it again with a fresh sidecar, and the journal's `Register` replaces the restored entry, so a later revert still has the original. Keep that guarded by `a_replace_after_a_restore_keeps_a_sidecar_for_the_final_revert`.
+
+\- Delta-patch artifacts are named by database file id, so they live in a folder per game-space directory (`app_paths::foxy_patch_artifacts_dir`), and the pre-download cleanup keeps every artifact a `download_patch_file` row of this database still references; when the rows cannot be read it removes nothing. A shared folder let one space's download delete or reuse another space's plans, and a testkit run delete the live install's.
+
+\- Startup recovery must leave the user's data where it was: a compaction swap interrupted between moving `database.db` aside and installing the compacted copy is undone from `database.db.bak` (`sweep_stale_db_artifacts`), and a live whole-database wipe writes the wipe marker before dropping tables and removes it on success, so a kill part-way finishes the wipe on the next start instead of opening a half-wiped database as healthy.
+
+\- A configuration file that exists but cannot be read or parsed is copied to `<file>.unreadable` before anything can save over it (`fs_safety::preserve_unreadable_file`, `Foxy::report_unreadable_config`), and an unreadable `repository_spaces.json` skips the space-binding reconcile that would otherwise strip every repository's membership.
+
+\- Closing the window while a sync worker runs cancels the sync and keeps the window open (answering each close request with `ViewportCommand::CancelClose`) until the worker has rolled back, bounded at 15 seconds, then flushes persistence and closes; no sync may start once a close is requested.
 
 \### Process launching
 

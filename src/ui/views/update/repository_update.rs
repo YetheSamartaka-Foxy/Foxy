@@ -883,7 +883,7 @@ impl Foxy {
         });
 
         if cancel_requested {
-            self.cancel_sync();
+            self.cancel_sync_and_queued_runs();
         }
         if let Some(paused) = set_download_paused {
             self.set_download_paused(paused);

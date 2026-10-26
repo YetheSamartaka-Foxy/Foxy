@@ -368,6 +368,18 @@ impl Foxy {
         self.needs_repaint = true;
     }
 
+    /// The Cancel the user presses: also stops the folder, space, or scheduled
+    /// run the sync belongs to, so the next queued repository does not start.
+    pub fn cancel_sync_and_queued_runs(&mut self) {
+        if self.syncing_repository.is_some()
+            || self.current_sync_mode.is_some()
+            || self.is_direct_download_running()
+        {
+            self.drop_queued_repository_runs();
+        }
+        self.cancel_sync();
+    }
+
     pub fn cancel_sync(&mut self) {
         let is_syncing = self.syncing_repository.is_some() || self.current_sync_mode.is_some();
         let direct_running = self.is_direct_download_running();

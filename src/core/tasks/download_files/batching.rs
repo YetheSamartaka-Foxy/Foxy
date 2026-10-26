@@ -16,7 +16,7 @@ use tokio::time::sleep;
 
 use super::SharedRollbackSession;
 use super::bandwidth::AdaptiveBandwidthLimiter;
-use super::failure::{DownloadStop, is_missing_remote_file};
+use super::failure::{DownloadStop, is_missing_remote_file, is_target_in_use, target_still_held};
 use super::metrics::{DownloadMetrics, DownloadSchedulerState, FileMetric};
 use super::progress::{ModProgressEntry, summarize_mod_progress};
 use super::transfer::{
@@ -610,6 +610,11 @@ pub(super) async fn process_mod_batch(
                         warn!(
                             "Stopping download: queued file is no longer available on the server"
                         );
+                    } else if is_target_in_use(&err)
+                        && target_still_held(&file.download_local_path).await
+                    {
+                        download_stop.target_held_open();
+                        warn!("Stopping download: a target file is held open by another process");
                     }
                     if cancellation_requested(&cancel_rx) || is_download_cancelled_error(&err) {
                         saw_cancelled_error = true;

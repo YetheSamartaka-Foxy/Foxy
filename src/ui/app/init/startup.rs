@@ -434,6 +434,10 @@ impl Foxy {
             addon_hash_recalc_queue: VecDeque::new(),
             scheduler_active_run: None,
             scheduler_pending_post_action: None,
+            scheduler_held_jobs: HashMap::new(),
+            scheduler_last_tick_at: None,
+            addon_selection_baseline: HashMap::new(),
+            pending_addon_selection_checks: HashSet::new(),
             scheduling_editor: None,
             syncing_repository: None,
             pending_repo_metadata_refresh: Vec::new(),
@@ -495,6 +499,7 @@ impl Foxy {
             startup_quick_scan_requested: 0,
             startup_sync: None,
             close_requested_at: None,
+            close_worker_wait_started_at: None,
             update_modal_sorted_mod_indices: Vec::new(),
             update_modal_mod_name_lowers: Vec::new(),
             update_modal_sort_generation: 0,
@@ -634,8 +639,9 @@ impl Foxy {
         app.initialize_agent_gui(&cc.egui_ctx, &agent_gui, active_renderer);
         app.i18n.set_language(&app.settings_view_state.locale);
         app.load_repositories();
-        app.load_repository_spaces();
-        app.reconcile_repository_space_paths();
+        if app.load_repository_spaces() {
+            app.reconcile_repository_space_paths();
+        }
         app.load_repository_visual_folders();
         let storage_paths = app.startup_storage_paths();
         let storage_check_repositories = app.storage_check_repositories();

@@ -730,7 +730,18 @@ impl Foxy {
                 && self.syncing_repository.is_none()
                 && !self.pending_quick_scan_urls.is_empty()
             {
-                let repo_urls: Vec<String> = self.pending_quick_scan_urls.drain().collect();
+                // A scan racing a purge of the same repository would write its
+                // verdict and hashes back over the rows being wiped.
+                let (repo_urls, held_urls): (Vec<String>, Vec<String>) =
+                    self.pending_quick_scan_urls.drain().partition(|url| {
+                        !self
+                            .pending_repository_db_wipes
+                            .contains(&Self::normalize_repo_url(url))
+                    });
+                self.pending_quick_scan_urls.extend(held_urls);
+                if repo_urls.is_empty() {
+                    return;
+                }
                 let prevalidated_repo_urls: HashSet<String> = repo_urls
                     .iter()
                     .filter(|url| self.pending_quick_scan_prevalidated_urls.remove(*url))

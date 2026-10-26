@@ -182,7 +182,11 @@ Switching happens in-process (`src/ui/app/runtime/game_space_switch.rs`):
 
 1. Refuse while mutating background work runs or debug mode shadows state;
    `game_space_switch_block_reason` returns the message shown in both the
-   disabled-button hover text and the toast.
+   disabled-button hover text and the toast. A worker that resolves its space
+   folder once (a Workshop task) counts as mutating work. Results that arrive
+   after the switch are dropped when their pending entry was cleared by it.
+   Per-space artifacts outside the space folder (delta-patch plans) live in a
+   folder keyed by the space directory.
 2. Drain the persistence queue so queued writes land in the space they belong to.
 3. Release the outgoing database handle (`close_active_database_sync`), activate
    the target, honor a pending wipe marker, stop the filesystem watcher.

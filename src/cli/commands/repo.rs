@@ -9,9 +9,7 @@ use crate::cli::args::{
 };
 use crate::cli::exit_codes;
 use crate::core::api::SyncMode;
-use crate::core::tasks::purge_repository::{
-    purge_repository_by_url, purge_repository_db_only_by_url,
-};
+use crate::core::tasks::purge_repository::purge_repository_db_only_by_url_and_path;
 use crate::ui::app::Foxy;
 use crate::ui::types::{
     Repository, RepositoryServer, apply_repo_client_parameters,
@@ -254,7 +252,10 @@ fn cmd_repo_wipe_db(cli: &CliArgs, args: RepoWipeDbArgs) -> Result<CommandSucces
     let runtime = Runtime::new()
         .map_err(|e| CommandError::operation("repo.wipe-db", format!("Runtime error: {}", e)))?;
     runtime
-        .block_on(purge_repository_db_only_by_url(&normalized))
+        .block_on(purge_repository_db_only_by_url_and_path(
+            &normalized,
+            &repo.path,
+        ))
         .map_err(|e| CommandError::operation("repo.wipe-db", format!("Failed: {}", e)))?;
     if !args.keep_hash_record {
         crate::core::tasks::calculate_hashes::forget_verified_hashes_under(&repo.path);
@@ -299,20 +300,9 @@ fn cmd_repo_force_redownload(
     }
 
     ensure_remote_reachable_before_destructive("repo.force-redownload", &normalized)?;
-    ensure_backend_ready();
-    let runtime = Runtime::new().map_err(|e| {
-        CommandError::operation("repo.force-redownload", format!("Runtime error: {}", e))
-    })?;
-    crate::core::utils::profiling::phase("purge");
-    runtime
-        .block_on(purge_repository_by_url(&normalized, repo_path.as_deref()))
-        .map_err(|e| {
-            CommandError::operation(
-                "repo.force-redownload",
-                format!("Failed to purge repository: {}", e),
-            )
-        })?;
 
+    // The forced sync purges only this folder's files and rows; a purge by
+    // address here would also wipe another folder's copy of the repository.
     let summary = run_repository_sync(
         &repo,
         &state.settings,

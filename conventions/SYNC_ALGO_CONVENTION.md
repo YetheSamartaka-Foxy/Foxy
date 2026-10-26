@@ -174,6 +174,14 @@ Prepared queues require a complete enabled-addon file graph, including part rows
 for every nonempty file. Local checksums matching newly published checksums do
 not prove that the stored remote graph is unchanged or complete.
 
+A Download first stats the verified files of enabled addons that the queue does
+not cover (`addons_with_changed_kept_files`). Any missing or resized file blocks
+prepared-queue reuse and adds its addon to the pending scope of the quick
+verify, so a file deleted or replaced after the check, which the watcher can
+miss, is repaired instead of ending as an up-to-date repository. A failed check
+counts as changed. Guarded by the `state-prepared-queue-local-delete-ssd` test
+kit lane (oracle) and `addons_whose_kept_files_are_missing_or_resized_are_reported`.
+
 Explicit pending-addon manifest refreshes bypass both repository skip gates and
 the selected addons' unchanged-graph gate, even when published checksums match.
 They also bypass conditional HTTP validators and the selected files' part-graph
@@ -272,6 +280,16 @@ remote manifest last published.
 Every sync run persists the caller's selection into `addons.enabled` before the
 pipeline reads it. A remote metadata rebuild is skipped whenever the remote
 checksum is unchanged, so the rebuild alone is not a sufficient write path.
+
+The background quick-scan worker does not persist a selection; it reads
+`addons.enabled` as the last sync left it. So the UI compares each instance's
+enabled-addon fingerprint (`Foxy::addon_selection_fingerprint`, after the
+selected profile) with the one the database last stored. A sync start records
+the fingerprint. A change found when `repositories.json` is saved queues a
+`QuickCheckOnly` sync for that instance, which persists the new selection and
+refreshes the status. It starts only when the sync slot and every queue that
+needs it are idle (`addon_selection_check_blocked`), and only for an instance
+whose status is already known.
 
 ## Layered Decision Model
 
@@ -1122,7 +1140,9 @@ Before download:
 - remove stale `.foxy.tmp`, `.foxy.part`, `.foxy.part.meta`, and `.foxy.bak`
   files only in target directories for the current work scope; sidecars and
   part files of queued targets are kept for resume
-- remove stale patch artifacts not referenced by current scoped download targets
+- remove patch artifacts in the game space's own patch folder that no
+  `download_patch_file` row references; skip the sweep when the rows cannot be
+  read
 - validate persisted download progress against actual temp file sizes (and
   resume sidecars for ranged parts) only for files in the current queue
 - perform a session-level connectivity check
@@ -1227,6 +1247,14 @@ Keep or refresh pending cache when:
   re-probes `repo.json` and requires that invalidated enabled files are already
   queued. Files outside the queue widen the pending-addon scope only to their
   owning addons before rebuilding the plan.
+- the download queue tables (`download_target_file*`, `download_patch_*`) are
+  per database, not per repository, so a game space holds one prepared plan at
+  a time: every sync that does not reuse its own prepared queue truncates them
+  (`truncate_all_download_tables`), including a check of another repository.
+  After a startup check of several repositories only the last one prepared
+  keeps its plan; updating any other one rebuilds its plan first. This is
+  intended. The pending-update record survives, so the repository still shows
+  its update, and the rebuild costs about one check, not a download.
 
 ### `RecheckIntegrity`
 

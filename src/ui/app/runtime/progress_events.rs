@@ -87,9 +87,26 @@ impl Foxy {
                                 self.settings_view_state.update_summary_notices.len();
                             self.repo_db_reset_pending_recheck
                                 .insert(result.repository_url.clone());
-                            self.clear_mod_diff_cache();
-                            self.clear_progress_event_history();
-                            self.update_ready_repo = None;
+                            // The diff and progress history belong to whichever
+                            // repository is syncing or awaiting confirmation; a
+                            // purge of another one (a deletion) must leave them.
+                            let diff_owner = self
+                                .syncing_repository
+                                .or(self.update_ready_repo)
+                                .or(self.download_finished_repo);
+                            let diff_owned_by_wiped = diff_owner.is_none_or(|idx| {
+                                self.repository_view_state.repositories.get(idx).is_none_or(
+                                    |repo| {
+                                        Self::normalize_repo_url(&repo.address)
+                                            == result.repository_url
+                                    },
+                                )
+                            });
+                            if diff_owned_by_wiped {
+                                self.clear_mod_diff_cache();
+                                self.clear_progress_event_history();
+                                self.update_ready_repo = None;
+                            }
                             self.clear_repo_state_for_url(
                                 &result.repository_url,
                                 &result.local_path,
@@ -321,6 +338,14 @@ impl Foxy {
                         } else {
                             debug!("Core progress channel closed");
                         }
+                        let last_repo = self.syncing_repository;
+                        let last_mode = self.current_sync_mode;
+                        // No terminal event will arrive, so a bulk or scheduled run
+                        // would otherwise wait for this repository forever.
+                        self.record_repository_space_bulk_completion(
+                            last_repo, last_mode, false, false,
+                        );
+                        self.record_scheduled_job_completion(last_repo, last_mode, false, false);
                         self.backend_progress_rx = None;
                         self.syncing_repository = None;
                         self.current_sync_mode = None;

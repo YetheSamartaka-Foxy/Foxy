@@ -888,6 +888,79 @@ async fn prepared_queue_covers_unverified_files(
     )
 }
 
+/// Enabled addons whose verified files outside the download queue are missing
+/// or changed size on disk. The watcher marks a changed folder, but a change it
+/// missed (the watcher off or idle, a file deleted just before Update) would
+/// otherwise be skipped by a reused queue and by the verify scoped to pending
+/// addons, ending as an up-to-date repository with files missing. `None` when
+/// the check itself failed.
+async fn addons_with_changed_kept_files(
+    context: Arc<FoxyContext>,
+    repo_url: &str,
+) -> Option<HashSet<String>> {
+    let repository = load_repository_by_remote_url(context.clone(), repo_url)
+        .await
+        .ok()?;
+    let rows = match context
+        .db()
+        .query_all(
+            "SELECT DISTINCT a.name, f.local_path, f.length FROM repository_addons ra \
+         JOIN addons a ON a.id = ra.addon_id JOIN addon_files af ON af.addon_id = a.id \
+         JOIN files f ON f.id = af.file_id \
+         WHERE ra.repository_id = ? AND a.enabled = 1 AND f.local_checksum != '' \
+         AND NOT EXISTS (SELECT 1 FROM download_target_file dt WHERE dt.file_id = f.id)",
+            params![repository.id as i64],
+        )
+        .await
+    {
+        Ok(rows) => rows,
+        Err(err) => {
+            warn!("Could not list files kept by the download queue: {}", err);
+            return None;
+        }
+    };
+    let expected: Vec<KeptFile> = rows
+        .iter()
+        .filter_map(|row| {
+            Some(KeptFile {
+                addon: row.get_opt_string("name").ok().flatten()?.to_lowercase(),
+                path: row.get_opt_string("local_path").ok().flatten()?,
+                length: row
+                    .get_opt_i64("length")
+                    .ok()
+                    .flatten()
+                    .and_then(|length| u64::try_from(length).ok()),
+            })
+        })
+        .collect();
+    match tokio::task::spawn_blocking(move || addons_with_changed_files(&expected)).await {
+        Ok(changed) => Some(changed),
+        Err(err) => {
+            warn!("Could not check files kept by the download queue: {}", err);
+            None
+        }
+    }
+}
+
+struct KeptFile {
+    addon: String,
+    path: String,
+    length: Option<u64>,
+}
+
+fn addons_with_changed_files(expected: &[KeptFile]) -> HashSet<String> {
+    expected
+        .iter()
+        .filter(|file| match std::fs::metadata(&file.path) {
+            Ok(metadata) => {
+                !metadata.is_file() || file.length.is_some_and(|length| metadata.len() != length)
+            }
+            Err(_) => true,
+        })
+        .map(|file| file.addon.clone())
+        .collect()
+}
+
 async fn prepared_remote_graph_is_complete(context: Arc<FoxyContext>, repository_id: u64) -> bool {
     matches!(
         context
@@ -1237,6 +1310,27 @@ async fn run_repository_pipeline(
     let mut mods: Vec<ModDiffSummary> = Vec::new();
     let mut cached_pending_scope =
         pending_update_mod_scope(context.clone(), &normalized_repo_url).await;
+    let changed_kept_addons = if mode == SyncMode::Download && !force_redownload {
+        addons_with_changed_kept_files(context.clone(), &normalized_repo_url).await
+    } else {
+        Some(HashSet::new())
+    };
+    let local_files_changed = changed_kept_addons
+        .as_ref()
+        .is_none_or(|addons| !addons.is_empty());
+    if let Some(addons) = changed_kept_addons
+        .as_ref()
+        .filter(|addons| !addons.is_empty())
+    {
+        info!(
+            "Files of {} addon(s) changed on disk since the last check for repo={}; verifying them with the pending addons",
+            addons.len(),
+            normalized_repo_url
+        );
+        if let Some(scope) = cached_pending_scope.as_mut() {
+            scope.extend(addons.iter().cloned());
+        }
+    }
 
     if *cancel_rx.borrow() {
         info!(
@@ -1258,6 +1352,7 @@ async fn run_repository_pipeline(
         && !force_redownload
         && !recent_local_path_reset
         && !discard_prepared_queue
+        && !local_files_changed
         && can_reuse_prepared_download_queue(
             context.clone(),
             &normalized_repo_url,
@@ -4201,6 +4296,38 @@ mod tests {
         // Remote differs from local → genuine pending update.
         assert!(pending_update_recorded("ABC", "DEF"));
         assert!(pending_update_recorded("ABC", ""));
+    }
+
+    #[test]
+    fn addons_whose_kept_files_are_missing_or_resized_are_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let kept = dir.path().join("kept.pbo");
+        std::fs::write(&kept, b"12345").unwrap();
+        let kept = kept.to_string_lossy().into_owned();
+        let missing = dir
+            .path()
+            .join("missing.pbo")
+            .to_string_lossy()
+            .into_owned();
+        let file = |addon: &str, path: &str, length: Option<u64>| KeptFile {
+            addon: addon.to_string(),
+            path: path.to_string(),
+            length,
+        };
+
+        assert!(addons_with_changed_files(&[file("@mod_01", &kept, Some(5))]).is_empty());
+        assert!(addons_with_changed_files(&[file("@mod_01", &kept, None)]).is_empty());
+        assert_eq!(
+            addons_with_changed_files(&[file("@mod_01", &kept, Some(4))]),
+            HashSet::from(["@mod_01".to_string()])
+        );
+        assert_eq!(
+            addons_with_changed_files(&[
+                file("@mod_01", &kept, Some(5)),
+                file("@mod_02", &missing, Some(5)),
+            ]),
+            HashSet::from(["@mod_02".to_string()])
+        );
     }
 
     #[test]

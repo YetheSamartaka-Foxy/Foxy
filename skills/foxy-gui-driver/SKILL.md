@@ -178,7 +178,7 @@ cargo run -- agent-gui scenario scenarios\smoke.json --json                     
 cargo run -- agent-gui invoke list-actions --json                                   # enumerate the semantic-action registry
 cargo run -- agent-gui invoke start-sync --repo-index 0 --allow-destructive --json  # drive by intent (gated for core/disk mutations)
 cargo run -- agent-gui invoke start-sync-full-files --repo-index 0 --allow-destructive --json # mismatch-scoped full-file test control
-cargo run -- agent-gui invoke apply-profile --repo-index 0 --profile Main --json    # non-destructive intents need no flag
+cargo run -- agent-gui invoke apply-profile --repo-index 0 --profile Main --json    # non-destructive intents need no flag; saves like the profile combo, so a changed addon selection queues a quick local check
 echo '[{"command":"set-filter","name":"addons-filter","value":"ace"},{"command":"settle","frames":2},{"command":"addons","tab":"addons"}]' | cargo run -- agent-gui batch --stdin --json  # server-side pipeline, one round-trip
 cargo run -- agent-gui diff --baseline last --json                                  # field-level delta vs the last snapshot/diff; also --baseline frame:<n>
 cargo run -- agent-gui drag --from-id profile.row.0 --to-id profile.row.3 --json    # one-call drag (coords: --from-x/--from-y --to-x/--to-y --steps N)

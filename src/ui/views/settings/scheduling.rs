@@ -51,8 +51,8 @@ impl Foxy {
         });
     }
 
-    /// Status row shown while a scheduled job is executing or a post-action is
-    /// counting down.
+    /// Status row shown while a scheduled job is executing, a post-action is
+    /// counting down, or a due job waits for other work.
     fn render_scheduling_active_status(&mut self, ui: &mut Ui, horizontal_padding: f32) {
         if let Some(run) = self.scheduler_active_run.as_ref() {
             let text = tr_fmt(
@@ -75,6 +75,20 @@ impl Foxy {
             ui.horizontal(|ui| {
                 ui.add_space(horizontal_padding);
                 ui.label(RichText::new(text).color(self.color_warn()));
+            });
+            ui.separator();
+        } else if let Some(held) = self
+            .scheduler_held_jobs
+            .values()
+            .min_by_key(|held| held.fire_ms)
+        {
+            let text = tr_fmt(
+                "Job '{name}' is due and starts when the running work finishes.",
+                &[("name", held.job_name.clone())],
+            );
+            ui.horizontal(|ui| {
+                ui.add_space(horizontal_padding);
+                ui.label(RichText::new(text).color(self.color_action_info()));
             });
             ui.separator();
         }

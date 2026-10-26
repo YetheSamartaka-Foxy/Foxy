@@ -845,7 +845,7 @@ impl Foxy {
                 self.dismiss_completed_repository_check_banner();
             }
             if cancel_sync_requested {
-                self.cancel_sync();
+                self.cancel_sync_and_queued_runs();
             }
             if profile_changed {
                 self.save_repositories();

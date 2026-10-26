@@ -646,6 +646,39 @@ fn remove_db_artifacts(path: &std::path::Path) {
 /// Remove stale maintenance artifacts next to `database.db`.
 fn sweep_stale_db_artifacts(path: &Path) {
     let compacting = with_suffix(path, ".compacting");
+    let bak = with_suffix(path, ".bak");
+    // A compaction swap interrupted after moving the original aside and before
+    // installing the copy leaves no live file; reopening would silently start
+    // from an empty database while the real one sits in the backup.
+    if !path.exists() && bak.exists() && compacting.exists() {
+        warn!(
+            "STARTUP: restoring {} from an interrupted compaction swap",
+            sanitize_log_path(path)
+        );
+        match fs::rename(&bak, path) {
+            Ok(()) => {
+                for suffix in ["-wal", "-shm"] {
+                    let from = with_suffix(&bak, suffix);
+                    if from.exists() {
+                        let to = with_suffix(path, suffix);
+                        let _ = fs::remove_file(&to);
+                        if let Err(err) = fs::rename(&from, &to) {
+                            warn!(
+                                "STARTUP: could not restore database sidecar {}: {}",
+                                sanitize_log_path(&from),
+                                err
+                            );
+                        }
+                    }
+                }
+            }
+            Err(err) => warn!(
+                "STARTUP: could not restore the database backup {}: {}",
+                sanitize_log_path(&bak),
+                err
+            ),
+        }
+    }
     if compacting.exists()
         || with_suffix(&compacting, "-wal").exists()
         || with_suffix(&compacting, "-shm").exists()
@@ -657,7 +690,6 @@ fn sweep_stale_db_artifacts(path: &Path) {
         remove_db_artifacts(&compacting);
     }
 
-    let bak = with_suffix(path, ".bak");
     if let Ok(metadata) = fs::metadata(&bak) {
         let expired = metadata
             .modified()
@@ -1317,6 +1349,37 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_interrupted_compaction_swap_restores_the_original_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("database.db");
+        std::fs::write(with_suffix(&path, ".bak"), b"original").unwrap();
+        std::fs::write(with_suffix(&path, ".bak-wal"), b"original wal").unwrap();
+        std::fs::write(with_suffix(&path, ".compacting"), b"compacted").unwrap();
+
+        sweep_stale_db_artifacts(&path);
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"original");
+        assert_eq!(
+            std::fs::read(with_suffix(&path, "-wal")).unwrap(),
+            b"original wal"
+        );
+        assert!(!with_suffix(&path, ".bak").exists());
+        assert!(!with_suffix(&path, ".compacting").exists());
+    }
+
+    #[test]
+    fn a_kept_backup_is_not_restored_over_a_missing_database_without_a_swap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("database.db");
+        std::fs::write(with_suffix(&path, ".bak"), b"older").unwrap();
+
+        sweep_stale_db_artifacts(&path);
+
+        assert!(!path.exists());
+        assert!(with_suffix(&path, ".bak").exists());
+    }
 
     async fn temp_db() -> (tempfile::TempDir, Database) {
         let dir = tempfile::tempdir().unwrap();

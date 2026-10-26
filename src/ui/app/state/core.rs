@@ -223,7 +223,6 @@ pub struct StartupQuickScanFilterResult {
 
 #[derive(Debug)]
 pub struct StartupPendingUpdateRestoreRequest {
-    pub repo_index: usize,
     pub repo_name: String,
     pub repo_url: String,
     /// Download folder of this repository instance; the cached pending-update row
@@ -234,7 +233,9 @@ pub struct StartupPendingUpdateRestoreRequest {
 
 #[derive(Debug)]
 pub struct StartupPendingUpdateRestoreRecord {
-    pub repo_index: usize,
+    /// Download folder of the instance; with `repo_url` it re-resolves the
+    /// repository, whose list position may have moved while the restore ran.
+    pub repo_path: String,
     pub repo_url: String,
     pub state: RepoState,
     pub mods: Option<Vec<ModDiffSummary>>,

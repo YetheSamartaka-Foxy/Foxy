@@ -70,6 +70,7 @@ impl Foxy {
                 ui.separator();
 
                 {
+                    let identity_locked = self.repository_identity_locked(repo_index);
                     let repo = &mut self.repository_view_state.repositories[repo_index];
                     Self::render_repository_configuration_identity(
                         ui,
@@ -77,6 +78,7 @@ impl Foxy {
                         &inherited_space,
                         color_text_dim,
                         pad_f32,
+                        identity_locked,
                         &mut changed,
                         &mut addr_changed,
                     );
@@ -112,6 +114,8 @@ impl Foxy {
             .name
             .clone();
         if self.show_delete_confirmation {
+            let delete_files_kept_note = self.delete_files_kept_note(repo_index);
+            let color_warn = self.color_warn();
             egui::Window::new(tr("Confirm Deletion"))
                 .frame(self.modal_window_chrome(ui.ctx()))
                 .title_frame(self.modal_window_chrome(ui.ctx()))
@@ -134,9 +138,13 @@ impl Foxy {
                             ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                         }
                         if self.delete_repository_delete_files {
-                            ui.label(tr(
-                                "This will also delete downloaded files for this repository.",
-                            ));
+                            if let Some(note) = &delete_files_kept_note {
+                                ui.label(egui::RichText::new(note).color(color_warn));
+                            } else {
+                                ui.label(tr(
+                                    "This will also delete downloaded files for this repository.",
+                                ));
+                            }
                         }
                         ui.add_space(20.0);
                         ui.horizontal(|ui| {
@@ -268,10 +276,23 @@ impl Foxy {
             self.current_view = FoxyView::RepositoryList;
             self.last_view = FoxyView::None;
         } else {
+            // A clone shares the original's folder rows until one of them moves.
+            let original_instance_key =
+                Self::repo_instance_key(&original_repo_address, &original_repo_path_raw);
+            let original_instance_still_configured = self
+                .repository_view_state
+                .repositories
+                .iter()
+                .enumerate()
+                .any(|(index, repo)| {
+                    index != repo_index
+                        && Self::repo_instance_key(&repo.address, &repo.path)
+                            == original_instance_key
+                });
             let should_wipe_cache = should_wipe_cache_after_local_path_change(
                 &original_repo_path_raw,
                 &self.repository_view_state.repositories[repo_index].path,
-            );
+            ) && !original_instance_still_configured;
             if changed {
                 self.save_repositories();
             }

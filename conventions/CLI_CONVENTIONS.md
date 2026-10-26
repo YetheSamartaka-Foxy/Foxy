@@ -22,6 +22,7 @@
 - `foxy game reforger list|add|import|remove|set|freeze|unfreeze|export|resolve` manages the Arma Reforger GUID addon store (`reforger_addons.json`) of the active space; it has no desktop UI yet.
 - `foxy config export <file>` / `foxy config import <file>` write and read `.foxypack` config packs, and `foxy config extra-file list|add|remove|set|activate` manages extra files. Both are CLI-only for now, so the README roadmap and the user guide must say so until a UI exists.
 - `foxy repo force-redownload` and `foxy addon force-redownload` probe the repository before deleting anything and fail with local files intact when it is unreachable, matching the GUI.
+- `foxy repo wipe-db` and `foxy repo force-redownload` act on the selected repository's folder only, like the GUI: another folder's copy of the same address keeps its records. Never purge by address alone from the CLI.
 - `foxy server inspect-addons` queries a live Arma 3 server's addon list through the Steam rules protocol; it does not open the database and may run beside the GUI.
 - User-visible command, flag, or exit-code changes update the CLI tables in `README.md` and `wiki/User-Guide.md` (client) or `wiki/Server-Admin-Guide.md` (server) in the same change.
 

@@ -48,7 +48,7 @@ use agent_driver::AgentGuiRuntime;
 pub use downloads::UpdateModalDiskSpaceProbe;
 pub use repository::game_space_overview::{RepositoryGroupSummary, TeamSpeakSummary};
 pub(crate) use runtime::DatabaseLaunchContinuation;
-pub use scheduling::{PendingPostAction, ScheduledJobRun};
+pub use scheduling::{HeldScheduledJob, PendingPostAction, ScheduledJobRun};
 pub use state::*;
 
 /// Last logged display metrics: (monitor resolution, app resolution, scale percent).
@@ -407,6 +407,17 @@ pub struct Foxy {
     /// A pending post-action (close app / shut down PC) waiting out its
     /// cancellable countdown before it fires. Runtime-only.
     pub scheduler_pending_post_action: Option<PendingPostAction>,
+    /// Due occurrences held back while other work ran, by job id. Holding
+    /// does not age them toward the missed-grace window. Runtime-only.
+    pub scheduler_held_jobs: HashMap<String, HeldScheduledJob>,
+    /// Wall-clock time of the previous scheduler tick, which tells a sleeping
+    /// computer apart from a job that is only waiting.
+    pub scheduler_last_tick_at: Option<chrono::DateTime<chrono::Local>>,
+    /// Enabled-addon fingerprint per repository instance as its database last
+    /// stored it, so a changed selection can queue a quick local check.
+    pub addon_selection_baseline: HashMap<String, u64>,
+    /// Repository instances waiting for that check, by instance key.
+    pub pending_addon_selection_checks: HashSet<String>,
     /// Open editor draft for the Scheduling tab (Add/Edit). Runtime-only.
     pub scheduling_editor: Option<ScheduleJobDraft>,
     pub syncing_repository: Option<usize>,
@@ -490,6 +501,8 @@ pub struct Foxy {
     /// O8 timeline for this launch; `None` until startup work is dispatched.
     pub(crate) startup_sync: Option<runtime::StartupSyncTracker>,
     pub close_requested_at: Option<Instant>,
+    /// Set while a close waits for a cancelled sync to roll back its files.
+    pub close_worker_wait_started_at: Option<Instant>,
     pub update_modal_sorted_mod_indices: Vec<usize>,
     pub update_modal_mod_name_lowers: Vec<String>,
     pub update_modal_sort_generation: u64,

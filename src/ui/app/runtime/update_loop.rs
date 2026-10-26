@@ -226,6 +226,7 @@ impl Foxy {
 
     pub fn update(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
         const CLOSE_FORCE_EXIT_TIMEOUT: Duration = Duration::from_secs(2);
+        const CLOSE_SYNC_WIND_DOWN_TIMEOUT: Duration = Duration::from_secs(15);
         let repaint_causes = ui.ctx().repaint_causes();
         self.frame_cost.begin_frame(
             crate::core::utils::thread_cpu::current_thread_cpu(),
@@ -260,7 +261,42 @@ impl Foxy {
             info!("Close requested by viewport event");
         }
 
-        if let Some(close_requested_at) = self.close_requested_at {
+        // Killing a sync mid-promotion leaves a mix of old and new files its
+        // rollback can no longer revert, so a close cancels it and keeps the
+        // window (showing the cancel) until the worker has rolled back.
+        let close_waits_for_worker = self.close_requested_at.is_some()
+            && (self
+                .backend_worker
+                .as_ref()
+                .is_some_and(|handle| !handle.is_finished())
+                || self.is_direct_download_running());
+        if close_waits_for_worker {
+            let wait_started_at = *self.close_worker_wait_started_at.get_or_insert_with(|| {
+                info!(
+                    "Close requested while a sync runs; cancelling it and waiting for its rollback"
+                );
+                Instant::now()
+            });
+            if wait_started_at.elapsed() > CLOSE_SYNC_WIND_DOWN_TIMEOUT {
+                error!(
+                    "Cancelled sync did not finish within {} seconds of the close; forcing process exit",
+                    CLOSE_SYNC_WIND_DOWN_TIMEOUT.as_secs()
+                );
+                std::process::exit(0);
+            }
+            self.cancel_sync_and_queued_runs();
+            ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+            ctx.request_repaint_after(Duration::from_millis(50));
+        } else if let Some(close_requested_at) = self.close_requested_at {
+            if let Some(wait_started_at) = self.close_worker_wait_started_at.take() {
+                info!(
+                    "Cancelled sync finished {:.1}s after the close request",
+                    wait_started_at.elapsed().as_secs_f64()
+                );
+                // The persistence flush gets its own window after the wait.
+                self.close_requested_at = Some(Instant::now());
+            }
+            let close_requested_at = self.close_requested_at.unwrap_or(close_requested_at);
             if close_requested_at.elapsed() > CLOSE_FORCE_EXIT_TIMEOUT {
                 error!(
                     "Close request timed out after {} seconds; forcing process exit",
@@ -366,6 +402,7 @@ impl Foxy {
         self.process_repository_space_sync_queue();
         self.process_repository_visual_folder_sync_queue();
         self.process_scheduled_jobs(&ctx);
+        self.process_addon_selection_checks();
         self.process_addon_hash_recalc_queue();
         self.maybe_sample_memory_diagnostics();
         self.maybe_emit_startup_sol();

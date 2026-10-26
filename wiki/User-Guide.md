@@ -175,7 +175,7 @@ The repository space toolbar operates on every repository in the space at once:
 - **Quick local check** - runs a quick local content check on all repositories in the space.
 - **Update all repositories** - downloads pending updates for every repository in the space that has updates.
 
-A progress indicator in the space header shows how many repositories are done and which one is active, with one block of triangles per repository.
+A progress indicator in the space header shows how many repositories are done and which one is active, with one block of triangles per repository. A repository that cannot start, for example because its folder is not writable, counts as failed, and one removed from the space or deleted during the run is taken out of it, so the run always finishes. **Cancel** stops the whole run, not just the repository in progress.
 
 ### Scanning and moving existing repositories
 
@@ -219,6 +219,12 @@ Foxy checks that published file parts cover the declared file size before applyi
 
 Before downloading, Foxy checks that the destination has enough free space and is on a drive it can use safely. If space runs short, Foxy tells you how much is missing and on which drive, and does not start writing.
 
+Foxy also checks that no other program holds the files it is about to replace. A running game keeps its mod files open, so update before starting the game: if a file is in use, Foxy names it and stops before downloading anything. If the game starts during an update, the update stops as soon as a file cannot be replaced and restores the previous files.
+
+A saved update plan is reused only while the files it does not touch are still on disk at their recorded size. If you deleted or replaced a mod file after the check, the update checks the repository again and repairs that file too.
+
+Each game space keeps one saved update plan at a time, for the repository that was checked last. Checking or updating any other repository replaces it. After a startup check finds updates in several repositories, only the last one checked starts downloading right away. The others still show their update, but each first rebuilds its plan, which takes about as long as a check. Nothing is downloaded twice.
+
 ### Delta patching
 
 When possible, Foxy downloads only the changed parts of a file instead of the whole file. If a patch fails validation, Foxy falls back to downloading the full file automatically.
@@ -227,7 +233,9 @@ Temporary connection failures and busy servers are retried automatically before 
 
 ### Cancelling
 
-You can cancel an active sync while Foxy is hashing or downloading. Foxy stops pending work, cleans up temporary download parts, and returns to a clean idle state.
+You can cancel an active sync while Foxy is hashing or downloading. Foxy stops pending work, cleans up temporary download parts, and returns to a clean idle state. When the sync is part of a folder or repository space run, or of a scheduled job, the rest of that run is cancelled too, and a scheduled job does not run its close or shutdown action.
+
+Closing Foxy during a sync cancels it first: the window stays open while the update restores the previous files, then closes, so a repository is never left with a mix of old and new files.
 
 ### Progress and status banners
 
@@ -259,6 +267,8 @@ Open repository settings with the **gear icon** in the repository toolbar, or pr
 - **Address** - the remote URL of the repository.
 - **Local Path** - the folder for this repository's files. If the repository belongs to a space, the path is inherited from the space and cannot be edited here.
 
+While a check, update, or database wipe of the repository is running, **Address** and **Local Path** are read-only, so the running work keeps writing to the repository it started with.
+
 #### Sync and display settings
 
 Each of these can be **Use global** (inherits from Application or Game space settings), **On (override)**, or **Off (override)**. Only the settings that apply to the open game appear:
@@ -284,7 +294,21 @@ If a repository does not support FoxyMode, Foxy uses MD5 regardless of this sett
 - **Recheck repository integrity** - full remote fetch and a rebuild of the stored checksums for every file.
 - **Force redownload repository** - removes local files and downloads everything again. Foxy first checks that the repository can be reached, so an offline server never leaves you with deleted files and nothing to download.
 - **Wipe repository database entries** - clears cached metadata for this repository without deleting local files.
-- **Delete repository** - removes the repository from Foxy (local files stay on disk).
+- **Delete repository** - removes the repository from Foxy. Downloaded files stay on disk unless you tick **Delete files**; see [Deleting a repository](#deleting-a-repository).
+
+#### Deleting a repository
+
+You can delete a repository here or from its right-click menu in the repository list. Either way, Foxy removes it from the list and clears its cached records. Downloaded files stay on disk unless you tick **Delete files** in the confirmation.
+
+With **Delete files**, Foxy removes the files it downloaded for the repository and then any addon folders left empty. It keeps:
+
+- files that another repository in your list also uses, such as an addon shared by repositories in one repository space;
+- files Foxy did not download, such as your own files inside an addon folder.
+
+**Delete files** removes nothing while another repository in your list uses the same address. When you tick the box, the confirmation shows a warning saying so before you confirm:
+
+- **Same address and folder**, for example a clone: the files belong to the other entry too, so only this list entry is removed.
+- **Same address, different folder**: Foxy clears this folder's records but leaves its files on disk. If you no longer need them, delete the folder yourself after confirming.
 
 ---
 
@@ -339,6 +363,8 @@ Lists the addons provided by the repository. Each addon is a card with its name 
 ### Optional Addons tab
 
 Lists addons the repository marks as optional. It works like the Addons tab. Your optional addon choices persist across refreshes and restarts, so a disabled optional addon is never silently re-enabled or re-downloaded.
+
+When you enable or disable an addon here or on the Addons tab, or switch to a profile with a different selection, Foxy runs a quick local check of that repository. The check starts once no other check, update, or scheduled job is running. The status then shows right away whether a newly enabled addon still needs downloading. A repository whose status is not known yet waits for its first check instead.
 
 ### External Addons tab
 
@@ -554,8 +580,10 @@ The **Scheduling** tab in Settings runs rechecks and update downloads at a chose
 
 - Jobs can run once or on recurring weekdays, for a single repository, a repository space, or a custom selection of repositories.
 - Each job can be enabled, disabled, edited, deleted, or started right away with **Run now**.
-- A job can close Foxy or shut down the PC when it finishes, optionally only if everything succeeded. Shutdown starts a 60-second countdown that you can cancel.
+- A job can close Foxy or shut down the PC when it finishes, optionally only if everything succeeded. Shutdown starts a 60-second countdown that you can cancel. A repository the job could not start, for example one that was removed or moved to another folder, counts as not succeeded, and the countdown waits while another check or download is still running.
 - Jobs only run while Foxy is open, and they belong to the game space they were created in.
+- A job that falls due while a check, update, direct download, database wipe, or another job is running waits, and the Scheduling tab shows it as due. It starts as soon as that work finishes, however long it takes.
+- A job is recorded as **missed** when its time passed more than 10 minutes before Foxy could start it because Foxy was closed or the computer was asleep. A missed job does not run late, so a "download then shut down" job never fires hours afterwards. The log names the reason.
 
 ---
 
@@ -705,6 +733,10 @@ After an update, the stored database may have been made by an incompatible versi
 Foxy checks the database itself, including leftover constraints from older versions. Updating a healthy database from 1.2.0 to 1.2.1 does not require another rebuild. If an earlier required rebuild was skipped and the database is still incompatible, Foxy asks for it again.
 
 You can dismiss the startup warning and keep using Foxy, including **Launch** and **Join**. Postponing does not remove the rebuild requirement: mod checks, updates, and background startup scans stay blocked until rebuilding succeeds. Each Launch or Join gives you another reminder after the other launch warnings, with an option to continue without wiping for that action. A failed rebuild keeps the requirement in place. Command-line mod checks and updates are blocked too, while command-line game launches remain available.
+
+### A settings or repository file could not be read
+
+If `repositories.json`, `repository_spaces.json`, `repository_visual_folders.json`, or a settings file exists but cannot be read, for example after a manual edit, Foxy keeps a copy next to it named `<file>.unreadable` and tells you so. The next save replaces the unreadable file with what Foxy could load, so restore your data from the copy before making changes, or fix the file and restart Foxy. While `repository_spaces.json` cannot be read, Foxy keeps the repositories' space memberships instead of removing them.
 
 ### Storage check notice
 
