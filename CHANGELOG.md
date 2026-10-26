@@ -14,6 +14,7 @@
 - Saved benchmarks now record work priority, low disk priority, and any forced memory pressure, with the settings shown in benchmark details and text exports.
 
 ## Fixed
+- Downloads now retry temporary connection failures and busy-server responses without restarting the whole file attempt. Interrupted transfers validate resumed byte ranges, and cancellation stops waiting for stalled server responses promptly. This reduces repeated failures partway through an update and keeps invalid resumed data from being accepted.
 - Fixed updates reusing outdated file lists after server changes, including updates already pending at startup or awaiting confirmation, and after a database wipe. Foxy now refreshes changed and pending addon manifests, includes newly changed addons, and validates saved update plans against current server metadata. This prevents missing published files, deleting manually copied files, or repeatedly downloading the same files. Inconsistent server metadata and failed verification are reported instead of claiming success.
 - Steam and TeamSpeak launch warnings no longer freeze the interface or delay button hover and clicks while checking whether the clients are running.
 - Windows no longer opens brief command windows when detecting Steam or checking whether Arma 3 is running before managing profiles.

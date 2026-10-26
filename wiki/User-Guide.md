@@ -223,6 +223,8 @@ Before downloading, Foxy checks that the destination has enough free space and i
 
 When possible, Foxy downloads only the changed parts of a file instead of the whole file. If a patch fails validation, Foxy falls back to downloading the full file automatically.
 
+Temporary connection failures and busy servers are retried automatically before a file download is abandoned. Interrupted transfers resume from received bytes, and Foxy validates the server's resumed byte range before writing it. Cancelling also interrupts waits for the server to respond.
+
 ### Cancelling
 
 You can cancel an active sync while Foxy is hashing or downloading. Foxy stops pending work, cleans up temporary download parts, and returns to a clean idle state.

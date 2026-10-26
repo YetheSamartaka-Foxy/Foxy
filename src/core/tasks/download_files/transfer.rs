@@ -18,7 +18,9 @@ use super::range_scheduler::{
     download_large_file_with_range_queue, range_chunk_size_for, range_part_meta_path,
     remove_range_meta,
 };
+use super::request::{cancellable, download_response};
 use super::{ATTEMPT_DELAY_MS, ATTEMPT_LIMIT, BUFFERED_WRITE_CAPACITY, LARGE_FILE_THRESHOLD};
+use crate::core::utils::http_range::validate_content_range_header;
 
 pub(super) const DOWNLOAD_CANCELLED_MESSAGE: &str = "download cancelled";
 
@@ -32,7 +34,7 @@ pub(super) struct TransferStats {
 }
 
 pub(super) fn jitter_delay(attempt: usize) -> Duration {
-    let base = ATTEMPT_DELAY_MS * (1 << attempt).min(8); // exponential backoff capped at ~3.5s
+    let base = ATTEMPT_DELAY_MS * (1 << attempt.min(3));
     let jitter: u64 = rng().random_range(0..base / 2);
     Duration::from_millis(base + jitter)
 }
@@ -181,28 +183,16 @@ async fn download_file_simple(
 
     loop {
         ensure_not_cancelled(&cancel_rx)?;
-        // On first attempt or retry, open a (possibly Range) request.
-        // Use identity encoding - binary PBO/PAA payloads are incompressible
-        // and compression would make Range byte offsets ambiguous.
-        let resp = if bytes_received == 0 {
-            context
-                .client
-                .get(url)
-                .header(reqwest::header::ACCEPT_ENCODING, "identity")
-                .send()
-                .await?
-        } else {
-            context
-                .client
-                .get(url)
-                .header(reqwest::header::ACCEPT_ENCODING, "identity")
-                .header("Range", format!("bytes={}-", bytes_received))
-                .send()
-                .await?
-        };
-        let resp = resp
-            .error_for_status()
-            .map_err(reqwest::Error::without_url)?;
+        let range = (bytes_received > 0).then_some((bytes_received, None));
+        let resp = download_response(
+            &context.client,
+            url,
+            range,
+            &mut download_pause_rx,
+            &mut cancel_rx,
+            &metrics,
+        )
+        .await?;
         if !resp.status().is_success() {
             anyhow::bail!("GET request failed: {}", resp.status());
         }
@@ -219,6 +209,13 @@ async fn download_file_simple(
             download_target.download_total.store(0, Ordering::SeqCst);
             download_target.download_cycle.store(0, Ordering::SeqCst);
         }
+        if resp.status() == reqwest::StatusCode::PARTIAL_CONTENT {
+            validate_content_range_header(
+                &resp,
+                bytes_received,
+                (total_size as u64).saturating_sub(1),
+            )?;
+        }
 
         // On first attempt (or after resume reset) create the part file; on resume, append
         let profiled = crate::core::utils::profiling::FsTimer::start();
@@ -233,19 +230,24 @@ async fn download_file_simple(
         profiled.stop("create", 0);
         let mut writer = tokio::io::BufWriter::with_capacity(BUFFERED_WRITE_CAPACITY, file);
         let mut response = resp;
-        let mut stream_failed = false;
-
         loop {
             if *download_pause_rx.borrow() {
                 wait_for_download_resume(&mut download_pause_rx, &mut cancel_rx).await?;
             }
             ensure_not_cancelled(&cancel_rx)?;
 
-            let chunk_result = timeout(Duration::from_secs(10), response.chunk()).await;
+            let chunk_result = cancellable(
+                &mut cancel_rx,
+                timeout(Duration::from_secs(10), response.chunk()),
+            )
+            .await?;
             match chunk_result {
                 Ok(Ok(Some(bytes))) => {
                     attempt = 0;
                     let n = bytes.len();
+                    if n as u64 > (total_size as u64).saturating_sub(bytes_received) {
+                        anyhow::bail!("Download response exceeds expected file size");
+                    }
                     bytes_received += n as u64;
                     limiter.acquire_and_record(n).await;
                     metrics.record_bytes(n as u64);
@@ -262,15 +264,13 @@ async fn download_file_simple(
                     disk_write_time = disk_write_time.saturating_add(write_started.elapsed());
                     disk_write_count = disk_write_count.saturating_add(1);
                 }
-                Ok(Ok(None)) => break, // stream complete
+                Ok(Ok(None)) => break,
                 Ok(Err(e)) => {
                     debug!("Simple download error for {}: {}", path, e);
-                    stream_failed = true;
                     break;
                 }
                 Err(_) => {
                     debug!("Simple download timeout for {}", path);
-                    stream_failed = true;
                     break;
                 }
             }
@@ -281,20 +281,11 @@ async fn download_file_simple(
         profiled.stop("flush", 1);
         flushed?;
 
-        if !stream_failed {
-            // Stream ended normally - verify size and promote .part file.
+        if bytes_received == total_size as u64 {
             // sync_all() is intentionally omitted: the .part + rename pattern
             // provides crash safety (incomplete .part files are cleaned on restart),
             // and skipping fsync per file avoids significant I/O latency.
             writer.shutdown().await?;
-            if bytes_received != total_size as u64 {
-                anyhow::bail!(
-                    "Download size mismatch for {}: expected {} bytes, received {}",
-                    path,
-                    total_size,
-                    bytes_received
-                );
-            }
             // Atomically promote part file to final path
             ensure_not_cancelled(&cancel_rx)?;
             let promote_started = std::time::Instant::now();
@@ -320,8 +311,12 @@ async fn download_file_simple(
             "Retrying simple download {} in {:?} (received {} bytes)",
             path, delay, bytes_received
         );
-        sleep(delay).await;
+        cancellable(&mut cancel_rx, sleep(delay)).await?;
         attempt += 1;
+        metrics
+            .counters
+            .range_retries
+            .fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -417,6 +412,15 @@ pub(super) async fn download_file_ranges(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retry_delay_stays_bounded_after_many_failures() {
+        for attempt in [0, 3, 31, 32, 49, usize::MAX] {
+            let delay = jitter_delay(attempt);
+            assert!(delay >= Duration::from_millis(ATTEMPT_DELAY_MS));
+            assert!(delay < Duration::from_millis(ATTEMPT_DELAY_MS * 12));
+        }
+    }
 
     #[tokio::test]
     async fn missing_http_status_survives_simple_and_ranged_transfers() {

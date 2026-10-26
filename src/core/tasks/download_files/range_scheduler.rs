@@ -13,6 +13,7 @@ use tokio::time::{sleep, timeout};
 use super::bandwidth::AdaptiveBandwidthLimiter;
 use super::failure::is_missing_remote_file;
 use super::metrics::{DownloadMetrics, DownloadSchedulerState, RangeMetric};
+use super::request::{cancellable, download_response};
 use super::transfer::{
     download_cancelled_error, ensure_not_cancelled, jitter_delay, wait_for_download_resume,
 };
@@ -664,13 +665,15 @@ async fn download_one_range(
     let expected_bytes = end - start + 1;
     let request_started = Instant::now();
 
-    let resp = context
-        .client
-        .get(&*state.url)
-        .header(reqwest::header::ACCEPT_ENCODING, "identity")
-        .header("Range", format!("bytes={}-{}", start, end))
-        .send()
-        .await?;
+    let resp = download_response(
+        &context.client,
+        &state.url,
+        Some((start, Some(end))),
+        pause_rx,
+        cancel_rx,
+        metrics,
+    )
+    .await?;
 
     let request_latency = request_started.elapsed();
 
@@ -713,12 +716,19 @@ async fn download_one_range(
             wait_for_download_resume(pause_rx, cancel_rx).await?;
         }
 
-        let chunk_result = timeout(Duration::from_secs(10), response.chunk()).await;
+        let chunk_result = cancellable(
+            cancel_rx,
+            timeout(Duration::from_secs(10), response.chunk()),
+        )
+        .await?;
 
         let needs_retry = match chunk_result {
             Ok(Ok(Some(bytes))) => {
                 attempt = 0;
                 let n = bytes.len();
+                if n as u64 > expected_bytes.saturating_sub(bytes_received) {
+                    anyhow::bail!("Range response exceeds requested byte count");
+                }
                 bytes_received += n as u64;
                 limiter.acquire_and_record(n).await;
                 metrics.record_bytes(n as u64);
@@ -739,7 +749,8 @@ async fn download_one_range(
                 }
                 false
             }
-            Ok(Ok(None)) => break,
+            Ok(Ok(None)) if bytes_received == expected_bytes => break,
+            Ok(Ok(None)) => true,
             Ok(Err(e)) => {
                 debug!("Range worker error {}-{}: {}", start, end, e);
                 true
@@ -756,7 +767,7 @@ async fn download_one_range(
             }
             let delay = jitter_delay(attempt as usize);
             trace!("Retrying range {}-{} in {:?}", start, end, delay);
-            sleep(delay).await;
+            cancellable(cancel_rx, sleep(delay)).await?;
             attempt += 1;
             metrics
                 .counters
@@ -782,16 +793,15 @@ async fn download_one_range(
                 break;
             }
             ensure_not_cancelled(cancel_rx)?;
-            let reconnect_resp = context
-                .client
-                .get(&*state.url)
-                .header(reqwest::header::ACCEPT_ENCODING, "identity")
-                .header("Range", format!("bytes={}-{}", resume_start, end))
-                .send()
-                .await?;
-            reconnect_resp
-                .error_for_status_ref()
-                .map_err(reqwest::Error::without_url)?;
+            let reconnect_resp = download_response(
+                &context.client,
+                &state.url,
+                Some((resume_start, Some(end))),
+                pause_rx,
+                cancel_rx,
+                metrics,
+            )
+            .await?;
             if reconnect_resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
                 anyhow::bail!(
                     "Reconnect range {}-{} returned {} (expected 206)",
@@ -800,6 +810,7 @@ async fn download_one_range(
                     reconnect_resp.status()
                 );
             }
+            validate_content_range_header(&reconnect_resp, resume_start, end)?;
             response = reconnect_resp;
         }
     }

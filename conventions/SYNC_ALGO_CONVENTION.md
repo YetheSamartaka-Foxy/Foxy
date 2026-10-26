@@ -1056,7 +1056,13 @@ Full download is the correctness fallback for every file.
    `max_active_range_requests / min_ranges_per_file` so the range budget is
    not oversubscribed. Oversubscription makes every file progress slowly and
    finish together, which is the worst possible shape for the tail.
-6. Validate `Content-Range` for ranged responses.
+6. Retry transient request/header failures and HTTP 408/429/5xx in place with
+   bounded backoff, including reconnects, before failing a file. Bound response
+   header waits and make header/body waits and retry delays cancellable.
+   Keep HTTP 404/410 terminal so the next update refreshes obsolete manifests.
+   Validate `Content-Range` on every initial and resumed range response, including
+   sequential resumes, and reject oversized bodies before writing outside the
+   requested span. Retry premature EOF from the received offset.
 7. Validate final byte count (resumed chunks count toward it).
 8. Remove the sidecar, then rename the live file aside to a sibling `*.foxy.bak`
    (same volume, no byte copy) and promote `*.foxy.part` onto the final path.

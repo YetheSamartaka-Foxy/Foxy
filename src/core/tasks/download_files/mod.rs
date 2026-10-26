@@ -5,6 +5,9 @@ mod metrics;
 mod orchestrator;
 mod progress;
 mod range_scheduler;
+#[cfg(test)]
+mod recovery_tests;
+mod request;
 mod rollback;
 mod transfer;
 

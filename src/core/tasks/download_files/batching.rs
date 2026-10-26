@@ -325,13 +325,8 @@ async fn download_single_file(
                 );
             } else {
                 error!(
-                    "File download failed: file_id={} mod_id={} file={} elapsed={:.2?} method={} error={}",
-                    file.file_id,
-                    mod_id,
-                    &file.download_remote_url,
-                    file_elapsed,
-                    download_method,
-                    err
+                    "File download failed: file_id={} mod_id={} elapsed={:.2?} method={} error={:#}",
+                    file.file_id, mod_id, file_elapsed, download_method, err
                 );
             }
         }
