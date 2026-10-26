@@ -220,7 +220,7 @@ impl Foxy {
                 repo
             }
         };
-        let current_version = crate::build_info::VERSION.to_string();
+        let current_version = crate::build_info::update_check_version().to_string();
         self.app_update_status = UpdateCheckStatus::Checking;
         self.app_update_changelogs.clear();
         self.app_update_changelog_loading.clear();

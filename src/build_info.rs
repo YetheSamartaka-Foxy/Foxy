@@ -69,6 +69,26 @@ pub fn version_label() -> String {
     }
 }
 
+/// Version the app update check compares against and shows as installed.
+///
+/// A pre-release is built from the changelog heading of the release it
+/// previews, so it reports as that version's semver pre-release (`1.0.0-pre`):
+/// the stable release of the same version is offered as an update, and older
+/// releases are not.
+pub fn update_check_version() -> &'static str {
+    static VERSION_FOR_UPDATES: LazyLock<String> =
+        LazyLock::new(|| update_check_version_for(VERSION, is_prerelease_build()));
+    VERSION_FOR_UPDATES.as_str()
+}
+
+fn update_check_version_for(version: &str, prerelease: bool) -> String {
+    if prerelease {
+        format!("{version}-pre")
+    } else {
+        version.to_string()
+    }
+}
+
 /// `version_label()` without the `v` prefix, for clap's `--version` output.
 pub fn clap_version() -> &'static str {
     static LABEL: LazyLock<String> = LazyLock::new(|| {
@@ -97,6 +117,20 @@ mod tests {
         let label = version_label();
         assert!(label.starts_with(&format!("v{VERSION}")));
         assert!(label.ends_with(&format!("({GIT_HASH})")));
+    }
+
+    #[test]
+    fn prerelease_update_version_sorts_just_below_its_release() {
+        let pre = semver::Version::parse(&update_check_version_for("1.2.2", true)).unwrap();
+        assert!(pre > semver::Version::parse("1.2.1").unwrap());
+        assert!(pre < semver::Version::parse("1.2.2").unwrap());
+        assert_eq!(update_check_version_for("1.2.2", false), "1.2.2");
+    }
+
+    #[test]
+    fn update_check_version_is_valid_semver_for_this_build() {
+        let version = semver::Version::parse(update_check_version()).unwrap();
+        assert_eq!(version.pre.is_empty(), !is_prerelease_build());
     }
 
     #[test]

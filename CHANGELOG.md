@@ -41,6 +41,7 @@
 - A database compaction interrupted by a crash or power loss no longer starts Foxy with an empty database; the original is restored. An interrupted full database wipe now finishes on the next start instead of leaving a half-wiped database that looked healthy.
 - Unreadable repository, repository space, folder, or settings files are no longer overwritten on the next save. Foxy keeps a copy ending in `.unreadable` and tells you, and a read error no longer removes every repository from its repository space.
 - Command line: `foxy repo wipe-db` and `foxy repo force-redownload` no longer wipe the records of another folder's copy of the same repository.
+- Pre-release builds now get the update notification when the stable release of the same version is published, the same way older versions do. The update screens show a pre-release's version with `-pre`, such as `1.2.2-pre`.
 
 # 1.2.1
 ## Added

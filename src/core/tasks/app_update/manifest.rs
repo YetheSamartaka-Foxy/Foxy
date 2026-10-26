@@ -170,6 +170,13 @@ mod tests {
         assert!(!is_newer("1.0.0-alpha", "1.0.0"));
     }
 
+    #[test]
+    fn is_newer_offers_stable_release_to_its_prerelease_build() {
+        assert!(is_newer("1.2.2", "1.2.2-pre"));
+        assert!(is_newer("1.2.3", "1.2.2-pre"));
+        assert!(!is_newer("1.2.1", "1.2.2-pre"));
+    }
+
     // ── current_platform_key ───────────────────────────────────────────
 
     #[test]
