@@ -107,6 +107,7 @@ impl Foxy {
         let mut open_recheck_all_modal = false;
         let mut open_update_all_modal = false;
         let mut dismiss_completed_bulk_progress = false;
+        let mut export_logs_requested = false;
         self.ensure_repository_addon_size_cache_loaded();
 
         ScrollArea::vertical()
@@ -283,6 +284,7 @@ impl Foxy {
                         None,
                         None,
                         None,
+                        false,
                     );
                 }
 
@@ -393,6 +395,7 @@ impl Foxy {
                         None,
                         Some(dismiss_label.as_str()),
                         None,
+                        progress.failed_count > 0,
                     );
                     if let Some(flare) = bulk_finished_flare {
                         paint_border_flare(
@@ -405,6 +408,8 @@ impl Foxy {
                     }
                     if banner.inner == RepositoryBannerResponse::DismissClicked {
                         dismiss_completed_bulk_progress = true;
+                    } else if banner.inner == RepositoryBannerResponse::ExportLogsClicked {
+                        export_logs_requested = true;
                     }
                 }
 
@@ -561,6 +566,9 @@ impl Foxy {
         }
         if dismiss_completed_bulk_progress {
             self.repository_space_bulk_progress = None;
+        }
+        if export_logs_requested {
+            self.on_export_logs_to_zip();
         }
 
         self.repository_space_selector_state = Some(selector_state);

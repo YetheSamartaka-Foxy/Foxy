@@ -41,6 +41,7 @@ pub(super) struct RepositoryCheckCompletionBanner {
     pub(super) detail: String,
     pub(super) stroke_color: Color32,
     pub(super) show_pending_action: bool,
+    pub(super) failed: bool,
 }
 
 pub(super) struct RepositoryActionBanner {
@@ -66,6 +67,7 @@ pub(super) enum RepositoryBannerResponse {
     None,
     ActionClicked,
     DismissClicked,
+    ExportLogsClicked,
 }
 
 pub(super) type RepositoryUiAction = Box<dyn FnOnce(&mut Foxy)>;

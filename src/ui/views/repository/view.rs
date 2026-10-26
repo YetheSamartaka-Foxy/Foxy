@@ -86,6 +86,7 @@ impl Foxy {
             let mut settings_action: Option<RepositoryUiAction> = None;
             let mut profile_changed = false;
             let mut dismiss_completed_check_banner = false;
+            let mut export_logs_requested = false;
             let mut cancel_sync_requested = false;
 
             central_frame.show(ui, |ui| {
@@ -510,6 +511,7 @@ impl Foxy {
                             None,
                             None,
                             None,
+                            false,
                         );
                         ui.add_space(10.0);
                     }
@@ -629,6 +631,7 @@ impl Foxy {
                             (!completed_check_banner.show_pending_action)
                                 .then_some(dismiss_label.as_str()),
                             None,
+                            completed_check_banner.failed,
                         );
                         if let Some(flare) = check_finished_flare {
                             paint_border_flare(
@@ -648,6 +651,9 @@ impl Foxy {
                             }
                             RepositoryBannerResponse::DismissClicked => {
                                 dismiss_completed_check_banner = true;
+                            }
+                            RepositoryBannerResponse::ExportLogsClicked => {
+                                export_logs_requested = true;
                             }
                             RepositoryBannerResponse::None => {}
                         }
@@ -669,6 +675,7 @@ impl Foxy {
                                 )),
                                 allow_dismiss.then_some(dismiss_label.as_str()),
                                 action_banner.activity,
+                                false,
                             )
                             .inner;
                         if response == RepositoryBannerResponse::DismissClicked {
@@ -843,6 +850,9 @@ impl Foxy {
             }
             if dismiss_completed_check_banner {
                 self.dismiss_completed_repository_check_banner();
+            }
+            if export_logs_requested {
+                self.on_export_logs_to_zip();
             }
             if cancel_sync_requested {
                 self.cancel_sync_and_queued_runs();

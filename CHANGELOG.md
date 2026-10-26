@@ -8,6 +8,7 @@
 - Storage type lets you override incorrect drive detection with SSD, HDD, or Removable drive for all drives. Memory pressure lets you override the measured memory level when planning checks and downloads. Both default to automatic detection, apply to the next check or download without restarting, and are also available through `foxy settings set --storage-type` and `--memory-pressure`.
 - Progress frame rate in Application settings lets you keep the default 30 fps or choose 20, 10, or 5 fps to use less processor time while showing progress.
 - Proxy settings let Foxy use the system proxy, connect directly, or use a manual HTTP or HTTPS proxy with an optional user name, password, and list of hosts to reach directly. The choice covers repositories, app updates, Steam Workshop details, images, and direct downloads, and is also available through `foxy settings set --proxy-mode` and the related proxy options. Passwords are masked in the interface and hidden from settings output, but stored as plain text in Foxy's settings file.
+- Failed repository checks, failed database wipes, bulk rechecks or updates with failures, and dialogs that show an error now offer Export logs to ZIP next to the message, so you can share the logs with support without opening Settings.
 
 ## Changed
 - Progress bars show triangles only while work is running. Idle and paused bars use solid fills, and completed downloads turn solid green.

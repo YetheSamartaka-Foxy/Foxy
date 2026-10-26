@@ -383,6 +383,7 @@ impl Foxy {
         action_button: Option<(&str, Color32)>,
         dismiss_label: Option<&str>,
         activity: Option<ActivityBar>,
+        export_logs: bool,
     ) -> egui::InnerResponse<RepositoryBannerResponse> {
         let banner_font_size = self
             .settings_view_state
@@ -453,6 +454,28 @@ impl Foxy {
                                 }
                                 if action_button.clicked() {
                                     response = RepositoryBannerResponse::ActionClicked;
+                                }
+                            });
+                        }
+                        if export_logs {
+                            if dismiss_label.is_some() || action_button.is_some() {
+                                ui.add_space(8.0);
+                            }
+                            ui.push_id("banner_export_logs", |ui| {
+                                let export_button = ui
+                                    .add(
+                                        Button::new(
+                                            RichText::new(self.export_logs_button_text())
+                                                .size((detail_font_size - 1.0).max(13.0)),
+                                        )
+                                        .fill(self.color_main_bg()),
+                                    )
+                                    .on_hover_text(self.export_logs_tooltip());
+                                if export_button.hovered() {
+                                    ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                                }
+                                if export_button.clicked() {
+                                    response = RepositoryBannerResponse::ExportLogsClicked;
                                 }
                             });
                         }
@@ -650,6 +673,7 @@ impl Foxy {
             detail,
             stroke_color,
             show_pending_action: banner.success && banner.had_updates,
+            failed: !banner.success,
         })
     }
 
@@ -697,6 +721,7 @@ impl Foxy {
                 self.color_error()
             },
             show_pending_action: false,
+            failed: !banner.success,
         })
     }
 }
