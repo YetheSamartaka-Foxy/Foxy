@@ -4,6 +4,10 @@ use super::persistence::{
     CleanPartMark, calculate_hash_from_items, persist_file_checksums, persist_mod_checksums,
     persist_part_checksums, persist_repository_checksums,
 };
+use super::pipeline::{
+    await_deferred_part_metadata_insert, derived_clean_part_indices,
+    start_background_part_metadata_insert,
+};
 use super::propagation::{
     collect_repo_indices_for_mods, update_mod_hashes_for_mods, update_repository_hashes_for_repos,
 };
@@ -13,7 +17,9 @@ use super::scheduling::{
     recalculate_parts_for_jobs_with_profile, return_tree_parts,
 };
 use super::*;
-use crate::core::tasks::remote_file_parts::flush_deferred_part_inserts_with_local_state;
+use crate::core::tasks::remote_file_parts::{
+    flush_deferred_part_inserts_with_local_state, persist_part_local_state_by_file_path,
+};
 use crate::ui::types::HashIoProfilePreference;
 
 #[derive(Clone, Debug, Default)]
@@ -110,6 +116,7 @@ pub(crate) async fn calculate_hashes_for_files(
         progress_tx,
         force_rehash,
         HashIoProfilePreference::Auto,
+        None,
     )
     .await
 }
@@ -121,6 +128,7 @@ pub(crate) async fn calculate_hashes_for_files_with_profile(
     progress_tx: Option<&Sender<ProgressEvent>>,
     force_rehash: bool,
     hash_io_profile: HashIoProfilePreference,
+    cancel_rx: Option<&watch::Receiver<bool>>,
 ) -> FileHashBatchResult {
     calculate_hashes_for_files_with_profile_and_sticky_auto(
         context,
@@ -132,6 +140,7 @@ pub(crate) async fn calculate_hashes_for_files_with_profile(
         None,
         false,
         false,
+        cancel_rx,
     )
     .await
 }
@@ -147,6 +156,7 @@ pub(crate) async fn calculate_hashes_for_files_with_profile_and_sticky_auto(
     sticky_auto_profile: Option<HashIoProfilePreference>,
     freshly_downloaded_files: bool,
     clean_part_mark_downloaded_files: bool,
+    cancel_rx: Option<&watch::Receiver<bool>>,
 ) -> FileHashBatchResult {
     let mut data_tree: Tree =
         match Tree::load_for_files(context.clone(), repository_url, file_ids).await {
@@ -170,6 +180,7 @@ pub(crate) async fn calculate_hashes_for_files_with_profile_and_sticky_auto(
         sticky_auto_profile,
         freshly_downloaded_files,
         clean_part_mark_downloaded_files,
+        cancel_rx,
     )
     .await
 }
@@ -181,6 +192,7 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile(
     progress_tx: Option<&Sender<ProgressEvent>>,
     force_rehash: bool,
     hash_io_profile: HashIoProfilePreference,
+    cancel_rx: Option<&watch::Receiver<bool>>,
 ) -> FileHashBatchResult {
     calculate_hashes_for_files_in_tree_with_profile_and_sticky_auto(
         context,
@@ -192,6 +204,7 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile(
         None,
         false,
         false,
+        cancel_rx,
     )
     .await
 }
@@ -207,6 +220,7 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
     sticky_auto_profile: Option<HashIoProfilePreference>,
     freshly_downloaded_files: bool,
     clean_part_mark_downloaded_files: bool,
+    cancel_rx: Option<&watch::Receiver<bool>>,
 ) -> FileHashBatchResult {
     let requested_file_ids = file_ids.clone();
     if file_ids.is_empty() {
@@ -303,6 +317,25 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
     }
     let repo_indices = collect_repo_indices_for_mods(data_tree, &mod_indices);
 
+    if cancel_rx.is_some_and(|rx| *rx.borrow()) {
+        return FileHashBatchResult {
+            requested_file_ids,
+            ..Default::default()
+        };
+    }
+    let repository_label = data_tree
+        .repositories
+        .first()
+        .map(|repository| repository.remote_url.clone())
+        .unwrap_or_default();
+    // Download batches cover only part of the staged rows; the download flow
+    // drains the buffer for them.
+    let mut background_part_insert = if freshly_downloaded_files {
+        None
+    } else {
+        start_background_part_metadata_insert(&context)
+    };
+
     let mut updated_part_indices: HashSet<usize> = HashSet::new();
     let lent_parts = lend_tree_parts(data_tree);
     let hash_jobs = build_file_hash_jobs(
@@ -365,18 +398,29 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
         });
     }
     let hash_started = Instant::now();
-    let (hash_results, profile_decision, _cancelled) = recalculate_parts_for_jobs_with_profile(
+    let (hash_results, profile_decision, cancelled) = recalculate_parts_for_jobs_with_profile(
         hash_jobs,
         &context,
         hash_io_profile,
         sticky_auto_profile,
         progress_tx,
         total_files,
-        None,
+        cancel_rx,
     )
     .await;
     return_tree_parts(data_tree, lent_parts);
     phase_timings.hash_wall += hash_started.elapsed();
+    if cancelled || cancel_rx.is_some_and(|rx| *rx.borrow()) {
+        info!(
+            "Partial hash pass cancelled during part hashing after {:.2}s",
+            hash_started.elapsed().as_secs_f64()
+        );
+        await_deferred_part_metadata_insert(&mut background_part_insert, &repository_label).await;
+        return FileHashBatchResult {
+            requested_file_ids,
+            ..Default::default()
+        };
+    }
     info!(
         "Hash profile decision: requested={} selected={} reason={} benchmark_files={} benchmark_bytes={} benchmark_elapsed={:.2}s",
         profile_decision.requested,
@@ -495,7 +539,49 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
     // covers the entire deferred buffer that the flush drains. Per-batch incremental
     // download hashing covers only a subset of the deferred files at a time, so it
     // must keep the inline persist path and let the download flow drain the buffer.
-    if context.deferred_part_count() > 0 && !freshly_downloaded_files {
+    if background_part_insert.is_some() {
+        // The background insert wrote the remote rows; a clean file's parts take
+        // their local state from its checksum when a tree loads.
+        let derived_clean = derived_clean_part_indices(data_tree, &file_indices);
+        part_updates = updated_part_indices
+            .difference(&derived_clean)
+            .filter_map(|&part_idx| data_tree.parts.get(part_idx).cloned())
+            .collect();
+        part_updates.sort_by_key(|part| (part.file_id, part.data_order));
+        parts_persisted += part_count.saturating_sub(part_updates.len());
+        info!(
+            "Phase 2 derived clean part state: parts={} fallback_parts={} db_part_updates=skipped",
+            parts_persisted,
+            part_updates.len()
+        );
+        let inserted =
+            await_deferred_part_metadata_insert(&mut background_part_insert, &repository_label)
+                .await;
+        if !inserted
+            || !persist_part_local_state_by_file_path(&db, &part_updates, |persisted_chunk| {
+                parts_persisted += persisted_chunk;
+                if parts_persisted % PERSIST_LOG_INTERVAL == 0 || parts_persisted == part_count {
+                    info!(
+                        "Phase 2 progress: {}/{} fallback parts persisted",
+                        parts_persisted, part_count
+                    );
+                }
+                if let Some(tx) = progress_tx {
+                    let pct = 0.50 + 0.20 * (parts_persisted as f32 / part_count.max(1) as f32);
+                    let _ = tx.send(ProgressEvent::Stage {
+                        label: format!("Saving parts {}/{}", parts_persisted, part_count),
+                        percent: pct,
+                    });
+                }
+            })
+            .await
+        {
+            error!(
+                "Failed to persist manifest parts or their local hash state for repo {}",
+                repository_label
+            );
+        }
+    } else if context.deferred_part_count() > 0 && !freshly_downloaded_files {
         let total_deferred_parts = data_tree.parts.len();
         info!(
             "Persisting {} deferred manifest parts with local hash state in one coalesced sorted insert pass",
@@ -863,5 +949,172 @@ mod tests {
         let tree = tree_with_one_file(file.path().to_string_lossy().into_owned(), vec![part]);
 
         assert!(clean_part_mark_for_file(&tree, 0).is_none());
+    }
+
+    const REPO_URL: &str = "http://repo.example.invalid:8080/";
+
+    fn checksum(bytes: &[u8]) -> String {
+        blake3::hash(bytes).to_hex().to_uppercase()
+    }
+
+    /// A repository with one file that hashes clean and one whose local bytes
+    /// differ, its part rows staged as a fresh load and the first of them
+    /// already committed by the part stream.
+    async fn fresh_staged_repository(root: &std::path::Path) -> (Arc<FoxyContext>, HashSet<u64>) {
+        use crate::core::db::params;
+        use crate::core::models::context::DeferredPartInsert;
+
+        let clean_path = root.join("clean.pbo");
+        let dirty_path = root.join("dirty.pbo");
+        std::fs::write(&clean_path, b"clean").unwrap();
+        std::fs::write(&dirty_path, b"local").unwrap();
+        let clean_part = checksum(b"clean");
+        let remote_dirty_part = checksum(b"other");
+        let context = Arc::new(FoxyContext::new(
+            crate::core::tasks::db_turso::build_test_database().await,
+            reqwest::Client::new(),
+        ));
+        let db = context.db();
+        let root_path = root.to_string_lossy().to_string();
+        db.execute(
+            "INSERT INTO repositories (id, name, remote_url, local_path) VALUES (1, 'MainRepo', ?, ?)",
+            params![REPO_URL, root_path.clone()],
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO addons (id, name, remote_path, local_path, enabled, required, data_order) \
+             VALUES (10, '@mod_01', 'rp', ?, 1, 1, 0)",
+            params![root_path],
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO repository_addons (repository_id, addon_id) VALUES (1, 10)",
+            params![],
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO files (id, name, remote_path, local_path, remote_checksum, length, data_order) \
+             VALUES (100, 'clean.pbo', 'r/clean.pbo', ?, ?, 5, 0), (101, 'dirty.pbo', 'r/dirty.pbo', ?, ?, 5, 1)",
+            params![
+                clean_path.to_string_lossy().to_string(),
+                checksum(clean_part.as_bytes()),
+                dirty_path.to_string_lossy().to_string(),
+                checksum(remote_dirty_part.as_bytes())
+            ],
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO addon_files (addon_id, file_id) VALUES (10, 100), (10, 101)",
+            params![],
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO subfiles (file_id, path, local_length, local_start, remote_length, remote_start, local_checksum, remote_checksum, data_order) \
+             VALUES (100, 'part0', 0, 0, 5, 0, '', ?, 0)",
+            params![clean_part.clone()],
+        )
+        .await
+        .unwrap();
+        let staged = |file_id: i64, remote_checksum: String| DeferredPartInsert {
+            file_id,
+            path: "part0".to_owned(),
+            remote_length: 5,
+            remote_start: 0,
+            remote_checksum,
+            data_order: 0,
+        };
+        context.set_fresh_subfiles_load(true);
+        context.set_defer_part_inserts(true);
+        context.buffer_deferred_parts(vec![
+            staged(100, clean_part),
+            staged(101, remote_dirty_part),
+        ]);
+        context.set_fresh_subfiles_load(false);
+        context.set_deferred_parts_persisted(1);
+        (context, HashSet::from([100, 101]))
+    }
+
+    #[tokio::test]
+    async fn a_file_scoped_pass_inserts_fresh_staged_rows_once_and_writes_only_dirty_part_state() {
+        use crate::core::db::params;
+
+        let root = tempfile::tempdir().unwrap();
+        let (context, file_ids) = fresh_staged_repository(root.path()).await;
+
+        let result = calculate_hashes_for_files_with_profile(
+            context.clone(),
+            REPO_URL,
+            &file_ids,
+            None,
+            false,
+            HashIoProfilePreference::Balanced,
+            None,
+        )
+        .await;
+
+        assert_eq!(result.processed_file_ids, file_ids);
+        assert_eq!(context.deferred_part_count(), 0);
+        let parts = context
+            .db()
+            .query_all(
+                "SELECT file_id, COALESCE(local_checksum, '') AS local FROM subfiles ORDER BY file_id",
+                params![],
+            )
+            .await
+            .unwrap();
+        let parts: Vec<(i64, String)> = parts
+            .iter()
+            .map(|row| {
+                (
+                    row.get_i64("file_id").unwrap(),
+                    row.get_string("local").unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            parts,
+            vec![(100, String::new()), (101, checksum(b"local"))],
+            "the clean part derives its state from the file; only the dirty one is written"
+        );
+        let tree = Tree::load(context, REPO_URL).await.unwrap();
+        let clean = &tree.parts[tree.file_nodes[tree.file_id_to_index[&100]].parts[0]];
+        assert_eq!(clean.local_checksum, checksum(b"clean"));
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_file_scoped_pass_records_no_hashes() {
+        use crate::core::db::params;
+
+        let root = tempfile::tempdir().unwrap();
+        let (context, file_ids) = fresh_staged_repository(root.path()).await;
+        let (_cancel_tx, cancel_rx) = watch::channel(true);
+
+        let result = calculate_hashes_for_files_with_profile(
+            context.clone(),
+            REPO_URL,
+            &file_ids,
+            None,
+            false,
+            HashIoProfilePreference::Balanced,
+            Some(&cancel_rx),
+        )
+        .await;
+
+        assert!(result.processed_file_ids.is_empty());
+        let hashed = context
+            .db()
+            .query_one(
+                "SELECT COUNT(*) AS c FROM files WHERE COALESCE(local_checksum, '') != ''",
+                params![],
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(hashed.get_i64("c").unwrap(), 0);
     }
 }

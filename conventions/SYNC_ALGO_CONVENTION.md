@@ -203,7 +203,12 @@ preparation before the remote gate.
 After refreshing remote metadata, union the cached pending-addon hint with the
 current instance's enabled addon tree mismatches before scoped bootstrap, local
 verification, or queue construction. A server update can add pending addons
-outside the startup payload; that payload must never hide the new work.
+outside the startup payload; that payload must never hide the new work. A
+repository whose part rows are staged as a fresh load (after a wipe, or a first
+check over existing files) has every addon pending and nothing for the scope to
+narrow, so its hash bootstrap still takes the whole-tree pass; the union keeps
+scoping verification and the queue. Guarded by
+`a_fresh_part_load_bootstraps_the_whole_tree_even_with_a_pending_scope`.
 
 Before applying an addon manifest, validate nonnegative file/part spans and
 contiguous ordered part coverage ending at the declared file length. Empty
@@ -855,6 +860,10 @@ Failure exits:
   their full payload so cancellation does not leave a partly updated repository.
 - Integrity recheck: the hash pass takes the cancel receiver and exits with
   `outcome=cancelled` between batches.
+- Hash bootstrap: the whole-tree, addon-scoped and targeted passes take the
+  cancel receiver too. A cancel stops hashing between batches, waits for a
+  running background part insert so the staged remote rows persist, and records
+  no hash results.
 
 ## Remote Metadata Refresh Algorithm
 
@@ -958,6 +967,11 @@ Deferred part rows:
   one part row. The rows stay in the deferred buffer, marked as committed, so
   the tree still takes them from memory and every flush skips them. Other
   checks hash long enough to hide the insert and keep the single flush.
+- A hash pass that persists fresh staged rows, whole-tree or file-scoped,
+  starts their insert in the background before hashing (skipping streamed
+  rows) and afterwards writes local part state only for files whose parts do
+  not derive clean from the file checksum. Writing every row again with its
+  local state doubled the insert after a streamed rebuild.
 - Both insert through `FoxyDb::bulk_insert_transaction`: its own retired
   connection with a 256 MiB page cache (the flush's whole speed-up: a 433k-row
   transaction spills at the pooled 16 MiB) and foreign keys off, so the caller

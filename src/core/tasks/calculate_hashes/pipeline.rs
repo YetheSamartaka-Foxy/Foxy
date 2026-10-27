@@ -49,9 +49,15 @@ pub(crate) enum HashCalculationResult {
     Failed,
 }
 
-fn derived_clean_part_indices(data_tree: &Tree) -> HashSet<usize> {
+pub(super) fn derived_clean_part_indices(
+    data_tree: &Tree,
+    file_indices: &[usize],
+) -> HashSet<usize> {
     let mut clean_indices = HashSet::new();
-    for file_node in &data_tree.file_nodes {
+    for file_node in file_indices
+        .iter()
+        .filter_map(|&file_idx| data_tree.file_nodes.get(file_idx))
+    {
         let Some(file) = data_tree.files.get(file_node.file_idx) else {
             continue;
         };
@@ -91,6 +97,25 @@ fn should_insert_part_metadata_in_background(context: &FoxyContext) -> bool {
     context.deferred_part_count() > 0 && context.deferred_part_inserts_are_fresh_load()
 }
 
+/// Insert the deferred manifest part rows while the files hash; rows the
+/// rebuild already streamed are skipped by the flush.
+pub(super) fn start_background_part_metadata_insert(
+    context: &Arc<FoxyContext>,
+) -> Option<tokio::task::JoinHandle<bool>> {
+    if !should_insert_part_metadata_in_background(context) {
+        return None;
+    }
+    info!(
+        "Starting deferred manifest part metadata insert in background before hashing: rows={}",
+        context.deferred_part_count()
+    );
+    let flush_context = context.clone();
+    context.set_defer_part_inserts(false);
+    Some(tokio::spawn(async move {
+        flush_deferred_part_inserts(flush_context).await
+    }))
+}
+
 /// Persist deferred manifest part rows when the hash pass is skipped. Returns
 /// `false` only when rows were pending and the insert failed.
 async fn flush_deferred_parts_without_hash_pass(
@@ -121,7 +146,7 @@ async fn flush_deferred_parts_without_hash_pass(
     false
 }
 
-async fn await_deferred_part_metadata_insert(
+pub(super) async fn await_deferred_part_metadata_insert(
     handle: &mut Option<tokio::task::JoinHandle<bool>>,
     repository_url: &str,
 ) -> bool {
@@ -229,21 +254,7 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
         }
         return HashCalculationResult::Completed(Box::new(data_tree));
     }
-    let mut deferred_part_metadata_insert_handle = if should_insert_part_metadata_in_background(
-        &context,
-    ) {
-        info!(
-            "Starting deferred manifest part metadata insert in background before hashing: rows={}",
-            context.deferred_part_count()
-        );
-        let flush_context = context.clone();
-        context.set_defer_part_inserts(false);
-        Some(tokio::spawn(async move {
-            flush_deferred_part_inserts(flush_context).await
-        }))
-    } else {
-        None
-    };
+    let mut deferred_part_metadata_insert_handle = start_background_part_metadata_insert(&context);
     let lent_parts = lend_tree_parts(&mut data_tree);
     let hash_jobs = build_file_hash_jobs(
         &data_tree,
@@ -462,7 +473,7 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
         return HashCalculationResult::Cancelled;
     }
     let derived_clean_indices = if deferred_part_metadata_insert_handle.is_some() {
-        derived_clean_part_indices(&data_tree)
+        derived_clean_part_indices(&data_tree, &all_file_indices)
     } else {
         HashSet::new()
     };
@@ -934,7 +945,7 @@ mod tests {
             parts: vec![0],
         });
 
-        assert_eq!(derived_clean_part_indices(&tree), HashSet::from([0]));
+        assert_eq!(derived_clean_part_indices(&tree, &[0]), HashSet::from([0]));
         let _ = std::fs::remove_file(file_path);
     }
 
@@ -974,7 +985,7 @@ mod tests {
             parts: vec![0],
         });
 
-        assert!(derived_clean_part_indices(&tree).is_empty());
+        assert!(derived_clean_part_indices(&tree, &[0]).is_empty());
         let _ = std::fs::remove_file(file_path);
     }
 }

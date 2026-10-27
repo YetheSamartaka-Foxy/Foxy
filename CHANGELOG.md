@@ -48,6 +48,8 @@
 - Pre-release builds now get the update notification when the stable release of the same version is published, the same way older versions do. The update screens show a pre-release's version with `-pre`, such as `1.2.2-pre`.
 - The download screen's CPU graph showed one processor thread as 100%, so a busy update could read above 600%. It now shows the share of the whole computer. On Windows the memory graph now matches the memory Task Manager shows, and disk writes are shown in MB/s as they happen instead of in bursts when files finish.
 - Automatic memory pressure no longer reports severe pressure on a computer with plenty of free memory. It counted memory reserved beyond RAM on Windows, and swap left over from earlier on Linux and macOS, as pressure, which limited checks and downloads to one or a few files at a time and could make an update many times slower.
+- Cancel now stops a check or update promptly while it hashes the files of added or changed addons. Foxy used to finish hashing those files first, which could take minutes on a hard drive.
+- Checks and updates no longer spend a fraction of a second at their start and end listing every thread running on the computer just to log Foxy's own processor use.
 
 # 1.2.1
 ## Added

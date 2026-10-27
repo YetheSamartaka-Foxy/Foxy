@@ -250,6 +250,17 @@ fn should_load_bootstrap_tree(
     !repo_already_complete && (!force_redownload || local_path_mismatch_guard_applies(mode))
 }
 
+/// A repository whose part rows were just staged as a fresh load has no hash
+/// state for the pending scope to narrow (every addon is pending), so its
+/// bootstrap takes the whole-tree pass, which inserts the parts during hashing.
+fn scopes_tree_bootstrap(
+    builds_download_plan: bool,
+    has_pending_scope: bool,
+    fresh_part_load: bool,
+) -> bool {
+    builds_download_plan && has_pending_scope && !fresh_part_load
+}
+
 /// True when this repository instance has file rows whose tree hash is missing
 /// (`local_checksum` NULL/empty) AND ZERO part rows (`subfiles`). This is a
 /// structurally broken state: the tree-hash rollup derives every file's
@@ -2015,7 +2026,11 @@ async fn run_repository_pipeline(
     let mut targeted_init_hashed_file_ids: HashSet<u64> = HashSet::new();
     let mut targeted_init_baseline_file_ids: HashSet<u64> = HashSet::new();
     let mut bootstrap_tree_for_content_hash: Option<Tree> = None;
-    let scoped_tree_bootstrap = builds_download_plan && !quick_update_mod_names.is_empty();
+    let scoped_tree_bootstrap = scopes_tree_bootstrap(
+        builds_download_plan,
+        !quick_update_mod_names.is_empty(),
+        context.deferred_part_count() > 0 && context.deferred_part_inserts_are_fresh_load(),
+    );
     summary.push(StageEntry::new("bootstrap_prepare", stage.elapsed()));
     stage = std::time::Instant::now();
     let bootstrap_tree_result =
@@ -2102,6 +2117,7 @@ async fn run_repository_pipeline(
                     Some(&progress_tx),
                     false,
                     hash_io_profile,
+                    Some(&cancel_rx),
                 )
                 .await;
                 if *cancel_rx.borrow() {
@@ -2190,6 +2206,7 @@ async fn run_repository_pipeline(
                         Some(&progress_tx),
                         false,
                         hash_io_profile,
+                        Some(&cancel_rx),
                     )
                     .await;
                     targeted_init_hashed_file_ids.extend(hashed.processed_file_ids.iter());
@@ -2225,6 +2242,7 @@ async fn run_repository_pipeline(
                         Some(&progress_tx),
                         false,
                         hash_io_profile,
+                        Some(&cancel_rx),
                     )
                     .await;
                     targeted_init_hashed_file_ids.extend(hashed.processed_file_ids.iter());
@@ -4611,6 +4629,14 @@ mod tests {
             true,
             SyncMode::RecheckOnly
         ));
+    }
+
+    #[test]
+    fn a_fresh_part_load_bootstraps_the_whole_tree_even_with_a_pending_scope() {
+        assert!(scopes_tree_bootstrap(true, true, false));
+        assert!(!scopes_tree_bootstrap(true, true, true));
+        assert!(!scopes_tree_bootstrap(true, false, false));
+        assert!(!scopes_tree_bootstrap(false, true, false));
     }
 
     #[test]

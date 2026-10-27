@@ -106,14 +106,8 @@ pub(crate) fn describe(groups: &[ThreadGroupCpu], unaccounted: CpuTime) -> Strin
 #[cfg(windows)]
 pub(crate) fn snapshot() -> ThreadCpuSnapshot {
     use winapi::shared::minwindef::FILETIME;
-    use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
-    use winapi::um::processthreadsapi::{
-        GetCurrentProcess, GetCurrentProcessId, GetProcessTimes, GetThreadTimes, OpenThread,
-    };
-    use winapi::um::tlhelp32::{
-        CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
-    };
-    use winapi::um::winnt::THREAD_QUERY_LIMITED_INFORMATION;
+    use winapi::um::processthreadsapi::{GetCurrentProcess, GetProcessTimes, GetThreadTimes};
+    use winapi::um::winnt::HANDLE;
 
     fn cpu(kernel: &FILETIME, user: &FILETIME) -> CpuTime {
         let duration = |time: &FILETIME| {
@@ -133,11 +127,89 @@ pub(crate) fn snapshot() -> ThreadCpuSnapshot {
         if GetProcessTimes(GetCurrentProcess(), created, exited, kernel, user) != 0 {
             snapshot.process = cpu(&times[2], &times[3]);
         }
+    }
+    let mut record = |id: u32, thread: HANDLE| unsafe {
+        let mut times: [FILETIME; 4] = std::mem::zeroed();
+        let [created, exited, kernel, user] = &mut times;
+        if GetThreadTimes(thread, created, exited, kernel, user) != 0 {
+            snapshot
+                .threads
+                .insert(id, (thread_name(thread.cast()), cpu(&times[2], &times[3])));
+        }
+    };
+    if !visit_own_threads(&mut record) {
+        visit_own_threads_in_system_snapshot(&mut record);
+    }
+    snapshot
+}
 
+/// Visits this process's threads with `NtGetNextThread`, which walks only
+/// them; a Toolhelp snapshot lists every thread on the machine, tens of
+/// thousands on a busy desktop and about 80 ms per walk. False when ntdll
+/// lacks the export or refuses the first step.
+#[cfg(windows)]
+fn visit_own_threads(visit: &mut dyn FnMut(u32, winapi::um::winnt::HANDLE)) -> bool {
+    use std::sync::OnceLock;
+    use winapi::um::handleapi::CloseHandle;
+    use winapi::um::libloaderapi::{GetModuleHandleA, GetProcAddress};
+    use winapi::um::processthreadsapi::{GetCurrentProcess, GetThreadId};
+    use winapi::um::winnt::{HANDLE, THREAD_QUERY_LIMITED_INFORMATION};
+
+    type NtGetNextThread =
+        unsafe extern "system" fn(HANDLE, HANDLE, u32, u32, u32, *mut HANDLE) -> i32;
+    static LOOKUP: OnceLock<Option<NtGetNextThread>> = OnceLock::new();
+    let lookup = LOOKUP.get_or_init(|| unsafe {
+        let ntdll = GetModuleHandleA(c"ntdll.dll".as_ptr());
+        if ntdll.is_null() {
+            return None;
+        }
+        let address = GetProcAddress(ntdll, c"NtGetNextThread".as_ptr());
+        (!address.is_null()).then(|| std::mem::transmute::<_, NtGetNextThread>(address))
+    });
+    let Some(next_thread) = lookup else {
+        return false;
+    };
+    unsafe {
+        let process = GetCurrentProcess();
+        let mut current: HANDLE = std::ptr::null_mut();
+        loop {
+            let mut next: HANDLE = std::ptr::null_mut();
+            let status = next_thread(
+                process,
+                current,
+                THREAD_QUERY_LIMITED_INFORMATION,
+                0,
+                0,
+                &mut next,
+            );
+            if !current.is_null() {
+                CloseHandle(current);
+            } else if status < 0 {
+                return false;
+            }
+            if status < 0 {
+                return true;
+            }
+            visit(GetThreadId(next), next);
+            current = next;
+        }
+    }
+}
+
+#[cfg(windows)]
+fn visit_own_threads_in_system_snapshot(visit: &mut dyn FnMut(u32, winapi::um::winnt::HANDLE)) {
+    use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
+    use winapi::um::processthreadsapi::{GetCurrentProcessId, OpenThread};
+    use winapi::um::tlhelp32::{
+        CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+    };
+    use winapi::um::winnt::THREAD_QUERY_LIMITED_INFORMATION;
+
+    unsafe {
         let pid = GetCurrentProcessId();
         let list = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
         if list == INVALID_HANDLE_VALUE {
-            return snapshot;
+            return;
         }
         let mut entry: THREADENTRY32 = std::mem::zeroed();
         entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
@@ -146,14 +218,7 @@ pub(crate) fn snapshot() -> ThreadCpuSnapshot {
             if entry.th32OwnerProcessID == pid {
                 let thread = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, 0, entry.th32ThreadID);
                 if !thread.is_null() {
-                    let mut times: [FILETIME; 4] = std::mem::zeroed();
-                    let [created, exited, kernel, user] = &mut times;
-                    if GetThreadTimes(thread, created, exited, kernel, user) != 0 {
-                        snapshot.threads.insert(
-                            entry.th32ThreadID,
-                            (thread_name(thread.cast()), cpu(&times[2], &times[3])),
-                        );
-                    }
+                    visit(entry.th32ThreadID, thread);
                     CloseHandle(thread);
                 }
             }
@@ -161,7 +226,6 @@ pub(crate) fn snapshot() -> ThreadCpuSnapshot {
         }
         CloseHandle(list);
     }
-    snapshot
 }
 
 #[cfg(not(windows))]
@@ -280,6 +344,49 @@ mod tests {
         CpuTime {
             user: Duration::from_millis(user_ms),
             kernel: Duration::from_millis(kernel_ms),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_own_thread_walk_finds_every_live_thread_with_its_name() {
+        use std::sync::{Arc, Barrier};
+        use winapi::um::processthreadsapi::GetCurrentThreadId;
+
+        let (ids_tx, ids_rx) = std::sync::mpsc::channel();
+        let release = Arc::new(Barrier::new(4));
+        let workers: Vec<_> = (0..3)
+            .map(|_| {
+                let ids_tx = ids_tx.clone();
+                let release = release.clone();
+                std::thread::Builder::new()
+                    .name("thread-cpu-probe".to_string())
+                    .spawn(move || {
+                        ids_tx.send(unsafe { GetCurrentThreadId() }).unwrap();
+                        release.wait();
+                    })
+                    .unwrap()
+            })
+            .collect();
+        let mut expected: Vec<u32> = (0..3).map(|_| ids_rx.recv().unwrap()).collect();
+        expected.push(unsafe { GetCurrentThreadId() });
+
+        let mut walked = Vec::new();
+        assert!(visit_own_threads(&mut |id, _| walked.push(id)));
+        let mut listed = Vec::new();
+        visit_own_threads_in_system_snapshot(&mut |id, _| listed.push(id));
+        let snapshot = snapshot();
+        release.wait();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+
+        for id in &expected {
+            assert!(walked.contains(id), "walk missed thread {id}");
+            assert!(listed.contains(id), "system snapshot missed thread {id}");
+        }
+        for id in &expected[..3] {
+            assert_eq!(snapshot.threads[id].0, "thread-cpu-probe");
         }
     }
 
