@@ -453,6 +453,45 @@ HDD run followed a 92 GB pass over the other volume, which leaves the HDD cold.
 The `38e52f6` baselines of Sept 20 (650.98 s HDD, 31.74 s SSD) sit where 1.1.0
 does, so the gains above were made between Sept 21 and Sept 24.
 
+### October 27 re-accepted SSD baselines (`c3207f2`)
+
+The origins changed by Oct 27: the large repository now publishes 3,976 files
+and 92,559,294,829 bytes, the small one 213 files and 4,281,422,525 bytes. The
+cases now expect those counts, so the SSD baselines retired
+(`origin-changed`, `case-hash-changed`) and were re-accepted from clean
+`c3207f2` runs (section 1a). The HDD baselines keep their September runs; their
+payloads predate the origin change.
+
+A first re-accept on `4fc0875` measured the evicted first check after a wipe at
+21.91 s. Since `eb094db` the pending scope lists every addon after a wipe, so
+the bootstrap took the addon-scoped pass. That pass inserted the 435k part rows
+after hashing instead of during it, wrote rows the rebuild had already streamed
+a second time, reloaded the tree and ignored cancel. `c3207f2` keeps the
+whole-tree pass for a fresh part load and fixes the scoped pass. It also walks
+only Foxy's own threads for the per-thread CPU line (`cff358c`), which took
+about 77 ms at the start and end of every sync and quick scan here (about
+14,200 threads on the machine, 0.3 ms for Foxy's 122).
+
+| Lane | September accepted | `4fc0875` | `c3207f2` |
+| --- | --- | --- | --- |
+| 92 GB evicted first check after a wipe | 15.53 s (`d1a8c18`, 3,738 files, 92.19 GB) | 21.91 s | 15.15 s; hash 13.3 s in all three |
+| Same after a wipe that keeps the verified-hash record (3 samples, not baselined) | HDD 7.08 s, bootstrap 0.79 s | 12.78-12.92 s, bootstrap 7.35-7.41 s | 5.90-6.84 s, bootstrap 0.77-0.82 s |
+| Cancel 3 s into that first check | not measured | stopped after 16.0-16.1 s | stopped after 1.06 s: hashing stops in 0.22 s, then the background part insert finishes |
+| Full redownload, 4.3 GB | 41.09 s (217 files) | 40.15 s | 40.32 s |
+| No-change recheck, app action | 0.138 s | 0.277 s | 0.134 s |
+| Clean quick check, app action (scan) | 0.005 s (0.003 s) | 0.156 s (0.003 s) | 0.007 s (0.003 s) |
+| Startup, live profile | 3.05 s (11 repositories), startup sync 0.025 s | 3.16 s (12), 0.183 s | 2.88 s, 0.011 s |
+| Four-file delta, gate 1 / gate 4 | 2.13 s / 2.16 s | 2.29 s / 2.30 s | 2.27 s / 2.30 s |
+| Metadata rebuild, 433k parts, app action, gate 4 / gate 1 | 14.47 s / 14.38 s | 12.68 s / 12.67 s | 12.42 s / 12.51 s |
+| Bulk part insert | 7.48 s | 6.85 s | 6.62 s |
+
+The delta lane's remote refresh grew from 0.13 s to 0.28 s because download
+preparation now fetches the pending addons' manifests (`eb094db`). The
+`regression` and `candidate-regression` flags on the recheck and startup rows
+come from `quick_scan.sol_calibrated` over a 3-7 ms scan whose median moved
+from 3.36 to 3.57 ms across the millisecond rounding, and the redownload's
+`download.ramp_s` moved from 3 to 4 whole seconds on the remote path.
+
 ## 1a. Current accepted baselines
 
 The earlier rows were regenerated with `foxy-testkit measurements` from the
@@ -464,27 +503,30 @@ the verified-hash record case from `dc09a72`. The TFR Main recheck, record and
 bulk part-insert rows were re-accepted on 2026-09-24 from clean `d1a8c18` runs
 (they replace 525.44 s, 19.67 s and 11.80 s). Rows that name an
 app-owned action instead of the outer driver bracket cite the same accepted
-run artifact.
+run artifact. The SSD rows were re-accepted on 2026-10-27 from clean `c3207f2`
+runs against the changed origins (see the October 27 section); the HDD rows
+keep their September baselines. Where a case has a gate 1 and a gate 4
+baseline, the row shows the gate 1 run.
 
 | Date | Case | Operation | SoL (kind) | Lane | Elapsed | Baseline | Samples | Work | Outcome | Build | Run |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 2026-09-17 | `perf-redownload-small-ssd` | force-redownload (O1 full-file download) | 95% (calibrated, network B1) | ssd warm | 41.09 s | 41.09 s median of 5 [40.53-41.26] | 5 | 217 files, 4.33 GB, 4.33 GB hashed | completed,completed,completed,completed,completed | 98e45d7 | `20260917T115728Z-3a091b88` |
-| 2026-09-17 | `perf-redownload-small-ssd` | recheck (O6 no-change sync) | 89% (calibrated, no-change B4) | ssd warm | 0.46 s | 0.46 s median of 5 [0.44-0.58] | 5 | n/a | ok | 98e45d7 | `20260917T115728Z-3a091b88` |
+| 2026-10-27 | `perf-redownload-small-ssd` | force-redownload (O1 full-file download) | 95% (calibrated, network B1) | ssd warm | 40.32 s | 40.32 s median of 5 [40.19-40.43] | 5 | 213 files, 4.28 GB, 4.28 GB hashed | completed,completed,completed,completed,completed | c3207f2 | `20261027T150714Z-17ddf2e0` |
+| 2026-10-27 | `perf-redownload-small-ssd` | recheck (O6 no-change sync) | 91% (calibrated, no-change B4) | ssd warm | 0.33 s | 0.33 s median of 5 [0.32-0.33] | 5 | n/a | regression | c3207f2 | `20261027T150714Z-17ddf2e0` |
 | 2026-09-17 | `perf-tfr-scifi-recheck-hdd` | recheck-integrity (O3 tree hash verification) | 45% (calibrated, hash B2+B6) | hdd warm | 1.12 s | 1.12 s median of 7 [1.10-1.14] | 7 | 4.33 GB hashed | ok | 98e45d7 | `20260917T114946Z-18571f30` |
 | 2026-09-19 | `perf-tfr-scifi-cold-auto-hash-hdd` | recheck-integrity@evicted (O3 tree hash verification) | 1.0262 raw calibrated ratio (above-bound reference warning) | hdd evicted | 30.70 s | 30.70 s median of 7 [30.56-34.17] | 7 | 4.33 GB hashed per sample | completed; separate oracle pass | 11924bd | `20260919T165348Z-1d502298` |
 | 2026-09-17 | `perf-tfr-scifi-stale-check-hdd` | download (O2 delta patch) | 12% (calibrated, network B1) | hdd warm | 31.54 s | 31.54 s median of 7 [30.73-32.63] | 7 | 40 files, 0.42 GB | completed,completed,completed,completed,completed,completed,completed | 98e45d7 | `20260917T155052Z-18ca3678` |
 | 2026-09-17 | `perf-tfr-scifi-stale-check-hdd` | quick-check-stale (O4 quick scan) | 5% (calibrated, metadata B5) | hdd warm | 0.45 s | 0.45 s median of 7 [0.45-0.56] | 7 | n/a | ok | 98e45d7 | `20260917T155052Z-18ca3678` |
-| 2026-09-18 | `perf-tfr-scifi-clean-check-ssd` | quick-check-clean (O4 quick scan) | 28% (calibrated, metadata B5) | ssd warm | 0.003 s app action | 0.003 s median of 5 [0.003-0.004] | 5 | 22 addons, 255 entries, zero hash/deep work | clean,clean,clean,clean,clean | bdea20b | `20260918T103351Z-02f12e74` |
+| 2026-10-27 | `perf-tfr-scifi-clean-check-ssd` | quick-check-clean (O4 quick scan) | 27% (calibrated, metadata B5) | ssd warm | 0.33 s | 0.33 s median of 5 [0.32-0.33] | 5 | n/a | candidate-improvement | c3207f2 | `20261027T150520Z-32c6a19c` |
 | 2026-09-17 | `perf-tfr-scifi-stale-check-hdd` | quick-check-verify@evicted (O4 quick scan) | 68% (calibrated, hash B2+B6) | hdd evicted | 32.24 s | 32.24 s median of 7 [31.56-32.78] | 7 | 2.44 GB hashed | ok | 98e45d7 | `20260917T155052Z-18ca3678` |
 | 2026-09-17 | `perf-tfr-scifi-stale-check-hdd` | remote-refresh (O5 remote metadata refresh) | 5% (calibrated, metadata B5) | hdd warm | 0.64 s | 0.64 s median of 7 [0.60-0.69] | 7 | n/a | ok | 98e45d7 | `20260917T155052Z-18ca3678` |
-| 2026-09-18 | `perf-db-refresh-main` | remote-refresh (O5 rebuilt graph) | n/a physical; empirical baseline | ssd warm, loopback | 0.733 s | 0.733 s median of 5 [0.706-0.779] | 5 | 96 manifests, 3,738 files, 433,063 parts | rebuilt,rebuilt,rebuilt,rebuilt,rebuilt | 9d8cfa3 | `20260918T103741Z-27e09ddc` |
-| 2026-09-18 | `perf-tfr-scifi-delta-patch-ssd` | db-persist (O7 gated write windows) | 62% median (calibrated, per-kind DB) | ssd warm, gate 1 | 11.3-21.1 ms | 10.613 ms per-kind estimate | 5 | 240 inserts, 232 updates, 205 deletes | early_exit | 571efc1 | `20260918T110808Z-0934e668` |
-| 2026-09-18 | `perf-startup-arma3-live` | startup (O8 startup) | 77% (calibrated, probe B4) | ssd warm | 3.05 s | 3.05 s median of 5 [3.02-3.06] | 5 | 11 repos | ok | 02c935e | `20260918T151335Z-18cda6f0` |
-| 2026-09-18 | `perf-tfr-scifi-delta-patch-ssd` | download (O2 delta patch) | 3% (calibrated, network B1) | ssd warm | 2.13 s | 2.13 s median of 5 [2.13-2.16] | 5 | 4 files, 0.01 GB, 0.21 GB hashed | completed,completed,completed,completed,completed | 571efc1 | `20260918T110808Z-0934e668` |
+| 2026-10-27 | `perf-db-refresh-main` | remote-refresh (O5 remote metadata refresh) | n/a | ssd warm | 12.80 s | 12.80 s median of 5 [12.68-13.03] | 5 | n/a | ok | c3207f2 | `20261027T150341Z-1e2954f0` |
+| 2026-10-27 | `perf-tfr-scifi-delta-patch-ssd` | db-persist (O7 gated write windows) | 56% median (calibrated, per-kind DB) | ssd warm, gate 1 | 16.5-24.5 ms | 10.446 ms per-kind estimate | 5 | 283 inserts, 212 updates, 185 deletes | completed | c3207f2 | `20261027T150628Z-20bb24f0` |
+| 2026-10-27 | `perf-startup-arma3-live` | startup (O8 startup) | 83% (calibrated, probe B4) | ssd warm | 2.88 s | 2.88 s median of 5 [2.86-2.95] | 5 | 12 repos | candidate-regression | c3207f2 | `20261027T151149Z-2b233d24` |
+| 2026-10-27 | `perf-tfr-scifi-delta-patch-ssd` | download (O2 delta patch) | 7% (calibrated, network B1) | ssd warm | 2.27 s | 2.27 s median of 5 [2.27-2.42] | 5 | 4 files, 0.01 GB, 0.26 GB hashed | completed,completed,completed,completed,completed | c3207f2 | `20261027T150628Z-20bb24f0` |
 | 2026-09-24 | `perf-hdd-plan-main-recheck-hdd` | remote-refresh@evicted (O5 remote metadata refresh) | 137% (calibrated, hash B2+B6) | hdd evicted | 521.30 s | 521.30 s median of 7 [521.16-521.89] | 7 | 92.19 GB hashed | candidate-regression | d1a8c18 | `20260924T164758Z-07584bdc` |
-| 2026-09-24 | `perf-hdd-plan-main-recheck-ssd` | remote-refresh@evicted (O5 remote metadata refresh) | 114% (calibrated, hash B2+B6) | ssd evicted | 15.53 s | 15.53 s median of 5 [15.36-15.62] | 5 | 92.19 GB hashed | improvement | d1a8c18 | `20260924T163452Z-12c9c464` |
+| 2026-10-27 | `perf-hdd-plan-main-recheck-ssd` | remote-refresh@evicted (O5 remote metadata refresh) | 114% (calibrated, hash B2+B6) | ssd evicted | 15.14 s | 15.15 s median of 5 [15.12-15.17] | 5 | 92.56 GB hashed | improvement | c3207f2 | `20261027T151228Z-0ccce3fc` |
 | 2026-09-24 | `perf-hdd-plan-main-bootstrap-record-hdd` | remote-refresh@evicted (O5 remote metadata refresh) | 2% (calibrated, no-change B4) | hdd evicted | 7.08 s | 7.08 s median of 7 [6.79-7.32] | 7 | n/a | regression | d1a8c18 | `20260924T163707Z-1a0b03dc` |
-| 2026-09-24 | `perf-db-parts-bulk` | force-redownload (O1 full-file download) | n/a | ssd warm | 7.48 s | 7.48 s median of 5 [7.30-7.51] | 5 | 864 files, 0.04 GB, 0.04 GB hashed | completed,completed,completed,completed,completed | d1a8c18 | `20260924T182154Z-1fe1f8d8` |
+| 2026-10-27 | `perf-db-parts-bulk` | force-redownload (O1 full-file download) | n/a | ssd warm | 6.62 s | 6.62 s median of 5 [6.53-6.80] | 5 | 864 files, 0.04 GB, 0.04 GB hashed | completed,completed,completed,completed,completed | c3207f2 | `20261027T150111Z-1ddd82c8` |
 
 ## 1b. Shared-aggregation and patch-timeline candidate
 
