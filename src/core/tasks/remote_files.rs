@@ -388,57 +388,56 @@ async fn reconcile_addon_file_links(
     // before this rebuild has no leftover links, so skip the per-mod SELECT/DELETE.
     if can_prune_stale
         && !context.has_fresh_addon_file_links()
-        && let Err(e) = context
-            .db()
-            .transaction("prune addon_files", |txn| {
-                let desired_file_ids = desired_file_ids.clone();
-                Box::pin(async move {
-                    if desired_file_ids.is_empty() {
-                        txn.execute(
-                            "DELETE FROM addon_files WHERE addon_id = ?",
-                            params![mod_id],
-                        )
-                        .await?;
-                    } else {
-                        let existing_links = txn
-                            .query_all(
-                                "SELECT file_id FROM addon_files WHERE addon_id = ?",
-                                params![mod_id],
-                            )
-                            .await?;
-                        let stale_file_ids: Vec<i64> = existing_links
-                            .iter()
-                            .filter_map(|row| row.get_i64("file_id").ok())
-                            .filter(|id| !desired_file_ids.contains(id))
-                            .collect();
-
-                        if !stale_file_ids.is_empty() {
-                            let delete_chunk_size = SQLITE_MAX_VARIABLES.saturating_sub(4).max(1);
-                            for chunk in stale_file_ids.chunks(delete_chunk_size) {
-                                let placeholders = vec!["?"; chunk.len()].join(", ");
-                                let sql = format!(
-                                    "DELETE FROM addon_files \
-                                     WHERE addon_id = ? AND file_id IN ({placeholders})"
-                                );
-                                let mut values: Vec<DbValue> = Vec::with_capacity(chunk.len() + 1);
-                                values.push(mod_id.into());
-                                for id in chunk {
-                                    values.push((*id).into());
-                                }
-                                txn.execute(&sql, values).await?;
-                            }
-                        }
-                    }
-                    Ok(())
-                })
-            })
-            .await
+        && let Err(e) = prune_stale_addon_file_links(&context.db(), mod_id, &desired_file_ids).await
     {
         warn!(
             "Failed to prune stale addon_files for {}: {}",
             mod_parent.remote_path, e
         );
     }
+}
+
+/// Deletes the addon's links to files outside `desired_file_ids`. The read runs
+/// outside a write transaction and each delete is a single statement: the
+/// addons of a rebuild prune in parallel, and a read-then-write transaction
+/// lost its snapshot to every other addon's commit.
+async fn prune_stale_addon_file_links(
+    db: &FoxyDb,
+    mod_id: i64,
+    desired_file_ids: &HashSet<i64>,
+) -> Result<(), crate::core::db::DbErr> {
+    if desired_file_ids.is_empty() {
+        db.execute_retry(
+            "prune addon_files",
+            "DELETE FROM addon_files WHERE addon_id = ?",
+            params![mod_id],
+        )
+        .await?;
+        return Ok(());
+    }
+    let stale_file_ids: Vec<i64> = db
+        .query_all(
+            "SELECT file_id FROM addon_files WHERE addon_id = ?",
+            params![mod_id],
+        )
+        .await?
+        .iter()
+        .filter_map(|row| row.get_i64("file_id").ok())
+        .filter(|id| !desired_file_ids.contains(id))
+        .collect();
+    for chunk in stale_file_ids.chunks(SQLITE_MAX_VARIABLES.saturating_sub(4).max(1)) {
+        let placeholders = vec!["?"; chunk.len()].join(", ");
+        let mut values: Vec<DbValue> = Vec::with_capacity(chunk.len() + 1);
+        values.push(mod_id.into());
+        values.extend(chunk.iter().map(|id| DbValue::from(*id)));
+        db.execute_retry(
+            "prune addon_files",
+            &format!("DELETE FROM addon_files WHERE addon_id = ? AND file_id IN ({placeholders})"),
+            values,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 pub(crate) async fn flush_pending_addon_file_links(context: Arc<FoxyContext>) {

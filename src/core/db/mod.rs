@@ -380,7 +380,7 @@ enum OwnedDbBarrierGuard {
 // --- Turso storage layer --------------------------------------------------------
 
 fn map_turso_err(e: turso::Error) -> DbErr {
-    DbErr::Custom(format!("turso: {e}"))
+    DbErr::from(e)
 }
 
 fn turso_value_to_db(v: turso::Value) -> DbValue {
@@ -699,5 +699,48 @@ mod tests {
             .unwrap()
             .expect("autocommit insert visible");
         assert_eq!(row.get_string("name").unwrap(), "n3");
+    }
+
+    #[tokio::test]
+    async fn a_transaction_retries_when_another_writer_makes_its_snapshot_stale() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let raw = build_test_database().await;
+        let db = FoxyDb::from_turso(raw.clone());
+        db.execute(
+            "INSERT INTO repositories (id, name, remote_url, local_path) VALUES (1, 'n1', 'u1', 'p1')",
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        db.transaction("stale snapshot", |txn| {
+            let attempts = attempts.clone();
+            let raw = raw.clone();
+            Box::pin(async move {
+                txn.query_all("SELECT id FROM repositories", Vec::new())
+                    .await?;
+                // A raw connection, because a nested seam call would queue on the
+                // shared barrier behind any other test's exclusive purge.
+                if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    raw.connect()?
+                        .execute("UPDATE repositories SET name = 'other' WHERE id = 1", ())
+                        .await?;
+                }
+                txn.execute("DELETE FROM repositories WHERE id = 1", Vec::new())
+                    .await?;
+                Ok(())
+            })
+        })
+        .await
+        .expect("a stale snapshot must be retried");
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert!(
+            db.query_all("SELECT id FROM repositories", Vec::new())
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }
