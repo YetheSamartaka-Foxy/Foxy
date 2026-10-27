@@ -666,17 +666,23 @@ impl ContextRun<'_> {
             let wait = operation["wait_timeout_s"]
                 .as_u64()
                 .unwrap_or(self.timeout.as_secs());
-            let mut args: Vec<String> = vec!["wait".into()];
             if matches!(
                 name,
                 "download" | "download-full-files" | "force-redownload"
             ) {
-                args.push("--download-complete".into());
+                self.wait_for_download(busy_reason, Duration::from_secs(wait))?;
             } else {
-                args.extend(["--busy-reason-cleared".into(), busy_reason.into()]);
+                self.driver(
+                    &[
+                        "wait".into(),
+                        "--busy-reason-cleared".into(),
+                        busy_reason.into(),
+                        "--timeout-ms".into(),
+                        (wait * 1000).to_string(),
+                    ],
+                    Duration::from_secs(wait + 10),
+                )?;
             }
-            args.extend(["--timeout-ms".into(), (wait * 1000).to_string()]);
-            self.driver(&args, Duration::from_secs(wait + 10))?;
         }
         let elapsed = started.elapsed().as_secs_f64();
         let ui_probe = probe.map(UiProbe::finish);
@@ -714,6 +720,43 @@ impl ContextRun<'_> {
         Ok(
             json!({"elapsed_s":elapsed,"summary":summary,"progress":progress,"snapshot":snapshot,"logs":captured,"log_text":log}),
         )
+    }
+    /// Only a successful download raises `--download-complete`. One that fails
+    /// before it finishes (a disk-space preflight, say) ends its sync without
+    /// it, so wait in slices and stop once the sync has ended, leaving the
+    /// failure to the row's outcome rather than sitting out the whole timeout.
+    fn wait_for_download(&self, busy_reason: &str, timeout: Duration) -> Result<()> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let slice = deadline
+                .saturating_duration_since(Instant::now())
+                .min(DOWNLOAD_WAIT_SLICE);
+            ensure!(
+                !slice.is_zero(),
+                "Timed out after {} s waiting for the download to complete",
+                timeout.as_secs()
+            );
+            let args = [
+                "wait".to_owned(),
+                "--download-complete".to_owned(),
+                "--timeout-ms".to_owned(),
+                slice.as_millis().to_string(),
+            ];
+            if self.driver(&args, slice + Duration::from_secs(10)).is_ok() {
+                return Ok(());
+            }
+            // A sync can drop its busy reason for a moment between stages, so
+            // the end only counts when a second look a second later agrees.
+            if sync_ended_without_download(&self.data(&["progress"])?, busy_reason) {
+                thread::sleep(Duration::from_secs(1));
+                if sync_ended_without_download(&self.data(&["progress"])?, busy_reason) {
+                    eprintln!(
+                        "The sync ended without completing the download; recording the operation as it stands"
+                    );
+                    return Ok(());
+                }
+            }
+        }
     }
     fn logged_since(&self, generation: u64, needle: &str) -> Result<bool> {
         let captured = self.data(&[
@@ -1423,9 +1466,33 @@ fn outcome_matches(expected: Option<&str>, observed: Option<&str>) -> bool {
     expected.is_none() || expected == observed
 }
 
+/// How long one `--download-complete` wait blocks before the runner checks
+/// whether the sync ended without completing the download.
+const DOWNLOAD_WAIT_SLICE: Duration = Duration::from_secs(60);
+
+fn sync_ended_without_download(progress: &Value, busy_reason: &str) -> bool {
+    let busy = progress["busy_reasons"]
+        .as_array()
+        .is_some_and(|reasons| reasons.iter().any(|reason| reason == busy_reason));
+    !busy && progress["download_finished"].as_bool() != Some(true)
+}
+
 #[cfg(test)]
 mod cache_state_tests {
-    use super::{cache_state, outcome_matches, residual_download_artifacts};
+    use super::{
+        cache_state, outcome_matches, residual_download_artifacts, sync_ended_without_download,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn a_download_wait_ends_only_once_the_sync_is_over_without_completing() {
+        let running = json!({ "busy_reasons": ["core-sync"], "download_finished": false });
+        let failed = json!({ "busy_reasons": [], "download_finished": false });
+        let done = json!({ "busy_reasons": [], "download_finished": true });
+        assert!(!sync_ended_without_download(&running, "core-sync"));
+        assert!(sync_ended_without_download(&failed, "core-sync"));
+        assert!(!sync_ended_without_download(&done, "core-sync"));
+    }
 
     #[test]
     fn eviction_wins_over_the_iteration_number() {

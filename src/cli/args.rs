@@ -1200,6 +1200,17 @@ pub struct SettingsSetArgs {
     pub download_speed_unlimited: bool,
     #[arg(
         long,
+        value_parser = clap::value_parser!(u8).range(10..=100),
+        help = "Most of the whole computer's processor time Foxy's work may use, in percent (10-100; default 90)"
+    )]
+    pub cpu_usage_limit: Option<u8>,
+    #[arg(
+        long,
+        help = "Let Foxy's work use every processor thread when nothing else needs it"
+    )]
+    pub cpu_usage_unlimited: bool,
+    #[arg(
+        long,
         help = "Set the processor threads hashing, scanning and checking plan around (minimum 1; kept within the detected processors while safe limits are on)"
     )]
     pub cpu_threads: Option<u32>,

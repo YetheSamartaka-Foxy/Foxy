@@ -115,6 +115,10 @@ pub struct BenchmarkMachine {
     /// records written before it was stored.
     #[serde(default)]
     pub cpu_thread_limit: Option<u32>,
+    /// CPU usage limit in percent; `None` is no limit, which is also what
+    /// records written before the setting existed ran with.
+    #[serde(default)]
+    pub cpu_usage_limit_percent: Option<u8>,
     /// Work priority setting; empty on records written before it was stored.
     #[serde(default)]
     pub work_priority: String,

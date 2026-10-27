@@ -249,6 +249,8 @@ Running work also shows outside the banner:
 
 - A repository in the sidebar shows a small round cluster of triangles that fills with mana as the operation progresses, and a single row of triangles under its name.
 - In the update view, completed mods have solid green bars, and the speed history marks its newest samples while the transfer runs. A paused download's bar has a solid fill, and on a cancel the bubbles sink while changes are rolled back.
+- The speed history uses the same scales as Task Manager: download speed in megabits per second, disk writes in megabytes per second as Foxy writes them (patched files count their full rewritten size), CPU as a share of every processor thread (100% is the whole computer), and memory as Foxy's private working set.
+- While Foxy's window is not in front, for example while you play, progress redraws at most 10 times a second, and once a second while the window is minimized or hidden to the tray, so drawing does not compete with the game.
 - A repository space runs **Recheck all** and **Update all** as a row of blocks, one per repository: solid for finished repositories, triangles filling for the running one, and empty for the rest.
 
 Turn on **Reduce motion** in Application settings to stop these animations. Progress values and status text keep updating.
@@ -512,6 +514,7 @@ Open Settings with the gear icon or **F2**. The Settings view has these tabs: **
 #### Performance options
 
 - **Renderer** - **Auto (WGPU)** (recommended), **WGPU**, or **Glow**. Auto uses WGPU but lets Foxy switch to Glow (OpenGL) after a graphics crash. Changes take effect after a restart.
+- **CPU usage limit** - the most of the whole computer's processor time Foxy's hashing, checking, and patching may use, on average: **90%** by default, anything from 10% to 100%, shown next to the control as about how many threads that is. The rest stays free for a game or other programs; a lower value makes checks and updates take longer when Foxy would otherwise use more. Tick **No limit** to let Foxy use every thread when nothing else needs it. It caps how much Foxy takes, while **Work priority** decides who goes first when another program also wants the processor. Command line: `foxy settings set --cpu-usage-limit <10-100>` or `--cpu-usage-unlimited`.
 - **CPU Threads** - the processor threads Foxy plans hashing, scanning, and checking work around. **Auto** uses every thread the system reports, which is shown next to the control as **Detected**. Untick **Auto** to enter a count yourself. **Safe limits** keeps it within the detected threads; untick it to enter any count up to 1024. From the command line, use `foxy settings set --cpu-threads <N>`, `--cpu-threads-auto`, or `--cpu-safe-limits <true|false>`.
 - **Work priority** (Windows) - processor priority of the threads that hash, scan, check, and download: **Normal**, **Below normal** (a running game gets the processor first), or **Lowest** (Foxy works only when the processor is otherwise idle). The interface and the programs Foxy launches, such as the game, keep normal priority. Command line: `--work-priority <normal|below-normal|lowest>`.
 - **Low disk priority** (Windows) - runs those threads in Windows background mode, which lowers their disk and memory priority so games and other programs load faster while Foxy checks or downloads. Command line: `--low-disk-priority <true|false>`.
@@ -519,7 +522,7 @@ Open Settings with the gear icon or **F2**. The Settings view has these tabs: **
 - **Memory pressure** - Foxy lowers hashing and download concurrency when memory runs low. **Auto** measures free memory before each check and download; **Normal**, **Constrained**, and **Severe** force a level. Command line: `--memory-pressure <auto|normal|constrained|severe>`.
 - **Progress frame rate** - how many frames per second Foxy draws while work shows progress: **Auto (30 fps)**, 20, 10, or 5 fps. Lower values use less processor time.
 
-None of these needs a restart: storage type and memory pressure apply from the next check or download, and the two priorities apply as soon as Foxy's work threads next wake. Saved benchmarks record the CPU Threads, work priority, low disk priority, and memory pressure settings, and the repository storage type they ran with.
+None of these needs a restart: storage type and memory pressure apply from the next check or download, the CPU usage limit and the two priorities apply as soon as Foxy's work threads next wake, and CPU Threads sets the worker threads of the next check or update. Saved benchmarks record the CPU usage limit, CPU Threads, work priority, low disk priority, and memory pressure settings, and the repository storage type they ran with.
 - **Hashing profile** - **Auto** benchmarks the first hashing work and picks the fastest profile; **Conservative**, **Balanced**, and **Aggressive** set the concurrency yourself.
 - **Skip unchanged files after a database reset** - after a database reset, trust files Foxy already verified and that Windows shows as untouched since, instead of reading them again. An integrity recheck always reads every file.
 

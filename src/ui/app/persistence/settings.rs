@@ -59,6 +59,10 @@ impl Foxy {
                 if self.settings_view_state.cpu_thread_limit == Some(0) {
                     self.settings_view_state.cpu_thread_limit = Some(1);
                 }
+                self.settings_view_state.cpu_usage_limit_percent =
+                    crate::core::utils::cpu_governor::sanitize_cpu_usage_limit(
+                        self.settings_view_state.cpu_usage_limit_percent,
+                    );
                 if self.settings_view_state.backup_max_age_days == Some(0) {
                     self.settings_view_state.backup_max_age_days = None;
                 }

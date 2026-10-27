@@ -2,7 +2,7 @@ use super::quick_scan::{
     StartupQuickScanEligibility, batch_eligible_repos, content_hash_baseline_ready_joined,
     launch_quick_scan_repo_eligible_joined, launch_quick_scan_repo_startup_eligibility,
     quick_local_change_diff, refresh_content_hashes_for_repository,
-    remote_checksum_state_ready_joined,
+    refresh_content_hashes_for_tree_files, remote_checksum_state_ready_joined,
 };
 use super::*;
 use crate::core::db::{FoxyDb, params};
@@ -838,6 +838,121 @@ async fn content_hash_refresh_records_baseline_for_pending_addon_missing_new_fil
         .expect("pending addon is reported");
     assert!(addon.needs_update);
     assert!(addon.files.iter().any(|f| f.name == "added.pbo"));
+}
+
+/// Refresh a two-addon repository with only `@pending`'s file in scope and
+/// return the repository baseline and `@kept`'s baseline afterwards.
+async fn file_scoped_rollup(kept_baseline: &str) -> (String, String) {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db = build_db().await;
+    let fdb = FoxyDb::from_turso(db.clone());
+    let context = Arc::new(FoxyContext::new(db.clone(), reqwest::Client::new()));
+
+    let repo_url = "https://example.invalid/repo/";
+    let repo_root = temp.path().join("repo");
+    let pending_dir = repo_root.join("@pending");
+    let kept_dir = repo_root.join("@kept");
+    std::fs::create_dir_all(&pending_dir).expect("create pending dir");
+    std::fs::create_dir_all(&kept_dir).expect("create kept dir");
+    let pending_file = pending_dir.join("pending.pbo");
+    std::fs::write(&pending_file, b"pending file").expect("write pending file");
+
+    seed_repository(
+        &fdb,
+        1,
+        "Repo",
+        repo_url,
+        &repo_root.to_string_lossy(),
+        "REPO_REMOTE",
+        "REPO_REMOTE",
+        "",
+    )
+    .await;
+    seed_addon(
+        &fdb,
+        11,
+        "@pending",
+        "https://example.invalid/repo/@pending/",
+        &pending_dir.to_string_lossy(),
+        "PENDING_REMOTE",
+        "PENDING_REMOTE",
+        "",
+        true,
+    )
+    .await;
+    seed_addon(
+        &fdb,
+        12,
+        "@kept",
+        "https://example.invalid/repo/@kept/",
+        &kept_dir.to_string_lossy(),
+        "KEPT_REMOTE",
+        "KEPT_REMOTE",
+        kept_baseline,
+        true,
+    )
+    .await;
+    seed_repository_addon(&fdb, 1, 11).await;
+    seed_repository_addon(&fdb, 1, 12).await;
+    seed_file(
+        &fdb,
+        21,
+        "pending.pbo",
+        "https://example.invalid/repo/@pending/pending.pbo",
+        &pending_file.to_string_lossy(),
+        "PENDING_FILE",
+        "PENDING_FILE",
+        "",
+        12,
+        0,
+    )
+    .await;
+    seed_file(
+        &fdb,
+        22,
+        "kept.pbo",
+        "https://example.invalid/repo/@kept/kept.pbo",
+        &kept_dir.join("kept.pbo").to_string_lossy(),
+        "KEPT_FILE",
+        "KEPT_FILE",
+        "KEPT_FILE_CONTENT",
+        9,
+        0,
+    )
+    .await;
+    seed_addon_file(&fdb, 11, 21).await;
+    seed_addon_file(&fdb, 12, 22).await;
+
+    let scope = HashSet::from([21u64]);
+    let tree =
+        crate::core::models::model_tree::Tree::load_for_files(context.clone(), repo_url, &scope)
+            .await
+            .expect("load file-scoped tree");
+    assert!(
+        refresh_content_hashes_for_tree_files(context, repo_url, &tree, &scope).await,
+        "content hash refresh should complete"
+    );
+    let (_, _, repo_content) = checksums(&fdb, "repositories", 1).await;
+    let (_, _, kept_content) = checksums(&fdb, "addons", 12).await;
+    (repo_content, kept_content)
+}
+
+#[tokio::test]
+async fn a_file_scoped_refresh_rolls_the_repository_up_with_untouched_addon_baselines() {
+    let (first, kept) = file_scoped_rollup("KEPT_BASELINE_A").await;
+    assert_eq!(
+        kept, "KEPT_BASELINE_A",
+        "an addon outside the scope keeps its baseline"
+    );
+    assert!(
+        !first.is_empty(),
+        "without a repository baseline the next quick scan re-samples every file"
+    );
+    let (second, _) = file_scoped_rollup("KEPT_BASELINE_B").await;
+    assert_ne!(
+        first, second,
+        "the rollup covers the untouched addon's stored baseline"
+    );
 }
 
 // ---------------------------------------------------------------------------

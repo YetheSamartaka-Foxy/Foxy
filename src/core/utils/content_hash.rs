@@ -311,6 +311,7 @@ pub(crate) fn blake3_file_hash(path: &Path) -> std::io::Result<String> {
         }
         read_bytes += bytes as u64;
         hasher.update(&buffer[..bytes]);
+        crate::core::utils::cpu_governor::checkpoint();
     }
     profiled.stop("hash_read", read_bytes);
     Ok(blake3_hex(hasher))
@@ -368,6 +369,7 @@ fn blake3_mmap_file_hash(path: &Path) -> std::io::Result<String> {
     let mut hasher = blake3::Hasher::new();
     hasher.update_mmap(path)?;
     profiled.stop("hash_mmap", hasher.count());
+    crate::core::utils::cpu_governor::checkpoint();
     Ok(blake3_hex(hasher))
 }
 

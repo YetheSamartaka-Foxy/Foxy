@@ -105,6 +105,11 @@ pub struct SettingsViewState {
     pub backup_directory: String,
     #[serde(default = "default_download_speed_limit_mbps")]
     pub download_speed_limit_mbps: Option<u32>,
+    /// Most of the whole computer's processor time Foxy's work may use, in
+    /// percent; `None` is no limit. Missing from older settings files, where
+    /// it takes the default.
+    #[serde(default = "default_cpu_usage_limit_percent")]
+    pub cpu_usage_limit_percent: Option<u8>,
     /// Processor threads hashing, scanning and checking plan around; `None`
     /// is Auto, every processor the system reports.
     #[serde(default)]
@@ -248,6 +253,10 @@ fn default_download_speed_limit_mbps() -> Option<u32> {
     None
 }
 
+fn default_cpu_usage_limit_percent() -> Option<u8> {
+    Some(crate::core::utils::cpu_governor::DEFAULT_CPU_USAGE_LIMIT_PERCENT)
+}
+
 fn default_cpu_thread_limit_safe() -> bool {
     true
 }
@@ -370,6 +379,7 @@ impl Default for SettingsViewState {
             temp_directory: String::new(),
             backup_directory: String::new(),
             download_speed_limit_mbps: default_download_speed_limit_mbps(),
+            cpu_usage_limit_percent: default_cpu_usage_limit_percent(),
             cpu_thread_limit: None,
             cpu_thread_limit_safe: default_cpu_thread_limit_safe(),
             work_priority: WorkPriorityPreference::default(),
@@ -559,6 +569,25 @@ mod cpu_thread_setting_tests {
         let settings: SettingsViewState = serde_json::from_value(saved).unwrap();
         assert_eq!(settings.cpu_thread_limit, None);
         assert!(settings.cpu_thread_limit_safe);
+    }
+
+    #[test]
+    fn settings_saved_before_the_cpu_usage_limit_existed_get_the_default() {
+        let mut saved = serde_json::to_value(SettingsViewState::default()).unwrap();
+        saved
+            .as_object_mut()
+            .unwrap()
+            .remove("cpu_usage_limit_percent");
+        let settings: SettingsViewState = serde_json::from_value(saved).unwrap();
+        assert_eq!(settings.cpu_usage_limit_percent, Some(90));
+    }
+
+    #[test]
+    fn a_saved_no_limit_stays_no_limit() {
+        let mut saved = serde_json::to_value(SettingsViewState::default()).unwrap();
+        saved["cpu_usage_limit_percent"] = serde_json::Value::Null;
+        let settings: SettingsViewState = serde_json::from_value(saved).unwrap();
+        assert_eq!(settings.cpu_usage_limit_percent, None);
     }
 }
 

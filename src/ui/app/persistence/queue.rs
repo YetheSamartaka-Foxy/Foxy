@@ -113,6 +113,10 @@ impl Foxy {
         if settings_to_save.cpu_thread_limit == Some(0) {
             settings_to_save.cpu_thread_limit = Some(1);
         }
+        settings_to_save.cpu_usage_limit_percent =
+            crate::core::utils::cpu_governor::sanitize_cpu_usage_limit(
+                settings_to_save.cpu_usage_limit_percent,
+            );
         settings_to_save.font_sizes.clamp_to_limits();
 
         settings_to_save

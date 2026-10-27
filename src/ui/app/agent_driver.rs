@@ -3499,9 +3499,28 @@ impl Foxy {
                 self.mark_settings_dirty();
                 json!(parsed)
             }
+            "cpu-usage-limit" | "cpu_usage_limit" | "cpu_usage_limit_percent" => {
+                if trimmed.eq_ignore_ascii_case("unlimited")
+                    || trimmed.eq_ignore_ascii_case("none")
+                    || trimmed.is_empty()
+                {
+                    self.settings_view_state.cpu_usage_limit_percent = None;
+                } else {
+                    let parsed: u8 = trimmed.parse().map_err(|_| {
+                        format!("Expected a percent (10-100) or 'unlimited' for cpu-usage-limit, got '{value}'")
+                    })?;
+                    self.settings_view_state.cpu_usage_limit_percent =
+                        crate::core::utils::cpu_governor::sanitize_cpu_usage_limit(Some(parsed));
+                }
+                crate::core::utils::cpu_governor::set_cpu_usage_limit(
+                    self.settings_view_state.cpu_usage_limit_percent,
+                );
+                self.mark_settings_dirty();
+                json!(self.settings_view_state.cpu_usage_limit_percent)
+            }
             other => {
                 return Err(format!(
-                    "Unsupported setting '{other}' (try debug-mode, show-activity-log, show-fps-counter, reduce-motion, extended-diagnostics-logging, ui-scale-percent, locale, download-speed-limit-mbps, cpu-threads, or cpu-safe-limits)"
+                    "Unsupported setting '{other}' (try debug-mode, show-activity-log, show-fps-counter, reduce-motion, extended-diagnostics-logging, ui-scale-percent, locale, download-speed-limit-mbps, cpu-usage-limit, cpu-threads, or cpu-safe-limits)"
                 ));
             }
         };

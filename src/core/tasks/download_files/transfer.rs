@@ -261,6 +261,7 @@ async fn download_file_simple(
                     let profiled = crate::core::utils::profiling::FsTimer::start();
                     writer.write_all(&bytes).await?;
                     profiled.stop("write", n as u64);
+                    crate::core::utils::file_io::note_written(n as u64);
                     disk_write_time = disk_write_time.saturating_add(write_started.elapsed());
                     disk_write_count = disk_write_count.saturating_add(1);
                 }

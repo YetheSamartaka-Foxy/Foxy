@@ -99,14 +99,35 @@ pub fn apply_to_current_thread() {
     });
 }
 
-/// Multi-thread runtime whose threads follow the work priority settings.
+/// Multi-thread runtime whose threads follow the work priority settings and
+/// whose worker count follows the CPU Threads setting (Auto keeps tokio's own
+/// default, one per detected processor).
 pub fn work_runtime_builder() -> tokio::runtime::Builder {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder
         .enable_all()
         .on_thread_start(apply_to_current_thread)
         .on_thread_unpark(apply_to_current_thread);
+    if let Some(workers) = runtime_worker_threads(
+        super::cpu_threads::cpu_threads(),
+        super::cpu_threads::detected_cpu_threads(),
+    ) {
+        builder.worker_threads(workers);
+    }
     builder
+}
+
+/// Async workers never gain from more threads than processors, so a CPU
+/// Threads value above the detected count (safe limits off) is capped there.
+fn runtime_worker_threads(planned: Option<usize>, detected: Option<usize>) -> Option<usize> {
+    let planned = planned?;
+    Some(
+        match detected {
+            Some(detected) => planned.min(detected),
+            None => planned,
+        }
+        .max(1),
+    )
 }
 
 #[cfg(windows)]
@@ -144,6 +165,15 @@ fn apply_os(_change: ThreadChange) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_workers_follow_the_planned_threads_within_the_processors() {
+        assert_eq!(runtime_worker_threads(Some(4), Some(24)), Some(4));
+        assert_eq!(runtime_worker_threads(Some(64), Some(24)), Some(24));
+        assert_eq!(runtime_worker_threads(Some(0), Some(24)), Some(1));
+        assert_eq!(runtime_worker_threads(Some(6), None), Some(6));
+        assert_eq!(runtime_worker_threads(None, Some(24)), None);
+    }
 
     #[test]
     fn defaults_leave_threads_untouched() {

@@ -5,7 +5,9 @@ mod repository_update;
 use crate::core::api::{FileDiffKind, ModDiffSummary, SyncMode};
 use crate::core::utils::disk_space::DiskSpaceShortfall;
 use crate::ui::app::{ActivityBar, BarMotion, Foxy, transfer_progress};
-use crate::ui::i18n::{fmt_bytes, fmt_duration, fmt_duration_ms, fmt_speed_mbps, locale_compare};
+use crate::ui::i18n::{
+    fmt_bytes, fmt_bytes_per_sec, fmt_duration, fmt_duration_ms, fmt_speed_mbps, locale_compare,
+};
 use crate::ui::types::FoxyView;
 use arboard::Clipboard;
 use eframe::egui::{

@@ -15,6 +15,7 @@
   "temp_directory": "",
   "backup_directory": "",
   "download_speed_limit_mbps": null,
+  "cpu_usage_limit_percent": 90,
   "cpu_thread_limit": null,
   "cpu_thread_limit_safe": true,
   "work_priority": "Normal",

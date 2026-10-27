@@ -1,7 +1,7 @@
 //! Database schema-version tracking and the rebuild requirement for updates.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -159,25 +159,33 @@ pub(crate) async fn ensure_database_ready_for_updates() -> Result<(), String> {
 /// from a build that predates schema versioning (no sidecar, real data). A
 /// missing or freshly `touch`ed 0-byte file counts as absent.
 fn legacy_database_present() -> bool {
-    let path = crate::core::tasks::db_turso::database_file_path();
-    fs::metadata(&path).map(|m| m.len() > 0).unwrap_or(false)
+    database_populated(&crate::core::tasks::db_turso::database_file_path())
 }
+
+fn database_populated(db_path: &Path) -> bool {
+    fs::metadata(db_path).is_ok_and(|meta| meta.len() > 0)
+}
+
+const DB_META_FILE: &str = "db_meta.json";
 
 /// Path to the schema-version sidecar (`db_meta.json`) beside the active game
 /// space's database.
 pub fn db_meta_path() -> PathBuf {
-    crate::core::game::spaces::active_game_space_dir().join("db_meta.json")
+    crate::core::game::spaces::active_game_space_dir().join(DB_META_FILE)
 }
 
 fn read_meta() -> Option<DbMeta> {
-    let path = db_meta_path();
-    let raw = fs::read_to_string(&path).ok()?;
+    read_meta_at(&db_meta_path())
+}
+
+fn read_meta_at(path: &Path) -> Option<DbMeta> {
+    let raw = fs::read_to_string(path).ok()?;
     match serde_json::from_str::<DbMeta>(&raw) {
         Ok(meta) => Some(meta),
         Err(err) => {
             log::warn!(
                 "Failed to parse database schema meta {}: {}; treating as missing",
-                sanitize_log_path(&path),
+                sanitize_log_path(path),
                 err
             );
             None
@@ -186,28 +194,61 @@ fn read_meta() -> Option<DbMeta> {
 }
 
 fn write_meta(meta: &DbMeta) {
-    let path = db_meta_path();
+    write_meta_at(&db_meta_path(), meta);
+}
+
+fn write_meta_at(path: &Path, meta: &DbMeta) {
     if let Some(parent) = path.parent()
         && let Err(err) = fs::create_dir_all(parent)
     {
         log::error!(
             "Failed to create directory for database schema meta {}: {}",
-            sanitize_log_path(&path),
+            sanitize_log_path(path),
             err
         );
         return;
     }
     match serde_json::to_string_pretty(meta) {
         Ok(serialized) => {
-            if let Err(err) = fs::write(&path, serialized) {
+            if let Err(err) = fs::write(path, serialized) {
                 log::error!(
                     "Failed to write database schema meta {}: {}",
-                    sanitize_log_path(&path),
+                    sanitize_log_path(path),
                     err
                 );
             }
         }
         Err(err) => log::error!("Failed to serialize database schema meta: {}", err),
+    }
+}
+
+fn bootstrap_meta(path: &Path, version: u32) {
+    log::info!(
+        "Database schema meta missing; bootstrapping to schema version {}",
+        version
+    );
+    write_meta_at(
+        path,
+        &DbMeta {
+            schema_version: version,
+            dismissed_for_version: None,
+            content_hash_format: CONTENT_HASH_FORMAT,
+        },
+    );
+}
+
+/// Bootstrap the sidecar for the database about to be opened at `db_path` when
+/// it is a genuine fresh install. Any opener can be the first, not only GUI
+/// startup: a database created without its sidecar reads as a pre-versioning
+/// upgrade on the next check and blocks it.
+pub(crate) fn bootstrap_if_fresh(db_path: &Path) {
+    let meta_path = db_path.with_file_name(DB_META_FILE);
+    if let SchemaDecision::Bootstrap(version) = decide(
+        read_meta_at(&meta_path).as_ref(),
+        database_populated(db_path),
+        DB_SCHEMA_VERSION,
+    ) {
+        bootstrap_meta(&meta_path, version);
     }
 }
 
@@ -218,15 +259,7 @@ pub fn evaluate_and_bootstrap() -> Option<DbSchemaWipePrompt> {
     let meta = read_meta();
     match decide(meta.as_ref(), legacy_database_present(), DB_SCHEMA_VERSION) {
         SchemaDecision::Bootstrap(version) => {
-            log::info!(
-                "Database schema meta missing; bootstrapping to schema version {}",
-                version
-            );
-            write_meta(&DbMeta {
-                schema_version: version,
-                dismissed_for_version: None,
-                content_hash_format: CONTENT_HASH_FORMAT,
-            });
+            bootstrap_meta(&db_meta_path(), version);
             None
         }
         SchemaDecision::UpToDate => {
@@ -531,5 +564,37 @@ mod tests {
         let parsed: DbMeta = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.content_hash_format, CONTENT_HASH_FORMAT);
         assert_eq!(meta, parsed);
+    }
+
+    #[test]
+    fn the_first_open_of_a_fresh_database_records_the_current_version() {
+        let dir = tempfile::tempdir().unwrap();
+        bootstrap_if_fresh(&dir.path().join("database.db"));
+        let meta = read_meta_at(&dir.path().join(DB_META_FILE)).unwrap();
+        assert_eq!(meta.schema_version, DB_SCHEMA_VERSION);
+        assert_eq!(
+            wipe_requirement(Some(&meta), true, DB_SCHEMA_VERSION, false),
+            None
+        );
+    }
+
+    #[test]
+    fn opening_a_populated_or_versioned_database_leaves_its_sidecar_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("database.db");
+        let meta_path = dir.path().join(DB_META_FILE);
+        fs::write(&db_path, b"populated").unwrap();
+        bootstrap_if_fresh(&db_path);
+        assert!(!meta_path.exists());
+
+        fs::remove_file(&db_path).unwrap();
+        let older = DbMeta {
+            schema_version: 24,
+            dismissed_for_version: None,
+            content_hash_format: CONTENT_HASH_FORMAT,
+        };
+        write_meta_at(&meta_path, &older);
+        bootstrap_if_fresh(&db_path);
+        assert_eq!(read_meta_at(&meta_path), Some(older));
     }
 }

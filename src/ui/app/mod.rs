@@ -21,8 +21,8 @@ pub(crate) use ui_helpers::activity::{
 #[cfg(test)]
 pub(crate) use ui_helpers::spinner::PROGRESS_FRAME_INTERVAL;
 pub(crate) use ui_helpers::spinner::{
-    PacedSpinner, progress_frame_interval, progress_frame_interval_override, request_frame_after,
-    set_progress_frame_rate,
+    PacedSpinner, WindowPresence, progress_frame_interval, progress_frame_interval_override,
+    request_frame_after, set_progress_frame_rate, set_window_presence, window_presence,
 };
 
 use std::collections::{HashMap, HashSet, VecDeque};

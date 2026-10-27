@@ -42,6 +42,17 @@ that trade is the accepted one, in both directions:
   `advisory-regression` / `advisory-improvement` with a `memory-advisory`
   flag and never decides a verdict; the time and correctness metrics do.
 
+Processor time is the one resource Foxy deliberately leaves on the table:
+the CPU usage limit (default 90% of every detected thread, user-overridable,
+`conventions/CORE_CONVENTIONS.md` "Processor use") keeps headroom for a game
+or other programs. It binds only when Foxy would otherwise use more than the
+limit, so I/O-bound work is unaffected and CPU-bound work is at most
+`1 / limit` slower. Treat it like a bandwidth cap: a policy ceiling. A run
+whose `sync_action` shows `cpu_limit_paused_s` well above zero is limited by
+policy, and its ratio against a CPU-bound reference is read against
+`limit x capacity`; compare speed changes with the limit off
+(`cpu_usage_limit_percent: null` in the case settings) or at equal limits.
+
 Phase 5 candidate "memory attribution" is therefore low priority and
 pursued only for evidence of unbounded growth or a renderer or allocator
 cost that is paid without any speed in return.
@@ -578,7 +589,7 @@ appended keys; parsers treat them as `metric_kind` inferred from `light_src` and
 | `SOL op=storage_read_probe` (when an SSD sample is attempted) | `storage=ssd`, opaque `volume_id`, `method`, `measured_at_utc`, `timer_scope=sample_wall`, `outcome` (`measured`, `failed`, `cancelled`), `op_id`; `work_bytes` and `actual_bps` are present for a completed sample |
 | `SOL op=quick_scan` | `repo`, `addons_total`, `addons_hashed`, `cache_hits_shared`, `cache_hits_persistent`, `deep_scan_files`, `entries` (directory entries the fingerprint walks enumerated), `addons_per_s`, `outcome`, `op_id` (the owning sync action or quick-scan sweep) |
 | `SOL op=remote_refresh` (every remote metadata refresh) | `outcome` (`skipped_clean`, `graph_unchanged`, `rebuilt`, `failed`), `index_requests`, `manifest_requests`, `mods`, `files`, `parts`, `response_bytes`, `fetch_sum_s`, `parse_sum_s`, `persist_sum_s`, `fan_out_wall_s`, `timer_scope=action_wall`, `op_id` |
-| `SOL op=sync_action` (every pipeline exit) | `op_id`, `mode`, `outcome` (the `PIPELINE SUMMARY` outcome: `completed`, `early-exit-clean`, `early-exit-skip`, `cancelled`, `failed-*`, ...), `stages`, `timer_scope=action_wall`, one `stage_<name>_s` per stage |
+| `SOL op=sync_action` (every pipeline exit) | `op_id`, `mode`, `outcome` (the `PIPELINE SUMMARY` outcome: `completed`, `early-exit-clean`, `early-exit-skip`, `cancelled`, `failed-*`, ...), `stages`, `timer_scope=action_wall`, one `stage_<name>_s` per stage; with a CPU usage limit set, `cpu_limit_percent` and `cpu_limit_paused_s` (time work threads paused for the limit during the action) |
 | `SOL op=db_persist` (every sync action) | `op_id`, `mode`, `outcome` (`completed`, `early_exit`), `write_time_ms`, `rows_affected`, per-kind `insert_rows_affected`, `update_rows_affected`, `delete_rows_affected`, `other_rows_affected`, `permit_wait_ms`, `write_calls`, `write_committed`, `write_failed`, `lock_retries`, `backoff_ms`, `categories`, `write_gate`, `conn_opened`, `conn_reused`, `timer_scope=action_wall` |
 | `SOL op=db_purge` (every repository or addon purge) | `op_id`, `kind` (`repository`, `addon`), `outcome`, `steps` (timed statements), `rows_affected`, the same four per-kind affected-row counters, `txn_s`, `checkpoint_s`, `timer_scope=action_wall` |
 | `SOL op=space_switch` (every runtime game-space switch) | `op_id`, `outcome`, `drain_s` (queued saves landing in the old space), `reset_s`, `reload_s`, `repositories`, `timer_scope=action_wall` |

@@ -317,7 +317,11 @@ Rules:
    keep enough addon/repository rows to recompute ordered parent checksums.
 4. Scoped content-hash refresh may persist file/addon content hashes for the
    scoped entities, but it must not rewrite repository `local_content_hash` from
-   a partial tree.
+   a partial tree. After an addon-scoped hash bootstrap, the pipeline reloads a
+   file-scoped tree with full addon headers instead, so the refresh rolls the
+   repository baseline up from the refreshed addons and the stored hashes of
+   the rest. Skipping the rollup leaves the repository baseline empty, and the
+   next quick scan re-samples every file to rebuild it.
 5. Full tree loading is acceptable only for full integrity modes, first-time
    full bootstrap, or explicit fallback when scoped mapping is impossible.
 

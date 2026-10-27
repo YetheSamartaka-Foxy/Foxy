@@ -1,6 +1,7 @@
 //! CPU time per thread, grouped by thread name, so a long operation can say
-//! which threads its CPU went to. Windows only; elsewhere every snapshot is
-//! empty and the breakdown says nothing.
+//! which threads its CPU went to. The breakdown is Windows only; elsewhere
+//! every snapshot is empty and it says nothing. The calling thread's and the
+//! whole process's CPU time are read on Windows, Linux and macOS.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -184,9 +185,53 @@ pub(crate) fn current_thread_cpu() -> Option<Duration> {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
+pub(crate) fn current_thread_cpu() -> Option<Duration> {
+    clock_cpu(libc::CLOCK_THREAD_CPUTIME_ID)
+}
+
+#[cfg(not(any(windows, unix)))]
 pub(crate) fn current_thread_cpu() -> Option<Duration> {
     None
+}
+
+/// User plus kernel CPU the whole process has used.
+#[cfg(windows)]
+pub(crate) fn process_cpu() -> Option<Duration> {
+    use winapi::shared::minwindef::FILETIME;
+    use winapi::um::processthreadsapi::{GetCurrentProcess, GetProcessTimes};
+
+    let ticks =
+        |time: &FILETIME| (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime);
+    unsafe {
+        let mut times: [FILETIME; 4] = std::mem::zeroed();
+        let [created, exited, kernel, user] = &mut times;
+        (GetProcessTimes(GetCurrentProcess(), created, exited, kernel, user) != 0)
+            .then(|| Duration::from_nanos((ticks(&times[2]) + ticks(&times[3])) * 100))
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn process_cpu() -> Option<Duration> {
+    clock_cpu(libc::CLOCK_PROCESS_CPUTIME_ID)
+}
+
+#[cfg(not(any(windows, unix)))]
+pub(crate) fn process_cpu() -> Option<Duration> {
+    None
+}
+
+#[cfg(unix)]
+fn clock_cpu(clock: libc::clockid_t) -> Option<Duration> {
+    // Zeroed rather than a literal: some targets pad `timespec` with private fields.
+    let mut time: libc::timespec = unsafe { std::mem::zeroed() };
+    if unsafe { libc::clock_gettime(clock, &mut time) } != 0 {
+        return None;
+    }
+    Some(Duration::new(
+        u64::try_from(time.tv_sec).ok()?,
+        u32::try_from(time.tv_nsec).ok()?,
+    ))
 }
 
 /// The thread's description, looked up at runtime because it only exists on
@@ -299,7 +344,7 @@ mod tests {
         assert_eq!(groups[0].cpu, cpu(40, 0));
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, unix))]
     #[test]
     fn the_current_thread_cpu_grows_with_work() {
         let before = current_thread_cpu().unwrap();
@@ -308,6 +353,17 @@ mod tests {
             std::hint::black_box(0u64);
         }
         assert!(current_thread_cpu().unwrap() > before);
+    }
+
+    #[cfg(any(windows, unix))]
+    #[test]
+    fn the_process_cpu_grows_with_work() {
+        let before = process_cpu().unwrap();
+        let started = std::time::Instant::now();
+        while started.elapsed() < Duration::from_millis(40) {
+            std::hint::black_box(0u64);
+        }
+        assert!(process_cpu().unwrap() > before);
     }
 
     #[cfg(windows)]

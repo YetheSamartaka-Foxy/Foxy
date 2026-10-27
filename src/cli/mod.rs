@@ -364,6 +364,32 @@ mod tests {
     }
 
     #[test]
+    fn cpu_usage_limit_accepts_ten_to_one_hundred_percent() {
+        use crate::cli::args::{CliCommand, SettingsCommand};
+        use clap::CommandFactory;
+
+        CliArgs::command().debug_assert();
+        let cli = CliArgs::try_parse_from(["foxy", "settings", "set", "--cpu-usage-limit", "75"])
+            .unwrap();
+        let Some(CliCommand::Settings { command }) = cli.command else {
+            panic!("expected a settings command");
+        };
+        let SettingsCommand::Set(args) = *command else {
+            panic!("expected settings set");
+        };
+        assert_eq!(args.cpu_usage_limit, Some(75));
+        assert!(!args.cpu_usage_unlimited);
+
+        for rejected in ["5", "101", "-1"] {
+            assert!(
+                CliArgs::try_parse_from(["foxy", "settings", "set", "--cpu-usage-limit", rejected])
+                    .is_err(),
+                "{rejected}"
+            );
+        }
+    }
+
+    #[test]
     fn env_flag_enabled_accepts_common_truthy_values() {
         for value in ["1", "true", "TRUE", " yes ", "on"] {
             assert!(env_flag_enabled(value));

@@ -1,4 +1,4 @@
-use crate::core::utils::cpu_threads;
+use crate::core::utils::{cpu_governor, cpu_threads};
 use crate::ui::app::Foxy;
 use crate::ui::i18n::{tr, tr_fmt};
 use crate::ui::types::{MemoryPressurePreference, StorageTypePreference, WorkPriorityPreference};
@@ -48,15 +48,18 @@ fn render_choice_row<T: Copy + PartialEq>(
 }
 
 impl Foxy {
-    /// CPU threads, work and disk priority, storage type, memory pressure, and
-    /// the progress frame rate. Every change applies to the running process.
+    /// CPU usage limit, CPU threads, work and disk priority, storage type,
+    /// memory pressure, and the progress frame rate. Every change applies to
+    /// the running process.
     pub(super) fn render_application_settings_resources(
         &mut self,
         ui: &mut Ui,
         horizontal_padding: f32,
         changed: &mut bool,
     ) {
-        let mut applied = self.render_cpu_threads_row(ui, horizontal_padding);
+        let mut applied = self.render_cpu_usage_limit_row(ui, horizontal_padding);
+        ui.separator();
+        applied |= self.render_cpu_threads_row(ui, horizontal_padding);
         ui.separator();
 
         if cfg!(windows) {
@@ -236,6 +239,78 @@ impl Foxy {
             crate::core::utils::runtime_settings::apply_runtime_settings(&self.settings_view_state);
             *changed = true;
         }
+    }
+
+    fn render_cpu_usage_limit_row(&mut self, ui: &mut Ui, horizontal_padding: f32) -> bool {
+        let mut limit_changed = false;
+        ui.horizontal(|ui| {
+            ui.add_space(horizontal_padding);
+            let limit_label = ui.label(tr("CPU usage limit")).on_hover_text(tr(
+                "The most processor time Foxy's hashing, checking and patching may use, as a share of the whole computer, on average. The rest stays free for games and other programs. Lower values make checks and updates take longer.",
+            ));
+
+            let mut unlimited = self.settings_view_state.cpu_usage_limit_percent.is_none();
+            let unlimited_checkbox = Self::ui_state_checkbox(ui, &mut unlimited, tr("No limit"))
+                .on_hover_text(tr(
+                    "Foxy's work may use every processor thread when nothing else needs it.",
+                ));
+            if unlimited_checkbox.changed() {
+                self.settings_view_state.cpu_usage_limit_percent = if unlimited {
+                    None
+                } else {
+                    Some(cpu_governor::DEFAULT_CPU_USAGE_LIMIT_PERCENT)
+                };
+                limit_changed = true;
+            }
+            if unlimited_checkbox.hovered() {
+                ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+            }
+
+            if let Some(limit) = self.settings_view_state.cpu_usage_limit_percent.as_mut() {
+                let clamped = cpu_governor::sanitize_cpu_usage_limit(Some(*limit))
+                    .unwrap_or(cpu_governor::DEFAULT_CPU_USAGE_LIMIT_PERCENT);
+                if clamped != *limit {
+                    *limit = clamped;
+                    limit_changed = true;
+                }
+                let limit_input = ui
+                    .add(
+                        egui::DragValue::new(limit)
+                            .range(
+                                cpu_governor::MIN_CPU_USAGE_LIMIT_PERCENT
+                                    ..=cpu_governor::MAX_CPU_USAGE_LIMIT_PERCENT,
+                            )
+                            .suffix(" %"),
+                    )
+                    .labelled_by(limit_label.id);
+                if limit_input.changed() {
+                    limit_changed = true;
+                }
+                if limit_input.hovered() {
+                    ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                }
+                if let Some(detected) = cpu_threads::detected_cpu_threads() {
+                    ui.label(
+                        RichText::new(tr_fmt(
+                            "About {threads} of {count} threads",
+                            &[
+                                (
+                                    "threads",
+                                    format!(
+                                        "{:.1}",
+                                        cpu_governor::budget_threads(*limit, detected)
+                                    ),
+                                ),
+                                ("count", detected.to_string()),
+                            ],
+                        ))
+                        .color(self.color_text_dim()),
+                    );
+                }
+            }
+            ui.add_space(horizontal_padding);
+        });
+        limit_changed
     }
 
     fn render_cpu_threads_row(&mut self, ui: &mut Ui, horizontal_padding: f32) -> bool {

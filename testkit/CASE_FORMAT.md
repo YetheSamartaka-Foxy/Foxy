@@ -122,7 +122,9 @@ republishing the repository in place. Every `.json` manifest under the new root 
 modification time, as a regenerated repository has, because the origin answers
 conditional requests from `Last-Modified` alone; switching back to the first root restores the published
 state for the next iteration. It is not ledgered and cannot be `setup_once`. Each operation may contain `wait_timeout_s`,
-`expect`, `label`, and `repository`. `repository` names the fixture repository
+`expect`, `label`, and `repository`. A GUI download operation waits for the download to complete, or until its sync
+ends without completing it (a failed preflight, say), checked once a minute, so a failure is recorded on the row
+instead of holding the run for the whole `wait_timeout_s`. `repository` names the fixture repository
 the operation acts on (the CLI `--repo-name`, or the GUI row with that name);
 it defaults to the case `repository`. `extra_repositories` is what puts a
 second repository into the fixture, so a case can download one repository and
@@ -243,6 +245,7 @@ the series into `summary.memory`, mirrored into the ledger row as `memory`:
 | `growth_private_bytes` | retained minus the operation's first sample, floored at zero |
 | `transient_private_bytes` | peak minus retained: what the operation borrowed |
 | `cpu_user_s`, `cpu_kernel_s`, `cpu_s` | process CPU seconds over the operation, user, kernel and both; `memory.cpu_s` is compared with a 15% advisory band |
+| `cpu_machine_percent`, `cpu_machine_peak_percent`, `cpu_threads` | process CPU as a share of every logical processor (Task Manager's scale, the app's CPU usage limit scale): the average over the operation before the settle tail, and the busiest 1 s window; `cpu_threads` is the processor count both divide by. An `expect` on `summary.memory.cpu_machine_peak_percent` checks the limit holds. Off Windows these and `cpu_s` are the only fields with values: the sampler reads total CPU time there and leaves the private-commit, working-set, fault, read and user/kernel figures out |
 | `median_private_bytes`, `peak_working_set_bytes`, `retained_working_set_bytes`, `process_peak_working_set_bytes`, `page_faults`, `samples`, `span_ms` | supporting detail |
 
 Private commit is the gated metric because the OS trims working set under
@@ -257,7 +260,9 @@ which is what separates "peaked here" from "still holding it"; it defaults to
 1500 ms and an operation may set `memory_settle_ms`. It is charged after
 `elapsed_s` is taken, so it does not enter any timing metric. The raw series is
 written to `memory-<iteration>-<operation>.json` beside the other artifacts and
-stripped from the ledger row.
+stripped from the ledger row, as is `cpu_series` (`[elapsed_ms, process CPU ms
+so far]` per sample, on every platform), which places a CPU peak in the
+operation.
 
 A `startup` operation replaces the app mid-watch; the sampler notices the pid
 change and discards the outgoing process's samples, so `start_private_bytes` for

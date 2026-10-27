@@ -1,8 +1,25 @@
-/// Platform-specific random-access file I/O helpers.
-///
-/// These are used by the download transfer layer, range scheduler, and delta
-/// patch transfer to write (and read) at arbitrary byte offsets without seeking,
-/// enabling safe concurrent access from multiple tasks sharing an `Arc<File>`.
+//! Platform-specific random-access file I/O helpers.
+//!
+//! These are used by the download transfer layer, range scheduler, and delta
+//! patch transfer to write (and read) at arbitrary byte offsets without seeking,
+//! enabling safe concurrent access from multiple tasks sharing an `Arc<File>`.
+
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static BYTES_WRITTEN: AtomicU64 = AtomicU64::new(0);
+
+/// Bytes written to download, patch and staging files since the process
+/// started: every [`write_at`] plus what streamed writers report through
+/// [`note_written`]. The download telemetry reads its disk-write rate here, so
+/// the rate follows the writes as they happen.
+pub(crate) fn bytes_written_total() -> u64 {
+    BYTES_WRITTEN.load(Ordering::Relaxed)
+}
+
+/// Count bytes a writer that does not go through [`write_at`] has written.
+pub(crate) fn note_written(bytes: u64) {
+    BYTES_WRITTEN.fetch_add(bytes, Ordering::Relaxed);
+}
 
 /// Write `buf` at `offset` in `file`, retrying partial writes on Windows.
 #[cfg(unix)]
@@ -11,6 +28,9 @@ pub(crate) fn write_at(file: &std::fs::File, offset: u64, buf: &[u8]) -> std::io
     let profiled = crate::core::utils::profiling::FsTimer::start();
     let result = file.write_all_at(buf, offset);
     profiled.stop("write_at", buf.len() as u64);
+    if result.is_ok() {
+        note_written(buf.len() as u64);
+    }
     result
 }
 
@@ -30,6 +50,7 @@ pub(crate) fn write_at(file: &std::fs::File, offset: u64, buf: &[u8]) -> std::io
         written += n;
     }
     profiled.stop("write_at", buf.len() as u64);
+    note_written(buf.len() as u64);
     Ok(())
 }
 

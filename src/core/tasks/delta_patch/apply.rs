@@ -204,6 +204,7 @@ pub(super) fn copy_run_blocking(
         }
 
         if remaining > 0 {
+            crate::core::utils::cpu_governor::checkpoint();
             if *cancel_rx.borrow() {
                 return Ok(RunOutcome {
                     hashes,
@@ -407,7 +408,7 @@ pub(super) fn apply_batch_blocking(
 
     write_at(output, batch.dest_start, &buffer[..batch_len])?;
 
-    Ok(op_states
+    let checksums = op_states
         .into_iter()
         .map(|(op_idx, readable)| {
             let op = &ops[op_idx];
@@ -420,7 +421,9 @@ pub(super) fn apply_batch_blocking(
             });
             (op_idx, checksum)
         })
-        .collect())
+        .collect();
+    crate::core::utils::cpu_governor::checkpoint();
+    Ok(checksums)
 }
 
 /// Per-file copy fallback accounting shared by the batched and streamed apply

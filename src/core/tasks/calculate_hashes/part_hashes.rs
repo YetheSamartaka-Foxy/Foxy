@@ -403,6 +403,7 @@ pub(super) async fn calculate_part_hashes(
                 }
             };
 
+            crate::core::utils::cpu_governor::checkpoint();
             let mut hashed = hash_span(
                 &mut reader,
                 &mut reader_pos,

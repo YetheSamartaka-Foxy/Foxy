@@ -53,6 +53,9 @@ pub(crate) struct ResourceProfile {
     pub(crate) pressure: ResourcePressure,
     pub(crate) total_memory: u64,
     pub(crate) available_memory: u64,
+    /// Logged for diagnosis only. Windows reports commit charge beyond physical
+    /// memory here rather than pagefile use, and swapped pages stay counted
+    /// elsewhere long after the pressure that pushed them out has gone.
     pub(crate) used_swap: u64,
     /// `pressure` came from the user's setting, not from the memory figures.
     pub(crate) pressure_overridden: bool,
@@ -82,13 +85,9 @@ impl ResourceProfile {
         const MIB: u64 = 1024 * 1024;
         const GIB: u64 = 1024 * MIB;
 
-        let pressure = if total_memory <= 6 * GIB
-            || available_memory < 1536 * MIB
-            || used_swap >= 2 * GIB
-        {
+        let pressure = if total_memory <= 6 * GIB || available_memory < 1536 * MIB {
             ResourcePressure::Severe
-        } else if total_memory <= 8704 * MIB || available_memory < 4 * GIB || used_swap >= 512 * MIB
-        {
+        } else if total_memory <= 8704 * MIB || available_memory < 4 * GIB {
             ResourcePressure::Constrained
         } else {
             ResourcePressure::Normal
@@ -150,6 +149,16 @@ mod tests {
     fn very_low_available_memory_is_severe() {
         let profile = ResourceProfile::from_memory(16 * 1024 * 1024 * 1024, 1024 * 1024 * 1024, 0);
         assert_eq!(profile.pressure, ResourcePressure::Severe);
+    }
+
+    #[test]
+    fn swap_in_use_does_not_raise_the_pressure_while_memory_is_free() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        let roomy = ResourceProfile::from_memory(94 * GIB, 40 * GIB, 5 * GIB);
+        assert_eq!(roomy.pressure, ResourcePressure::Normal);
+        assert!(roomy.summary().ends_with("swap_used=5.00 GiB"));
+        let small = ResourceProfile::from_memory(8 * GIB, 5 * GIB, 3 * GIB);
+        assert_eq!(small.pressure, ResourcePressure::Constrained);
     }
 
     #[test]

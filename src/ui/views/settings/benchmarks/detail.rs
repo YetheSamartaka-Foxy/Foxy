@@ -844,6 +844,14 @@ impl Foxy {
                     .unwrap_or_else(|| self.t("Unlimited")),
             ),
             (
+                self.t("CPU usage limit"),
+                record
+                    .machine
+                    .cpu_usage_limit_percent
+                    .map(|limit| format!("{limit}%"))
+                    .unwrap_or_else(|| self.t("No limit")),
+            ),
+            (
                 self.t("CPU Threads"),
                 record
                     .machine

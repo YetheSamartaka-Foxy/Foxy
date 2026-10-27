@@ -12,6 +12,7 @@ pub fn apply_runtime_settings(settings: &SettingsViewState) {
         settings.cpu_thread_limit,
         settings.cpu_thread_limit_safe,
     );
+    super::cpu_governor::set_cpu_usage_limit(settings.cpu_usage_limit_percent);
     super::work_priority::set_work_priority(settings.work_priority, settings.low_disk_priority);
     set_storage_class_override(storage_class(settings.storage_type_override));
     set_pressure_override(memory_pressure(settings.memory_pressure_override));

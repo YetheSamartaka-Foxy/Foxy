@@ -308,6 +308,9 @@ fn sanitize_settings(settings: &mut SettingsViewState) {
     if settings.cpu_thread_limit == Some(0) {
         settings.cpu_thread_limit = Some(1);
     }
+    settings.cpu_usage_limit_percent = crate::core::utils::cpu_governor::sanitize_cpu_usage_limit(
+        settings.cpu_usage_limit_percent,
+    );
     settings.app_update_url = settings.app_update_url.trim().to_string();
     if settings.app_update_url.is_empty() {
         settings.app_update_url_user_override = false;

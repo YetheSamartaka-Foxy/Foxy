@@ -870,6 +870,7 @@ async fn calculate_whole_file_checksum(
                 blake3_mmap_file_hash_full(Path::new(&file_path_for_hash), mmap_strategy)
             {
                 profiled.stop("hash_mmap", expected_len);
+                crate::core::utils::cpu_governor::checkpoint();
                 let content_hash = std::fs::File::open(&file_path_for_hash)
                     .ok()
                     .and_then(|mut file| fingerprint(&mut file));
@@ -886,6 +887,7 @@ async fn calculate_whole_file_checksum(
                 }
                 read_bytes += read as u64;
                 hasher.update(&buffer[..read]);
+                crate::core::utils::cpu_governor::checkpoint();
             }
             profiled.stop("hash_read", read_bytes);
             let content_hash = fingerprint(&mut file);

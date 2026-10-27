@@ -1159,6 +1159,7 @@ impl Foxy {
             sample.hash_files_per_sec
         });
         let cpu_max = max_summary_value(&summary.telemetry_samples, |sample| sample.cpu_percent);
+        let cpu_threads = crate::core::utils::cpu_threads::detected_cpu_threads().unwrap_or(1);
         let memory_max = max_summary_value(&summary.telemetry_samples, |sample| {
             sample.memory_bytes as f64
         });
@@ -1180,10 +1181,13 @@ impl Foxy {
                 row: 1,
                 selected_idx: selected_disk_write_idx,
                 label: self.t("Disk write speed"),
-                value_text: fmt_speed_mbps(selected_disk_write_sample.disk_write_bps),
+                value_text: fmt_bytes_per_sec(selected_disk_write_sample.disk_write_bps),
                 peak_text: self.t_fmt(
                     "Peak {value}",
-                    &[("value", fmt_speed_mbps(disk_write_max / 8.0 * 1_000_000.0))],
+                    &[(
+                        "value",
+                        fmt_bytes_per_sec(disk_write_max / 8.0 * 1_000_000.0),
+                    )],
                 ),
                 max_value: disk_write_max,
                 color: self.color_success(),
@@ -1213,8 +1217,17 @@ impl Foxy {
                 row: 3,
                 selected_idx: selected_cpu_idx,
                 label: "CPU".to_string(),
-                value_text: format_percent(selected_cpu_sample.cpu_percent),
-                peak_text: self.t_fmt("Peak {value}", &[("value", format_percent(cpu_max))]),
+                value_text: format_percent(machine_cpu_percent(
+                    selected_cpu_sample.cpu_percent,
+                    cpu_threads,
+                )),
+                peak_text: self.t_fmt(
+                    "Peak {value}",
+                    &[(
+                        "value",
+                        format_percent(machine_cpu_percent(cpu_max, cpu_threads)),
+                    )],
+                ),
                 max_value: cpu_max,
                 color: self.color_warn(),
             },
@@ -1308,7 +1321,13 @@ impl Foxy {
             ui.ctx().output_mut(|output| {
                 output.cursor_icon = CursorIcon::Crosshair;
             });
-            let cpu_tooltip = format!("CPU: {}", format_percent(selected_cpu_sample.cpu_percent));
+            let cpu_tooltip = format!(
+                "CPU: {}",
+                format_percent(machine_cpu_percent(
+                    selected_cpu_sample.cpu_percent,
+                    cpu_threads
+                ))
+            );
             let memory_tooltip = format!(
                 "{}: {}",
                 self.t("Memory"),
@@ -1334,7 +1353,7 @@ impl Foxy {
                     "Disk write: {speed}",
                     &[(
                         "speed",
-                        fmt_speed_mbps(selected_disk_write_sample.disk_write_bps)
+                        fmt_bytes_per_sec(selected_disk_write_sample.disk_write_bps)
                     )]
                 ),
                 self.t_fmt(
@@ -1509,6 +1528,12 @@ fn mbps_value(bytes_per_sec: f64) -> f64 {
 
 fn format_percent(value: f64) -> String {
     format!("{:.1}%", value.max(0.0))
+}
+
+/// Telemetry counts one fully busy processor thread as 100%; Task Manager
+/// shows the share of every thread, which is what the lane reports.
+fn machine_cpu_percent(per_thread_percent: f64, threads: usize) -> f64 {
+    per_thread_percent / threads.max(1) as f64
 }
 
 fn nearest_summary_sample_index(
@@ -1749,6 +1774,13 @@ fn repository_update_cancel_stage(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cpu_lane_reports_a_share_of_every_thread() {
+        assert_eq!(machine_cpu_percent(631.7, 24), 631.7 / 24.0);
+        assert_eq!(machine_cpu_percent(2400.0, 24), 100.0);
+        assert_eq!(machine_cpu_percent(50.0, 0), 50.0);
+    }
 
     #[test]
     fn update_view_inset_width_preserves_equal_gutters() {

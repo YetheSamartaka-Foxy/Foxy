@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::Duration;
 
 use egui::{Pos2, Rect, Response, Sense, Shape, Stroke, Ui, Widget, WidgetInfo};
@@ -32,12 +32,64 @@ pub(crate) fn set_progress_frame_rate(frames_per_second: Option<u32>) {
     PROGRESS_FRAME_INTERVAL_OVERRIDE_US.store(micros, Ordering::Relaxed);
 }
 
-/// The interval the user's setting asks for, when it is not Auto.
+/// Progress pacing while another program, such as a game, has the foreground.
+const BACKGROUND_PROGRESS_FRAME_INTERVAL: Duration = Duration::from_millis(100);
+/// Progress pacing while the window is minimized or hidden to the tray.
+const HIDDEN_PROGRESS_FRAME_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Whether the window can be seen and has the user's attention.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WindowPresence {
+    Foreground,
+    Background,
+    Hidden,
+}
+
+static WINDOW_PRESENCE: AtomicU8 = AtomicU8::new(0);
+
+/// Record where the window is, once a frame; progress paces slower while it is
+/// not in front, so Foxy's drawing does not compete with the program that is.
+pub(crate) fn set_window_presence(presence: WindowPresence) {
+    let encoded = match presence {
+        WindowPresence::Foreground => 0,
+        WindowPresence::Background => 1,
+        WindowPresence::Hidden => 2,
+    };
+    WINDOW_PRESENCE.store(encoded, Ordering::Relaxed);
+}
+
+pub(crate) fn window_presence() -> WindowPresence {
+    match WINDOW_PRESENCE.load(Ordering::Relaxed) {
+        1 => WindowPresence::Background,
+        2 => WindowPresence::Hidden,
+        _ => WindowPresence::Foreground,
+    }
+}
+
+fn presence_frame_interval(presence: WindowPresence) -> Option<Duration> {
+    match presence {
+        WindowPresence::Foreground => None,
+        WindowPresence::Background => Some(BACKGROUND_PROGRESS_FRAME_INTERVAL),
+        WindowPresence::Hidden => Some(HIDDEN_PROGRESS_FRAME_INTERVAL),
+    }
+}
+
+/// The slower of two optional pacing limits.
+fn slowest(a: Option<Duration>, b: Option<Duration>) -> Option<Duration> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+/// The slowest pacing in force beyond Auto: the user's progress frame rate,
+/// or the slower pacing used while the window is not in front.
 pub(crate) fn progress_frame_interval_override() -> Option<Duration> {
-    match PROGRESS_FRAME_INTERVAL_OVERRIDE_US.load(Ordering::Relaxed) {
+    let setting = match PROGRESS_FRAME_INTERVAL_OVERRIDE_US.load(Ordering::Relaxed) {
         0 => None,
         micros => Some(Duration::from_micros(micros)),
-    }
+    };
+    slowest(setting, presence_frame_interval(window_presence()))
 }
 
 /// How often live progress asks for its next frame.
@@ -132,6 +184,29 @@ mod tests {
             .min()
             .unwrap();
         assert_eq!(delay, PROGRESS_FRAME_INTERVAL);
+    }
+
+    #[test]
+    fn a_window_out_of_front_paces_progress_slower() {
+        assert_eq!(presence_frame_interval(WindowPresence::Foreground), None);
+        assert_eq!(
+            presence_frame_interval(WindowPresence::Background),
+            Some(BACKGROUND_PROGRESS_FRAME_INTERVAL)
+        );
+        assert_eq!(
+            presence_frame_interval(WindowPresence::Hidden),
+            Some(HIDDEN_PROGRESS_FRAME_INTERVAL)
+        );
+    }
+
+    #[test]
+    fn the_slower_of_the_setting_and_the_window_pacing_wins() {
+        let ms = Duration::from_millis;
+        assert_eq!(slowest(None, None), None);
+        assert_eq!(slowest(Some(ms(200)), None), Some(ms(200)));
+        assert_eq!(slowest(None, Some(ms(100))), Some(ms(100)));
+        assert_eq!(slowest(Some(ms(50)), Some(ms(100))), Some(ms(100)));
+        assert_eq!(slowest(Some(ms(200)), Some(ms(100))), Some(ms(200)));
     }
 
     #[test]

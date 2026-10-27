@@ -230,14 +230,15 @@ pub(crate) async fn refresh_content_hashes_for_scoped_tree(
 }
 
 /// Refresh content hashes for `file_ids` only, plus the addons that contain
-/// them, inside an already loaded tree. `persist_repository_rollup` must be
-/// true only when the tree carries every addon row of the repository.
+/// them, inside an already loaded tree, and roll the repository baseline up.
+/// The tree must carry every addon row of the repository (a full tree, or
+/// [`Tree::load_for_files`]), since untouched addons contribute their stored
+/// hashes to the rollup.
 pub(crate) async fn refresh_content_hashes_for_tree_files(
     context: Arc<FoxyContext>,
     repo_url: &str,
     tree: &Tree,
     file_ids: &HashSet<u64>,
-    persist_repository_rollup: bool,
 ) -> bool {
     if file_ids.is_empty() {
         return false;
@@ -247,7 +248,7 @@ pub(crate) async fn refresh_content_hashes_for_tree_files(
         repo_url,
         tree,
         Instant::now(),
-        persist_repository_rollup,
+        true,
         Some(file_ids),
     )
     .await

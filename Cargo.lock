@@ -26,6 +26,7 @@ dependencies = [
  "icu_locale_core",
  "image",
  "jmespath",
+ "libc",
  "log",
  "md-5",
  "mimalloc",

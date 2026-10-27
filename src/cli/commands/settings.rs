@@ -174,6 +174,15 @@ fn cmd_settings_set(
         state.settings.download_speed_limit_mbps = None;
         changed = true;
     }
+    if let Some(v) = args.cpu_usage_limit {
+        state.settings.cpu_usage_limit_percent =
+            crate::core::utils::cpu_governor::sanitize_cpu_usage_limit(Some(v));
+        changed = true;
+    }
+    if args.cpu_usage_unlimited {
+        state.settings.cpu_usage_limit_percent = None;
+        changed = true;
+    }
     if let Some(v) = args.cpu_safe_limits {
         state.settings.cpu_thread_limit_safe = v;
         changed = true;

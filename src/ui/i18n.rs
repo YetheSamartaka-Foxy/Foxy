@@ -1227,6 +1227,21 @@ pub fn fmt_speed_mbps(bytes_per_sec: f64) -> String {
     }
 }
 
+/// A byte rate in the size units Task Manager uses for disk activity, such as
+/// `19.2 MB/s`; network speeds stay in megabits ([`fmt_speed_mbps`]).
+pub fn fmt_bytes_per_sec(bytes_per_sec: f64) -> String {
+    fmt_bytes_per_sec_with_locale(bytes_per_sec, current_locale_format())
+}
+
+fn fmt_bytes_per_sec_with_locale(bytes_per_sec: f64, lf: &LocaleFormat) -> String {
+    let bytes = if bytes_per_sec.is_finite() {
+        bytes_per_sec.max(0.0).round() as u64
+    } else {
+        0
+    };
+    format!("{}/s", fmt_bytes_with_locale(bytes, lf))
+}
+
 pub fn locale_compare(a: &str, b: &str) -> Ordering {
     let lang = current_language();
     resolve_collator(&lang).compare(a, b)
@@ -1407,6 +1422,22 @@ fn parse_bundle(raw_json: &str, language_name: &str) -> HashMap<String, String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn byte_rates_use_size_units_per_second() {
+        assert_eq!(
+            fmt_bytes_per_sec_with_locale(19.2 * 1024.0 * 1024.0, &EN_FORMAT),
+            format!("19.2 {}/s", EN_FORMAT.size_units[2])
+        );
+        assert_eq!(
+            fmt_bytes_per_sec_with_locale(-5.0, &EN_FORMAT),
+            format!("0 {}/s", EN_FORMAT.size_units[0])
+        );
+        assert_eq!(
+            fmt_bytes_per_sec_with_locale(f64::NAN, &EN_FORMAT),
+            format!("0 {}/s", EN_FORMAT.size_units[0])
+        );
+    }
 
     #[test]
     fn missing_locale_key_falls_back_to_english_bundle() {

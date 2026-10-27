@@ -21,7 +21,7 @@ pub use worker::{
 // Crate-visible items
 pub(crate) use content_hash::{
     refresh_content_hashes_for_file_ids, refresh_content_hashes_for_repository,
-    refresh_content_hashes_for_scoped_tree, refresh_content_hashes_for_tree_files,
+    refresh_content_hashes_for_tree_files,
 };
 pub(crate) use diff::{
     PreHashedFiles, quick_local_change_diff, quick_local_change_diff_with_prehashed,

@@ -1,6 +1,7 @@
 pub mod addon_backup;
 pub mod app_paths;
 pub mod content_hash;
+pub mod cpu_governor;
 pub mod cpu_threads;
 pub mod deelevate;
 pub mod disk_space;

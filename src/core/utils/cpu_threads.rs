@@ -3,6 +3,7 @@
 //! the whole process (an app-global setting, so it survives space switches).
 
 use std::num::NonZeroUsize;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use log::info;
@@ -14,11 +15,15 @@ pub const MAX_CPU_THREADS: u32 = 1024;
 /// Applied override; 0 means Auto.
 static CPU_THREAD_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
 
-/// Logical processors the system reports, ignoring the user's setting.
+/// Logical processors the system reports, ignoring the user's setting. Read
+/// once: views and the CPU usage limit ask for it many times a second.
 pub fn detected_cpu_threads() -> Option<usize> {
-    std::thread::available_parallelism()
-        .ok()
-        .map(NonZeroUsize::get)
+    static DETECTED: OnceLock<Option<usize>> = OnceLock::new();
+    *DETECTED.get_or_init(|| {
+        std::thread::available_parallelism()
+            .ok()
+            .map(NonZeroUsize::get)
+    })
 }
 
 /// Thread count CPU-bound work plans around: the applied setting, or the

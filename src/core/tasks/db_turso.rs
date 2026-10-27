@@ -1146,6 +1146,7 @@ async fn open_and_prepare_database(path: &Path) -> Arc<Database> {
     }
 
     sweep_stale_db_artifacts(path);
+    crate::core::tasks::db_schema_version::bootstrap_if_fresh(path);
 
     let mut db = build_or_rebuild_after_failure(path, &path_str)
         .await

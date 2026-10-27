@@ -20,6 +20,27 @@ const FRAME_INTERVAL_WINDOW: usize = 240;
 /// How soon a frame follows a state change the UI flagged with `needs_repaint`.
 const STATE_CHANGE_REPAINT_DELAY: Duration = Duration::from_millis(16);
 
+/// Where the window is for progress pacing. A GUI-harness session stays in the
+/// foreground pacing so its frame measurements compare across runs, whatever
+/// window the operating system gives focus.
+fn window_presence_for(
+    harness_attached: bool,
+    hidden_to_tray: bool,
+    focused: Option<bool>,
+    minimized: Option<bool>,
+) -> crate::ui::app::WindowPresence {
+    use crate::ui::app::WindowPresence;
+    if harness_attached {
+        WindowPresence::Foreground
+    } else if hidden_to_tray || minimized == Some(true) {
+        WindowPresence::Hidden
+    } else if focused == Some(false) {
+        WindowPresence::Background
+    } else {
+        WindowPresence::Foreground
+    }
+}
+
 /// `(p50, p95, max)` of the recent frame intervals in milliseconds.
 pub(crate) fn frame_interval_stats(intervals: &VecDeque<f32>) -> Option<(f32, f32, f32)> {
     if intervals.is_empty() {
@@ -128,8 +149,12 @@ impl Foxy {
         }
 
         // Repaint every frame so the counter or opt-in agent probe reflects the
-        // current framerate.
-        ctx.request_repaint();
+        // current framerate; out of front the counter follows the slower pacing.
+        if agent_gui_probe
+            || crate::ui::app::window_presence() == crate::ui::app::WindowPresence::Foreground
+        {
+            ctx.request_repaint();
+        }
     }
 
     /// Color for the FPS readout in the footer: green when healthy, amber when
@@ -248,6 +273,13 @@ impl Foxy {
         self.apply_runtime_motion_preference(&ctx);
         self.invalidate_galley_caches_on_font_atlas_change(&ctx);
         self.log_display_metrics_if_changed(&ctx);
+        let (focused, minimized) = ctx.input(|i| (i.viewport().focused, i.viewport().minimized));
+        crate::ui::app::set_window_presence(window_presence_for(
+            self.agent_gui.is_some(),
+            self.hidden_to_tray,
+            focused,
+            minimized,
+        ));
         self.update_fps_estimate(&ctx);
         self.poll_agent_gui(&ctx);
         // After `poll_agent_gui`: the driver pushes injected key events into the
@@ -890,5 +922,38 @@ mod tests {
         intervals.push_back(300.0);
         let (_, _, max) = frame_interval_stats(&intervals).unwrap();
         assert_eq!(max, 300.0);
+    }
+
+    #[test]
+    fn window_presence_follows_focus_minimize_and_the_tray() {
+        use crate::ui::app::WindowPresence;
+        assert_eq!(
+            window_presence_for(false, false, Some(true), Some(false)),
+            WindowPresence::Foreground
+        );
+        assert_eq!(
+            window_presence_for(false, false, None, None),
+            WindowPresence::Foreground
+        );
+        assert_eq!(
+            window_presence_for(false, false, Some(false), Some(false)),
+            WindowPresence::Background
+        );
+        assert_eq!(
+            window_presence_for(false, false, Some(false), Some(true)),
+            WindowPresence::Hidden
+        );
+        assert_eq!(
+            window_presence_for(false, true, Some(true), None),
+            WindowPresence::Hidden
+        );
+    }
+
+    #[test]
+    fn a_harness_session_keeps_foreground_pacing() {
+        assert_eq!(
+            window_presence_for(true, true, Some(false), Some(true)),
+            crate::ui::app::WindowPresence::Foreground
+        );
     }
 }

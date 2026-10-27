@@ -7,10 +7,9 @@ use super::super::quick_scan::{
     log_local_path_availability, pending_update_mod_scope, persist_pending_updates,
     quick_local_change_diff, quick_local_change_diff_with_prehashed,
     refresh_content_hashes_for_file_ids, refresh_content_hashes_for_repository,
-    refresh_content_hashes_for_scoped_tree, refresh_content_hashes_for_tree_files,
-    refresh_patch_plan_metadata_for_pending_updates, summarize_local_path_availability,
-    suspect_local_path_mismatch, tree_local_checksums_baseline_missing,
-    tree_local_checksums_missing,
+    refresh_content_hashes_for_tree_files, refresh_patch_plan_metadata_for_pending_updates,
+    summarize_local_path_availability, suspect_local_path_mismatch,
+    tree_local_checksums_baseline_missing, tree_local_checksums_missing,
 };
 use super::super::*;
 use super::backup::backup_pending_addons_for_download;
@@ -2119,13 +2118,12 @@ async fn run_repository_pipeline(
                     emit_progress!(ProgressEvent::Cancelled);
                     return;
                 }
-                Tree::load_for_mod_names(
-                    context.clone(),
-                    &normalized_repo_url,
-                    &quick_update_mod_names,
-                )
-                .await
-                .ok()
+                // Every addon row, not only the pending ones, so the content
+                // refresh can roll the repository baseline up; without it the
+                // next quick scan re-samples every file to rebuild it.
+                Tree::load_for_files(context.clone(), &normalized_repo_url, &file_ids)
+                    .await
+                    .ok()
             } else {
                 match calculate_hashes_with_tree_and_profile_cancellable(
                     context.clone(),
@@ -2183,6 +2181,8 @@ async fn run_repository_pipeline(
                 });
                 let targeted_init_processed_file_ids: HashSet<u64>;
                 if scoped_tree_bootstrap {
+                    let scoped_file_ids: HashSet<u64> =
+                        tree.files.iter().map(|file| file.id).collect();
                     let hashed = calculate_hashes_for_files_with_profile(
                         context.clone(),
                         &normalized_repo_url,
@@ -2208,10 +2208,10 @@ async fn run_repository_pipeline(
                         emit_progress!(ProgressEvent::Cancelled);
                         return;
                     }
-                    if let Ok(refreshed_tree) = Tree::load_for_mod_names(
+                    if let Ok(refreshed_tree) = Tree::load_for_files(
                         context.clone(),
                         &normalized_repo_url,
-                        &quick_update_mod_names,
+                        &scoped_file_ids,
                     )
                     .await
                     {
@@ -2312,7 +2312,6 @@ async fn run_repository_pipeline(
                     &normalized_repo_url,
                     &tree,
                     &targeted_init_baseline_file_ids,
-                    !scoped_tree_bootstrap,
                 )
                 .await;
             }
@@ -2337,10 +2336,12 @@ async fn run_repository_pipeline(
         let stage_started = std::time::Instant::now();
         if scoped_tree_bootstrap {
             if let Some(tree) = bootstrap_tree_for_content_hash.take() {
-                let _ = refresh_content_hashes_for_scoped_tree(
+                let file_ids: HashSet<u64> = tree.files.iter().map(|file| file.id).collect();
+                let _ = refresh_content_hashes_for_tree_files(
                     context.clone(),
                     &normalized_repo_url,
                     &tree,
+                    &file_ids,
                 )
                 .await;
             }
@@ -3695,7 +3696,9 @@ async fn run_repository_pipeline(
     let verification = if finalized_hashes {
         verify_downloaded_files(context.clone(), &normalized_repo_url, &download_file_ids).await
     } else {
-        Err(anyhow::anyhow!("Failed to finalize downloaded-file checksums"))
+        Err(anyhow::anyhow!(
+            "Failed to finalize downloaded-file checksums"
+        ))
     };
     if let Err(error) = verification {
         let message = format!("Update verification failed: {}", error);
@@ -3744,7 +3747,6 @@ async fn run_repository_pipeline(
             &normalized_repo_url,
             &hash_context.tree,
             &download_file_ids,
-            true,
         )
         .await;
     } else {
