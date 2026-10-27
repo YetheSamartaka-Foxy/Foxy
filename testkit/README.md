@@ -349,7 +349,7 @@ Its reproducible case template is
 `testkit/examples/perf-tfr-scifi-cold-auto-hash-hdd.example.json`; set
 `FOXY_TESTKIT_REPO_URL` and `FOXY_TESTKIT_HDD_PAYLOAD` to the matching origin
 and HDD payload path before running it. The baseline records seven evicted
-integrity rechecks at a 30.70 s median. Its calibrated hash ratio exceeds one,
+integrity rechecks at a 25.21 s median. Its calibrated hash ratio exceeds one,
 so use the elapsed time as the accepted comparison until the B2+B6 reference
 is reviewed.
 
