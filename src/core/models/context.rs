@@ -24,6 +24,10 @@ pub(crate) struct FoxyContext {
     pub(crate) client: Client,
     pub(crate) recheck_level: RecheckLevel,
     pub(crate) forced_mod_refreshes: HashSet<String>,
+    /// Addons whose manifests a recheck applies again although the stored graph
+    /// matches the server. Unlike `forced_mod_refreshes` the cached manifest is
+    /// revalidated, not refetched, and unchanged files keep their part graph.
+    pub(crate) reapplied_mod_manifests: HashSet<String>,
     pub(crate) queue_download_targets: bool,
     pub(crate) patch_plan_metadata_refresh: bool,
     pub(crate) force_download_targets: bool,
@@ -41,6 +45,10 @@ pub(crate) struct FoxyContext {
     /// P0-b). Shared (`Arc`) so the flag set before the parallel fan-out is visible
     /// to every spawned mod task. Default `false` (safe `ON CONFLICT` path).
     pub(crate) fresh_subfiles_load: Arc<AtomicBool>,
+    /// Set by the metadata rebuild when the repository instance links no file
+    /// yet, so no addon can hold a stale link. A repository can keep its links
+    /// after losing every part row, so `fresh_subfiles_load` alone does not say this.
+    fresh_addon_file_links: Arc<AtomicBool>,
     /// A++ (after_turso_regression_analysis7.md): when set (force-redownload), the
     /// per-mod part insert buffers its brand-new rows into `deferred_part_inserts`
     /// instead of writing them inline, so the ~22s 66k-row insert can run as one
@@ -97,6 +105,7 @@ impl FoxyContext {
             client,
             recheck_level: RecheckLevel::DEFAULT,
             forced_mod_refreshes: HashSet::new(),
+            reapplied_mod_manifests: HashSet::new(),
             queue_download_targets: true,
             patch_plan_metadata_refresh: false,
             force_download_targets: false,
@@ -105,6 +114,7 @@ impl FoxyContext {
             repository_space_shared_path: None,
             operation_id: None,
             fresh_subfiles_load: Arc::new(AtomicBool::new(false)),
+            fresh_addon_file_links: Arc::new(AtomicBool::new(false)),
             defer_part_inserts: Arc::new(AtomicBool::new(false)),
             deferred_part_inserts: Arc::new(Mutex::new(Vec::new())),
             deferred_part_inserts_fresh_load: Arc::new(AtomicBool::new(false)),
@@ -241,6 +251,16 @@ impl FoxyContext {
         self.fresh_subfiles_load.store(value, Ordering::Relaxed);
     }
 
+    /// Whether the current metadata rebuild started with no file linked to any
+    /// addon of the repository. See [`FoxyContext::fresh_addon_file_links`].
+    pub(crate) fn has_fresh_addon_file_links(&self) -> bool {
+        self.fresh_addon_file_links.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn set_fresh_addon_file_links(&self, value: bool) {
+        self.fresh_addon_file_links.store(value, Ordering::Relaxed);
+    }
+
     pub(crate) fn deferred_part_inserts_are_fresh_load(&self) -> bool {
         self.deferred_part_inserts_fresh_load
             .load(Ordering::Relaxed)
@@ -310,6 +330,11 @@ impl FoxyContext {
         forced_mod_refreshes: HashSet<String>,
     ) -> Self {
         self.forced_mod_refreshes = forced_mod_refreshes;
+        self
+    }
+
+    pub(crate) fn with_reapplied_mod_manifests(mut self, addons: HashSet<String>) -> Self {
+        self.reapplied_mod_manifests = addons;
         self
     }
 

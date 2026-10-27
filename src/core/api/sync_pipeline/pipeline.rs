@@ -261,6 +261,18 @@ fn scopes_tree_bootstrap(
     builds_download_plan && has_pending_scope && !fresh_part_load
 }
 
+/// Addons a recheck without a download plan applies again from their
+/// manifests: those of the saved pending update, so stored metadata that
+/// disagrees with the server cannot keep the update pending through every
+/// recheck. A download plan forces its own quick-verify scope instead.
+fn recheck_reapplied_addons(saved_pending_mods: &[ModDiffSummary]) -> HashSet<String> {
+    saved_pending_mods
+        .iter()
+        .filter(|m| m.needs_update)
+        .map(|m| m.name.to_lowercase())
+        .collect()
+}
+
 /// True when this repository instance has file rows whose tree hash is missing
 /// (`local_checksum` NULL/empty) AND ZERO part rows (`subfiles`). This is a
 /// structurally broken state: the tree-hash rollup derives every file's
@@ -1827,6 +1839,13 @@ async fn run_repository_pipeline(
         let recheck_start = std::time::Instant::now();
         let remote_metadata_queues_download_targets =
             should_queue_download_targets_during_remote_metadata(mode, force_redownload);
+        let reapplied_addons = if builds_download_plan || force_redownload {
+            HashSet::new()
+        } else {
+            recheck_reapplied_addons(
+                &load_pending_update_mods(context.clone(), &normalized_repo_url).await,
+            )
+        };
         let remote_refresh_context = if builds_download_plan
             && !force_redownload
             && !quick_update_mod_names.is_empty()
@@ -1840,6 +1859,19 @@ async fn run_repository_pipeline(
                     .as_ref()
                     .clone()
                     .with_forced_mod_refreshes(quick_update_mod_names.clone())
+                    .with_download_target_queueing(remote_metadata_queues_download_targets),
+            )
+        } else if !reapplied_addons.is_empty() {
+            info!(
+                "Re-applying the manifests of {} addons with a saved pending update for repo={}",
+                reapplied_addons.len(),
+                normalized_repo_url
+            );
+            Arc::new(
+                context
+                    .as_ref()
+                    .clone()
+                    .with_reapplied_mod_manifests(reapplied_addons)
                     .with_download_target_queueing(remote_metadata_queues_download_targets),
             )
         } else {
@@ -4637,6 +4669,22 @@ mod tests {
         assert!(!scopes_tree_bootstrap(true, true, true));
         assert!(!scopes_tree_bootstrap(true, false, false));
         assert!(!scopes_tree_bootstrap(false, true, false));
+    }
+
+    #[test]
+    fn a_recheck_reapplies_the_manifests_of_the_saved_pending_addons() {
+        let saved = |name: &str, needs_update: bool| ModDiffSummary {
+            name: name.to_string(),
+            needs_update,
+            total_bytes: 0,
+            files: Vec::new(),
+        };
+
+        assert_eq!(
+            recheck_reapplied_addons(&[saved("@Mod_01", true), saved("@mod_02", false)]),
+            HashSet::from(["@mod_01".to_string()])
+        );
+        assert!(recheck_reapplied_addons(&[]).is_empty());
     }
 
     #[test]

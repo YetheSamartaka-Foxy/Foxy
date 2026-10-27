@@ -452,9 +452,9 @@ pub(super) async fn process_mods_upsert(
                 })
             };
             let has_content_hash = !mod_entry.local_content_hash.trim().is_empty();
-            let force_mod_refresh = context_clone
-                .forced_mod_refreshes
-                .contains(&mod_entry.name.to_lowercase());
+            let mod_key = mod_entry.name.to_lowercase();
+            let force_mod_refresh = context_clone.forced_mod_refreshes.contains(&mod_key)
+                || context_clone.reapplied_mod_manifests.contains(&mod_key);
             let remote_graph_unchanged = previous_mod.as_ref().is_some_and(|previous| {
                 previous.remote_checksum == mod_entry.remote_checksum
                     && normalize_path_key(&previous.local_path)

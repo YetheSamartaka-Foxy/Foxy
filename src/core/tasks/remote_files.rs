@@ -384,10 +384,10 @@ async fn reconcile_addon_file_links(
         );
     }
 
-    // Phase 2: Prune stale addon_file links. A whole-wipe force-redownload has
-    // no leftover links, so skip the per-mod SELECT/DELETE.
+    // Phase 2: Prune stale addon_file links. A repository that linked no file
+    // before this rebuild has no leftover links, so skip the per-mod SELECT/DELETE.
     if can_prune_stale
-        && !context.is_fresh_subfiles_load()
+        && !context.has_fresh_addon_file_links()
         && let Err(e) = context
             .db()
             .transaction("prune addon_files", |txn| {

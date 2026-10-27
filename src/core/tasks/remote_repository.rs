@@ -756,7 +756,8 @@ pub(crate) async fn remote_repository(
     let remote_graph_complete =
         repository_remote_graph_complete(&repository, has_linked_addons, has_remote_state);
 
-    let has_forced_mod_refreshes = !context.forced_mod_refreshes.is_empty();
+    let has_forced_mod_refreshes =
+        !context.forced_mod_refreshes.is_empty() || !context.reapplied_mod_manifests.is_empty();
     if should_skip_clean_remote_refresh(
         &repository,
         has_linked_addons,

@@ -903,6 +903,13 @@ Addon stage:
    even when their published checksums match the stored graph. A changed stored
    addon version also bypasses cached HTTP validators, including for addons
    outside the earlier pending scope. Other unchanged addons keep their graph.
+   A remote recheck without a download plan (Recheck all, `repo sync --mode
+   remote-refresh`) applies the manifests of the saved pending update's addons
+   again (`reapplied_mod_manifests`), so stored metadata that disagrees with
+   the server is rebuilt instead of keeping the update pending through every
+   recheck. Unlike a forced refresh it revalidates the cached manifest and
+   keeps each unchanged file's part graph, so a recheck after a wipe, whose
+   saved update lists every addon, fetches and hashes nothing extra.
 
 File stage:
 
@@ -919,7 +926,11 @@ File stage:
 2. Upsert file rows.
 3. Preserve file local tree and content hashes only when local path identity is
    unchanged.
-4. Reconcile `addon_files` links and prune stale links when safe.
+4. Reconcile `addon_files` links and prune stale links when safe. Skip the
+   prune only when the repository instance linked no file before the rebuild.
+   An empty `subfiles` does not prove that, because links outlive lost part
+   rows, and an unpruned link keeps a file the server no longer lists missing,
+   so its addon stays pending.
 5. Diff the fetched file list before part processing. Mark changed only when
    file checksum, length, path identity, link state, or DB completeness changed.
 6. Skip part metadata processing for a file when:
