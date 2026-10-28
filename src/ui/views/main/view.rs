@@ -119,7 +119,7 @@ impl Foxy {
                 };
                 let top_bar_resp = ui.interact(
                     drag_area,
-                    Id::new("top_bar_drag_area"),
+                    Id::unique("top_bar_drag_area"),
                     Sense::click_and_drag(),
                 );
                 if use_custom_window_chrome && !is_minimized && top_bar_resp.double_clicked() {
@@ -254,7 +254,7 @@ impl Foxy {
                                 self.t("Special thanks to the Task Force Roddenberry community");
                             tfr_logo_button.widget_info(|| {
                                 egui::WidgetInfo::labeled(
-                                    egui::WidgetType::Link,
+                                    egui::Role::Link,
                                     true,
                                     tfr_thanks.clone(),
                                 )

@@ -1287,7 +1287,7 @@ impl Foxy {
                         // Stable id so the agent GUI driver's `focus` command can
                         // target this field deterministically (see agent_driver
                         // AGENT_FOCUS_TARGETS).
-                        .id(egui::Id::new("agent.add-repository-input"))
+                        .id(egui::Id::unique("agent.add-repository-input"))
                         .desired_width(ui.available_width()),
                 );
                 if input.hovered() {

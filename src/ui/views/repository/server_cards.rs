@@ -320,7 +320,7 @@ impl Foxy {
         ui.add_space(12.0);
 
         ui.scope_builder(
-            egui::UiBuilder::new().id(egui::Id::new("launch_join_area")),
+            egui::UiBuilder::new().scope_id(egui::Id::unique("launch_join_area")),
             |ui| {
                 ui.horizontal(|ui| {
                     let launch_join_font_size = self

@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::Duration;
 
 use egui::{Pos2, Rect, Response, Sense, Shape, Stroke, Ui, Widget, WidgetInfo};
-use egui::{WidgetType, emath::lerp, vec2};
+use egui::{Role, emath::lerp, vec2};
 
 /// How often a spinner or live progress asks for its next frame on Auto. egui's
 /// own spinner asks for one on every paint, which keeps the whole UI redrawing
@@ -97,12 +97,8 @@ pub(crate) fn progress_frame_interval() -> Duration {
     progress_frame_interval_override().unwrap_or(PROGRESS_FRAME_INTERVAL)
 }
 
-/// Ask for the next frame no sooner than `delay` from now. egui starts a delayed
-/// frame one predicted frame early (1/60 s unless the platform says otherwise),
-/// so a 16 ms request would otherwise repaint at once.
 pub(crate) fn request_frame_after(ctx: &egui::Context, delay: Duration) {
-    let predicted = Duration::try_from_secs_f32(ctx.input(|i| i.predicted_dt)).unwrap_or_default();
-    ctx.request_repaint_after(delay + predicted);
+    ctx.request_repaint_after(delay);
 }
 
 /// egui's spinner, drawn the same way, animated at [`progress_frame_interval`].
@@ -152,7 +148,7 @@ impl Widget for PacedSpinner {
             .size
             .unwrap_or_else(|| ui.style().spacing.interact_size.y);
         let (rect, response) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
-        response.widget_info(|| WidgetInfo::new(WidgetType::ProgressIndicator));
+        response.widget_info(|| WidgetInfo::new(Role::ProgressIndicator));
         self.paint_at(ui, rect);
         response
     }

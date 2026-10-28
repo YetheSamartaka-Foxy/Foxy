@@ -686,7 +686,7 @@ impl Foxy {
                 ViewportClass::Immediate | ViewportClass::Deferred => {
                     let mut viewport_ui = egui::Ui::new(
                         viewport_ctx.clone(),
-                        Id::new("memory_diagnostics_immediate_panel"),
+                        Id::unique("memory_diagnostics_immediate_panel"),
                         egui::UiBuilder::new().max_rect(viewport_ctx.content_rect()),
                     );
                     CentralPanel::default()

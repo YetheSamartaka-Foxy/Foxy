@@ -46,6 +46,11 @@
 
 \### Schema changes
 
+Startup rebuild after an engine initialization failure is limited to structured
+`turso::Error::Corrupt` and `NotAdb` errors. Other errors preserve the database
+and propagate to the startup failure path; a failed bootstrap, file-access
+error, or engine API change is not evidence that stored data should be reset.
+
 \- Never edit `database.db` directly unless explicitly instructed.
 
 \- The schema is a single folded bootstrap file, `sql/turso_schema.sql`, applied to a fresh database (no incremental migration replay; the legacy `migrations/*.sql` files are historical only). Edit that file for schema changes and keep its `ON DELETE CASCADE` chains and `(remote_url, local_path)` identity intact.

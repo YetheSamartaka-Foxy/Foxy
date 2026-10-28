@@ -133,6 +133,7 @@ pub struct BenchmarkExportJob {
     pub chart_count: usize,
     pub frames_rendered: u32,
     pub screenshot_requested: bool,
+    pub screenshot_rx: Option<std::sync::mpsc::Receiver<std::sync::Arc<egui::ColorImage>>>,
     pub chart_rect: Option<(String, egui::Rect)>,
     pub images: Vec<crate::core::benchmarks::export::ExportImage>,
 }

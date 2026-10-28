@@ -32,7 +32,7 @@ impl Foxy {
         } else {
             egui::Sense::hover()
         };
-        let response = ui.interact(rect, ui.id().with(icon), sense);
+        let response = ui.interact(rect, ui.scope_id().with(icon), sense);
 
         if ui.is_rect_visible(rect) {
             let visuals = if enabled {

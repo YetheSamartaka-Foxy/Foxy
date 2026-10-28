@@ -754,6 +754,13 @@ async fn move_db_artifacts_to_rebuild_backup(path: &Path) -> std::io::Result<Pat
 async fn build_or_rebuild_after_failure(path: &Path, path_str: &str) -> turso::Result<Database> {
     match build_and_bootstrap(path_str).await {
         Ok(db) => Ok(db),
+        Err(first_err) if !matches!(first_err, Error::Corrupt(_) | Error::NotAdb(_)) => {
+            warn!(
+                "STARTUP: Turso database initialization failed ({}); preserving database artifacts",
+                first_err
+            );
+            Err(first_err)
+        }
         Err(first_err) => {
             warn!(
                 "STARTUP: Turso database initialization failed ({}); attempting clean rebuild",
@@ -1459,6 +1466,89 @@ mod tests {
         assert!(!db_error_message_is_retryable(
             "Busy: cannot commit transaction - SQL statements in progress"
         ));
+    }
+
+    #[tokio::test]
+    async fn initialization_failure_preserves_existing_database_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("database.db");
+        let path_str = path.to_str().unwrap();
+        let db = Builder::new_local(path_str).build().await.unwrap();
+        let conn = db.connect().unwrap();
+        conn.execute(
+            "CREATE TABLE addons (id INTEGER PRIMARY KEY, marker TEXT)",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute("INSERT INTO addons VALUES (1, 'keep')", ())
+            .await
+            .unwrap();
+        drop(conn);
+        drop(db);
+
+        assert!(
+            build_or_rebuild_after_failure(&path, path_str)
+                .await
+                .is_err()
+        );
+
+        let db = Builder::new_local(path_str).build().await.unwrap();
+        let conn = db.connect().unwrap();
+        let mut rows = conn
+            .query("SELECT marker FROM addons WHERE id = 1", ())
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next()
+                .await
+                .unwrap()
+                .unwrap()
+                .get::<String>(0)
+                .unwrap(),
+            "keep"
+        );
+        assert!(fs::read_dir(dir.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains("rebuild-backup")
+        }));
+    }
+
+    #[tokio::test]
+    async fn initialization_reuses_existing_database_rows() {
+        let (dir, db) = temp_db().await;
+        let conn = db.connect().unwrap();
+        conn.execute(
+            "INSERT INTO repositories (name, remote_url, local_path) VALUES ('RepoAlpha', 'https://repo.example.invalid/', 'R:/Mods/RepoAlpha')",
+            (),
+        )
+        .await
+        .unwrap();
+        drop(conn);
+        drop(db);
+
+        let path = dir.path().join("database.db");
+        let db = build_or_rebuild_after_failure(&path, path.to_str().unwrap())
+            .await
+            .unwrap();
+        let conn = db.connect().unwrap();
+        let mut rows = conn
+            .query("SELECT name FROM repositories", ())
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next()
+                .await
+                .unwrap()
+                .unwrap()
+                .get::<String>(0)
+                .unwrap(),
+            "RepoAlpha"
+        );
+        assert!(rows.next().await.unwrap().is_none());
     }
 
     #[tokio::test]

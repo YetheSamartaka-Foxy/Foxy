@@ -8,7 +8,7 @@ use crate::ui::search_filter::MultiEntryFilter;
 use crate::ui::types::{FoxyView, RepositorySettingsTab};
 use crate::ui::views::galley_cache;
 use crate::ui::views::repository::RepositoryListSectionContextAction;
-use eframe::egui::{self, Align, Button, Margin, RichText, ScrollArea, TextEdit, Ui, Vec2};
+use eframe::egui::{self, Button, Margin, RichText, ScrollArea, TextEdit, Ui, Vec2};
 use log::{info, warn};
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
@@ -375,7 +375,7 @@ impl Foxy {
                                 )
                                 .id_salt("repository_filter_input")
                                 .hint_text(repository_filter_hint)
-                                .horizontal_align(Align::Center),
+                                .align(egui::Align2::CENTER_TOP),
                             );
                             ui.add_space(6.0);
                             self.filter_help_icon(ui, &repository_filter_help);

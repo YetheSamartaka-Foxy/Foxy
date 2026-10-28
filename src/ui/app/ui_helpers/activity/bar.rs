@@ -1,6 +1,5 @@
 use egui::{
-    Color32, Mesh, Rect, Response, Sense, Shape, TextStyle, Ui, Widget, WidgetInfo, WidgetType,
-    vec2,
+    Color32, Mesh, Rect, Response, Role, Sense, Shape, TextStyle, Ui, Widget, WidgetInfo, vec2,
 };
 
 use super::label::paint_bar_label;
@@ -210,10 +209,8 @@ impl Widget for ActivityBar {
         let (rect, response) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
         response.widget_info(|| {
             let mut info = match &self.text {
-                Some(text) => {
-                    WidgetInfo::labeled(WidgetType::ProgressIndicator, ui.is_enabled(), text)
-                }
-                None => WidgetInfo::new(WidgetType::ProgressIndicator),
+                Some(text) => WidgetInfo::labeled(Role::ProgressIndicator, ui.is_enabled(), text),
+                None => WidgetInfo::new(Role::ProgressIndicator),
             };
             info.value = self
                 .progress

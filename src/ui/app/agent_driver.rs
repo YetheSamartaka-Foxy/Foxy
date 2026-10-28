@@ -8,7 +8,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{
-    self, Event, Key, Modifiers, MouseWheelUnit, PointerButton, Pos2, TouchPhase, UserData, Vec2,
+    self, Event, Key, Modifiers, MouseWheelUnit, PointerButton, Pos2, TouchPhase, Vec2,
     ViewportCommand,
 };
 use rand::{RngExt, distr::Alphanumeric, rng};
@@ -145,10 +145,10 @@ struct AgentUiEvent {
 
 #[derive(Debug)]
 struct PendingScreenshot {
-    request_id: u64,
     output: PathBuf,
     response_tx: Sender<AgentGuiResponse>,
     requested_at: Instant,
+    image_rx: Receiver<std::sync::Arc<egui::ColorImage>>,
     /// Node rects captured at request time when `--annotate` was set, so the
     /// completion path can draw the overlay and emit the sidecar JSON.
     annotation: Option<Vec<AgentGuiNode>>,
@@ -1435,6 +1435,7 @@ impl Foxy {
                 ctx.input_mut(|input| {
                     input.events.push(Event::PointerMoved(pos));
                     input.events.push(Event::MouseWheel {
+                        source: egui::MouseWheelSource::Unknown,
                         unit: MouseWheelUnit::Point,
                         delta: Vec2::new(*dx, *dy),
                         phase: TouchPhase::Move,
@@ -1553,16 +1554,19 @@ impl Foxy {
                 // Capture the node overlay map now so the sidecar reflects the
                 // frame the screenshot was requested from.
                 let annotation = annotate.then(|| self.agent_gui_nodes(ctx));
+                let (image_tx, image_rx) = std::sync::mpsc::channel();
                 runtime.pending_screenshots.push(PendingScreenshot {
-                    request_id: request.request_id,
                     output,
                     response_tx: request.response_tx,
                     requested_at: started_at,
+                    image_rx,
                     annotation,
                 });
-                ctx.send_viewport_cmd(ViewportCommand::Screenshot(UserData::new(
-                    request.request_id,
-                )));
+                let repaint = ctx.clone();
+                ctx.request_screenshot(move |image| {
+                    let _ = image_tx.send(image);
+                    repaint.request_repaint();
+                });
                 ctx.request_repaint();
                 return;
             }
@@ -2274,27 +2278,10 @@ impl Foxy {
         ctx: &egui::Context,
         runtime: &mut AgentGuiRuntime,
     ) {
-        let events = ctx.input(|input| input.events.clone());
-        for event in events {
-            let Event::Screenshot {
-                user_data, image, ..
-            } = event
-            else {
-                continue;
-            };
-            let Some(request_id) = user_data
-                .data
-                .as_ref()
-                .and_then(|data| data.downcast_ref::<u64>())
-                .copied()
-            else {
-                continue;
-            };
-            let Some(index) = runtime
-                .pending_screenshots
-                .iter()
-                .position(|pending| pending.request_id == request_id)
-            else {
+        let mut index = 0;
+        while index < runtime.pending_screenshots.len() {
+            let Ok(image) = runtime.pending_screenshots[index].image_rx.try_recv() else {
+                index += 1;
                 continue;
             };
             let pending = runtime.pending_screenshots.remove(index);
@@ -6005,7 +5992,7 @@ fn agent_gui_focus_target_id(name: &str) -> Option<egui::Id> {
     AGENT_FOCUS_TARGETS
         .iter()
         .find(|(target, _)| *target == name)
-        .map(|(_, id)| egui::Id::new(id))
+        .map(|(_, id)| egui::Id::unique(id))
 }
 
 /// The registered focus target names, for error messages.
@@ -6018,7 +6005,7 @@ fn agent_gui_focus_target_names() -> Vec<&'static str> {
 fn agent_gui_focused_name(ctx: &egui::Context) -> Option<String> {
     let focused = ctx.memory(|memory| memory.focused())?;
     for (name, id) in AGENT_FOCUS_TARGETS {
-        if egui::Id::new(id) == focused {
+        if egui::Id::unique(id) == focused {
             return Some((*name).to_string());
         }
     }
@@ -6809,7 +6796,7 @@ mod tests {
     fn focus_target_registry_resolves_known_target() {
         assert_eq!(
             agent_gui_focus_target_id("add-repository-input"),
-            Some(egui::Id::new("agent.add-repository-input"))
+            Some(egui::Id::unique("agent.add-repository-input"))
         );
         assert_eq!(agent_gui_focus_target_id("nope"), None);
         assert!(agent_gui_focus_target_names().contains(&"add-repository-input"));

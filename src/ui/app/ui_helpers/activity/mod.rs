@@ -287,7 +287,7 @@ mod tests {
             ..Default::default()
         };
         let mut output = ctx.run_ui(input, |ui| {
-            age = rise_age(ui, Id::new("rise"), on);
+            age = rise_age(ui, Id::unique("rise"), on);
         });
         output.textures_delta.clear();
         age

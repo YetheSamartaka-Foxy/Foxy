@@ -321,7 +321,7 @@ impl Foxy {
                                         ui.vertical(|ui| {
                                                 // Row: [name] ... [Diff (X files) button (right)]
                                                 let details_id =
-                                                    Id::new(("update-details-toggle", mod_idx, &m.name));
+                                                    Id::unique(("update-details-toggle", mod_idx, &m.name));
                                                 let diff_file_indices: Vec<usize> = m
                                                     .files
                                                     .iter()
@@ -418,7 +418,7 @@ impl Foxy {
                                                         file_fingerprint,
                                                     );
                                                     ScrollArea::vertical()
-                                                        .id_salt(Id::new((
+                                                        .id_salt(Id::unique((
                                                             "update-details-files",
                                                             mod_idx,
                                                             &m.name,
@@ -740,7 +740,7 @@ impl Foxy {
                 } else {
                     Sense::click()
                 };
-                let response = ui.interact(rect, Id::new("repository-update-action"), sense);
+                let response = ui.interact(rect, Id::unique("repository-update-action"), sense);
                 let bg_color = if response.hovered() && !start_disabled {
                     if download_finished_for_selected {
                         self.color_success_muted()

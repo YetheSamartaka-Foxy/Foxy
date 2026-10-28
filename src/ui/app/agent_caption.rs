@@ -28,7 +28,7 @@ impl AgentCaption {
         }
         let (elapsed, remaining) = (now - self.shown_at, self.until - now);
         let opacity = fade_opacity(elapsed, remaining);
-        let painter = ctx.layer_painter(LayerId::new(Order::Tooltip, Id::new("agent_caption")));
+        let painter = ctx.layer_painter(LayerId::new(Order::Tooltip, Id::unique("agent_caption")));
         let screen = ctx.content_rect();
         painter.rect_filled(screen, 0.0, AGENT_CAPTION_BACKDROP.gamma_multiply(opacity));
 

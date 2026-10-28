@@ -733,6 +733,8 @@ Check which game space is open at the top of the sidebar. Each game space has it
 
 Only one Foxy window or command can use a game space at a time. If Foxy reports that another process is using the game space's database, close the other Foxy window or command first.
 
+If database initialization fails without reporting corruption, Foxy stops and preserves the database instead of replacing it. Check the log for the cause, resolve file access or storage problems, and try again.
+
 ### Foxy asks to wipe and rebuild the database
 
 After an update, the stored database may have been made by an incompatible version. Rebuilding keeps your downloaded mods on disk, and Foxy rechecks your repositories afterward. Files Foxy already verified and that have not changed are restored from its verified-hash record instead of being read again, unless you turned off **Skip unchanged files after a database reset**.

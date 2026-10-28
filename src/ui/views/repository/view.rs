@@ -518,7 +518,7 @@ impl Foxy {
 
                     let check_finished_flare = rise_effect(
                         ui,
-                        egui::Id::new(("repository-check-finished", selected_idx)),
+                        egui::Id::unique(("repository-check-finished", selected_idx)),
                         status_banner.is_none() && completed_check_banner.is_some(),
                         BANNER_FLARE_SECONDS,
                     );

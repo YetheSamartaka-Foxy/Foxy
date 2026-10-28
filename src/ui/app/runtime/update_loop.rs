@@ -772,7 +772,7 @@ impl Foxy {
 fn resize_single(
     ui: &mut Ui,
     rect: Rect,
-    id: impl Into<Id>,
+    id: &'static str,
     cursor: CursorIcon,
     direction: ResizeDirection,
 ) {
@@ -786,7 +786,7 @@ fn resize_single(
         return;
     }
 
-    let response = ui.interact(rect, id.into(), Sense::drag());
+    let response = ui.interact(rect, Id::unique(id), Sense::drag());
     if response.hovered() {
         ui.ctx().output_mut(|o| o.cursor_icon = cursor);
     }

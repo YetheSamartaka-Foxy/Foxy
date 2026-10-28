@@ -1,4 +1,4 @@
-use egui::{Color32, Rect, Response, Sense, Ui, Widget, WidgetInfo, WidgetType, pos2, vec2};
+use egui::{Color32, Rect, Response, Role, Sense, Ui, Widget, WidgetInfo, pos2, vec2};
 
 use super::{ActivityBar, BarMotion};
 
@@ -94,7 +94,7 @@ impl Widget for StepTrack {
         let width = ui.available_size_before_wrap().x.max(96.0);
         let (rect, response) = ui.allocate_exact_size(vec2(width, HEIGHT), Sense::hover());
         response.widget_info(|| {
-            let mut info = WidgetInfo::new(WidgetType::ProgressIndicator);
+            let mut info = WidgetInfo::new(Role::ProgressIndicator);
             info.value = Some((f64::from(self.overall()) * 100.0).floor());
             info
         });

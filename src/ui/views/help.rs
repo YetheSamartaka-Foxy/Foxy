@@ -219,7 +219,8 @@ impl Foxy {
 
             let tab_button = ui
                 .scope_builder(
-                    egui::UiBuilder::new().id(ui.make_persistent_id(("help_tab", tab.as_str()))),
+                    egui::UiBuilder::new()
+                        .scope_id(ui.make_persistent_id(("help_tab", tab.as_str()))),
                     |ui| {
                         ui.add_sized(
                             Vec2::new(ui.available_width(), 40.0),

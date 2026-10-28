@@ -352,7 +352,7 @@ impl Foxy {
                     .filter(|progress| progress.completed_count >= progress.total_count);
                 let bulk_finished_flare = rise_effect(
                     ui,
-                    egui::Id::new(("space-bulk-finished", space.id.as_str())),
+                    egui::Id::unique(("space-bulk-finished", space.id.as_str())),
                     finished_bulk.is_some(),
                     BANNER_FLARE_SECONDS,
                 );

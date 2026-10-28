@@ -631,7 +631,7 @@ impl Foxy {
                 }
                 let area = Vec2::new(row_width, row_height);
                 if let Some(tooltip) = active_operation_tooltip.as_ref() {
-                    let spinner_id = egui::Id::new(("repository_status_spinner", repo_index));
+                    let spinner_id = egui::IdSalt::new(("repository_status_spinner", repo_index));
                     let atom_response = if let Some(tex) = icon {
                         let img = Image::new((tex.id(), Vec2::splat(28.0)));
                         Button::new((img, text, Atom::custom(spinner_id, status_size)))

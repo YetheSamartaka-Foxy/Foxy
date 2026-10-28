@@ -18,6 +18,7 @@
 - While Foxy's window is in the background it redraws at most 10 times per second, and once per second when minimized or in the tray, so showing progress uses less processor time while you play. The FPS counter no longer keeps a background window redrawing.
 
 ## Fixed
+- Database startup errors caused by file access or an incompatible operation no longer silently replace existing database records. Foxy preserves the database and reports the failure instead.
 - Repository space rechecks, quick local checks, and updates now follow the repository order you set in the sidebar instead of the server's order.
 - Downloads now retry temporary connection failures and busy-server responses without restarting the whole file attempt. Interrupted transfers validate resumed byte ranges, and cancellation stops waiting for stalled server responses promptly. This reduces repeated failures partway through an update and keeps invalid resumed data from being accepted.
 - Fixed updates reusing outdated file lists after server changes, including updates already pending at startup or awaiting confirmation, and after a database wipe. Foxy now refreshes changed and pending addon manifests, includes newly changed addons, and validates saved update plans against current server metadata. This prevents missing published files, deleting manually copied files, or repeatedly downloading the same files. Inconsistent server metadata and failed verification are reported instead of claiming success.

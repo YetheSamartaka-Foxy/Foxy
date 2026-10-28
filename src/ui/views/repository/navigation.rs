@@ -227,7 +227,7 @@ impl Foxy {
         }
 
         let filter_focused =
-            ctx.memory(|memory| memory.has_focus(Id::new("repository_filter_input")));
+            ctx.memory(|memory| memory.has_focus(Id::unique("repository_filter_input")));
         if filter_focused {
             return;
         }
