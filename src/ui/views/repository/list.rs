@@ -471,7 +471,7 @@ impl Foxy {
                 ));
                 self.repository_list_galleys.ensure(
                     row_count,
-                    1,
+                    2,
                     repository_rows_generation,
                     galley_cache::fingerprint((
                         (self.settings_view_state.font_sizes.repository_view.status_banner as f32)

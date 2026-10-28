@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
-use eframe::egui::{self, Visuals};
+use eframe::egui;
 use log::info;
 
 use crate::core::api::{self, QuickScanProgressEvent, QuickScanResult};
@@ -32,7 +32,7 @@ impl Foxy {
         debug_modal_previews: Vec<crate::ui::app::debug_modals::DebugModal>,
     ) -> Self {
         info!("Initializing Foxy UI state");
-        let mut visuals = Visuals::dark();
+        let mut visuals = Self::base_visuals(true);
         visuals.override_text_color = Some(palette::TEXT_NORMAL);
         cc.egui_ctx.set_theme(egui::Theme::Dark);
         // egui 0.36 would otherwise push the theme into the native window after
@@ -542,6 +542,7 @@ impl Foxy {
             last_applied_palette: None,
             cached_color32: None,
             last_font_image_size: [0, 0],
+            last_font_pixels_per_point: 0.0,
             last_saved_window_state: Self::load_window_state(),
             last_logged_display_metrics: None,
             tray_manager: None,

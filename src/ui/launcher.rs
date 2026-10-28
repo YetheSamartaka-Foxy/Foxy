@@ -197,6 +197,7 @@ fn build_native_options(
 ) -> (NativeOptions, bool) {
     let mut options = NativeOptions {
         viewport,
+        system_font_fallback: false,
         ..Default::default()
     };
     configure_renderer_fallback(&mut options, stage);

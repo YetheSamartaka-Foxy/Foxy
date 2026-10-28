@@ -600,6 +600,7 @@ const APP_GLOBAL_FOXY_FIELDS: &[&str] = &[
     "last_applied_palette",
     "cached_color32",
     "last_font_image_size",
+    "last_font_pixels_per_point",
     "last_saved_window_state",
     "last_logged_display_metrics",
     "tray_manager",

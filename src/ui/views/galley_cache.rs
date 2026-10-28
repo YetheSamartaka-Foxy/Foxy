@@ -80,7 +80,6 @@ pub(crate) fn truncated_galley(
 
 /// Like [`lazy_galley_colored`] but truncated with an ellipsis to `max_width`,
 /// for a row widget whose label must never push the row wider than its column.
-/// Fold `max_width` into the cache fingerprint.
 pub(crate) fn lazy_galley_truncated(
     ui: &Ui,
     slot: &mut Option<Arc<Galley>>,
@@ -89,7 +88,9 @@ pub(crate) fn lazy_galley_truncated(
     max_width: f32,
     text: impl FnOnce() -> String,
 ) -> Arc<Galley> {
-    if let Some(galley) = slot {
+    if let Some(galley) = slot
+        && galley.job.wrap.max_width.to_bits() == max_width.to_bits()
+    {
         return galley.clone();
     }
     let mut job = LayoutJob::single_section(
@@ -152,5 +153,48 @@ pub(crate) fn paint_anchored(
             .with_clip_rect(clip)
             .galley(rect.min, galley, color),
         None => ui.painter().galley(rect.min, galley, color),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unchanged_truncation_width_reuses_the_cached_layout() {
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let mut slot = None;
+            let first = truncated_galley(ui, &mut slot, FontId::proportional(20.0), 120.0, || {
+                "Repository with a long label".to_owned()
+            });
+            let cached = truncated_galley(ui, &mut slot, FontId::proportional(20.0), 120.0, || {
+                panic!("unchanged layout should stay cached")
+            });
+            assert!(Arc::ptr_eq(&first, &cached));
+        });
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn changed_truncation_width_reflows_without_a_content_generation_change() {
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let mut slot = None;
+            let mut previous = None;
+            for width in [200.0_f32, 80.0, 240.0] {
+                let galley =
+                    truncated_galley(ui, &mut slot, FontId::proportional(20.0), width, || {
+                        "WWWWWWWWWWWWWWWWWWWW".to_owned()
+                    });
+                assert!(galley.size().x <= width);
+                assert_eq!(galley.job.wrap.max_width.to_bits(), width.to_bits());
+                if let Some(previous) = previous {
+                    assert!(!Arc::ptr_eq(&previous, &galley));
+                }
+                previous = Some(galley);
+            }
+        });
+        output.textures_delta.clear();
     }
 }

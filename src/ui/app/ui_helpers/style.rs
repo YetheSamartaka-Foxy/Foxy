@@ -5,6 +5,21 @@ use crate::ui::i18n::tr;
 use crate::ui::palette;
 
 impl Foxy {
+    pub(in crate::ui::app) fn base_visuals(dark_mode: bool) -> Visuals {
+        let mut visuals = if dark_mode {
+            Visuals::dark()
+        } else {
+            Visuals::light()
+        };
+        let widgets = &mut visuals.widgets;
+        widgets.noninteractive.corner_radius = egui::CornerRadius::same(2);
+        widgets.inactive.corner_radius = egui::CornerRadius::same(2);
+        widgets.hovered.corner_radius = egui::CornerRadius::same(3);
+        widgets.active.corner_radius = egui::CornerRadius::same(2);
+        widgets.open.corner_radius = egui::CornerRadius::same(2);
+        visuals
+    }
+
     fn ensure_color32_cache(&mut self) {
         let palette = &self.settings_view_state.palette_colors;
         if self
@@ -466,21 +481,19 @@ impl Foxy {
         self.repository_external_addons_list_cache.galleys = Default::default();
     }
 
-    /// Drop the galley caches when egui's font atlas size changes.
-    ///
-    /// Reading the atlas size at the top of the frame (before any Foxy text is
-    /// laid out) catches every recreation or growth, whatever the cause. This is
-    /// the general safety net; see [`Self::reset_all_list_galley_caches`] for why
-    /// staleness corrupts the text.
     pub(in crate::ui::app) fn invalidate_galley_caches_on_font_atlas_change(
         &mut self,
         ctx: &egui::Context,
     ) {
         let size = ctx.fonts(|fonts| fonts.font_image_size());
-        if size == self.last_font_image_size {
+        let pixels_per_point = ctx.pixels_per_point();
+        if size == self.last_font_image_size
+            && pixels_per_point.to_bits() == self.last_font_pixels_per_point.to_bits()
+        {
             return;
         }
         self.last_font_image_size = size;
+        self.last_font_pixels_per_point = pixels_per_point;
         self.reset_all_list_galley_caches();
     }
 
@@ -506,11 +519,7 @@ impl Foxy {
         let cache = self.color_cache();
 
         let dark_mode = uses_dark_visuals(cache.main_bg, cache.text_normal);
-        let mut visuals = if dark_mode {
-            Visuals::dark()
-        } else {
-            Visuals::light()
-        };
+        let mut visuals = Self::base_visuals(dark_mode);
         visuals.dark_mode = dark_mode;
         visuals.override_text_color = Some(cache.text_normal);
         visuals.weak_text_color = Some(cache.text_gray);
@@ -582,6 +591,7 @@ impl Foxy {
         ctx.set_visuals_of(egui::Theme::Dark, visuals.clone());
         ctx.set_visuals_of(egui::Theme::Light, visuals);
         ctx.global_style_mut(|style| {
+            style.spacing.button_padding = egui::vec2(4.0, 1.0);
             style.spacing.interact_size.x = style.spacing.interact_size.x.max(44.0);
             style.spacing.interact_size.y = style.spacing.interact_size.y.max(28.0);
         });
@@ -710,6 +720,50 @@ fn addon_row_colors(widget_bg: Color32, card_bg: Color32, text: Color32) -> (Col
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn widget_corners_stay_compact_in_both_visual_modes() {
+        for dark_mode in [false, true] {
+            let visuals = Foxy::base_visuals(dark_mode);
+            assert_eq!(visuals.dark_mode, dark_mode);
+            for widget in [
+                visuals.widgets.noninteractive,
+                visuals.widgets.inactive,
+                visuals.widgets.active,
+                visuals.widgets.open,
+            ] {
+                assert_eq!(widget.corner_radius, egui::CornerRadius::same(2));
+            }
+            assert_eq!(
+                visuals.widgets.hovered.corner_radius,
+                egui::CornerRadius::same(3)
+            );
+        }
+    }
+
+    #[test]
+    fn bundled_fonts_cover_ui_icons_without_color_glyphs() {
+        let ctx = egui::Context::default();
+        ctx.set_missing_glyph_policy(egui::epaint::text::MissingGlyphPolicy::Panic);
+        let icons = "\u{2699}\u{2705}\u{1f4da}\u{1f4e1}\u{2139}\u{1f4d6}\u{1f4e6}\u{26a0}\u{2753}";
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.fonts_mut(|fonts| {
+                for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+                    let font = egui::FontId::new(24.0, family);
+                    assert!(fonts.has_glyphs(&font, icons));
+                    let _ = fonts.layout_no_wrap(icons.to_owned(), font, Color32::WHITE);
+                }
+                assert!(
+                    fonts
+                        .image()
+                        .pixels
+                        .iter()
+                        .all(|pixel| { pixel.r() == pixel.g() && pixel.g() == pixel.b() })
+                );
+            });
+        });
+        output.textures_delta.clear();
+    }
 
     #[test]
     fn selects_visual_mode_from_palette_contrast() {

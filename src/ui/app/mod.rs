@@ -553,6 +553,7 @@ pub struct Foxy {
     /// checked. A change signals an atlas recreation/growth that invalidates any
     /// `Arc<Galley>` held across frames, so we drop those caches the frame it moves.
     pub last_font_image_size: [usize; 2],
+    pub last_font_pixels_per_point: f32,
     pub last_saved_window_state: Option<WindowState>,
     /// Used to log monitor/app resolutions at startup and whenever they change.
     pub last_logged_display_metrics: Option<DisplayMetricsSnapshot>,

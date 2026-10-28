@@ -605,24 +605,43 @@ impl Foxy {
         };
         let name_max_chars = if icon.is_some() { 20 } else { 24 };
         let truncated_name = Self::truncate_display_name(&name, name_max_chars);
-        let display_text = if active_operation_tooltip.is_some() {
-            truncated_name
-        } else {
-            format!("{truncated_name}  {state_icon}")
-        };
-
-        let text_color = self.color_text_normal();
-        let text = galley_cache::lazy_galley_colored(
-            ui,
-            self.repository_list_galleys.slot(row_slot, 0),
-            TextStyle::Heading.resolve(ui.style()),
-            text_color,
-            || display_text,
-        );
         let row_height = Self::repository_list_row_height();
         let indent = if indented { 18.0 } else { 0.0 };
         let row_width = (ui.available_width() - indent).max(80.0);
         let status_size = Vec2::splat(18.0);
+        let text_color = self.color_text_normal();
+        let font = TextStyle::Heading.resolve(ui.style());
+        let status_text = galley_cache::lazy_galley_colored(
+            ui,
+            self.repository_list_galleys.slot(row_slot, 1),
+            font.clone(),
+            text_color,
+            || format!(" {state_icon}"),
+        );
+        let status_width = if active_operation_tooltip.is_some() {
+            status_size.x
+        } else {
+            status_text.size().x
+        };
+        let icon_width = if icon.is_some() {
+            28.0 + ui.spacing().icon_spacing
+        } else {
+            0.0
+        };
+        let name_width = (row_width
+            - ui.spacing().button_padding.x * 2.0
+            - icon_width
+            - ui.spacing().icon_spacing
+            - status_width)
+            .max(16.0);
+        let text = galley_cache::lazy_galley_truncated(
+            ui,
+            self.repository_list_galleys.slot(row_slot, 0),
+            font,
+            text_color,
+            name_width,
+            || truncated_name,
+        );
 
         let resp = ui
             .horizontal(|ui| {
@@ -677,10 +696,19 @@ impl Foxy {
                     let img = Image::new((tex.id(), Vec2::splat(28.0)));
                     ui.add_sized(
                         area,
-                        Button::image_and_text(img, text).fill(fill).truncate(),
+                        Button::new((img, text, status_text))
+                            .fill(fill)
+                            .min_size(area)
+                            .truncate(),
                     )
                 } else {
-                    ui.add_sized(area, Button::new(text).fill(fill).truncate())
+                    ui.add_sized(
+                        area,
+                        Button::new((text, status_text))
+                            .fill(fill)
+                            .min_size(area)
+                            .truncate(),
+                    )
                 }
             })
             .inner;
