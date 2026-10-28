@@ -5,8 +5,35 @@ use log::{info, warn};
 use crate::core::api::SyncMode;
 use crate::ui::app::Foxy;
 use crate::ui::types::{
-    BulkActionEntry, RepoState, RepositorySpaceBulkAction, RepositorySpaceBulkMode,
+    BulkActionEntry, RepoState, Repository, RepositorySpace, RepositorySpaceBulkAction,
+    RepositorySpaceBulkMode, RepositoryVisualFolder,
 };
+
+fn repository_space_sync_targets(
+    space: &RepositorySpace,
+    repositories: &[Repository],
+    folders: &[RepositoryVisualFolder],
+) -> Vec<usize> {
+    let mut targets: Vec<usize> = repositories
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, repo)| {
+            (repo.repository_space_id.as_deref() == Some(space.id.as_str())).then_some(idx)
+        })
+        .collect();
+    targets.sort_by_cached_key(|idx| {
+        let repo = &repositories[*idx];
+        let key = Foxy::repo_instance_key(&repo.address, &repo.path);
+        folders
+            .iter()
+            .position(|folder| {
+                folder.repository_space_id.as_deref() == Some(space.id.as_str())
+                    && folder.repository_keys.contains(&key)
+            })
+            .unwrap_or(folders.len())
+    });
+    targets
+}
 
 impl Foxy {
     pub fn detach_repository_from_space(&mut self, repo_idx: usize) -> bool {
@@ -36,36 +63,11 @@ impl Foxy {
             return Vec::new();
         };
 
-        let mut ordered_entry_urls = Vec::new();
-        for required in [true, false] {
-            for entry in &space.entries {
-                if entry.required == required {
-                    ordered_entry_urls.push(Self::repo_url_match_key(&entry.address));
-                }
-            }
-        }
-
-        let mut seen = HashSet::new();
-        let mut ordered_targets = Vec::new();
-        for entry_url in &ordered_entry_urls {
-            for (idx, repo) in self.repository_view_state.repositories.iter().enumerate() {
-                if repo.repository_space_id.as_deref() != Some(space_id) || seen.contains(&idx) {
-                    continue;
-                }
-                if Self::repo_url_match_key(&repo.address) == *entry_url {
-                    seen.insert(idx);
-                    ordered_targets.push(idx);
-                }
-            }
-        }
-
-        for (idx, repo) in self.repository_view_state.repositories.iter().enumerate() {
-            if repo.repository_space_id.as_deref() == Some(space_id) && seen.insert(idx) {
-                ordered_targets.push(idx);
-            }
-        }
-
-        ordered_targets
+        repository_space_sync_targets(
+            space,
+            &self.repository_view_state.repositories,
+            &self.repository_visual_folders,
+        )
     }
 
     pub fn queue_repository_space_sync(&mut self, space_id: &str, mode: SyncMode) -> usize {
@@ -525,5 +527,107 @@ impl Foxy {
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn space() -> RepositorySpace {
+        serde_json::from_value(serde_json::json!({
+            "id": "space-alpha",
+            "name": "SpaceAlpha",
+            "entries": [
+                { "name": "RepoAlpha", "address": "https://repo.example.invalid:8080/alpha/", "required": true },
+                { "name": "RepoBeta", "address": "https://repo.example.invalid:8080/beta/", "required": false }
+            ]
+        }))
+        .expect("valid space fixture")
+    }
+
+    fn repository(address: &str, space_id: Option<&str>) -> Repository {
+        Repository {
+            address: address.to_string(),
+            path: "R:/Mods/Shared".to_string(),
+            repository_space_id: space_id.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn space_sync_follows_user_order_instead_of_manifest_or_required_order() {
+        let mut space = space();
+        let mut repositories = vec![
+            repository(&space.entries[0].address, Some(&space.id)),
+            repository(&space.entries[1].address, Some(&space.id)),
+        ];
+        let moved = repositories.remove(1);
+        repositories.insert(0, moved);
+
+        assert_eq!(
+            repository_space_sync_targets(&space, &repositories, &[]),
+            vec![0, 1]
+        );
+        space.entries.reverse();
+        space.entries[0].required = true;
+        assert_eq!(
+            repository_space_sync_targets(&space, &repositories, &[]),
+            vec![0, 1]
+        );
+    }
+
+    #[test]
+    fn space_sync_keeps_members_missing_from_manifest_in_user_order() {
+        let space = space();
+        let repositories = vec![
+            repository("https://repo.example.invalid:8080/extra/", Some(&space.id)),
+            repository(&space.entries[0].address, None),
+            repository(&space.entries[1].address, Some("space-beta")),
+            repository(&space.entries[1].address, Some(&space.id)),
+            repository(&space.entries[0].address, Some(&space.id)),
+        ];
+
+        assert_eq!(
+            repository_space_sync_targets(&space, &repositories, &[]),
+            vec![0, 3, 4]
+        );
+        assert!(repository_space_sync_targets(&space, &[], &[]).is_empty());
+        assert!(repository_space_sync_targets(&space, &repositories[1..3], &[]).is_empty());
+    }
+
+    #[test]
+    fn space_sync_follows_folder_order_then_ungrouped_repositories() {
+        let space = space();
+        let mut repositories = vec![
+            repository(&space.entries[0].address, Some(&space.id)),
+            repository(&space.entries[1].address, Some(&space.id)),
+            repository(&space.entries[0].address, Some(&space.id)),
+            repository("https://repo.example.invalid:8080/extra/", Some(&space.id)),
+        ];
+        repositories[2].path = "R:/Mods/Other".to_string();
+        let folder = |id: &str, space_id: &str, indices: &[usize], collapsed: bool| {
+            serde_json::from_value::<RepositoryVisualFolder>(serde_json::json!({
+                "id": id,
+                "name": id,
+                "repository_space_id": space_id,
+                "collapsed": collapsed,
+                "repository_keys": indices.iter().map(|idx| {
+                    let repo = &repositories[*idx];
+                    Foxy::repo_instance_key(&repo.address, &repo.path)
+                }).collect::<Vec<_>>()
+            }))
+            .expect("valid folder fixture")
+        };
+        let folders = vec![
+            folder("unrelated", "space-beta", &[0], false),
+            folder("first", &space.id, &[3, 2], true),
+            folder("second", &space.id, &[1], false),
+        ];
+
+        assert_eq!(
+            repository_space_sync_targets(&space, &repositories, &folders),
+            vec![2, 3, 1, 0]
+        );
     }
 }

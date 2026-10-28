@@ -175,6 +175,8 @@ The repository space toolbar operates on every repository in the space at once:
 - **Quick local check** - runs a quick local content check on all repositories in the space.
 - **Update all repositories** - downloads pending updates for every repository in the space that has updates.
 
+These operations and their confirmation lists follow the repository order you set under the space in the sidebar.
+
 A progress indicator in the space header shows how many repositories are done and which one is active, with one block of triangles per repository. A repository that cannot start, for example because its folder is not writable, counts as failed, and one removed from the space or deleted during the run is taken out of it, so the run always finishes. **Cancel** stops the whole run, not just the repository in progress.
 
 ### Scanning and moving existing repositories
