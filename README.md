@@ -169,6 +169,7 @@ Behavior:
 | `ui` | Launch desktop UI |
 | `version` | Print Foxy version, build kind, and source commit (`--version` prints the same label) |
 | `settings show\|set\|reset` | Inspect/modify settings |
+| `settings set --retry-failed-downloads <true\|false>` | Control automatic retries of temporary desktop update failures (enabled by default) |
 | `repo list\|add\|remove\|clone\|sync\|wipe-db\|force-redownload` | Repository operations |
 | `sync` | Alias of `repo sync` |
 | `addon list\|set\|recalc-hashes\|force-redownload` | Addon operations |
@@ -215,6 +216,8 @@ Foxy stores app-global data at the config root and everything that belongs to on
 | `games/<space_id>/repository_visual_folders.json` | Sidebar folders |
 | `games/<space_id>/workshop.json`, `extra_files.json`, `reforger_addons.json` | Steam Workshop, extra-file, and Reforger addon stores |
 | `games/<space_id>/database.db` | Turso (SQLite-compatible) database state |
+| `games/<space_id>/paused_repositories.json` | Download pauses remembered per repository installation |
+| `games/<space_id>/interrupted_updates/` | Notices for updates that still need verification after interruption |
 | `games/<space_id>/images/` | Cached images |
 
 A legacy flat layout from Foxy 1.1 or earlier is migrated into an Arma 3 game space on first start, and the previous files are kept as `.pre-gamespaces.bak` copies. See `examples/json/appdata/` for sample files.

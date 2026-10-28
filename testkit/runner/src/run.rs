@@ -1,5 +1,5 @@
 use crate::{
-    case,
+    case::{self, read_json},
     collect::{expect, logs, memory, metrics, profile, sol},
     driver,
     fixture::{self, write_json},
@@ -24,12 +24,50 @@ use std::{
 #[derive(Clone, Debug)]
 pub struct RunOptions {
     pub case: PathBuf,
+    pub foxy_binary: Option<PathBuf>,
     pub database_mode: String,
     pub db_write_gate: u32,
     pub accept: bool,
     pub validate_only: bool,
     pub no_build: bool,
     pub progress_probe_ms: u64,
+}
+
+fn ensure_run_path(run: &Path, path: &Path) -> Result<PathBuf> {
+    let run = fs::canonicalize(run)?;
+    ensure!(path.is_absolute(), "Test paths must be absolute");
+    ensure!(
+        path.components()
+            .all(|component| !matches!(component, std::path::Component::ParentDir)),
+        "Target cannot contain a parent-directory component"
+    );
+    let mut ancestor = path;
+    while !ancestor.exists() {
+        ancestor = ancestor
+            .parent()
+            .context("Test path has no existing parent directory")?;
+    }
+    ensure!(
+        fs::canonicalize(ancestor)?.starts_with(&run),
+        "Target must resolve under the case run directory"
+    );
+    Ok(path.to_owned())
+}
+
+fn is_download_sidecar(path: &Path) -> bool {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    [".foxy.bak", ".foxy.part", ".foxy.part.meta", ".foxy.tmp"]
+        .iter()
+        .any(|suffix| name.ends_with(suffix))
+}
+
+fn file_state_contains(current: &Value, expected: &Value) -> bool {
+    match (current.as_object(), expected.as_object()) {
+        (Some(current), Some(expected)) => expected
+            .iter()
+            .all(|(path, state)| current.get(path) == Some(state)),
+        _ => false,
+    }
 }
 
 struct ContextRun<'a> {
@@ -220,6 +258,302 @@ fn progress_probe_summary(samples: &[(f64, f64)], elapsed_s: f64) -> Value {
 }
 
 impl ContextRun<'_> {
+    fn repository_path(&self) -> Result<PathBuf> {
+        let path = PathBuf::from(
+            self.case["repository"]["path"]
+                .as_str()
+                .context("Missing repository path")?,
+        );
+        let path = fs::canonicalize(path)?;
+        let run = fs::canonicalize(self.run)?;
+        ensure!(
+            path.starts_with(run),
+            "State assertions are restricted to this run's repository directory"
+        );
+        Ok(path)
+    }
+
+    fn state_path(&self, operation: &Value) -> Result<PathBuf> {
+        let Some(path) = operation["path"].as_str() else {
+            return self.repository_path();
+        };
+        let path = fs::canonicalize(path)?;
+        let run = fs::canonicalize(self.run)?;
+        ensure!(
+            path.starts_with(run),
+            "State assertions are restricted to this run's directories"
+        );
+        Ok(path)
+    }
+
+    fn repository_file_state_at(&self, root: &Path) -> Result<Value> {
+        let mut files = serde_json::Map::new();
+        let mut paths = walkdir::WalkDir::new(root)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file())
+            .filter(|entry| !is_download_sidecar(entry.path()))
+            .map(|entry| entry.path().to_owned())
+            .collect::<Vec<_>>();
+        paths.sort();
+        for path in paths {
+            let relative = path
+                .strip_prefix(root)?
+                .to_string_lossy()
+                .replace('\\', "/");
+            let bytes = fs::read(path)?;
+            files.insert(
+                relative,
+                json!({"bytes":bytes.len(),"blake3":blake3::hash(&bytes).to_hex().to_string()}),
+            );
+        }
+        Ok(Value::Object(files))
+    }
+
+    fn repository_file_state(&self) -> Result<Value> {
+        self.repository_file_state_at(&self.repository_path()?)
+    }
+
+    fn state_operation(&self, operation: &Value) -> Result<bool> {
+        let Some(name) = operation["op"].as_str() else {
+            return Ok(false);
+        };
+        match name {
+            "capture-file-state" => {
+                let label = operation["label"]
+                    .as_str()
+                    .context("capture-file-state requires label")?;
+                ensure!(
+                    label
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-'),
+                    "File-state labels must be ASCII letters, digits, or hyphens"
+                );
+                write_json(
+                    &self.run.join(format!("file-state-{label}.json")),
+                    &self.repository_file_state_at(&self.state_path(operation)?)?,
+                )?;
+                Ok(true)
+            }
+            "assert-file-state" => {
+                let label = operation["label"]
+                    .as_str()
+                    .context("assert-file-state requires label")?;
+                let expected = read_json(&self.run.join(format!("file-state-{label}.json")))?;
+                let current = self.repository_file_state_at(&self.state_path(operation)?)?;
+                match operation["comparison"].as_str().unwrap_or("equal") {
+                    "equal" => ensure!(
+                        current == expected,
+                        "Repository files differ from captured state '{label}'"
+                    ),
+                    "different" => ensure!(
+                        current != expected,
+                        "Repository files unexpectedly match captured state '{label}'"
+                    ),
+                    "contains" => ensure!(
+                        file_state_contains(&current, &expected),
+                        "Repository files no longer contain captured state '{label}'"
+                    ),
+                    other => anyhow::bail!(
+                        "Unknown file-state comparison '{other}'; use equal, different, or contains"
+                    ),
+                }
+                Ok(true)
+            }
+            "assert-download-paused" => {
+                let expected = operation["paused"]
+                    .as_bool()
+                    .context("assert-download-paused requires paused")?;
+                let progress = self.data(&["progress"])?;
+                ensure!(
+                    progress["download_paused"].as_bool() == Some(expected),
+                    "Expected download_paused={expected}, got {}",
+                    progress["download_paused"]
+                );
+                Ok(true)
+            }
+            "assert-repository-paused" => {
+                let index = operation["repository_index"]
+                    .as_u64()
+                    .context("assert-repository-paused requires repository_index")?;
+                let expected = operation["paused"]
+                    .as_bool()
+                    .context("assert-repository-paused requires paused")?;
+                let progress = self.data(&["progress"])?;
+                let paused = progress["paused_repositories"]
+                    .as_array()
+                    .is_some_and(|repos| {
+                        repos
+                            .iter()
+                            .any(|repo| repo["repo_index"].as_u64() == Some(index))
+                    });
+                ensure!(
+                    paused == expected,
+                    "Expected repository index {index} paused={expected}"
+                );
+                Ok(true)
+            }
+            "assert-space-bulk-target-count" => {
+                let expected = operation["equals"]
+                    .as_u64()
+                    .context("assert-space-bulk-target-count requires equals")?;
+                let progress = self.data(&["progress"])?;
+                ensure!(
+                    progress["repository_space_bulk_progress"]["total_count"].as_u64()
+                        == Some(expected),
+                    "Expected space bulk target count {expected}, got {}",
+                    progress["repository_space_bulk_progress"]["total_count"]
+                );
+                Ok(true)
+            }
+            "assert-space-bulk-completed-count" | "assert-space-bulk-failed-count" => {
+                let field = if name == "assert-space-bulk-failed-count" {
+                    "failed_count"
+                } else {
+                    "completed_count"
+                };
+                let expected = operation["equals"]
+                    .as_u64()
+                    .context("Space bulk count assertion requires equals")?;
+                let progress = self.data(&["progress"])?;
+                ensure!(
+                    progress["repository_space_bulk_progress"][field].as_u64() == Some(expected),
+                    "Expected space bulk {field} {expected}, got {}",
+                    progress["repository_space_bulk_progress"][field]
+                );
+                Ok(true)
+            }
+            "wait-for-space-bulk-target-count" => {
+                let expected = operation["equals"]
+                    .as_u64()
+                    .context("wait-for-space-bulk-target-count requires equals")?;
+                let deadline = Instant::now()
+                    + Duration::from_secs(operation["timeout_s"].as_u64().unwrap_or(120));
+                loop {
+                    let progress = self.data(&["progress"])?;
+                    if progress["repository_space_bulk_progress"]["total_count"].as_u64()
+                        == Some(expected)
+                    {
+                        return Ok(true);
+                    }
+                    ensure!(
+                        Instant::now() < deadline,
+                        "Space bulk target count did not reach {expected}"
+                    );
+                    thread::sleep(Duration::from_millis(50));
+                }
+            }
+            "prepare-test-directory" => {
+                let path = operation["path"]
+                    .as_str()
+                    .context("prepare-test-directory requires path")?;
+                let path = ensure_run_path(self.run, &PathBuf::from(path))?;
+                fs::create_dir_all(&path)?;
+                ensure_run_path(self.run, &path)?;
+                Ok(true)
+            }
+            "invoke-driver" => {
+                let action = operation["action"]
+                    .as_str()
+                    .context("invoke-driver requires action")?;
+                let params = operation
+                    .get("params")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
+                let params = serde_json::to_string(&params)?;
+                let mut args = vec!["invoke", action, "--params", &params];
+                if operation["allow_destructive"].as_bool() == Some(true) {
+                    args.push("--allow-destructive");
+                }
+                self.data(&args)?;
+                Ok(true)
+            }
+            "wait-for-busy" => {
+                let reason = operation["reason"]
+                    .as_str()
+                    .context("wait-for-busy requires reason")?;
+                let expected_active = operation["cleared"].as_bool() != Some(true);
+                let deadline = Instant::now()
+                    + Duration::from_secs(operation["timeout_s"].as_u64().unwrap_or(120));
+                loop {
+                    let progress = self.data(&["progress"])?;
+                    let active = progress["busy_reasons"]
+                        .as_array()
+                        .is_some_and(|reasons| reasons.iter().any(|entry| entry == reason));
+                    if active == expected_active {
+                        return Ok(true);
+                    }
+                    ensure!(
+                        Instant::now() < deadline,
+                        "Timed out waiting for busy reason '{reason}' to {}",
+                        if expected_active { "start" } else { "clear" }
+                    );
+                    thread::sleep(Duration::from_millis(100));
+                }
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn wait_for_promoted_file(&self, before: &Value, timeout: Duration) -> Result<String> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let current = self.repository_file_state()?;
+            if let Some(files) = before.as_object() {
+                for (path, previous) in files {
+                    if current.get(path).is_some_and(|now| now != previous) {
+                        return Ok(path.clone());
+                    }
+                }
+            }
+            ensure!(
+                Instant::now() < deadline,
+                "No previously published file was promoted before the timeout"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    fn close_gui_and_restart(&self, timeout: Duration) -> Result<u64> {
+        self.data(&["close"])?;
+        let started = Instant::now();
+        let deadline = started + timeout;
+        loop {
+            let exited = self
+                .gui
+                .borrow_mut()
+                .as_mut()
+                .context("The GUI process is not running")?
+                .child
+                .try_wait()?
+                .is_some();
+            if exited {
+                break;
+            }
+            ensure!(
+                Instant::now() < deadline,
+                "Foxy did not finish its normal close path before the timeout"
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
+        memory::set(self.pid, None);
+        drop(self.gui.borrow_mut().take());
+        let child =
+            launch::start_gui(self.exe, self.config, self.run, self.env, timeout, self.pid)?;
+        *self.gui.borrow_mut() = Some(child);
+        self.driver(
+            &[
+                "wait".into(),
+                "--busy-reason-cleared".into(),
+                "startup-sync".into(),
+                "--timeout-ms".into(),
+                timeout.as_millis().to_string(),
+            ],
+            timeout + Duration::from_secs(10),
+        )?;
+        Ok(started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64)
+    }
     fn driver(&self, args: &[String], timeout: Duration) -> Result<driver::Response> {
         driver::call(self.exe, self.config, args, self.env, timeout)
     }
@@ -629,6 +963,14 @@ impl ContextRun<'_> {
         if name == "wipe-db" && operation["keep_hash_record"].as_bool() == Some(true) {
             invoke.extend(["--params", r#"{"keep-hash-record":true}"#]);
         }
+        let watch_promotion = operation["cancel_after_promoted_file"].as_bool() == Some(true)
+            || operation["kill_after_promoted_file"].as_bool() == Some(true)
+            || operation["close_after_promoted_file"].as_bool() == Some(true);
+        let before_promotion = if watch_promotion {
+            Some(self.repository_file_state()?)
+        } else {
+            None
+        };
         self.data(&invoke)?;
         let busy_deadline = Instant::now() + Duration::from_secs(30);
         let mut observed_busy = false;
@@ -660,7 +1002,45 @@ impl ContextRun<'_> {
         // A cancellation lane: let the transfer run for `cancel_after_s`, then
         // cancel and measure cancel-to-quiescent (the busy reason clearing).
         let mut cancel_quiescent_ms = Value::Null;
-        if let Some(after) = operation["cancel_after_s"].as_f64()
+        let mut promoted_file = None;
+        let mut close_wait_ms = Value::Null;
+        let mut paused = false;
+        if operation["close_after_promoted_file"].as_bool() == Some(true) && !finished_between_polls
+        {
+            let wait = operation["wait_timeout_s"].as_u64().unwrap_or(300);
+            promoted_file = Some(self.wait_for_promoted_file(
+                before_promotion.as_ref().expect("promotion watch snapshot"),
+                Duration::from_secs(wait),
+            )?);
+            close_wait_ms = self
+                .close_gui_and_restart(Duration::from_secs(wait))?
+                .into();
+            finished_between_polls = true;
+        } else if operation["cancel_after_promoted_file"].as_bool() == Some(true)
+            && !finished_between_polls
+        {
+            let wait = operation["wait_timeout_s"].as_u64().unwrap_or(300);
+            promoted_file = Some(self.wait_for_promoted_file(
+                before_promotion.as_ref().expect("promotion watch snapshot"),
+                Duration::from_secs(wait),
+            )?);
+            let cancel_started = Instant::now();
+            self.data(&["invoke", "cancel-download"])?;
+            self.driver(
+                &[
+                    "wait".into(),
+                    "--busy-reason-cleared".into(),
+                    busy_reason.into(),
+                    "--timeout-ms".into(),
+                    (wait * 1000).to_string(),
+                ],
+                Duration::from_secs(wait + 10),
+            )?;
+            cancel_quiescent_ms = (cancel_started.elapsed().as_secs_f64() * 1000.0)
+                .round()
+                .into();
+            finished_between_polls = true;
+        } else if let Some(after) = operation["cancel_after_s"].as_f64()
             && !finished_between_polls
         {
             thread::sleep(Duration::from_secs_f64(after));
@@ -682,10 +1062,33 @@ impl ContextRun<'_> {
                 .into();
             finished_between_polls = true;
         }
+        if let Some(after) = operation["pause_after_s"].as_f64()
+            && !finished_between_polls
+        {
+            thread::sleep(Duration::from_secs_f64(after));
+            self.data(&["invoke", "pause-download"])?;
+            paused = true;
+            finished_between_polls = true;
+        }
         // A killed process cannot finish the refresh, so the checksum commit
         // inside it must not land. The next operation restarts the app.
         let mut killed = false;
-        if let Some(after) = operation["kill_after_s"].as_f64()
+        if operation["kill_after_promoted_file"].as_bool() == Some(true) && !finished_between_polls
+        {
+            let wait = operation["wait_timeout_s"].as_u64().unwrap_or(300);
+            promoted_file = Some(self.wait_for_promoted_file(
+                before_promotion.as_ref().expect("promotion watch snapshot"),
+                Duration::from_secs(wait),
+            )?);
+            if let Some(gui) = self.gui.borrow_mut().as_mut() {
+                let _ = gui.child.kill();
+                let _ = gui.wait(Duration::from_secs(15));
+            }
+            memory::set(self.pid, None);
+            drop(self.gui.borrow_mut().take());
+            killed = true;
+            finished_between_polls = true;
+        } else if let Some(after) = operation["kill_after_s"].as_f64()
             && !finished_between_polls
         {
             thread::sleep(Duration::from_secs_f64(after));
@@ -732,6 +1135,15 @@ impl ContextRun<'_> {
         };
         if !cancel_quiescent_ms.is_null() {
             summary["cancel_quiescent_ms"] = cancel_quiescent_ms;
+        }
+        if !close_wait_ms.is_null() {
+            summary["close_wait_ms"] = close_wait_ms;
+        }
+        if let Some(path) = promoted_file {
+            summary["promoted_file"] = json!(path);
+        }
+        if paused {
+            summary["paused"] = json!(true);
         }
         if let Some(ui_probe) = ui_probe {
             summary["ui_probe"] = ui_probe;
@@ -1045,6 +1457,10 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
     }
     let env: Environment = [
         (
+            "FOXY_TESTKIT_RUN_DIR".into(),
+            Some(run.to_string_lossy().into_owned()),
+        ),
+        (
             "FOXY_CONFIG_DIR".into(),
             Some(config.to_string_lossy().into_owned()),
         ),
@@ -1069,7 +1485,20 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
     ]
     .into_iter()
     .collect();
-    let exe = if options.no_build {
+    let exe = if let Some(exe) = &options.foxy_binary {
+        let exe = fs::canonicalize(exe).context("Could not resolve --foxy-binary")?;
+        let local = fs::canonicalize(root.join(".local"))
+            .context("Repository .local directory is required for --foxy-binary")?;
+        ensure!(
+            exe.starts_with(local),
+            "--foxy-binary must point inside repository .local"
+        );
+        ensure!(
+            exe.is_file(),
+            "--foxy-binary must point to an executable file"
+        );
+        exe
+    } else if options.no_build {
         launch::executable(root, profile, "Foxy")
     } else {
         launch::build(root, profile, "Foxy", timeout)?
@@ -1079,6 +1508,34 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
         "Foxy executable is missing; build it or omit --no-build"
     );
     let _origin = if let Some(origin) = resolved.get("origin").filter(|v| !v.is_null()) {
+        if let Some(versions) = origin["synthetic"].as_array() {
+            for version in versions {
+                let output = version["root"]
+                    .as_str()
+                    .context("Synthetic origin version requires root")?;
+                let output = ensure_run_path(&run, &PathBuf::from(output))?;
+                let mut source = output.as_os_str().to_owned();
+                source.push("-src");
+                ensure_run_path(&run, &PathBuf::from(source))?;
+                let options = crate::origin::synthetic::SyntheticOptions {
+                    output,
+                    mods: version["mods"].as_u64().unwrap_or(1) as u32,
+                    files_per_mod: version["files_per_mod"].as_u64().unwrap_or(2) as u32,
+                    file_bytes: version["file_bytes"].as_u64().unwrap_or(16 * 1024 * 1024) as usize,
+                    tail_file_bytes: None,
+                    pbo_entries: version["pbo_entries"].as_u64().unwrap_or(0) as u32,
+                    entry_bytes: version["entry_bytes"].as_u64().unwrap_or(64) as usize,
+                    seed: version["seed"].as_i64().unwrap_or(20261028) as i32,
+                    repo_name: version["repo_name"]
+                        .as_str()
+                        .unwrap_or("RepoAlpha")
+                        .to_owned(),
+                    mode: "foxy".into(),
+                    force: true,
+                };
+                options.execute(root)?;
+            }
+        }
         let path = origin["root"]
             .as_str()
             .context("Case origin requires a root directory")?;
@@ -1235,6 +1692,9 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
             .iter()
             .filter(|op| op["setup_once"].as_bool().unwrap_or(false))
         {
+            if context.state_operation(operation)? {
+                continue;
+            }
             if operation["op"].as_str() == Some("evict-cache") {
                 evict(operation)?;
                 continue;
@@ -1257,6 +1717,9 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                 .filter(|op| !op["setup_once"].as_bool().unwrap_or(false))
             {
                 let name = operation["op"].as_str().context("Missing operation name")?;
+                if context.state_operation(operation)? {
+                    continue;
+                }
                 match name {
                     "mutate" => {
                         mutation_info = mutation
@@ -1409,6 +1872,9 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                         "download" | "download-full-files" | "force-redownload"
                     )
                     && !cancelled_on_purpose
+                    && operation["pause_after_s"].as_f64().is_none()
+                    && operation["kill_after_promoted_file"].as_bool() != Some(true)
+                    && operation["kill_after_s"].as_f64().is_none()
                     && summary["files_updated"].as_i64().unwrap_or(-1) != expected
                 {
                     flags.push("incomplete-payload");
@@ -1420,6 +1886,9 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                     name,
                     "download" | "download-full-files" | "force-redownload"
                 ) && !cancelled_on_purpose
+                    && operation["pause_after_s"].as_f64().is_none()
+                    && operation["kill_after_promoted_file"].as_bool() != Some(true)
+                    && operation["kill_after_s"].as_f64().is_none()
                 {
                     if oracle(&resolved, root, &run, timeout)? {
                         "passed"
@@ -1540,9 +2009,49 @@ fn sync_ended_without_download(progress: &Value, busy_reason: &str) -> bool {
 #[cfg(test)]
 mod cache_state_tests {
     use super::{
-        cache_state, outcome_matches, residual_download_artifacts, sync_ended_without_download,
+        cache_state, ensure_run_path, file_state_contains, is_download_sidecar, outcome_matches,
+        residual_download_artifacts, sync_ended_without_download,
     };
     use serde_json::json;
+    use std::path::PathBuf;
+
+    #[test]
+    fn payload_state_ignores_sidecars_and_preserves_captured_file_bytes() {
+        for path in [
+            "file.foxy.bak",
+            "file.foxy.part",
+            "file.foxy.part.meta",
+            "file.foxy.tmp",
+        ] {
+            assert!(is_download_sidecar(std::path::Path::new(path)));
+        }
+        assert!(!is_download_sidecar(std::path::Path::new("file.pbo")));
+        let captured = json!({"promoted.bin": {"bytes": 3, "blake3": "new"}});
+        assert!(file_state_contains(
+            &json!({"promoted.bin": {"bytes": 3, "blake3": "new"}, "restored.bin": {"bytes": 3, "blake3": "old"}}),
+            &captured
+        ));
+        assert!(!file_state_contains(&json!({}), &captured));
+        assert!(!file_state_contains(
+            &json!({"promoted.bin": {"bytes": 3, "blake3": "old"}}),
+            &captured
+        ));
+    }
+
+    #[test]
+    fn test_paths_must_be_absolute_and_stay_inside_the_run() {
+        let run = tempfile::tempdir().unwrap();
+        let inside = run.path().join("nested");
+        std::fs::create_dir_all(&inside).unwrap();
+        assert_eq!(ensure_run_path(run.path(), &inside).unwrap(), inside);
+        let missing = inside.join("new").join("payload");
+        assert_eq!(ensure_run_path(run.path(), &missing).unwrap(), missing);
+        assert!(ensure_run_path(run.path(), &inside.join("..").join("escape")).is_err());
+        assert!(ensure_run_path(run.path(), &PathBuf::from("relative")).is_err());
+        assert!(
+            ensure_run_path(run.path(), &run.path().parent().unwrap().join("outside")).is_err()
+        );
+    }
 
     #[test]
     fn a_download_wait_ends_only_once_the_sync_is_over_without_completing() {

@@ -604,6 +604,9 @@ pub(super) async fn process_mod_batch(
                     running_total = running_total.saturating_sub(1);
                 }
                 Ok((Err(err), _is_large, file)) => {
+                    if !cancellation_requested(&cancel_rx) {
+                        download_stop.record_failure(&err);
+                    }
                     running_total = running_total.saturating_sub(1);
                     if is_missing_remote_file(&err) {
                         download_stop.remote_file_missing();

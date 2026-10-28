@@ -1,5 +1,7 @@
 # 1.2.2
 ## Added
+- Temporary update failures can now retry automatically while Foxy stays open, with a countdown and Cancel retry control. This is enabled by default and can be disabled in Application settings or with `foxy settings set --retry-failed-downloads false`. Bulk runs retry a temporary failure once before continuing with other repositories.
+- Launch and Join can wait for an update that is replacing files the game needs. The queued launch can be cancelled, checks readiness again after the update succeeds, and does not launch after a failed or cancelled update.
 - Addons, Optional Addons, and External Addons now have a default-off Filtered only checkbox. Turn it on to make Enable all and Disable all affect only addons matching the current filters.
 - Right-click an addon to open its Steam Workshop or Arma Reforger Workshop page in your browser, including optional and external addons.
 - Generic game spaces can now use repositories, including repositories that deliver the game itself. The game shows in its own Game section instead of the addon list, always stays up to date, and Launch starts it directly without any game directory or Steam setup. Updates to the game download only the changed parts of its files.
@@ -13,12 +15,17 @@
 - Failed repository checks, failed database wipes, bulk rechecks or updates with failures, and dialogs that show an error now offer Export logs to ZIP next to the message, so you can share the logs with support without opening Settings.
 
 ## Changed
+- Paused repository updates stay paused after closing and reopening Foxy. Resume checks the current update plan before downloading; scheduled and bulk updates respect the saved pause.
+- Before joining, Foxy refreshes the server's addon requirements and local availability. Changed requirements keep compatible choices and ask for confirmation again.
+- Updating shared files with conflicting versions is blocked within a repository space. For independently configured repositories sharing a folder, Foxy warns which other repositories will need updating and keeps their status accurate.
+- When a repository server is unreachable, its page distinguishes cached local status from remote freshness and shows the last successful server check.
+- Editing, disabling, or deleting a running scheduled job now asks whether to change future runs only or also stop the current run and its close or shutdown action.
 - Progress bars show triangles only while work is running. Idle and paused bars use solid fills, and completed downloads turn solid green.
 - Saved benchmarks now record work priority, low disk priority, and any forced memory pressure, with the settings shown in benchmark details and text exports.
 - While Foxy's window is in the background it redraws at most 10 times per second, and once per second when minimized or in the tray, so showing progress uses less processor time while you play. The FPS counter no longer keeps a background window redrawing.
 
 ## Fixed
-- Database startup errors caused by file access or an incompatible operation no longer silently replace existing database records. Foxy preserves the database and reports the failure instead.
+- Database startup errors caused by file access or an incompatible operation no longer silently replace existing database records. Foxy preserves the database and reports the failure instead. A corrupt database that cannot be backed up requires explicit confirmation before it is discarded and rebuilt.
 - Repository space rechecks, quick local checks, and updates now follow the repository order you set in the sidebar instead of the server's order.
 - Downloads now retry temporary connection failures and busy-server responses without restarting the whole file attempt. Interrupted transfers validate resumed byte ranges, and cancellation stops waiting for stalled server responses promptly. This reduces repeated failures partway through an update and keeps invalid resumed data from being accepted.
 - Fixed updates reusing outdated file lists after server changes, including updates already pending at startup or awaiting confirmation, and after a database wipe. Foxy now refreshes changed and pending addon manifests, includes newly changed addons, and validates saved update plans against current server metadata. This prevents missing published files, deleting manually copied files, or repeatedly downloading the same files. Inconsistent server metadata and failed verification are reported instead of claiming success.
@@ -33,10 +40,10 @@
 - Updating a repository no longer deletes the saved patch plans of repositories in other game spaces, which made their next update download whole files.
 - Updating while the game is running now stops before downloading anything and names a file the game keeps open, instead of downloading everything and then rolling back with a generic error. If the game starts during an update, the update stops and restores the previous files.
 - An update whose patch failed and fell back to a full download now restores the original file when it is later cancelled or fails, instead of deleting it.
-- Closing Foxy during an update now cancels it and restores the previous files before the window closes, instead of leaving a mix of old and new files.
+- Closing Foxy during an update now waits for previous files to be restored and changes saved. A slow cleanup offers explicit force quit instead of silently exiting; interrupted restoration is retried on reopening. Unexpected crashes preserve completed update files and identify the installation as interrupted until checked.
 - Starting Foxy in another game space no longer discards the restore data of an update that is still running.
 - Cancel now stops the whole folder, repository space, or scheduled run instead of only the repository in progress.
-- Deleting, reordering, or cloning a repository during a folder or repository space Update all no longer starts the next update on the wrong repository.
+- Deleting, reordering, or cloning a repository during a folder or repository space Update all no longer starts the next update on the wrong repository. Queued work keeps its original address and folder, skips changed or detached targets, and uses the current profile when an unchanged target starts.
 - Repository space Update all and Recheck all no longer stay stuck with disabled buttons when a repository cannot start, is removed from the space or deleted, or stops without reporting a result.
 - Scheduled jobs that fall due while a check, update, or another job is running now wait and start as soon as that work finishes, instead of being recorded as missed. A job is missed only when Foxy was closed or the computer was asleep, and the log says which. The Scheduling tab shows a job that is waiting.
 - A scheduled close or shutdown limited to runs where everything succeeded no longer runs when some repositories could not start. Scheduled post-actions also no longer interrupt a running download and never run after the job was cancelled.
@@ -49,7 +56,9 @@
 - Deleting a repository while another one is updating no longer clears that update's progress and summary.
 - Results that arrive after switching game spaces are no longer applied to the new space, and a running Steam Workshop task now has to finish before you can switch.
 - A database compaction interrupted by a crash or power loss no longer starts Foxy with an empty database; the original is restored. An interrupted full database wipe now finishes on the next start instead of leaving a half-wiped database that looked healthy.
-- Unreadable repository, repository space, folder, or settings files are no longer overwritten on the next save. Foxy keeps a copy ending in `.unreadable` and tells you, and a read error no longer removes every repository from its repository space.
+- Unreadable repository, repository space, folder, or settings files are preserved as `.unreadable` copies and require confirmation before a replacement is saved. If preserving the original fails, overwriting it is blocked. An unreadable game-space registry is preserved too, and a read error no longer removes every repository from its repository space.
+- Switching game spaces freezes edits while outgoing changes save. A failed save offers Retry, an explicit discard and switch, or Cancel, with writes kept in their owning space.
+- Command line sync no longer reports success when its worker stops without a terminal result.
 - Command line: `foxy repo wipe-db` and `foxy repo force-redownload` no longer wipe the records of another folder's copy of the same repository.
 - Command line: on a new installation, a first command such as `foxy repo wipe-db` no longer leaves the database marked as outdated, which blocked every later check and update until `foxy --wipe-db --yes` rebuilt it.
 - Pre-release builds now get the update notification when the stable release of the same version is published, the same way older versions do. The update screens show a pre-release's version with `-pre`, such as `1.2.2-pre`.

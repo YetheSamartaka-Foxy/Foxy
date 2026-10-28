@@ -46,6 +46,9 @@ enum Command {
         validate_only: bool,
         #[arg(long)]
         no_build: bool,
+        /// Use a Foxy executable stored under the repository's ignored .local directory.
+        #[arg(long)]
+        foxy_binary: Option<PathBuf>,
         /// Sample the app's hash progress fraction at this interval during
         /// each GUI operation and score how far it strays from linear; 0 is off.
         /// A run flag rather than a case field, so frozen cases keep their hash.
@@ -229,12 +232,14 @@ fn main() -> Result<()> {
             accept,
             validate_only,
             no_build,
+            foxy_binary,
             progress_probe_ms,
         } => {
             let result = run::execute(
                 repo_root,
                 &run::RunOptions {
                     case: absolute(repo_root, &case),
+                    foxy_binary: foxy_binary.map(|path| absolute(repo_root, &path)),
                     database_mode,
                     db_write_gate,
                     accept,

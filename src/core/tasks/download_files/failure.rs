@@ -124,6 +124,8 @@ impl std::fmt::Display for TargetsInUse {
 impl std::error::Error for TargetsInUse {}
 
 pub(super) struct DownloadStop {
+    transient_failure: AtomicBool,
+    permanent_failure: AtomicBool,
     missing_remote_file: AtomicBool,
     target_in_use: AtomicBool,
     cancel_tx: watch::Sender<bool>,
@@ -132,6 +134,8 @@ pub(super) struct DownloadStop {
 impl DownloadStop {
     pub(super) fn new(cancel_tx: watch::Sender<bool>) -> Self {
         Self {
+            transient_failure: AtomicBool::new(false),
+            permanent_failure: AtomicBool::new(false),
             missing_remote_file: AtomicBool::new(false),
             target_in_use: AtomicBool::new(false),
             cancel_tx,
@@ -157,7 +161,55 @@ impl DownloadStop {
     pub(super) fn has_target_in_use(&self) -> bool {
         self.target_in_use.load(Ordering::SeqCst)
     }
+
+    pub(super) fn record_failure(&self, error: &anyhow::Error) {
+        let transient = error.is::<TransientDownloadFailure>()
+            || error.chain().any(|cause| {
+                cause.downcast_ref::<reqwest::Error>().is_some_and(|err| {
+                    err.is_timeout()
+                        || err.is_connect()
+                        || err.is_body()
+                        || err.status().is_some_and(|status| {
+                            status.is_server_error()
+                                || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                                || status == reqwest::StatusCode::REQUEST_TIMEOUT
+                        })
+                }) || cause.downcast_ref::<std::io::Error>().is_some_and(|err| {
+                    matches!(
+                        err.kind(),
+                        std::io::ErrorKind::ConnectionReset
+                            | std::io::ErrorKind::ConnectionAborted
+                            | std::io::ErrorKind::NotConnected
+                            | std::io::ErrorKind::TimedOut
+                    )
+                })
+            });
+        if transient {
+            &self.transient_failure
+        } else {
+            &self.permanent_failure
+        }
+        .store(true, Ordering::SeqCst);
+    }
+
+    pub(super) fn only_transient_failures(&self) -> bool {
+        self.transient_failure.load(Ordering::SeqCst)
+            && !self.permanent_failure.load(Ordering::SeqCst)
+    }
 }
+
+#[derive(Debug)]
+pub(crate) struct TransientDownloadFailure;
+
+impl std::fmt::Display for TransientDownloadFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(
+            "The connection or server is temporarily unavailable. The update can be retried.",
+        )
+    }
+}
+
+impl std::error::Error for TransientDownloadFailure {}
 
 #[derive(Debug)]
 pub(crate) struct MissingRemoteFiles;
@@ -173,6 +225,28 @@ impl std::error::Error for MissingRemoteFiles {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automatic_retry_requires_only_transient_failures() {
+        let (tx, _) = watch::channel(false);
+        let stop = DownloadStop::new(tx);
+        stop.record_failure(&anyhow::Error::from(std::io::Error::from(
+            std::io::ErrorKind::TimedOut,
+        )));
+        assert!(stop.only_transient_failures());
+        stop.record_failure(&anyhow::Error::from(std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied,
+        )));
+        assert!(!stop.only_transient_failures());
+    }
+
+    #[test]
+    fn unknown_failures_are_not_automatically_retried() {
+        let (tx, _) = watch::channel(false);
+        let stop = DownloadStop::new(tx);
+        stop.record_failure(&anyhow::anyhow!("checksum mismatch"));
+        assert!(!stop.only_transient_failures());
+    }
 
     #[test]
     fn missing_remote_file_stops_transfers_without_user_cancellation() {

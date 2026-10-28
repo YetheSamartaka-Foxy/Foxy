@@ -235,7 +235,22 @@ fn run_db_wipe(output: &CliOutput, confirmed: bool) -> CliExecution {
     }
 
     let result = match tokio::runtime::Runtime::new() {
-        Ok(rt) => rt.block_on(crate::core::tasks::init_database::wipe_database_live()),
+        Ok(rt) => {
+            let first = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                rt.block_on(crate::core::tasks::init_database::wipe_database_live())
+            }));
+            match first {
+                Ok(result) => result,
+                Err(_) if crate::core::tasks::db_turso::corrupt_rebuild_requires_discard() => {
+                    crate::core::tasks::db_turso::discard_corrupt_database().and_then(|()| {
+                        rt.block_on(crate::core::tasks::init_database::wipe_database_live())
+                    })
+                }
+                Err(_) => Err(
+                    "Database initialization failed; existing records were preserved".to_string(),
+                ),
+            }
+        }
         Err(err) => Err(format!("Failed to create runtime for database wipe: {err}")),
     };
 

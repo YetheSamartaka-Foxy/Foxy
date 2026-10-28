@@ -5,9 +5,49 @@ use log::{info, warn};
 use crate::core::api::SyncMode;
 use crate::ui::app::Foxy;
 use crate::ui::types::{
-    BulkActionEntry, RepoState, Repository, RepositorySpace, RepositorySpaceBulkAction,
-    RepositorySpaceBulkMode, RepositoryVisualFolder,
+    BulkActionEntry, RepoInstanceKey, RepoState, Repository, RepositorySpace,
+    RepositorySpaceBulkAction, RepositorySpaceBulkMode, RepositoryVisualFolder,
 };
+
+#[derive(Debug, Clone)]
+pub(crate) struct QueuedRepositorySpaceSync {
+    pub space_id: String,
+    pub target: RepoInstanceKey,
+    pub mode: SyncMode,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct QueuedRepositoryVisualFolderSync {
+    pub folder_id: String,
+    pub target: RepoInstanceKey,
+    pub mode: SyncMode,
+}
+
+fn repo_key(repo: &Repository) -> RepoInstanceKey {
+    RepoInstanceKey {
+        remote_url: repo.address.clone(),
+        local_path: repo.path.clone(),
+    }
+}
+
+fn queued_target_matches(repo: &Repository, target: &RepoInstanceKey) -> bool {
+    queued_identity_matches(&repo.address, &repo.path, target)
+}
+
+fn queued_identity_matches(address: &str, path: &str, target: &RepoInstanceKey) -> bool {
+    Foxy::normalize_repo_url(address) == Foxy::normalize_repo_url(&target.remote_url)
+        && Foxy::repo_instance_path_key(path) == Foxy::repo_instance_path_key(&target.local_path)
+}
+
+fn queued_target_remains_in_folder(
+    folder: &RepositoryVisualFolder,
+    target: &RepoInstanceKey,
+) -> bool {
+    folder.repository_keys.contains(&Foxy::repo_instance_key(
+        &target.remote_url,
+        &target.local_path,
+    ))
+}
 
 fn repository_space_sync_targets(
     space: &RepositorySpace,
@@ -113,8 +153,19 @@ impl Foxy {
             if repo.address.trim().is_empty() || repo.path.trim().is_empty() {
                 continue;
             }
+            let Some(folder) = self
+                .repository_visual_folders
+                .iter()
+                .find(|folder| folder.id == folder_id)
+            else {
+                continue;
+            };
             self.repository_visual_folder_sync_queue
-                .push_back((repo_idx, mode));
+                .push_back(QueuedRepositoryVisualFolderSync {
+                    folder_id: folder.id.clone(),
+                    target: repo_key(repo),
+                    mode,
+                });
         }
 
         let queued = self.repository_visual_folder_sync_queue.len();
@@ -171,7 +222,11 @@ impl Foxy {
                 continue;
             }
             self.repository_space_sync_queue
-                .push_back((space_id.to_string(), repo_idx, mode));
+                .push_back(QueuedRepositorySpaceSync {
+                    space_id: space_id.to_string(),
+                    target: repo_key(repo),
+                    mode,
+                });
         }
 
         self.repository_space_sync_queue.len()
@@ -253,10 +308,15 @@ impl Foxy {
         let target_repo_urls: HashSet<String> = self
             .repository_space_sync_queue
             .iter()
-            .filter(|(queued_space_id, _, queued_mode)| {
-                queued_space_id == space_id && *queued_mode == Self::sync_mode_for_bulk_mode(mode)
+            .filter(|queued| {
+                queued.space_id == space_id && queued.mode == Self::sync_mode_for_bulk_mode(mode)
             })
-            .filter_map(|(_, idx, _)| self.repository_view_state.repositories.get(*idx))
+            .filter_map(|queued| {
+                self.repository_view_state
+                    .repositories
+                    .iter()
+                    .find(|repo| queued_target_matches(repo, &queued.target))
+            })
             .map(|repo| Self::normalize_repo_url(&repo.address))
             .collect();
         let total_count = target_repo_urls.len();
@@ -365,17 +425,27 @@ impl Foxy {
     }
 
     pub(in crate::ui::app) fn process_repository_space_sync_queue(&mut self) {
-        if self.database_updates_blocked()
+        if self.pending_download_retry.is_some()
+            || self.database_updates_blocked()
             || self.repository_sync_active()
             || self.is_direct_download_running()
         {
             return;
         }
 
-        while let Some((space_id, repo_idx, mode)) = self.repository_space_sync_queue.pop_front() {
-            let Some(repo) = self.repository_view_state.repositories.get(repo_idx) else {
+        while let Some(queued) = self.repository_space_sync_queue.pop_front() {
+            let space_id = queued.space_id;
+            let mode = queued.mode;
+            let Some(repo_idx) = self
+                .repository_view_state
+                .repositories
+                .iter()
+                .position(|repo| queued_target_matches(repo, &queued.target))
+            else {
+                self.skip_changed_repository_space_target(&space_id, &queued.target);
                 continue;
             };
+            let repo = &self.repository_view_state.repositories[repo_idx];
             let repo_url = Self::normalize_repo_url(&repo.address);
             if repo.repository_space_id.as_deref() != Some(space_id.as_str()) {
                 // Detached since it was queued: no longer part of the run.
@@ -406,6 +476,7 @@ impl Foxy {
             let repo_name = repo.name.clone();
             self.start_core_sync(repo_idx, mode);
             if self.syncing_repository == Some(repo_idx) {
+                self.sync_is_bulk = true;
                 self.refresh_repository_space_bulk_current_repo();
                 info!(
                     "Started queued repository-space sync: {} mode={:?}",
@@ -423,12 +494,26 @@ impl Foxy {
         }
     }
 
+    fn skip_changed_repository_space_target(&mut self, space_id: &str, target: &RepoInstanceKey) {
+        if let Some(progress) = self
+            .repository_space_bulk_progress
+            .as_mut()
+            .filter(|progress| progress.space_id == space_id)
+        {
+            progress.remove_target(&Self::normalize_repo_url(&target.remote_url));
+        }
+        self.show_error_toast(
+            self.t("Queued repository skipped because its address or folder changed."),
+        );
+        self.finish_repository_space_bulk_if_done();
+    }
+
     /// Clear a run whose remaining members were all taken out of it.
     fn finish_repository_space_bulk_if_done(&mut self) {
         if self
             .repository_space_bulk_progress
             .as_ref()
-            .is_some_and(|progress| progress.total_count == 0)
+            .is_some_and(|progress| progress.total_count == 0 && progress.failed_count == 0)
         {
             self.repository_space_bulk_progress = None;
         }
@@ -441,15 +526,12 @@ impl Foxy {
         let dropped_folder = self.repository_visual_folder_sync_queue.len();
         self.repository_visual_folder_sync_queue.clear();
         let dropped_space: Vec<_> = self.repository_space_sync_queue.drain(..).collect();
-        for (space_id, repo_idx, _) in &dropped_space {
-            let Some(repo) = self.repository_view_state.repositories.get(*repo_idx) else {
-                continue;
-            };
-            let repo_url = Self::normalize_repo_url(&repo.address);
+        for queued in &dropped_space {
+            let repo_url = Self::normalize_repo_url(&queued.target.remote_url);
             if let Some(progress) = self
                 .repository_space_bulk_progress
                 .as_mut()
-                .filter(|progress| &progress.space_id == space_id)
+                .filter(|progress| progress.space_id == queued.space_id)
             {
                 progress.remove_target(&repo_url);
             }
@@ -467,17 +549,37 @@ impl Foxy {
     }
 
     pub(in crate::ui::app) fn process_repository_visual_folder_sync_queue(&mut self) {
-        if self.database_updates_blocked()
+        if self.pending_download_retry.is_some()
+            || self.database_updates_blocked()
             || self.repository_sync_active()
             || self.is_direct_download_running()
         {
             return;
         }
 
-        while let Some((repo_idx, mode)) = self.repository_visual_folder_sync_queue.pop_front() {
-            let Some(repo) = self.repository_view_state.repositories.get(repo_idx) else {
+        while let Some(queued) = self.repository_visual_folder_sync_queue.pop_front() {
+            let Some(repo_idx) = self
+                .repository_view_state
+                .repositories
+                .iter()
+                .position(|repo| queued_target_matches(repo, &queued.target))
+            else {
+                self.show_error_toast(
+                    self.t("Queued repository skipped because its address or folder changed."),
+                );
                 continue;
             };
+            let still_in_folder = self.repository_visual_folders.iter().any(|folder| {
+                folder.id == queued.folder_id
+                    && queued_target_remains_in_folder(folder, &queued.target)
+            });
+            if !still_in_folder {
+                self.show_error_toast(
+                    self.t("Queued repository skipped because it left the selected folder."),
+                );
+                continue;
+            }
+            let repo = &self.repository_view_state.repositories[repo_idx];
             if repo.address.trim().is_empty() || repo.path.trim().is_empty() {
                 warn!(
                     "Skipping queued visual-folder sync for {} due to incomplete configuration",
@@ -487,11 +589,13 @@ impl Foxy {
             }
 
             let repo_name = repo.name.clone();
-            self.start_core_sync(repo_idx, mode);
+            self.start_core_sync(repo_idx, queued.mode);
             if self.syncing_repository == Some(repo_idx) {
+                self.sync_is_bulk = true;
+                self.sync_visual_folder_id = Some(queued.folder_id.clone());
                 info!(
                     "Started queued visual-folder sync: {} mode={:?}",
-                    repo_name, mode
+                    repo_name, queued.mode
                 );
                 break;
             }
@@ -533,6 +637,51 @@ impl Foxy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queued_identity_matches_only_the_original_address_and_path() {
+        let target = RepoInstanceKey {
+            remote_url: "https://repo.example.invalid/pack".into(),
+            local_path: "R:/Mods/Pack".into(),
+        };
+        assert!(queued_identity_matches(
+            "https://repo.example.invalid/pack/",
+            "r:/mods/pack",
+            &target,
+        ));
+        assert!(!queued_identity_matches(
+            "https://repo.example.invalid/other/",
+            "R:/Mods/Pack",
+            &target,
+        ));
+        assert!(!queued_identity_matches(
+            "https://repo.example.invalid/pack/",
+            "R:/Mods/Other",
+            &target,
+        ));
+    }
+
+    #[test]
+    fn visual_folder_queue_member_must_still_be_in_original_folder() {
+        let target = RepoInstanceKey {
+            remote_url: "https://repo.example.invalid/pack/".into(),
+            local_path: "R:/Mods/Pack".into(),
+        };
+        let mut folder = RepositoryVisualFolder {
+            id: "folder".into(),
+            name: "Folder".into(),
+            repository_space_id: None,
+            color_rgb: [0, 0, 0],
+            collapsed: false,
+            repository_keys: vec![Foxy::repo_instance_key(
+                &target.remote_url,
+                &target.local_path,
+            )],
+        };
+        assert!(queued_target_remains_in_folder(&folder, &target));
+        folder.repository_keys.clear();
+        assert!(!queued_target_remains_in_folder(&folder, &target));
+    }
 
     fn space() -> RepositorySpace {
         serde_json::from_value(serde_json::json!({

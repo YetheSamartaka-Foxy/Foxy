@@ -2,6 +2,7 @@ mod banner_translations;
 mod banners;
 mod game_build;
 mod launch;
+mod launch_policy;
 mod list;
 mod list_rows;
 mod mission_cards;

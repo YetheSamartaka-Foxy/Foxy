@@ -47,6 +47,7 @@ impl Foxy {
             || !pending.extra_enabled.is_empty();
         let has_dlc_changes = pending.has_dlc_changes();
         let has_addon_actions = has_addon_list_actions || has_dlc_changes;
+        let final_facts_query_running = self.pending_join_preflight_query.is_some();
 
         if let Some(status) = self.prelaunch_process_checks.poll(
             ctx,
@@ -108,6 +109,19 @@ impl Foxy {
             .default_width(modal_width)
             .show(ctx, |ui| {
                 join_preflight_body(ui, |ui| {
+                    if pending.final_facts_refreshed {
+                        ui.colored_label(
+                            self.color_text_error(),
+                            self.t("Server or local addon requirements changed. Review the refreshed choices before joining."),
+                        );
+                        ui.add_space(6.0);
+                    }
+                    if final_facts_query_running {
+                        ui.horizontal(|ui| {
+                            ui.add(crate::ui::app::PacedSpinner::new());
+                            ui.label(self.t("Refreshing server and local addon requirements..."));
+                        });
+                    }
                 Frame::NONE
                     .fill(self.color_main_bg())
                     .stroke(egui::Stroke::new(1.0, self.color_text_gray()))
@@ -544,7 +558,7 @@ impl Foxy {
                             self.t("Launch with selected addons")
                         };
                         let launch_with_btn = ui.add_enabled(
-                            has_selected_addons && (selected_missing_known_remote || can_launch),
+                            !final_facts_query_running && has_selected_addons && (selected_missing_known_remote || can_launch),
                             Button::new(action_label),
                         );
                         if launch_with_btn.hovered() && launch_with_btn.enabled() {
@@ -567,8 +581,10 @@ impl Foxy {
                     } else {
                         self.t("Join")
                     };
-                    let launch_without_btn =
-                        ui.add_enabled(can_launch, Button::new(launch_without_label));
+                    let launch_without_btn = ui.add_enabled(
+                        !final_facts_query_running && can_launch,
+                        Button::new(launch_without_label),
+                    );
                     if launch_without_btn.hovered() && can_launch {
                         ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                     }
@@ -588,6 +604,7 @@ impl Foxy {
 
         if cancel {
             self.pending_join_preflight = None;
+            self.pending_join_preflight_query = None;
             self.prelaunch_process_checks = Default::default();
             return;
         }
@@ -662,6 +679,19 @@ impl Foxy {
             if !pending.can_launch() {
                 self.pending_join_preflight = Some(pending);
                 ctx.request_repaint();
+                return;
+            }
+        }
+
+        if launch_with_suggestions || launch_without_suggestions {
+            let has_selected_missing_remote = launch_with_suggestions
+                && pending
+                    .known_remote
+                    .iter()
+                    .any(|remote| remote.selected && !remote.available);
+            if !has_selected_missing_remote
+                && self.confirm_final_join_facts(ctx, &pending, launch_with_suggestions)
+            {
                 return;
             }
         }

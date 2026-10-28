@@ -18,6 +18,7 @@ use super::hashing::{
     render_hash_total_summary, run_incremental_hash_batch,
 };
 use super::remote_recovery::invalidate_remote_graph;
+use super::shared_conflicts;
 use super::summary::{PipelineSummary, StageEntry};
 use super::verification::verify_downloaded_files;
 use crate::core::api::FileDiffKind;
@@ -1076,6 +1077,7 @@ async fn run_repository_pipeline(
         operation_id,
         mut prepare_download_plan,
         repository_space_shared_path,
+        repository_space_members,
         auto_backup_directory,
         rollback_temp_directory,
         download_speed_limit_mbps,
@@ -1901,6 +1903,7 @@ async fn run_repository_pipeline(
         if force_redownload || defer_remote_metadata_part_inserts {
             context.set_defer_part_inserts(true);
         }
+        context.clear_transient_metadata_failure();
         let repo_metadata = remote_repository(
             remote_refresh_context,
             &normalized_repo_url,
@@ -1930,6 +1933,9 @@ async fn run_repository_pipeline(
             );
             error!("{}", message);
             summary.log_table("failed-remote-metadata");
+            if context.has_transient_metadata_failure() && !*cancel_rx.borrow() {
+                emit_progress!(ProgressEvent::RetryableDownloadFailure);
+            }
             emit_progress!(ProgressEvent::Failed(message));
             return;
         };
@@ -3125,6 +3131,39 @@ async fn run_repository_pipeline(
     }
 
     // Download files
+    let mut shared_version_advisory = false;
+    match shared_conflicts::check_shared_version_conflicts(
+        context.clone(),
+        &normalized_repo_url,
+        &repository_space_members,
+    )
+    .await
+    {
+        Ok(conflicts) => {
+            if !conflicts.blocking.is_empty() {
+                let message = format!(
+                    "Shared addon versions conflict within this repository space: {}. Publish matching shared files before updating.",
+                    conflicts.blocking.join(", ")
+                );
+                summary.log_table("failed-shared-version-conflict");
+                emit_progress!(ProgressEvent::Failed(message));
+                return;
+            }
+            if !conflicts.advisory.is_empty() {
+                shared_version_advisory = true;
+                emit_progress!(ProgressEvent::SharedVersionWarning {
+                    repositories: conflicts.advisory
+                });
+            }
+        }
+        Err(err) => {
+            summary.log_table("failed-shared-version-check");
+            emit_progress!(ProgressEvent::Failed(format!(
+                "Could not check shared addon versions: {err}"
+            )));
+            return;
+        }
+    }
     crate::core::utils::profiling::phase("download");
     let download_start = std::time::Instant::now();
     let mut hashed_download_file_ids: HashSet<u64> = HashSet::new();
@@ -3146,18 +3185,28 @@ async fn run_repository_pipeline(
             "Rollback stale-session cleanup failed for repo={}: {}",
             normalized_repo_url, err
         );
+        summary.log_table("failed-prior-recovery");
+        emit_progress!(ProgressEvent::Failed(format!(
+            "Previous update recovery is incomplete: {err}"
+        )));
+        return;
     }
-    let rollback_session =
-        match UpdateRollbackSession::new(&rollback_root, &normalized_repo_url).await {
-            Ok(session) => Some(Arc::new(Mutex::new(session))),
-            Err(err) => {
-                let message = format!("Failed to prepare update rollback: {}", err);
-                error!("{}", message);
-                summary.log_table("failed-rollback-prepare");
-                emit_progress!(ProgressEvent::Failed(message));
-                return;
-            }
-        };
+    let rollback_session = match UpdateRollbackSession::new_for_instance(
+        &rollback_root,
+        &normalized_repo_url,
+        &local_path,
+    )
+    .await
+    {
+        Ok(session) => Some(Arc::new(Mutex::new(session))),
+        Err(err) => {
+            let message = format!("Failed to prepare update rollback: {}", err);
+            error!("{}", message);
+            summary.log_table("failed-rollback-prepare");
+            emit_progress!(ProgressEvent::Failed(message));
+            return;
+        }
+    };
     let mut cancel_watch = cancel_rx.clone();
     let allowed_ids_for_download = if download_file_ids.is_empty() {
         None
@@ -3467,6 +3516,10 @@ async fn run_repository_pipeline(
                 if *cancel_watch.borrow() {
                     info!("Sync cancelled during download phase for repo={}", normalized_repo_url);
                     cancelled_during_download = true;
+                    if let Some(session) = rollback_session.as_ref()
+                        && let Err(err) = session.lock().await.request_restore().await {
+                        warn!("Could not record cancellation recovery intent: {err}");
+                    }
                     emit_progress!(ProgressEvent::Stage {
                         label: "Cancelling...".into(),
                         percent: 0.84,
@@ -3523,6 +3576,9 @@ async fn run_repository_pipeline(
         Ok(report) => report,
         Err(err) => {
             settle_incremental_hash_worker(incremental_hash_worker, "failure").await;
+            let retryable =
+                err.is::<crate::core::tasks::download_files::TransientDownloadFailure>();
+            let mut rollback_succeeded = true;
             let message = format!("Download failed: {}", err);
             error!("{}", message);
             if let Some(session) = rollback_session.as_ref() {
@@ -3532,6 +3588,7 @@ async fn run_repository_pipeline(
                 });
                 let mut rollback = session.lock().await;
                 if let Err(rollback_err) = rollback.restore_all(Some(progress_tx.clone())).await {
+                    rollback_succeeded = false;
                     warn!(
                         "Rollback after download failure failed for repo={}: {}",
                         normalized_repo_url, rollback_err
@@ -3557,6 +3614,9 @@ async fn run_repository_pipeline(
                 }
             }
             summary.log_table("failed-download");
+            if retryable && rollback_succeeded {
+                emit_progress!(ProgressEvent::RetryableDownloadFailure);
+            }
             emit_progress!(ProgressEvent::Failed(message));
             return;
         }
@@ -3810,6 +3870,39 @@ async fn run_repository_pipeline(
 
     // Propagate checksums to sibling repositories sharing the same addon paths,
     // so subsequent syncs in the same space skip already-downloaded files.
+    if shared_version_advisory {
+        match shared_conflicts::invalidate_conflicting_siblings(
+            context.clone(),
+            &normalized_repo_url,
+        )
+        .await
+        {
+            Ok(repo_urls) => emit_progress!(ProgressEvent::SiblingPropagation { repo_urls }),
+            Err(err) => {
+                summary.log_table("failed-shared-version-state");
+                if let Some(session) = rollback_session.as_ref() {
+                    let mut rollback = session.lock().await;
+                    let restored = rollback.restore_all(Some(progress_tx.clone())).await;
+                    forget_reverted_hashes(
+                        context.clone(),
+                        &rollback.touched_file_ids(),
+                        "shared-version-failure",
+                    )
+                    .await;
+                    if let Err(restore_err) = restored {
+                        emit_progress!(ProgressEvent::Failed(format!(
+                            "Failed to revert shared-file update: {restore_err}"
+                        )));
+                        return;
+                    }
+                }
+                emit_progress!(ProgressEvent::Failed(format!(
+                    "Could not invalidate conflicting shared-file state: {err}"
+                )));
+                return;
+            }
+        }
+    }
     let propagated_sibling_urls =
         propagate_checksums_to_siblings(context.clone(), &normalized_repo_url).await;
     if !propagated_sibling_urls.is_empty() {
@@ -3895,6 +3988,7 @@ async fn run_repository_pipeline(
             emit_progress!(ProgressEvent::Failed(message));
             return;
         }
+        UpdateRollbackSession::clear_recovery_notice(&normalized_repo_url, &local_path);
         info!(
             "Committed update rollback session for repo={} touched_files={}",
             normalized_repo_url, touched_files

@@ -192,7 +192,6 @@ impl Foxy {
                     self.database_wipe_in_flight = false;
                     self.pending_db_schema_wipe = None;
                     self.show_db_schema_wipe_prompt = false;
-                    self.join_preflight_cache.clear();
                     self.fs_watch_index_dirty = true;
                     self.show_success_toast(self.t("Database wiped successfully"));
                     if repair_required && self.startup_tasks_started {
@@ -340,6 +339,12 @@ impl Foxy {
                         }
                         let last_repo = self.syncing_repository;
                         let last_mode = self.current_sync_mode;
+                        if let Some(repo) = last_repo
+                            .and_then(|idx| self.repository_view_state.repositories.get(idx))
+                        {
+                            let instance = Self::repo_instance_key(&repo.address, &repo.path);
+                            self.finish_queued_update_launch(&instance, false);
+                        }
                         // No terminal event will arrive, so a bulk or scheduled run
                         // would otherwise wait for this repository forever.
                         self.record_repository_space_bulk_completion(
@@ -367,6 +372,13 @@ impl Foxy {
             self.benchmark_observe_event(&evt);
 
             match &evt {
+                ProgressEvent::RetryableDownloadFailure => self.sync_retryable_failure = true,
+                ProgressEvent::SharedVersionWarning { repositories } => {
+                    self.show_error_toast(self.t_fmt(
+                        "Updating shared files will require updates in: {repositories}",
+                        &[("repositories", repositories.join(", "))],
+                    ));
+                }
                 ProgressEvent::Diff { mods } => {
                     if let Some(repo_idx) = self.syncing_repository
                         && let Some((repo_address, repo_path)) = self
@@ -717,6 +729,29 @@ impl Foxy {
                     let was_cancelled = matches!(evt, ProgressEvent::Cancelled);
                     let last_repo = self.syncing_repository;
                     let last_mode = self.current_sync_mode;
+                    let retry_scheduled = matches!(evt, ProgressEvent::Failed(_))
+                        && last_mode == Some(SyncMode::Download)
+                        && self.sync_retryable_failure
+                        && last_repo.is_some_and(|idx| self.queue_failed_download_retry(idx));
+                    if let Some(idx) = last_repo
+                        && let Some(repo) = self.repository_view_state.repositories.get(idx)
+                    {
+                        let instance = Self::repo_instance_key(&repo.address, &repo.path);
+                        if last_mode == Some(SyncMode::Download) {
+                            self.finish_queued_update_launch(&instance, finished_successfully);
+                        }
+                        if !retry_scheduled {
+                            self.download_retry_attempts.remove(&instance);
+                        }
+                        if finished_successfully && last_mode == Some(SyncMode::Download) {
+                            self.interrupted_update_instances.remove(&instance);
+                        }
+                    }
+                    if matches!(&evt, ProgressEvent::Failed(message) if message.contains("revert") || message.contains("rollback"))
+                    {
+                        self.close_requested_at = None;
+                        self.close_worker_wait_started_at = None;
+                    }
                     let sync_elapsed = self.sync_started_at.map(|started_at| started_at.elapsed());
                     let mut update_count = self
                         .mod_diff_cache
@@ -733,6 +768,31 @@ impl Foxy {
                         }
                     }
                     let had_updates = last_mode != Some(SyncMode::Download) && update_count > 0;
+                    if finished_successfully
+                        && update_count == 0
+                        && let Some(repo) = last_repo
+                            .and_then(|idx| self.repository_view_state.repositories.get(idx))
+                            .cloned()
+                    {
+                        self.interrupted_update_instances
+                            .remove(&Self::repo_instance_key(&repo.address, &repo.path));
+                        crate::core::tasks::download_files::UpdateRollbackSession::clear_recovery_notice(&repo.address, &repo.path);
+                    }
+                    if finished_successfully
+                        && matches!(
+                            last_mode,
+                            Some(
+                                SyncMode::RemoteRefreshOnly
+                                    | SyncMode::RecheckOnly
+                                    | SyncMode::Download
+                            )
+                        )
+                        && let Some(repo) = last_repo
+                            .and_then(|idx| self.repository_view_state.repositories.get(idx))
+                            .cloned()
+                    {
+                        self.note_successful_remote_check(&repo.address, &repo.path);
+                    }
                     self.syncing_repository = None;
                     self.current_sync_mode = None;
                     // A sync is what first writes a repository's addon rows, and
@@ -1079,18 +1139,20 @@ impl Foxy {
                         );
                     }
                     self.benchmark_finish_capture(&evt, last_mode, update_count);
-                    self.record_repository_space_bulk_completion(
-                        last_repo,
-                        last_mode,
-                        finished_successfully,
-                        had_updates,
-                    );
-                    self.record_scheduled_job_completion(
-                        last_repo,
-                        last_mode,
-                        finished_successfully,
-                        had_updates,
-                    );
+                    if !retry_scheduled {
+                        self.record_repository_space_bulk_completion(
+                            last_repo,
+                            last_mode,
+                            finished_successfully,
+                            had_updates,
+                        );
+                        self.record_scheduled_job_completion(
+                            last_repo,
+                            last_mode,
+                            finished_successfully,
+                            had_updates,
+                        );
+                    }
                     if !self.mod_download_progress.is_empty() {
                         self.mod_download_progress.clear();
                         self.invalidate_update_modal_sort_cache();

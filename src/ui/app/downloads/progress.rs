@@ -371,7 +371,10 @@ impl Foxy {
     /// The Cancel the user presses: also stops the folder, space, or scheduled
     /// run the sync belongs to, so the next queued repository does not start.
     pub fn cancel_sync_and_queued_runs(&mut self) {
-        if self.syncing_repository.is_some()
+        let had_pending_retry = self.pending_download_retry.is_some();
+        self.cancel_pending_download_retry();
+        if had_pending_retry
+            || self.syncing_repository.is_some()
             || self.current_sync_mode.is_some()
             || self.is_direct_download_running()
         {
@@ -441,6 +444,19 @@ impl Foxy {
         }
 
         self.download_paused = paused;
+        if let Some(repo_idx) = self.syncing_repository
+            && let Some(repo) = self
+                .repository_view_state
+                .repositories
+                .get(repo_idx)
+                .cloned()
+            && let Err(err) = self.persist_repository_pause(&repo, paused)
+        {
+            warn!("Could not persist download pause state: {}", err);
+            self.show_error_toast(
+                self.t_fmt("Could not save pause state: {error}", &[("error", err)]),
+            );
+        }
         self.download_eta_remaining = None;
         self.download_eta_updated_at = None;
         self.download_speed_sample_at = None;

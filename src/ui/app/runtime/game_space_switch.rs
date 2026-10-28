@@ -60,6 +60,8 @@ impl Foxy {
         }
         info!("Game space switch requested: {}", entry.id);
         self.pending_game_space_switch = Some(entry.clone());
+        self.pending_game_space_switch_save_error = None;
+        self.pending_game_space_switch_discard_save = false;
         self.game_space_switch_requested_at = Some(std::time::Instant::now());
         self.needs_repaint = true;
     }
@@ -68,7 +70,26 @@ impl Foxy {
         if self.pending_game_space_switch.is_none() {
             return;
         }
-        self.maybe_dispatch_persistence_requests(true);
+        if self.pending_game_space_switch_discard_save {
+            if self.settings_save_in_flight_revision.is_some()
+                || self.repositories_save_in_flight_revision.is_some()
+            {
+                ctx.request_repaint_after(Duration::from_millis(16));
+                return;
+            }
+            self.settings_dirty = false;
+            self.settings_completed_revision = self.settings_revision;
+            self.settings_last_mutated_at = None;
+            self.repositories_dirty = false;
+            self.repositories_completed_revision = self.repositories_revision;
+            self.repositories_last_mutated_at = None;
+            self.pending_game_space_switch_save_error = None;
+        } else {
+            if self.pending_game_space_switch_save_error.is_some() {
+                return;
+            }
+            self.maybe_dispatch_persistence_requests(true);
+        }
         if self.has_pending_persistence_writes() {
             ctx.request_repaint_after(Duration::from_millis(16));
             return;
@@ -77,6 +98,76 @@ impl Foxy {
             return;
         };
         self.finish_game_space_switch(ctx, &entry);
+    }
+
+    pub(crate) fn retry_game_space_switch_save(&mut self) {
+        if self.pending_game_space_switch.is_none() {
+            return;
+        }
+        self.pending_game_space_switch_save_error = None;
+        self.pending_game_space_switch_discard_save = false;
+        if self.settings_dirty {
+            self.settings_last_mutated_at = Some(std::time::Instant::now());
+        }
+        if self.repositories_dirty {
+            self.repositories_last_mutated_at = Some(std::time::Instant::now());
+        }
+        self.needs_repaint = true;
+    }
+
+    pub(crate) fn discard_game_space_switch_save_and_continue(&mut self) {
+        if self.pending_game_space_switch.is_some()
+            && self.pending_game_space_switch_save_error.is_some()
+        {
+            self.pending_game_space_switch_discard_save = true;
+            self.needs_repaint = true;
+        }
+    }
+
+    pub(crate) fn cancel_pending_game_space_switch(&mut self) {
+        self.pending_game_space_switch = None;
+        self.game_space_switch_requested_at = None;
+        self.pending_game_space_switch_save_error = None;
+        self.pending_game_space_switch_discard_save = false;
+        self.needs_repaint = true;
+    }
+
+    pub(crate) fn render_pending_game_space_switch(&mut self, ctx: &egui::Context) {
+        let Some(error) = self.pending_game_space_switch_save_error.clone() else {
+            if self.pending_game_space_switch.is_some() {
+                egui::Window::new(self.t("Switching game space"))
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                    .show(ctx, |ui| {
+                        ui.label(self.t("Saving changes before switching game spaces..."));
+                        if ui.button(self.t("Cancel switching")).clicked() {
+                            self.cancel_pending_game_space_switch();
+                        }
+                    });
+            }
+            return;
+        };
+
+        egui::Window::new(self.t("Could not save before switching"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.label(self.t("Your changes are still in the current game space."));
+                ui.label(error);
+                ui.horizontal(|ui| {
+                    if ui.button(self.t("Retry save")).clicked() {
+                        self.retry_game_space_switch_save();
+                    }
+                    if ui.button(self.t("Discard changes and switch")).clicked() {
+                        self.discard_game_space_switch_save_and_continue();
+                    }
+                    if ui.button(self.t("Cancel switching")).clicked() {
+                        self.cancel_pending_game_space_switch();
+                    }
+                });
+            });
     }
 
     fn finish_game_space_switch(&mut self, ctx: &egui::Context, entry: &GameSpaceEntry) {
@@ -265,6 +356,8 @@ impl Foxy {
     /// startup default. App-global state (window, theme, locale, activity
     /// log, app updates, backups, tray) is deliberately left alone.
     fn reset_space_scoped_state(&mut self) {
+        self.interrupted_update_instances.clear();
+        self.startup_recovery_rx = None;
         // Mount table snapshot behind hash IO tuning: the incoming space may sit
         // on a drive attached after the last refresh.
         crate::core::tasks::calculate_hashes::invalidate_storage_class_cache();
@@ -291,6 +384,10 @@ impl Foxy {
         self.repository_space_detail_filter_space_id = None;
         self.repository_space_selector_state = None;
         self.repository_space_settings_state = None;
+        self.paused_repository_instances.clear();
+        self.pending_game_space_switch_save_error = None;
+        self.pending_game_space_switch_discard_save = false;
+        self.show_unreadable_config_replacement = false;
         self.pending_repository_space_bulk_action = None;
         self.repository_space_bulk_progress = None;
         self.repository_space_import_in_flight = false;
@@ -383,7 +480,6 @@ impl Foxy {
         self.pending_server_queries.clear();
         self.pending_queries.clear();
         while self.server_updates.try_recv().is_ok() {}
-        self.join_preflight_cache.clear();
         self.pending_join_preflight = None;
         self.pending_join_preflight_query = None;
         self.pending_join_status_query = None;
@@ -499,6 +595,13 @@ impl Foxy {
         self.download_eta_updated_at = None;
         self.download_pause_tx = None;
         self.download_paused = false;
+        self.pending_update_launch = None;
+        self.scheduling_job_change_prompt = None;
+        self.pending_download_retry = None;
+        self.download_retry_attempts.clear();
+        self.sync_retryable_failure = false;
+        self.sync_is_bulk = false;
+        self.sync_visual_folder_id = None;
         self.cancel_tx = None;
         self.recheck_stage_label = None;
         self.recheck_stage_percent = None;
@@ -609,6 +712,8 @@ const APP_GLOBAL_FOXY_FIELDS: &[&str] = &[
     "pending_renderer_fallback_notice",
     // App-global settings, locale, and debug flags.
     "settings_view_state",
+    // Backup acknowledgments are keyed by full source path across spaces.
+    "unreadable_config_replacements",
     "i18n",
     "launch_debug_mode",
     "show_debug_windows",

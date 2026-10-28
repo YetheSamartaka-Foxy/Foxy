@@ -3546,6 +3546,16 @@ impl Foxy {
             "download_label": download_label,
             "download_percent": download_percent,
             "download_paused": self.download_paused,
+            "paused_repositories": self.repository_view_state.repositories.iter().enumerate()
+                .filter(|(_, repo)| self.is_repository_paused(repo))
+                .map(|(index, _)| json!({"repo_index":index}))
+                .collect::<Vec<_>>(),
+            "repository_space_bulk_progress": self.repository_space_bulk_progress.as_ref().map(|progress| json!({
+                "total_count":progress.total_count,
+                "completed_count":progress.completed_count,
+                "succeeded_count":progress.succeeded_count,
+                "failed_count":progress.failed_count,
+            })),
             "download_finished": self.download_finished,
             "download_speed_bps": self.download_speed_bps,
             "download_eta_secs": self.download_eta_remaining.map(|d| d.as_secs_f64()),
@@ -5303,6 +5313,105 @@ impl Foxy {
                     &selected,
                 );
             }
+            "space-update-all" => {
+                let space_id = params
+                    .get("space")
+                    .or_else(|| params.get("space_id"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .or_else(|| self.selected_repository_space_id.clone())
+                    .ok_or_else(|| {
+                        (
+                            "invalid-params".to_string(),
+                            "Provide space or select a repository space first".to_string(),
+                        )
+                    })?;
+                let action = self
+                    .build_repository_space_bulk_action(
+                        &space_id,
+                        RepositorySpaceBulkMode::UpdateAll,
+                    )
+                    .ok_or_else(|| {
+                        (
+                            "invalid-params".to_string(),
+                            format!("No repository space with id '{space_id}'"),
+                        )
+                    })?;
+                let selected: Vec<usize> = action
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.selected)
+                    .map(|entry| entry.repo_index)
+                    .collect();
+                self.start_repository_space_bulk_action(
+                    &space_id,
+                    RepositorySpaceBulkMode::UpdateAll,
+                    &selected,
+                );
+            }
+            "set-space-shared-path" => {
+                let space_id = params.get("space").and_then(Value::as_str).ok_or_else(|| {
+                    (
+                        "invalid-params".to_string(),
+                        "Provide a space id".to_string(),
+                    )
+                })?;
+                let path = params.get("path").and_then(Value::as_str).ok_or_else(|| {
+                    (
+                        "invalid-params".to_string(),
+                        "Provide a path under the test run directory".to_string(),
+                    )
+                })?;
+                self.validate_agent_gui_testkit_path(path)?;
+                self.set_repository_space_shared_path(space_id, path.to_string());
+            }
+            "detach-space-repository" => {
+                let index = self.agent_gui_resolve_repo_index(params)?;
+                if !self.detach_repository_from_space(index) {
+                    return Err((
+                        "invalid-state".to_string(),
+                        "The repository is not attached to a repository space".to_string(),
+                    ));
+                }
+            }
+            "attach-existing-space-repository" => {
+                let space_id = params.get("space").and_then(Value::as_str).ok_or_else(|| {
+                    (
+                        "invalid-params".to_string(),
+                        "Provide a space id".to_string(),
+                    )
+                })?;
+                let index = self.agent_gui_resolve_repo_index(params)?;
+                let repo_path = self
+                    .repository_view_state
+                    .repositories
+                    .get(index)
+                    .map(|repo| repo.path.clone())
+                    .ok_or_else(|| {
+                        (
+                            "invalid-params".to_string(),
+                            "Repository index is out of range".to_string(),
+                        )
+                    })?;
+                self.validate_agent_gui_testkit_path(&repo_path)?;
+                let mut candidate = self
+                    .scan_repository_space_candidates(space_id)
+                    .into_iter()
+                    .find(|candidate| candidate.repo_index == index)
+                    .ok_or_else(|| {
+                        (
+                            "invalid-state".to_string(),
+                            "The repository is not a candidate for this space".to_string(),
+                        )
+                    })?;
+                candidate.checked = true;
+                if self.apply_repository_space_scan_candidates(space_id, &[candidate]) == 0 {
+                    return Err((
+                        "invalid-state".to_string(),
+                        "The repository could not be attached to the space".to_string(),
+                    ));
+                }
+            }
             "wipe-repo-db" => {
                 let index = self.agent_gui_resolve_repo_index(params)?;
                 let keep_hash_record = params
@@ -5434,6 +5543,59 @@ impl Foxy {
         }
         ctx.request_repaint();
         Ok(json!({ "action": name, "ran": true, "destructive": meta.destructive }))
+    }
+
+    fn validate_agent_gui_testkit_path(&self, path: &str) -> Result<(), (String, String)> {
+        let run_root = std::env::var_os("FOXY_TESTKIT_RUN_DIR")
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                (
+                    "testkit-only".to_string(),
+                    "This path mutation is available only in an isolated testkit run".to_string(),
+                )
+            })?;
+        let run_root = std::fs::canonicalize(run_root).map_err(|_| {
+            (
+                "testkit-only".to_string(),
+                "The isolated testkit run directory is unavailable".to_string(),
+            )
+        })?;
+        let config_dir = std::fs::canonicalize(Self::get_config_directory()).map_err(|_| {
+            (
+                "testkit-only".to_string(),
+                "The isolated testkit configuration directory is unavailable".to_string(),
+            )
+        })?;
+        if !config_dir.starts_with(&run_root) {
+            return Err((
+                "testkit-only".to_string(),
+                "Path mutation is refused outside the isolated testkit configuration".to_string(),
+            ));
+        }
+        let requested = PathBuf::from(path);
+        if !requested.is_absolute()
+            || requested
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err((
+                "invalid-params".to_string(),
+                "The path must be absolute and contain no parent-directory component".to_string(),
+            ));
+        }
+        let resolved = std::fs::canonicalize(&requested).map_err(|_| {
+            (
+                "invalid-params".to_string(),
+                "The test repository directory must exist before changing the target".to_string(),
+            )
+        })?;
+        if !resolved.starts_with(&run_root) {
+            return Err((
+                "invalid-params".to_string(),
+                "The target path must stay under the isolated testkit run directory".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     /// Clear the simple boolean modal/window flags (non-destructive). Used by
@@ -5641,6 +5803,30 @@ const AGENT_ACTIONS: &[AgentAction] = &[
         destructive: true,
         params: "space?",
         summary: "Recheck every repository of a repository space (the space's Recheck all, confirmed with its default selection)",
+    },
+    AgentAction {
+        name: "space-update-all",
+        destructive: true,
+        params: "space?",
+        summary: "Update repositories in a space that currently have pending updates",
+    },
+    AgentAction {
+        name: "set-space-shared-path",
+        destructive: true,
+        params: "space, path",
+        summary: "Change a repository space path (isolated testkit runs only)",
+    },
+    AgentAction {
+        name: "detach-space-repository",
+        destructive: true,
+        params: "repo-index",
+        summary: "Detach a repository from its space",
+    },
+    AgentAction {
+        name: "attach-existing-space-repository",
+        destructive: true,
+        params: "space, repo-index",
+        summary: "Attach an existing repository to a space (isolated testkit runs only)",
     },
     AgentAction {
         name: "wipe-repo-db",

@@ -193,6 +193,8 @@ pub struct Repository {
     /// Unix seconds of the last successful download for this instance.
     #[serde(default)]
     pub last_updated_at: Option<u64>,
+    #[serde(default)]
+    pub last_remote_check_at: Option<u64>,
     /// Unix seconds of the last game launch from this instance.
     #[serde(default)]
     pub last_launched_at: Option<u64>,
@@ -259,6 +261,7 @@ impl Default for Repository {
             repository_space_entry_address: None,
             hash_algorithm_preference: HashAlgorithmPreference::default(),
             last_updated_at: None,
+            last_remote_check_at: None,
             last_launched_at: None,
         }
     }

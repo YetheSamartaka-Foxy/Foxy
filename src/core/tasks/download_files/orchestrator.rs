@@ -1063,10 +1063,9 @@ pub(crate) async fn download_files(
             && let Err(net_err) = check_network_connectivity(&context, &first_url).await
         {
             error!("{}", net_err);
-            if let Some(tx) = progress_tx.as_ref() {
-                send_progress_event(tx, ProgressEvent::Failed(net_err.clone()), &operation_id);
-            }
-            return Err(anyhow!(net_err));
+            return Err(
+                anyhow::Error::new(super::failure::TransientDownloadFailure).context(net_err)
+            );
         }
     }
 
@@ -1095,15 +1094,11 @@ pub(crate) async fn download_files(
                     ProgressEvent::DiskSpaceShortfall(shortfall),
                     &operation_id,
                 );
-                send_progress_event(tx, ProgressEvent::Failed(space_err.clone()), &operation_id);
             }
             return Err(anyhow!(space_err));
         }
         if let Err(fs_err) = check_destination_filesystem(&targets, &metrics) {
             error!("{}", fs_err);
-            if let Some(tx) = progress_tx.as_ref() {
-                send_progress_event(tx, ProgressEvent::Failed(fs_err.clone()), &operation_id);
-            }
             return Err(anyhow!(fs_err));
         }
     }
@@ -1116,9 +1111,6 @@ pub(crate) async fn download_files(
                 "Download refused before transfer: {} target file(s) are held open by another process",
                 in_use.count
             );
-            if let Some(tx) = progress_tx.as_ref() {
-                send_progress_event(tx, ProgressEvent::Failed(in_use.to_string()), &operation_id);
-            }
             return Err(in_use.into());
         }
     }
@@ -1788,6 +1780,9 @@ pub(crate) async fn download_files(
     }
 
     if mods_failed > 0 {
+        if download_stop.only_transient_failures() {
+            return Err(super::failure::TransientDownloadFailure.into());
+        }
         return Err(anyhow!(
             "download failed for {} mod(s); {} mod(s) completed",
             mods_failed,

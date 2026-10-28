@@ -49,6 +49,7 @@ impl Foxy {
                 self.render_scheduling_job_list(ui, horizontal_padding);
             }
         });
+        self.render_scheduling_change_prompt(ui.ctx());
     }
 
     /// Status row shown while a scheduled job is executing, a post-action is
@@ -140,21 +141,13 @@ impl Foxy {
                 }
             }
             Some(JobListAction::Delete(i)) => {
-                if i < self.settings_view_state.scheduled_jobs.len() {
-                    let removed = self.settings_view_state.scheduled_jobs.remove(i);
-                    info!("Removed scheduled job '{}'", removed.name);
-                    self.save_settings();
+                if let Some(job) = self.settings_view_state.scheduled_jobs.get(i).cloned() {
+                    self.request_scheduled_job_delete(&job.id, &job.name);
                 }
             }
             Some(JobListAction::ToggleEnabled(i)) => {
-                if let Some(job) = self.settings_view_state.scheduled_jobs.get_mut(i) {
-                    job.enabled = !job.enabled;
-                    info!(
-                        "Scheduled job '{}' {}",
-                        job.name,
-                        if job.enabled { "enabled" } else { "disabled" }
-                    );
-                    self.save_settings();
+                if let Some(job) = self.settings_view_state.scheduled_jobs.get(i).cloned() {
+                    self.request_scheduled_job_enabled(&job.id, &job.name, !job.enabled);
                 }
             }
             Some(JobListAction::RunNow(i)) => {
@@ -455,7 +448,16 @@ impl Foxy {
                 .unwrap_or_else(|| format!("job-{}", Local::now().timestamp_millis()));
             match draft.build(id, Local::now()) {
                 Ok(job) => {
-                    self.upsert_scheduled_job(job);
+                    if self
+                        .settings_view_state
+                        .scheduled_jobs
+                        .iter()
+                        .any(|existing| existing.id == job.id)
+                    {
+                        self.request_scheduled_job_save(job);
+                    } else {
+                        self.upsert_scheduled_job(job);
+                    }
                     self.scheduling_editor = None;
                 }
                 Err(error) => {
@@ -485,6 +487,62 @@ impl Foxy {
             self.settings_view_state.scheduled_jobs.push(job);
         }
         self.save_settings();
+    }
+
+    fn render_scheduling_change_prompt(&mut self, ctx: &egui::Context) {
+        let Some(prompt) = self.scheduling_job_change_prompt.as_ref() else {
+            return;
+        };
+        let title = self.t("Scheduled job change");
+        let message = self.t_fmt(
+            "'{name}' has a run or post-action in progress. Choose whether this change affects it.",
+            &[("name", prompt.job_name.clone())],
+        );
+        let mut choice = None;
+        let mut cancel = false;
+        egui::Window::new(title)
+            .frame(self.modal_window_chrome(ctx))
+            .title_frame(self.modal_window_chrome(ctx))
+            .title_bar(true)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .default_width(480.0)
+            .show(ctx, |ui| {
+                ui.label(message);
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    let future = ui.button(self.t("Future runs only"));
+                    if future.hovered() {
+                        ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                    }
+                    if future.clicked() {
+                        choice = Some(false);
+                    }
+                    let stop = ui.add(
+                        Button::new(self.t("Also stop this run and its post-action"))
+                            .fill(self.color_action_destructive()),
+                    );
+                    if stop.hovered() {
+                        ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                    }
+                    if stop.clicked() {
+                        choice = Some(true);
+                    }
+                    if ui.button(self.t("Cancel")).clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if cancel {
+            self.dismiss_scheduled_job_change();
+            return;
+        }
+        if let Some(stop_current) = choice
+            && self.scheduling_job_change_prompt.is_some()
+        {
+            self.resolve_scheduled_job_change(stop_current);
+        }
     }
 
     fn render_scheduling_repo_picker(&self, ui: &mut Ui, draft: &mut ScheduleJobDraft) {

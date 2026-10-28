@@ -206,6 +206,7 @@ impl Foxy {
     }
 
     pub(crate) fn mark_settings_dirty(&mut self) {
+        self.show_replacement_confirmation_if_needed();
         self.settings_dirty = true;
         self.settings_revision = self.settings_revision.saturating_add(1);
         self.settings_last_mutated_at = Some(Instant::now());
@@ -213,6 +214,7 @@ impl Foxy {
     }
 
     pub(crate) fn mark_repositories_dirty(&mut self) {
+        self.show_replacement_confirmation_if_needed();
         self.repositories_dirty = true;
         self.repositories_revision = self.repositories_revision.saturating_add(1);
         self.repositories_last_mutated_at = Some(Instant::now());
@@ -275,11 +277,17 @@ impl Foxy {
     }
 
     pub(crate) fn maybe_dispatch_persistence_requests(&mut self, force: bool) {
-        if self.settings_save_ready(force) {
+        if self.pending_game_space_switch_save_error.is_some()
+            || self.pending_game_space_switch_discard_save
+        {
+            self.dispatch_backup_inventory_refresh_request();
+            return;
+        }
+        if self.settings_save_ready(force) && self.settings_persistence_is_confirmed() {
             self.queue_settings_save();
         }
 
-        if self.repositories_save_ready(force) {
+        if self.repositories_save_ready(force) && self.repositories_persistence_is_confirmed() {
             self.queue_repositories_save();
         }
 
@@ -308,6 +316,9 @@ impl Foxy {
                         Err(err) => {
                             self.settings_dirty = true;
                             self.settings_last_mutated_at = Some(Instant::now());
+                            if self.pending_game_space_switch.is_some() {
+                                self.pending_game_space_switch_save_error = Some(err.clone());
+                            }
                             error!("{}", err);
                         }
                     }
@@ -353,6 +364,9 @@ impl Foxy {
                         Err(err) => {
                             self.repositories_dirty = true;
                             self.repositories_last_mutated_at = Some(Instant::now());
+                            if self.pending_game_space_switch.is_some() {
+                                self.pending_game_space_switch_save_error = Some(err.clone());
+                            }
                             error!("{}", err);
                         }
                     }

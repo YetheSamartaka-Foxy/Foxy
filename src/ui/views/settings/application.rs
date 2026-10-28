@@ -19,6 +19,13 @@ impl Foxy {
             .auto_shrink([false, true])
             .show(ui, |ui| {
                 ui.vertical(|ui| {
+                    let label = self.t("Retry temporary download failures automatically");
+                    if ui
+                        .checkbox(&mut self.settings_view_state.retry_failed_downloads, label)
+                        .changed()
+                    {
+                        path_change_flags.settings = true;
+                    }
                     self.render_application_settings_general(
                         ui,
                         horizontal_padding,

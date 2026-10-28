@@ -102,6 +102,10 @@ fn cmd_settings_set(
         state.settings.auto_quick_scan_on_launch = v;
         changed = true;
     }
+    if let Some(v) = args.retry_failed_downloads {
+        state.settings.retry_failed_downloads = v;
+        changed = true;
+    }
     if let Some(v) = args.apply_repo_json_client_parameters {
         state.settings.apply_repo_json_client_parameters = v;
         changed = true;

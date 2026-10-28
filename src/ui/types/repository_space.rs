@@ -59,15 +59,15 @@ impl RepositorySpaceBulkProgress {
         true
     }
 
-    /// Take a removed member out of the run, whether or not it already finished,
-    /// so the remaining members can still complete it.
+    /// Remove a pending member from this run and count it as a failed skip.
+    /// Completed outcomes stay in the run summary if their row is later removed.
     pub fn remove_target(&mut self, repo_url: &str) {
         if !self.target_repo_urls.remove(repo_url) {
             return;
         }
-        self.total_count = self.total_count.saturating_sub(1);
-        if self.completed_repo_urls.remove(repo_url) {
-            self.completed_count = self.completed_count.saturating_sub(1);
+        if !self.completed_repo_urls.contains(repo_url) {
+            self.total_count = self.total_count.saturating_sub(1);
+            self.failed_count += 1;
         }
     }
 
@@ -97,13 +97,41 @@ mod tests {
     }
 
     #[test]
-    fn removing_a_finished_member_still_lets_the_run_complete() {
+    fn removing_a_pending_member_counts_as_failed_and_remaining_can_finish() {
+        let mut run = progress(&["a/", "b/"]);
+        run.remove_target("a/");
+        assert_eq!(run.total_count, 1);
+        assert_eq!((run.completed_count, run.failed_count), (0, 1));
+        assert!(!run.is_finished());
+        assert!(run.target_repo_urls.contains("b/"));
+        assert!(!run.target_repo_urls.contains("a/"));
+
+        assert!(run.record("b/", true, false));
+        assert!(run.is_finished());
+        assert_eq!((run.succeeded_count, run.failed_count), (1, 1));
+    }
+
+    #[test]
+    fn removing_a_finished_member_preserves_its_counted_outcome() {
         let mut run = progress(&["a/", "b/"]);
         assert!(run.record("a/", true, false));
         run.remove_target("a/");
+        assert_eq!(run.total_count, 2);
+        assert_eq!((run.completed_count, run.succeeded_count), (1, 1));
         assert!(!run.is_finished());
         assert!(run.record("b/", true, false));
         assert!(run.is_finished());
+        assert_eq!((run.completed_count, run.succeeded_count), (2, 2));
+    }
+
+    #[test]
+    fn removing_the_only_pending_member_finishes_as_failed() {
+        let mut run = progress(&["a/"]);
+        run.remove_target("a/");
+
+        assert!(run.is_finished());
+        assert_eq!(run.total_count, 0);
+        assert_eq!((run.succeeded_count, run.failed_count), (0, 1));
     }
 
     #[test]

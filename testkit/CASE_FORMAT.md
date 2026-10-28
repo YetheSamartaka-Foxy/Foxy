@@ -48,6 +48,16 @@ When `origin` is present the runner serves `origin.root` on `origin.port`
 additionally refuses to start when the repository's manifest publishes no
 mods.
 
+An origin may declare `synthetic` as an array of `{root, seed, repo_name?,
+mods, files_per_mod, file_bytes, pbo_entries?, entry_bytes?}` versions. A positive
+`pbo_entries` generates PBO files whose entries can be mutated for delta repair;
+`entry_bytes` defaults to 64. The runner generates each repository
+under its own `root` before starting the server; every root must stay under the
+case run directory. Different seeds produce different payload bytes with the
+same published file names, so `origin-switch` can reproduce an in-place update
+without an external fixture. The runner uses the testkit repository generator
+when preparing these versions.
+
 `profile` turns on the app's deep profiler. The run then emits `PROFILE ...`
 lines that the kit parses into `profile-<iteration>-<operation>.json`:
 
@@ -389,6 +399,38 @@ patching `download` cancelled while applying), not only on full downloads.
 `kill_after_s` on a GUI sync operation stops the process that many seconds
 after it reports busy, without a cooperative cancel, and the next operation
 starts the app again. The killed row has no pipeline outcome.
+
+For deterministic recovery checks, GUI downloads also accept the boolean
+`cancel_after_promoted_file`, `close_after_promoted_file`, and
+`kill_after_promoted_file`. Each waits until the content digest of a file that
+already existed in the target folder changes, then performs cooperative cancel,
+normal app close and restart, or process kill respectively. The captured file
+path is recorded in the operation summary. The normal-close path is allowed to
+finish naturally; a failed case timeout then uses ordinary child-process cleanup.
+`pause_after_s` pauses a running GUI download after the given
+number of seconds and returns while it remains paused; payload and oracle gates
+are skipped for that intentionally incomplete operation.
+
+State operations do not produce ledger rows. `capture-file-state` stores a
+deterministic relative-path/length/BLAKE3 map under the run directory, and
+`assert-file-state` compares a run-local repository directory with that saved
+map (`comparison` is `equal`, `different`, or `contains`). `contains` permits
+additional recovered files but requires every captured payload file to retain
+its exact bytes. Download sidecars are excluded from these payload snapshots.
+An optional `path` is allowed only
+inside the current run directory. `prepare-test-directory` creates such an
+isolated path. `assert-repository-paused` checks a repository index in the
+driver's paused-instance snapshot. `invoke-driver` calls a named `agent-gui`
+intent with JSON params; destructive intents still require
+`allow_destructive:true`. `wait-for-busy` waits for a named driver busy reason,
+or for it to clear when `cleared:true`. `assert-space-bulk-target-count`,
+`assert-space-bulk-completed-count`, `assert-space-bulk-failed-count`, and
+`wait-for-space-bulk-target-count`
+inspect the active bulk run's counts.
+The testkit-only shared-path intent refuses to run without
+`FOXY_TESTKIT_RUN_DIR`, when Foxy's config is outside that run, or when the new
+path resolves outside it. These operations are intended for synthetic recovery
+and queue cases, never for a live profile.
 
 The ledger row also retains `delta_patch_stages`, the typed per-file planning,
 fetch, apply, promote, verify and finalize spans emitted during the operation.

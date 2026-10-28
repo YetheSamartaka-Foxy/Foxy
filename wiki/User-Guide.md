@@ -106,7 +106,7 @@ The panel at the top of the sidebar shows the open game space:
 ### Creating, switching, and removing game spaces
 
 - In the Game spaces list, click **Create game space**, choose the game, and enter a name. You can create several game spaces for the same game to keep separate setups apart.
-- **Open game space** switches right away without restarting Foxy. Pending changes are saved first. Foxy does not switch while downloads or scans are running, so let them finish first.
+- **Open game space** switches without restarting Foxy. Pending changes are saved to the current space first. While saving, Foxy shows **Switching** and freezes edits; you can cancel navigation. If a save fails, Foxy stays in the current space and offers **Retry**, **Discard changes and switch**, or **Cancel switching**. Discard waits for in-flight writes to finish and never saves those changes into the destination space. Downloads and scans must finish before switching.
 - **Remove game space** deletes only the Foxy workspace: its repository list, game settings, and local database. Game installs and downloaded mods stay on disk.
 - **Rename** in Game space settings changes only the name shown in Foxy. The game space folder and its data stay where they are.
 
@@ -165,6 +165,8 @@ Foxy rereads each space's manifest from the server at launch and every 30 minute
 
 A repository space can define a common local folder for all its repositories. When a repository belongs to a space, its local path is inherited from the space's shared path and cannot be changed individually. Required repositories of the space are added automatically and see the same shared folder.
 
+If an update through a repository space would install incompatible versions into that shared folder, Foxy blocks it and identifies the conflicting repositories. For ordinary repository entries that share a folder, Foxy warns which repositories need another version and lets the requested update proceed; it never reports incompatible copies as current.
+
 If only some of a repository's addons are installed in the shared folder, Foxy can check it and offer to download the rest. Addons already installed by another repository do not cause a wrong-folder warning for addons that have never been downloaded. Foxy still pauses if the configured folder is missing, files appear under unexpected paths, or most content with saved local verification state has disappeared.
 
 ### Bulk operations
@@ -176,6 +178,8 @@ The repository space toolbar operates on every repository in the space at once:
 - **Update all repositories** - downloads pending updates for every repository in the space that has updates.
 
 These operations and their confirmation lists follow the repository order you set under the space in the sidebar.
+
+An **Update all** request freezes the repositories selected when you confirm it. Repositories added to the group later are not added to that run. If a queued repository is removed or its address or local folder changes before its turn, Foxy skips it and explains why. A profile change on an unchanged repository takes effect when that repository starts.
 
 A progress indicator in the space header shows how many repositories are done and which one is active, with one block of triangles per repository. A repository that cannot start, for example because its folder is not writable, counts as failed, and one removed from the space or deleted during the run is taken out of it, so the run always finishes. **Cancel** stops the whole run, not just the repository in progress.
 
@@ -211,7 +215,11 @@ Before preparing an update, Foxy checks the current server metadata and refreshe
 
 At startup, a saved update is shown immediately and then checked with the server when **Auto recheck on launch** or **Auto quick scan on launch** is on for that repository. The check runs even when the repository checksum has not changed, and it includes a repository the quick local check cannot scan yet. The saved update stays on screen while that check runs. If the server does not answer, the local check stands and Foxy asks again later in the same session: one minute after startup finishes, then every 15 minutes, until the server answers or you check the repository yourself. Turning both startup settings off leaves the repository alone until you check it.
 
+If the local files check out but Foxy cannot reach the repository server, the status remains **Locally verified; server not checked**, with the last successful remote check time. You can still launch; this status does not mean the installation is current with the server.
+
 If the server changes after an automatic startup check or while an update confirmation is open, Foxy checks the repository version and published addon list again before reusing a saved update plan. Changed addon versions or membership rebuild the plan automatically, even if the repository checksum stayed the same. Newly changed addons join the update even when they were absent from the startup list. A clean local check alone cannot finish an update without checking the server.
+
+Starting an update approves reaching the latest publication for the selected addons. If the publication grows before transfer begins, Foxy refreshes the plan and continues without asking again just because the size estimate increased. It still verifies the fresh plan and keeps the selected-addon scope.
 
 Foxy checks that published file parts cover the declared file size before applying a manifest. It retries inconsistent metadata with a fresh request and stops before cleanup if it remains invalid. A database wipe can reuse server-validated manifest caches, but invalid cached layouts are refreshed automatically. If fresh metadata is still inconsistent, the repository administrator must republish it. Downloaded files must pass checksum verification before the update succeeds; a failure restores the previous files and invalidates remote metadata for the next attempt.
 
@@ -233,13 +241,17 @@ Each game space keeps one saved update plan at a time, for the repository that w
 
 When possible, Foxy downloads only the changed parts of a file instead of the whole file. If a patch fails validation, Foxy falls back to downloading the full file automatically.
 
-Temporary connection failures and busy servers are retried automatically before a file download is abandoned. Interrupted transfers resume from received bytes, and Foxy validates the server's resumed byte range before writing it. Cancelling also interrupts waits for the server to respond.
+Temporary connection failures and busy servers are retried automatically before a file download is abandoned. After a retryable update failure, Foxy can also start a fresh attempt automatically while it remains open. This is enabled by default; turn off **Retry failed downloads** in **Settings > Application** to require a manual Retry. Each attempt checks the current plan again and shows a countdown with a Stop action. A canceled sync never retries. Interrupted transfers resume from received bytes, and Foxy validates the server's resumed byte range before writing it.
 
 ### Cancelling
 
-You can cancel an active sync while Foxy is hashing or downloading. Foxy stops pending work, cleans up temporary download parts, and returns to a clean idle state. When the sync is part of a folder or repository space run, or of a scheduled job, the rest of that run is cancelled too, and a scheduled job does not run its close or shutdown action.
+You can cancel an active sync while Foxy is hashing or downloading. Foxy stops pending work, cleans up temporary download parts, and returns to a clean idle state. When the sync is part of a folder or repository space run, or of a scheduled job, the rest of that run is cancelled too, and a scheduled job does not run its close or shutdown action. A bulk run makes one retry for a target when its failure may be transient, then continues with unaffected targets and shows a partial result. Retry failed targets from that result. A failed or skipped target never counts as a successful run.
 
-Closing Foxy during a sync cancels it first: the window stays open while the update restores the previous files, then closes, so a repository is never left with a mix of old and new files.
+Closing Foxy during a sync cancels it first and waits for the update to restore previous files. If restoration takes too long, Foxy keeps the window open and offers an explicit force-quit choice that explains recovery is incomplete. A force quit preserves recovery data; Foxy reports unresolved recovery on the next start. An unexpected crash keeps completed files and recovers forward, showing the repository as interrupted until it is checked and the update can be finished.
+
+Pausing a repository download is remembered for that repository instance across closing and reopening Foxy. Startup shows it as pending and paused. Click **Resume** to refresh and validate the plan before Foxy transfers again. An explicit command line download also resumes that instance; checks and dry runs leave it paused. Automatic, scheduled, and bulk downloads do not start a paused instance. A canceled sync remains canceled and is not treated as a pause.
+
+When Foxy cannot read a configuration file, it saves a `.unreadable` copy before allowing a replacement. The first save asks before replacing the active file. If Foxy could not preserve a copy, writes that would overwrite that file stay blocked until recovery is chosen.
 
 ### Progress and status banners
 
@@ -401,6 +413,8 @@ When a repository defines servers, the detail view shows **server cards** with e
 - **Launch** starts the game with the addons and settings of the selected profile.
 - **Join** starts the game and connects to the selected server. Offline servers have no Join action.
 
+If an update is replacing files needed by that installation, Launch or Join waits in a cancellable queue for that exact repository and folder. Foxy checks readiness again when the update ends. A failed update does not launch the game, and work in another folder does not block it.
+
 When you join an Arma 3 server, Foxy reads what the server reports and can:
 - warn when the server needs addons that you have locally but disabled for this launch, and
 - offer to **match the server's Creator DLCs**: enable the Creator DLCs the server requires and disable enabled ones it does not use, for that launch only.
@@ -432,7 +446,7 @@ When you click **Join**, these warnings appear before Foxy checks the server and
 
 When the Steam check is enabled, **Launch** and **Join** stay disabled in the warning dialog until Steam is running. TeamSpeak 3, missing external addons, addon selections, and Creator DLC differences are advisory: you can continue after reviewing them. Missing external addons are also reported on Join when server-addon checking is disabled or the server reports no addons. An offline server, a failed server query, or an invalid game installation still stops the launch or join.
 
-The warning dialog checks for Steam and TeamSpeak in the background, keeping its buttons and keyboard controls responsive while waiting for either client to start.
+The warning dialog checks for Steam and TeamSpeak in the background, keeping its buttons and keyboard controls responsive while waiting for either client to start. Before Join starts, Foxy refreshes the server requirements and relevant local addon state again. If the checklist changed, Foxy preserves compatible choices and asks you to confirm the difference.
 
 On Windows, Steam detection and the running-client checks do not open command windows. This also applies to the Arma 3 running check before managing profiles.
 
@@ -507,6 +521,7 @@ Open Settings with the gear icon or **F2**. The Settings view has these tabs: **
 
 - **Language** - System (auto-detect) or one of more than 40 bundled languages, including right-to-left languages.
 - **Download Speed Limit** - a maximum download speed in Mbps, or **Unlimited**.
+- **Retry failed downloads** - automatically retry retryable update failures while Foxy remains open. Enabled by default; turn it off to wait for a manual Retry after the current attempt fails. The CLI can set this desktop preference with `foxy settings set --retry-failed-downloads <true|false>`; a CLI sync itself returns failure for its caller to handle.
 - **Proxy** - how Foxy reaches repositories, app updates, Steam Workshop details, and images. **System proxy settings** (the default) uses the proxy set in Windows or in the `HTTP_PROXY` and `HTTPS_PROXY` environment variables. **No proxy** connects directly. **Manual proxy** uses an HTTP or HTTPS proxy you enter, such as `http://proxy.example:8080`, with an optional user name and password and a comma-separated list of hosts to connect to directly. The password is stored in Foxy's settings file as plain text and is hidden from `foxy settings show`. SOCKS proxies are not supported. From the command line, use `foxy settings set --proxy-mode <system|none|manual>`, `--proxy-url`, `--proxy-username`, `--proxy-password`, and `--proxy-bypass`.
 - **Auto backup addons before update** - back up addons before any download.
 - **Auto recheck repositories on launch** - refresh repository metadata when Foxy starts, and confirm any saved update with the server.
@@ -584,6 +599,8 @@ You can open the settings of a game space that is not open. Changes are saved to
 ## Scheduling
 
 The **Scheduling** tab in Settings runs rechecks and update downloads at a chosen time.
+
+If you edit, disable, or delete a job while its run is active, Foxy asks whether the change applies to future runs only or should also stop the current run and its close or shutdown action.
 
 - Jobs can run once or on recurring weekdays, for a single repository, a repository space, or a custom selection of repositories.
 - Each job can be enabled, disabled, edited, deleted, or started right away with **Run now**.
@@ -735,6 +752,8 @@ Only one Foxy window or command can use a game space at a time. If Foxy reports 
 
 If database initialization fails without reporting corruption, Foxy stops and preserves the database instead of replacing it. Check the log for the cause, resolve file access or storage problems, and try again.
 
+If Foxy reports corruption but cannot make the usual database backup, it asks before discarding that database and rebuilding. This choice loses cached repository metadata, not downloaded mods or JSON configuration.
+
 ### Foxy asks to wipe and rebuild the database
 
 After an update, the stored database may have been made by an incompatible version. Rebuilding keeps your downloaded mods on disk, and Foxy rechecks your repositories afterward. Files Foxy already verified and that have not changed are restored from its verified-hash record instead of being read again, unless you turned off **Skip unchanged files after a database reset**.
@@ -745,7 +764,7 @@ You can dismiss the startup warning and keep using Foxy, including **Launch** an
 
 ### A settings or repository file could not be read
 
-If `repositories.json`, `repository_spaces.json`, `repository_visual_folders.json`, or a settings file exists but cannot be read, for example after a manual edit, Foxy keeps a copy next to it named `<file>.unreadable` and tells you so. The next save replaces the unreadable file with what Foxy could load, so restore your data from the copy before making changes, or fix the file and restart Foxy. While `repository_spaces.json` cannot be read, Foxy keeps the repositories' space memberships instead of removing them.
+If `repositories.json`, `repository_spaces.json`, `repository_visual_folders.json`, or a settings file exists but cannot be read, for example after a manual edit, Foxy keeps a copy next to it named `<file>.unreadable` and tells you so. If that copy succeeded, the first save asks before replacing the unreadable file with what Foxy could load. If preserving the copy failed, writes to that file remain blocked until you recover it. While `repository_spaces.json` cannot be read, Foxy keeps the repositories' space memberships instead of removing them.
 
 ### Storage check notice
 

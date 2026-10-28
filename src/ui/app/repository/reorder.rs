@@ -1,6 +1,5 @@
 use crate::ui::app::Foxy;
 use log::info;
-use std::collections::VecDeque;
 
 impl Foxy {
     /// Move a repository from `from_idx` to `to_idx` in the flat repositories Vec.
@@ -27,10 +26,8 @@ impl Foxy {
         self.save_repositories();
     }
 
-    /// Re-point every field that refers to a repository by list position after
-    /// the list changed shape. `remap` returns the new position, or `None` when
-    /// the repository is gone; queued work for a gone repository is dropped so it
-    /// never starts on whichever repository took its place.
+    /// Re-point index-based fields after the repository list changes shape.
+    /// Queued syncs keep instance identities and resolve them when dispatched.
     pub(crate) fn remap_repository_indices(&mut self, remap: impl Fn(usize) -> Option<usize>) {
         let remap_opt = |index: Option<usize>| index.and_then(&remap);
         self.repository_view_state.selected_repository =
@@ -51,16 +48,6 @@ impl Foxy {
                 banner.repo_index = remap(banner.repo_index)?;
                 Some(banner)
             });
-        Self::remap_queue(
-            &mut self.repository_visual_folder_sync_queue,
-            &remap,
-            |(index, _)| index,
-        );
-        Self::remap_queue(
-            &mut self.repository_space_sync_queue,
-            &remap,
-            |(_, index, _)| index,
-        );
         self.pending_repo_metadata_refresh = self
             .pending_repo_metadata_refresh
             .iter()
@@ -103,23 +90,6 @@ impl Foxy {
         } else {
             index
         }
-    }
-
-    fn remap_queue<T>(
-        queue: &mut VecDeque<T>,
-        remap: impl Fn(usize) -> Option<usize>,
-        repo_idx_of: impl Fn(&mut T) -> &mut usize,
-    ) {
-        queue.retain_mut(|entry| {
-            let repo_idx = repo_idx_of(entry);
-            match remap(*repo_idx) {
-                Some(index) => {
-                    *repo_idx = index;
-                    true
-                }
-                None => false,
-            }
-        });
     }
 
     /// Convert a visual insertion slot (`0..=len`) into the final Vec index used after removal.
@@ -268,30 +238,6 @@ mod tests {
         assert_eq!(Foxy::adjust_index_after_insertion(1, 2), 1);
         assert_eq!(Foxy::adjust_index_after_insertion(2, 2), 3);
         assert_eq!(Foxy::adjust_index_after_insertion(4, 2), 5);
-    }
-
-    #[test]
-    fn queued_syncs_follow_their_repository_after_a_removal() {
-        let mut queue: VecDeque<(usize, &str)> =
-            VecDeque::from([(0, "first"), (2, "removed"), (3, "last")]);
-        Foxy::remap_queue(
-            &mut queue,
-            |idx| Foxy::adjust_index_after_removal(Some(idx), 2),
-            |(index, _)| index,
-        );
-        assert_eq!(queue, VecDeque::from([(0, "first"), (2, "last")]));
-
-        let mut space_queue: VecDeque<(&str, usize, u8)> =
-            VecDeque::from([("space", 4, 1), ("space", 1, 2)]);
-        Foxy::remap_queue(
-            &mut space_queue,
-            |idx| Foxy::adjust_index_after_move(Some(idx), 4, 0),
-            |(_, index, _)| index,
-        );
-        assert_eq!(
-            space_queue,
-            VecDeque::from([("space", 0, 1), ("space", 2, 2)])
-        );
     }
 
     #[test]

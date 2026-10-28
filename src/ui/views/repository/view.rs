@@ -112,6 +112,7 @@ impl Foxy {
                         }
                     });
                 } else if let Some(selected_idx) = self.repository_view_state.selected_repository {
+                    self.render_repository_recovery_status(ui, selected_idx);
                     let color_primary_accent = self.color_primary_accent();
                     let (
                         repo_name,

@@ -1137,6 +1137,11 @@ pub struct SettingsSetArgs {
     pub auto_quick_scan_on_launch: Option<bool>,
     #[arg(
         long,
+        help = "Automatically retry temporary download failures in the desktop app (true/false)"
+    )]
+    pub retry_failed_downloads: Option<bool>,
+    #[arg(
+        long,
         help = "Auto-apply launch parameters from repo.json metadata (true/false)"
     )]
     pub apply_repo_json_client_parameters: Option<bool>,

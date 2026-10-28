@@ -1,0 +1,42 @@
+{
+  "id": "state-paused-restart-ssd",
+  "kind": "perf",
+  "description": "Pause a synthetic repository download, restart Foxy through its normal close path, and assert that the exact repository instance remains paused.",
+  "build": "release",
+  "harness": "gui",
+  "timeout_s": 600,
+  "origin": {
+    "root": "${RUN_DIR}/origin-v1",
+    "port": 18132,
+    "delay_ms": 600,
+    "synthetic": [
+      { "root": "${RUN_DIR}/origin-v1", "seed": 20261011, "mods": 1, "files_per_mod": 8, "file_bytes": 1048576 },
+      { "root": "${RUN_DIR}/origin-v2", "seed": 20261012, "mods": 1, "files_per_mod": 8, "file_bytes": 1048576 }
+    ]
+  },
+  "repository": {
+    "name": "RepoAlpha",
+    "address": "http://127.0.0.1:18132/",
+    "path": "${RUN_DIR}/repo-alpha",
+    "space_id": null
+  },
+  "operations": [
+    { "op": "download", "label": "seed-download", "setup_once": true, "wait_timeout_s": 180 },
+    { "op": "origin-switch", "root": "${RUN_DIR}/origin-v2" },
+    { "op": "remote-refresh", "wait_timeout_s": 180 },
+    { "op": "download", "label": "paused-download", "pause_after_s": 0.3, "wait_timeout_s": 180 },
+    { "op": "assert-download-paused", "paused": true },
+    { "op": "startup", "label": "restart-paused", "wait_timeout_s": 180 },
+    { "op": "assert-repository-paused", "repository_index": 0, "paused": true }
+  ],
+  "repetitions": 1,
+  "warmup": false,
+  "settings": { "memory_pressure_override": "Severe" },
+  "guards": {
+    "require_storage_class": "ssd",
+    "require_no_other_foxy": true,
+    "require_clean_worktree": false,
+    "fail_on_db_wipe": true,
+    "max_run_gb": 1
+  }
+}

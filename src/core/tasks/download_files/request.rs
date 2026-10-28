@@ -90,6 +90,9 @@ pub(super) async fn download_response(
             Err(_) => (anyhow!("download response headers timed out"), true, None),
         };
         if !retryable || attempt == REQUEST_RETRIES {
+            if retryable {
+                return Err(error.context(super::failure::TransientDownloadFailure));
+            }
             return Err(error.context(format!(
                 "download request failed after {} attempt(s)",
                 attempt + 1

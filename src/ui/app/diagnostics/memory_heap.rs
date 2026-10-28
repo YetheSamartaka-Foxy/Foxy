@@ -338,6 +338,9 @@ impl Foxy {
                         .map(Self::heap_bytes_of_string)
                         .sum::<usize>()
             }
+            ProgressEvent::SharedVersionWarning { repositories } => {
+                repositories.iter().map(Self::heap_bytes_of_string).sum()
+            }
             ProgressEvent::RecheckHashProgress { .. }
             | ProgressEvent::DownloadPlan { .. }
             | ProgressEvent::DownloadTelemetry { .. }
@@ -345,6 +348,7 @@ impl Foxy {
             | ProgressEvent::HashSummary { .. }
             | ProgressEvent::HashEstimate { .. }
             | ProgressEvent::Finished
+            | ProgressEvent::RetryableDownloadFailure
             | ProgressEvent::Cancelled => 0,
         }
     }
@@ -384,12 +388,17 @@ impl Foxy {
     }
 
     pub(super) fn heap_bytes_of_repo_space_sync_queue(
-        queue: &VecDeque<(String, usize, SyncMode)>,
+        queue: &VecDeque<crate::ui::app::repository::space_actions::QueuedRepositorySpaceSync>,
     ) -> usize {
-        queue.capacity() * size_of::<(String, usize, SyncMode)>()
+        queue.capacity()
+            * size_of::<crate::ui::app::repository::space_actions::QueuedRepositorySpaceSync>()
             + queue
                 .iter()
-                .map(|(repo_url, _, _)| Self::heap_bytes_of_string(repo_url))
+                .map(|queued| {
+                    Self::heap_bytes_of_string(&queued.space_id)
+                        + Self::heap_bytes_of_string(&queued.target.remote_url)
+                        + Self::heap_bytes_of_string(&queued.target.local_path)
+                })
                 .sum::<usize>()
     }
 

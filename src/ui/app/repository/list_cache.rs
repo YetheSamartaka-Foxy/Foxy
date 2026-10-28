@@ -41,6 +41,14 @@ impl Foxy {
     }
 
     pub fn load_repositories(&mut self) {
+        self.load_paused_repository_instances();
+        self.interrupted_update_instances =
+            crate::core::tasks::download_files::UpdateRollbackSession::recovery_notices(
+                &Self::get_game_space_directory(),
+            )
+            .into_iter()
+            .map(|(url, path)| Self::repo_instance_key(&url, &path))
+            .collect();
         let path = Self::get_repositories_path();
         match std::fs::read_to_string(&path) {
             Ok(json) => match serde_json::from_str::<Vec<Repository>>(&json) {

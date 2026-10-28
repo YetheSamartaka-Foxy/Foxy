@@ -3,6 +3,8 @@ use crate::core::utils::manifest_cache::{ManifestCache, Validators};
 use log::{debug, warn};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use std::error::Error;
+use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -12,6 +14,60 @@ const FETCH_JSON_TIMEOUT: Duration = Duration::from_secs(120);
 /// Maximum decompressed response body size (200 MB). Protects against truncated
 /// gzip streams or malformed servers sending unbounded data.
 const FETCH_JSON_MAX_BODY_SIZE: usize = 200 * 1024 * 1024;
+
+#[derive(Debug)]
+struct HttpStatusError {
+    status: reqwest::StatusCode,
+    url: String,
+}
+
+impl fmt::Display for HttpStatusError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "JSON fetch for {} failed with status {}",
+            self.url, self.status
+        )
+    }
+}
+
+impl Error for HttpStatusError {}
+
+#[derive(Debug)]
+struct FetchTimeoutError(String);
+
+impl fmt::Display for FetchTimeoutError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl Error for FetchTimeoutError {}
+
+fn is_transient_metadata_error(error: &(dyn Error + 'static)) -> bool {
+    let mut current = Some(error);
+    while let Some(error) = current {
+        if error
+            .downcast_ref::<HttpStatusError>()
+            .is_some_and(|status| {
+                status.status == reqwest::StatusCode::REQUEST_TIMEOUT
+                    || status.status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                    || status.status.is_server_error()
+            })
+            || error.downcast_ref::<FetchTimeoutError>().is_some()
+        {
+            return true;
+        }
+        if error
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(|error| error.is_connect() || error.is_timeout() || error.is_body())
+        {
+            return true;
+        }
+        current = error.source();
+    }
+    false
+}
 
 /// Timing breakdown for a JSON metadata fetch.
 #[derive(Debug, Clone, Copy)]
@@ -99,7 +155,11 @@ async fn fetch_json_timed_with_cache<T: DeserializeOwned + Send + 'static>(
         }
     }
 
-    Err(last_error.unwrap_or_else(|| "fetch_json: all retries exhausted".into()))
+    let error = last_error.unwrap_or_else(|| "fetch_json: all retries exhausted".into());
+    if is_transient_metadata_error(error.as_ref()) {
+        context.mark_transient_metadata_failure();
+    }
+    Err(error)
 }
 
 async fn fetch_json_single<T: DeserializeOwned + Send + 'static>(
@@ -135,10 +195,10 @@ async fn fetch_json_single<T: DeserializeOwned + Send + 'static>(
     let resp = tokio::time::timeout(FETCH_JSON_TIMEOUT, request.send())
         .await
         .map_err(|_| {
-            format!(
+            FetchTimeoutError(format!(
                 "JSON fetch timed out after {:?} for {}",
                 FETCH_JSON_TIMEOUT, url
-            )
+            ))
         })??;
     if resp.status() == reqwest::StatusCode::NOT_MODIFIED
         && let Some(cache) = cache
@@ -167,11 +227,10 @@ async fn fetch_json_single<T: DeserializeOwned + Send + 'static>(
         ));
     }
     if !resp.status().is_success() {
-        return Err(format!(
-            "JSON fetch for {} failed with status {}",
-            url,
-            resp.status()
-        )
+        return Err(HttpStatusError {
+            status: resp.status(),
+            url: url.to_owned(),
+        }
         .into());
     }
     let content_encoding = resp
@@ -185,10 +244,10 @@ async fn fetch_json_single<T: DeserializeOwned + Send + 'static>(
     let body = tokio::time::timeout(FETCH_JSON_TIMEOUT, resp.bytes())
         .await
         .map_err(|_| {
-            format!(
+            FetchTimeoutError(format!(
                 "JSON body read timed out after {:?} for {}",
                 FETCH_JSON_TIMEOUT, url
-            )
+            ))
         })??;
     let download = download_start.elapsed();
     let response_bytes = body.len();
@@ -294,6 +353,37 @@ fn parse_json_slice<T: DeserializeOwned>(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn only_retryable_http_statuses_and_fetch_timeouts_are_transient() {
+        for status in [
+            reqwest::StatusCode::REQUEST_TIMEOUT,
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            reqwest::StatusCode::from_u16(599).unwrap(),
+        ] {
+            assert!(is_transient_metadata_error(&HttpStatusError {
+                status,
+                url: "http://repo.example.invalid/".to_owned(),
+            }));
+        }
+        for status in [
+            reqwest::StatusCode::OK,
+            reqwest::StatusCode::BAD_REQUEST,
+            reqwest::StatusCode::NOT_FOUND,
+        ] {
+            assert!(!is_transient_metadata_error(&HttpStatusError {
+                status,
+                url: "http://repo.example.invalid/".to_owned(),
+            }));
+        }
+        assert!(is_transient_metadata_error(&FetchTimeoutError(
+            "timed out".to_owned()
+        )));
+        assert!(!is_transient_metadata_error(
+            &serde_json::from_str::<Value>("not json").unwrap_err()
+        ));
+    }
 
     /// Serves one JSON body with an ETag and answers a matching
     /// `If-None-Match` with 304; counts the full bodies it sent.

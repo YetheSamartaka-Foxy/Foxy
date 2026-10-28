@@ -5,7 +5,7 @@ use eframe::egui::{
     self, CentralPanel, CursorIcon, Frame, Id, PointerButton, Rect, ResizeDirection, Sense, Ui,
     Vec2, ViewportCommand,
 };
-use log::{error, info, warn};
+use log::{info, warn};
 
 use crate::core::api::SyncMode;
 use crate::ui::app::debug_modals::DebugModal;
@@ -250,8 +250,6 @@ impl Foxy {
     }
 
     pub fn update(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
-        const CLOSE_FORCE_EXIT_TIMEOUT: Duration = Duration::from_secs(2);
-        const CLOSE_SYNC_WIND_DOWN_TIMEOUT: Duration = Duration::from_secs(15);
         let repaint_causes = ui.ctx().repaint_causes();
         self.frame_cost.begin_frame(
             crate::core::utils::thread_cpu::current_thread_cpu(),
@@ -303,23 +301,20 @@ impl Foxy {
                 .is_some_and(|handle| !handle.is_finished())
                 || self.is_direct_download_running());
         if close_waits_for_worker {
-            let wait_started_at = *self.close_worker_wait_started_at.get_or_insert_with(|| {
+            self.close_worker_wait_started_at.get_or_insert_with(|| {
                 info!(
                     "Close requested while a sync runs; cancelling it and waiting for its rollback"
                 );
                 Instant::now()
             });
-            if wait_started_at.elapsed() > CLOSE_SYNC_WIND_DOWN_TIMEOUT {
-                error!(
-                    "Cancelled sync did not finish within {} seconds of the close; forcing process exit",
-                    CLOSE_SYNC_WIND_DOWN_TIMEOUT.as_secs()
-                );
-                std::process::exit(0);
-            }
             self.cancel_sync_and_queued_runs();
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             ctx.request_repaint_after(Duration::from_millis(50));
-        } else if let Some(close_requested_at) = self.close_requested_at {
+        } else if self.close_requested_at.is_some() {
+            self.poll_backend_progress();
+            if self.close_requested_at.is_none() {
+                return;
+            }
             if let Some(wait_started_at) = self.close_worker_wait_started_at.take() {
                 info!(
                     "Cancelled sync finished {:.1}s after the close request",
@@ -328,18 +323,15 @@ impl Foxy {
                 // The persistence flush gets its own window after the wait.
                 self.close_requested_at = Some(Instant::now());
             }
-            let close_requested_at = self.close_requested_at.unwrap_or(close_requested_at);
-            if close_requested_at.elapsed() > CLOSE_FORCE_EXIT_TIMEOUT {
-                error!(
-                    "Close request timed out after {} seconds; forcing process exit",
-                    CLOSE_FORCE_EXIT_TIMEOUT.as_secs()
-                );
-                std::process::exit(0);
-            }
-
             self.poll_persistence_results();
             self.maybe_dispatch_persistence_requests(true);
             if self.has_pending_persistence_writes() {
+                ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+                if self.show_unreadable_config_replacement {
+                    self.render_unreadable_config_replacement(&ctx);
+                } else {
+                    self.render_close_wait(&ctx, true);
+                }
                 ctx.request_repaint_after(Duration::from_millis(16));
                 return;
             }
@@ -351,6 +343,7 @@ impl Foxy {
 
         self.poll_persistence_results();
         self.process_pending_game_space_switch(&ctx);
+        self.poll_update_recovery();
         if self.db_lock_conflict.is_some() {
             self.render_db_lock_conflict_prompt(&ctx);
             polls.stop(&mut self.frame_cost);
@@ -413,6 +406,20 @@ impl Foxy {
         self.tick_benchmark_capture(&ctx);
         self.poll_benchmark_export_screenshot(&ctx);
         self.poll_join_preflight_results(&ctx);
+        if self.close_requested_at.is_some() {
+            self.render_close_wait(&ctx, false);
+            polls.stop(&mut self.frame_cost);
+            return;
+        }
+        self.render_corrupt_database_recovery(&ctx);
+        self.render_unreadable_config_replacement(&ctx);
+        if self.pending_game_space_switch.is_some() {
+            self.render_pending_game_space_switch(&ctx);
+            polls.stop(&mut self.frame_cost);
+            return;
+        }
+        self.render_queued_update_launch(&ctx);
+        self.service_download_retry(&ctx);
         // Drain any pending repo.json metadata refreshes queued by sync completion.
         if !self.pending_repo_metadata_refresh.is_empty() {
             let indices: Vec<usize> = self.pending_repo_metadata_refresh.drain(..).collect();
@@ -455,6 +462,7 @@ impl Foxy {
 
         // Resume any Join that was waiting on a background server-status query.
         self.poll_pending_join_status(&ctx);
+        self.render_pending_join_status(&ctx);
 
         if self.needs_repaint {
             // One 60 Hz frame later, not at once: while progress events keep
@@ -606,19 +614,18 @@ impl Foxy {
 
     fn poll_join_preflight_results(&mut self, ctx: &egui::Context) {
         while let Ok(result) = self.join_preflight_result_rx.try_recv() {
-            let Some(pending) = self.pending_join_preflight_query.take() else {
+            let Some(pending) = self.pending_join_preflight_query.as_ref() else {
                 continue;
             };
+            if !result.matches_pending(pending) {
+                continue;
+            }
+            let pending = self
+                .pending_join_preflight_query
+                .take()
+                .expect("matching preflight request is present");
             match result.result {
                 Ok(query_result) => {
-                    self.join_preflight_cache.insert(
-                        (result.address, result.port),
-                        crate::ui::app::JoinPreflightCacheEntry {
-                            result: query_result.clone(),
-                            display_names: result.display_names.clone(),
-                            cached_at: Instant::now(),
-                        },
-                    );
                     self.finish_join_preflight(
                         ctx,
                         &pending.original_repository,

@@ -450,39 +450,54 @@ fn run_repository_sync(
     // channel as a cancellation, so a temporary sender here races the database
     // open and intermittently fails the sync with "Cancelled".
     let (_cancel_tx, cancel_rx) = watch::channel(false);
+    let options = api::RepositorySyncOptions {
+        operation_id: api::next_operation_id("cli-sync"),
+        persisted_addon_selection: Some(selected_mod_states.clone()),
+        prepare_download_plan: false,
+        discard_prepared_queue: false,
+        repository_space_shared_path: None,
+        repository_space_members: if let Some(space_id) = repo.repository_space_id.as_ref() {
+            AppState::load()?
+                .repositories
+                .into_iter()
+                .filter(|member| member.repository_space_id.as_ref() == Some(space_id))
+                .map(|member| (member.address, member.path))
+                .collect()
+        } else {
+            Vec::new()
+        },
+        auto_backup_directory: None,
+        rollback_temp_directory: Some(if settings.temp_directory.trim().is_empty() {
+            crate::core::utils::app_paths::foxy_data_dir()
+                .display()
+                .to_string()
+        } else {
+            settings.temp_directory.trim().to_string()
+        }),
+        download_speed_limit_mbps: settings
+            .download_speed_limit_mbps
+            .filter(|limit| *limit > 0),
+        recent_local_path_reset: false,
+        force_redownload,
+        force_full_downloads: false,
+        allow_suspect_full_redownload: force_redownload,
+        download_pause_rx: pause_rx,
+        cancel_rx,
+        hash_algorithm_preference: repo.hash_algorithm_preference,
+        hash_io_profile: settings.hash_io_profile,
+        trust_verified_hashes: settings.trust_verified_hashes,
+    };
+    if mode == SyncMode::Download {
+        Foxy::clear_persisted_repository_pause_for_cli(&repo.address, &repo.path)
+            .map_err(|error| CommandError::operation("repo.sync", error))?;
+    }
     let worker = api::spawn_repository_sync(
         repo.address.clone(),
         repo.path.clone(),
-        selected_mod_states.clone(),
+        selected_mod_states,
         tx,
         mode,
-        api::RepositorySyncOptions {
-            operation_id: api::next_operation_id("cli-sync"),
-            persisted_addon_selection: Some(selected_mod_states),
-            prepare_download_plan: false,
-            discard_prepared_queue: false,
-            repository_space_shared_path: None,
-            auto_backup_directory: None,
-            rollback_temp_directory: Some(if settings.temp_directory.trim().is_empty() {
-                crate::core::utils::app_paths::foxy_data_dir()
-                    .display()
-                    .to_string()
-            } else {
-                settings.temp_directory.trim().to_string()
-            }),
-            download_speed_limit_mbps: settings
-                .download_speed_limit_mbps
-                .filter(|limit| *limit > 0),
-            recent_local_path_reset: false,
-            force_redownload,
-            force_full_downloads: false,
-            allow_suspect_full_redownload: force_redownload,
-            download_pause_rx: pause_rx,
-            cancel_rx,
-            hash_algorithm_preference: repo.hash_algorithm_preference,
-            hash_io_profile: settings.hash_io_profile,
-            trust_verified_hashes: settings.trust_verified_hashes,
-        },
+        options,
         None,
     );
 
@@ -556,6 +571,13 @@ fn run_repository_sync(
                     }
                 }
                 ProgressEvent::RepositoryFoxyMode { .. } => {}
+                ProgressEvent::RetryableDownloadFailure => {}
+                ProgressEvent::SharedVersionWarning { repositories } => {
+                    eprintln!(
+                        "Updating shared files may require updates in: {}",
+                        repositories.join(", ")
+                    );
+                }
                 ProgressEvent::Finished => finished = true,
                 ProgressEvent::Cancelled => {
                     failed = Some("Cancelled".to_string());
@@ -584,7 +606,14 @@ fn run_repository_sync(
             break;
         }
     }
-    let _ = worker.join();
+    let worker_succeeded = worker.join().is_ok();
+    if !finished || !worker_succeeded {
+        return Err(CommandError::operation(
+            "repo.sync",
+            "The sync worker stopped without a successful terminal result. Retry the operation."
+                .to_string(),
+        ));
+    }
 
     if let Some(message) = failed {
         return Err(CommandError::operation(

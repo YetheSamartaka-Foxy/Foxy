@@ -72,6 +72,16 @@ impl Foxy {
             warn!("Sync request ignored: Foxy is closing");
             return;
         }
+        if mode == SyncMode::Download
+            && self
+                .repository_view_state
+                .repositories
+                .get(repo_idx)
+                .is_some_and(|repo| self.is_repository_paused(repo))
+        {
+            self.show_error_toast(self.t("This update is paused. Resume it before downloading."));
+            return;
+        }
         if self.block_database_update_request() {
             return;
         }
@@ -158,6 +168,9 @@ impl Foxy {
             let (tx, rx) = broadcast::channel(4096);
             let (download_pause_tx, download_pause_rx) = watch::channel(false);
             let (cancel_tx, cancel_rx) = watch::channel(false);
+            self.sync_retryable_failure = false;
+            self.sync_is_bulk = false;
+            self.sync_visual_folder_id = None;
             self.backend_progress_rx = Some(rx);
             self.cancel_tx = Some(cancel_tx);
             self.clear_progress_event_history();
@@ -346,6 +359,20 @@ impl Foxy {
                     operation_id: api::next_operation_id("repo-sync"),
                     prepare_download_plan,
                     repository_space_shared_path,
+                    repository_space_members: repo
+                        .repository_space_id
+                        .as_ref()
+                        .map(|space_id| {
+                            self.repository_view_state
+                                .repositories
+                                .iter()
+                                .filter(|member| {
+                                    member.repository_space_id.as_ref() == Some(space_id)
+                                })
+                                .map(|member| (member.address.clone(), member.path.clone()))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
                     auto_backup_directory,
                     rollback_temp_directory,
                     download_speed_limit_mbps,

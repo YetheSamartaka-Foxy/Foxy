@@ -14,6 +14,7 @@ mod transfer;
 pub(crate) use bandwidth::AdaptiveBandwidthLimiter;
 pub(crate) use batching::DownloadModCompletion;
 pub(crate) use failure::MissingRemoteFiles;
+pub(crate) use failure::TransientDownloadFailure;
 pub(crate) use metrics::{DownloadMetrics, DownloadRunReport};
 pub(crate) use orchestrator::{
     apply_download_plan_bytes, build_download_estimate_diffs, download_files,

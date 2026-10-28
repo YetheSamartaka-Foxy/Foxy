@@ -83,6 +83,14 @@ After Steam, TeamSpeak, external-addon, server-addon, and DLC readiness steps, e
 
 A live wipe stays marked in flight until its result is received, preventing another wipe or game-space switch during the rebuild. Successful repair resumes the exact saved Launch or Join continuation with its addon/DLC selections. Failure retains the repair requirement and pending action; cancel stops that action. Continuing without wiping resumes only that saved action and leaves the next Launch or Join eligible for the reminder.
 
+### Accepted status, queue, and launch contracts
+
+- A locally verified repository with unknown remote freshness stays launchable. Show persistent inline status such as "Locally verified; server not checked" and the last successful remote-check time. Do not add a launch dialog for this state.
+- A terminal retryable transfer error gets automatic retries by default while Foxy stays open, controlled by app-global `retry_failed_downloads` (default enabled). Show countdown and Stop. Explicit cancellation never retries. A multi-repository run retries a target once when the error may be transient, then continues unaffected targets and reports a partial result with failed-target retry available. Never report the overall run as successful when any target failed or was skipped.
+- If a scheduled job definition is edited, disabled, or deleted while that job runs, ask whether the change affects future runs only or also stops the active run and its post-action. The active run uses its captured target and action snapshot unless explicitly stopped.
+- Launch or Join for an instance whose files are being replaced is queued and cancellable against that exact `(URL, local path)` identity. Recheck readiness when the update ends; an update failure does not launch. An unrelated installation does not block it.
+- Refresh server requirements and relevant local addon state immediately before Join dispatch. Preserve compatible choices; if facts changed, show the difference and ask for confirmation again. Do this even when the earlier checklist is recent.
+
 \### Renderer startup
 
 \- `src/ui/launcher.rs` owns graphics startup. A crash inside a Vulkan ICD or an injected overlay layer kills the process before any panic hook runs, so the only evidence is the launch-attempt marker (`renderer_fallback::record_launch_attempt`) written before `eframe::run_native` and cleared in the app-creator closure. `next_launch_stage` moves a launch that finds the marker one rung down `GraphicsLaunchStage`: `Full` (every wgpu backend, or the one remembered in the graphics-backend record), `SafeBackend` (DX12 on Windows, GL on Linux), then `Glow`, which is persisted into the renderer setting and shows the existing fallback notice.

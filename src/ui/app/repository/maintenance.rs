@@ -767,7 +767,7 @@ impl Foxy {
             && removed.repository_space_id.as_deref() == Some(progress.space_id.as_str())
         {
             progress.remove_target(&normalized_url);
-            if progress.total_count == 0 {
+            if progress.total_count == 0 && progress.failed_count == 0 {
                 self.repository_space_bulk_progress = None;
             }
         }
@@ -952,7 +952,7 @@ impl Foxy {
             self.repository_space_bulk_progress = None;
         }
         self.repository_space_sync_queue
-            .retain(|(queued_space_id, _, _)| queued_space_id != space_id);
+            .retain(|queued| queued.space_id != space_id);
         self.prune_repository_visual_folders(false);
 
         self.pending_repository_space_delete_id = None;

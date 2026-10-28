@@ -204,6 +204,13 @@ Consequences for new code:
   otherwise. A space-scoped field left out of the reset leaks the previous space's
   data into the next one.
 
+### Accepted game-space and queued-work contracts
+
+- A space switch drains saves into the outgoing space before activation. While it waits, freeze new edits and show a Switching state with a cancel action. On save failure, stay in the outgoing space and offer Retry, explicit Discard changes and switch, or Cancel switching. Discard waits for in-flight writes to settle; no queued save may be retargeted to the destination.
+- A manual bulk request freezes its target set and each target's normalized `(remote_url, local_path)` identity at enqueue time. If a queued row is removed or its identity changes, skip that target and explain why. Do not add repositories that join the group later. Resolve that repository's current profile when its unchanged identity actually starts.
+- If a requested update through a repository space would put incompatible versions in that space's shared root, block it and report the conflicting members. For ordinary repositories sharing a folder outside that space contract, warn about affected instances and let the requested repository proceed; keep their current states independent.
+- An edit, disable, or delete of a scheduled job that has an active run must ask whether it affects future runs only or also stops the current run and its post-action. Keep the active run snapshot unless the user explicitly revokes it.
+
 ---
 
 ## Sharing a Workshop selection

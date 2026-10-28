@@ -39,6 +39,7 @@
     "path": "C:\\\\Example\\\\Foxy\\\\Repository1",
     "auto_recheck_on_launch": null,
     "auto_quick_scan_on_launch": null,
+    "last_remote_check_at": null,
     "auto_backup_on_update": null,
     "apply_repo_json_client_parameters": null,
     "apply_repo_json_dlc_content": null,

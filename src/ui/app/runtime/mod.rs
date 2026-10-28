@@ -1,9 +1,12 @@
 mod background_tasks;
 mod database_repair;
+pub(crate) mod download_retry;
 pub(crate) mod frame_cost;
 mod game_space_switch;
 mod keyboard_focus;
 mod progress_events;
+pub(crate) mod repository_status;
+mod shutdown;
 mod startup_prompts;
 mod startup_sync;
 mod storage_notice;

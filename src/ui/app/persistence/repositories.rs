@@ -3,6 +3,7 @@ use crate::ui::types::RepositoryViewState;
 
 impl Foxy {
     pub fn reset_repositories(&mut self) {
+        self.paused_repository_instances.clear();
         self.repository_view_state = RepositoryViewState::default();
         self.repository_spaces.clear();
         self.repository_visual_folders.clear();
@@ -29,5 +30,7 @@ impl Foxy {
         let _ = std::fs::remove_file(Self::get_repositories_path());
         let _ = std::fs::remove_file(Self::get_repository_spaces_path());
         let _ = std::fs::remove_file(Self::get_repository_visual_folders_path());
+        let _ =
+            std::fs::remove_file(Self::get_game_space_directory().join("paused_repositories.json"));
     }
 }

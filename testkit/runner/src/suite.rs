@@ -93,6 +93,7 @@ pub fn execute(root: &Path, options: &SuiteOptions) -> Result<Value> {
             root,
             &run::RunOptions {
                 case: path.clone(),
+                foxy_binary: None,
                 database_mode: options.database_mode.clone(),
                 db_write_gate: options.db_write_gate,
                 accept: false,
@@ -179,6 +180,7 @@ pub fn sweep(
                 root,
                 &run::RunOptions {
                     case: case_path.to_path_buf(),
+                    foxy_binary: None,
                     database_mode: mode.clone(),
                     db_write_gate: *gate,
                     accept: false,

@@ -104,7 +104,44 @@ younger than 30 days; replacing the database file loses it.
 
 \- A configuration file that exists but cannot be read or parsed is copied to `<file>.unreadable` before anything can save over it (`fs_safety::preserve_unreadable_file`, `Foxy::report_unreadable_config`), and an unreadable `repository_spaces.json` skips the space-binding reconcile that would otherwise strip every repository's membership.
 
-\- Closing the window while a sync worker runs cancels the sync and keeps the window open (answering each close request with `ViewportCommand::CancelClose`) until the worker has rolled back, bounded at 15 seconds, then flushes persistence and closes; no sync may start once a close is requested.
+\- Closing the window while a sync worker runs cancels it and keeps the window open (`ViewportCommand::CancelClose`) until rollback and persistence finish. After 15 seconds offer explicit force quit with recovery information preserved; never force exit solely because that interval elapsed. No sync starts once close is requested.
+
+#### Accepted recovery and retry contracts
+
+- An ordinary close waits for the active sync to finish rollback before closing. If a force-quit choice is offered after a prolonged wait, it must say recovery is incomplete and retain enough journal state to finish recovery on the next start. Report unresolved recovery before treating that repository as ready.
+- An unavoidable process loss recovers forward: keep promoted files, identify the interrupted repository instance, verify it, and offer to finish the current update. Do not report success or readiness until verification completes. A recorded user cancellation during ordinary close follows the restore contract above.
+- Download Pause is durable intent scoped to the normalized `(remote_url, local_path)` instance within its game space. Closing cancels and restores active writes while retaining that paused intent. Startup shows pending work as paused; explicit Resume refreshes and validates the current plan before any transfer. Explicit CLI Download is also Resume for that instance; checks and dry runs retain the pause. Automatic, scheduled, queued, and bulk starts must not bypass the pause.
+- A retryable terminal transfer failure may retry automatically while Foxy remains open when the app-global `retry_failed_downloads` option is enabled (default `true`). Show a countdown and Stop control, revalidate the plan each attempt, and retain the pending update on exhaustion. Explicit cancellation is terminal and never auto-retries. The option only controls retries after a terminal failure; it does not replace per-request retries.
+- An update approval permits reaching the latest publication for the selected addons. Refresh and rebuild stale plans without a second confirmation solely because the byte estimate grew. Never use a stale plan or include addons outside the approved selection.
+- A configuration file that cannot be read or parsed is preserved as `<file>.unreadable` before replacement. When preservation succeeds, ask for confirmation before the first save replaces that source. When it fails, block only writes that would overwrite that source until recovery is chosen. A backup is recovery evidence, not a repair.
+- A corrupt database whose backup cannot be created may be discarded only after an explicit user choice that explains database metadata loss and distinguishes downloaded files and JSON configuration, which remain separate.
+- An update that would install incompatible versions into a repository-space shared root is a conflict: block the update and identify the affected member repositories. For ordinary repository entries configured to share a folder, warn about affected repositories and let the requested update proceed; never mark incompatible siblings current.
+- Launching while an update owns files needed by that installation queues a cancellable launch for that exact instance. Recheck readiness after the update completes. An update failure never launches automatically. Work in unrelated folders does not block the launch.
+
+#### Accepted product contracts
+
+These IDs are settled requirements from the design review. Future gap reviews must use them as acceptance criteria and investigate unreviewed cases; do not reopen a settled choice unless a materially different scenario creates a real conflict.
+
+| ID | Settled contract | Canonical detail |
+| --- | --- | --- |
+| Q1 | Close waits for rollback; force quit is explicit and recoverable. | [Recovery and retry](CORE_CONVENTIONS.md#accepted-recovery-and-retry-contracts) |
+| Q2 | Unexpected process loss recovers forward and reports interrupted state. | [Recovery and retry](CORE_CONVENTIONS.md#accepted-recovery-and-retry-contracts) |
+| Q3 | Pause is durable per repository instance and requires explicit revalidated Resume. | [Sync queue](SYNC_ALGO_CONVENTION.md#accepted-queue-pause-and-retry-contracts) |
+| Q4 | Failed outgoing saves offer Retry, Discard and switch, or Cancel; writes remain outgoing. | [Space switching](GAME_SPACES_CONVENTIONS.md#accepted-game-space-and-queued-work-contracts) |
+| Q5 | Freeze edits during a pending space switch and show cancellable Switching state. | [Space switching](GAME_SPACES_CONVENTIONS.md#accepted-game-space-and-queued-work-contracts) |
+| Q6 | Confirm replacement after a successful unreadable-file backup; failed preservation blocks its overwrite. | [Recovery and retry](CORE_CONVENTIONS.md#accepted-recovery-and-retry-contracts) |
+| Q7 | Corrupt database discard and rebuild requires explicit choice when backup fails. | [Recovery and retry](CORE_CONVENTIONS.md#accepted-recovery-and-retry-contracts) |
+| Q8 | Freeze queued identities and skip a changed or removed instance. | [Queued work](GAME_SPACES_CONVENTIONS.md#accepted-game-space-and-queued-work-contracts) |
+| Q9 | Use the current profile when an unchanged queued instance starts. | [Queued work](SYNC_ALGO_CONVENTION.md#accepted-queue-pause-and-retry-contracts) |
+| Q10 | Freeze bulk membership when the request is accepted. | [Queued work](SYNC_ALGO_CONVENTION.md#accepted-queue-pause-and-retry-contracts) |
+| Q11 | Block incompatible versions in repository-space shared roots; warn and proceed for ordinary shared folders. | [Shared-version conflicts](CORE_CONVENTIONS.md#accepted-recovery-and-retry-contracts) |
+| Q12 | An update approval reaches the latest publication for the selected addons without a growth-only reconfirmation. | [Queued work](SYNC_ALGO_CONVENTION.md#accepted-queue-pause-and-retry-contracts) |
+| Q13 | Unknown remote freshness is persistent inline status and does not block launch. | [UI status](UI_CONVENTIONS.md#accepted-status-queue-and-launch-contracts) |
+| Q14 | Retry retryable terminal failures by default while Foxy is open; expose an app-global off switch. | [Recovery and retry](CORE_CONVENTIONS.md#accepted-recovery-and-retry-contracts) |
+| Q15 | Retry a transient bulk target once, continue unaffected targets, and report partial failure. | [UI status](UI_CONVENTIONS.md#accepted-status-queue-and-launch-contracts) |
+| Q16 | Ask whether a scheduled-job edit also stops its active run and post-action. | [Queued work](GAME_SPACES_CONVENTIONS.md#accepted-game-space-and-queued-work-contracts) |
+| Q17 | Queue a cancellable launch behind writes to that instance and recheck readiness afterward. | [UI status](UI_CONVENTIONS.md#accepted-status-queue-and-launch-contracts) |
+| Q18 | Refresh Join requirements before dispatch and reconfirm changed facts. | [UI status](UI_CONVENTIONS.md#accepted-status-queue-and-launch-contracts) |
 
 \### Processor use
 

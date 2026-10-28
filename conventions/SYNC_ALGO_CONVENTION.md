@@ -882,6 +882,13 @@ Failure exits:
   running background part insert so the staged remote rows persist, and records
   no hash results.
 
+## Accepted queue, pause, and retry contracts
+
+- A queued manual bulk run freezes the original target set and each target's normalized `(remote_url, local_path)` identity. Skip and report a queued target whose row was removed or now names a different instance. Membership changes after enqueue do not add targets. Resolve the current profile selection only when the unchanged instance starts.
+- A paused repository instance is remembered per game space across close and restart. On explicit Resume, rebuild or validate current remote metadata and selected-addon coverage before transferring. Startup checks, scheduled jobs, manual queues, and bulk runs must honor the pause and leave the target pending.
+- An update approval authorizes the latest publication for the selected addons. If the server changes the plan or byte estimate before transfer, refresh and rebuild the queue under the same selected scope. A stale plan is never reused; do not stop only because the estimate grew.
+- After a retryable terminal failure, retry at most according to the app-global `retry_failed_downloads` option (default enabled) while the app stays open. Revalidate the plan before each attempt and show a countdown and Stop action. Exhaustion leaves pending work and a failure outcome. Explicit user cancellation does not enter this retry path.
+
 ## Remote Metadata Refresh Algorithm
 
 Remote metadata refresh has two jobs:

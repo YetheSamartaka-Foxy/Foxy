@@ -78,6 +78,22 @@ impl QuickScanProgressState {
 }
 
 pub struct Foxy {
+    pub(crate) interrupted_update_instances: HashSet<String>,
+    pub(crate) startup_recovery_rx:
+        Option<std::sync::mpsc::Receiver<runtime::repository_status::UpdateRecoveryResult>>,
+    pub(crate) pending_download_retry: Option<runtime::download_retry::PendingDownloadRetry>,
+    pub(crate) download_retry_attempts: HashMap<String, u32>,
+    pub(crate) sync_retryable_failure: bool,
+    pub(crate) sync_is_bulk: bool,
+    pub(crate) sync_visual_folder_id: Option<String>,
+    pub(crate) paused_repository_instances: HashSet<String>,
+    pub(crate) pending_game_space_switch_save_error: Option<String>,
+    pub(crate) pending_game_space_switch_discard_save: bool,
+    pub(crate) unreadable_config_replacements:
+        HashMap<std::path::PathBuf, Option<std::path::PathBuf>>,
+    pub(crate) show_unreadable_config_replacement: bool,
+    pub(crate) pending_update_launch: Option<PendingUpdateLaunch>,
+    pub(crate) scheduling_job_change_prompt: Option<scheduling::ScheduledJobChangePrompt>,
     pub app_icon: Option<egui::TextureHandle>,
     pub tfr_logo: Option<egui::TextureHandle>,
     pub default_repo_image: Option<egui::TextureHandle>,
@@ -242,7 +258,6 @@ pub struct Foxy {
     pub pending_queries: Vec<std::thread::JoinHandle<()>>,
     pub server_updates: StdReceiver<(String, String, ServerOnlineStatus)>,
     pub updates_sender: StdSender<(String, String, ServerOnlineStatus)>,
-    pub join_preflight_cache: HashMap<(String, u16), JoinPreflightCacheEntry>,
     pub join_preflight_worker: Option<std::thread::JoinHandle<()>>,
     pub join_preflight_result_rx: StdReceiver<JoinPreflightQueryResult>,
     pub join_preflight_result_tx: StdSender<JoinPreflightQueryResult>,
@@ -407,8 +422,9 @@ pub struct Foxy {
     startup_pending_restore_worker: Option<std::thread::JoinHandle<()>>,
     pub startup_repository_layout_logged: bool,
     pub startup_recheck_queue: VecDeque<(String, String, SyncMode)>,
-    pub repository_space_sync_queue: VecDeque<(String, usize, SyncMode)>,
-    pub repository_visual_folder_sync_queue: VecDeque<(usize, SyncMode)>,
+    pub repository_space_sync_queue: VecDeque<repository::space_actions::QueuedRepositorySpaceSync>,
+    pub repository_visual_folder_sync_queue:
+        VecDeque<repository::space_actions::QueuedRepositoryVisualFolderSync>,
     pub addon_hash_recalc_queue: VecDeque<(String, String)>,
     /// The scheduled job currently executing its recheck/download pipeline, if
     /// any. Runtime-only; never persisted. See `src/ui/app/scheduling/`.

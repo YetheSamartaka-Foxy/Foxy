@@ -34,6 +34,40 @@ use turso::{Builder, Connection, Database, Error, Statement};
 
 use crate::core::utils::format::sanitize_log_path;
 
+static CORRUPT_REBUILD_REQUIRES_DISCARD: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+pub(crate) fn corrupt_rebuild_requires_discard() -> bool {
+    CORRUPT_REBUILD_REQUIRES_DISCARD
+        .lock()
+        .ok()
+        .is_some_and(|slot| {
+            slot.as_ref()
+                .is_some_and(|path| *path == database_file_path())
+        })
+}
+
+pub(crate) fn discard_corrupt_database() -> Result<(), String> {
+    let path = database_file_path();
+    if !crate::core::tasks::db_process_lock::holds(&path) {
+        return Err("The database is not owned by this process".to_string());
+    }
+    for name in DATABASE_ARTIFACT_FILE_NAMES {
+        let artifact = path
+            .parent()
+            .ok_or("Database directory is unavailable")?
+            .join(name);
+        match fs::remove_file(artifact) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(format!("Could not discard the corrupt database: {err}")),
+        }
+    }
+    if let Ok(mut slot) = CORRUPT_REBUILD_REQUIRES_DISCARD.lock() {
+        *slot = None;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[path = "db_turso/round2_benches.rs"]
 mod round2_benches;
@@ -773,10 +807,13 @@ async fn build_or_rebuild_after_failure(path: &Path, path_str: &str) -> turso::R
                 ),
                 Err(move_err) => {
                     warn!(
-                        "STARTUP: could not move failed database aside ({}); removing database artifacts before rebuild",
+                        "STARTUP: could not preserve corrupt database ({}); explicit discard is required",
                         move_err
                     );
-                    remove_db_artifacts(path);
+                    if let Ok(mut slot) = CORRUPT_REBUILD_REQUIRES_DISCARD.lock() {
+                        *slot = Some(path.to_path_buf());
+                    }
+                    return Err(first_err);
                 }
             }
             match build_and_bootstrap(path_str).await {

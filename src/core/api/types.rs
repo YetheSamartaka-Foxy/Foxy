@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LogEntry {
@@ -128,6 +128,10 @@ pub enum ProgressEvent {
     /// The destination volume cannot take the planned download; always
     /// followed by `Failed` carrying the same shortfall as text.
     DiskSpaceShortfall(crate::core::utils::disk_space::DiskSpaceShortfall),
+    RetryableDownloadFailure,
+    SharedVersionWarning {
+        repositories: Vec<String>,
+    },
     Finished,
     Failed(String),
     Cancelled,
@@ -147,6 +151,7 @@ pub struct RepositorySyncOptions {
     /// Build and persist the final download queue, but stop before backup or transfer.
     pub prepare_download_plan: bool,
     pub repository_space_shared_path: Option<String>,
+    pub repository_space_members: Vec<(String, String)>,
     pub auto_backup_directory: Option<String>,
     pub rollback_temp_directory: Option<String>,
     pub download_speed_limit_mbps: Option<u32>,

@@ -467,9 +467,20 @@ fn ensure_layout_at(root: &Path) -> Result<ActiveGameSpace, String> {
         match load_games_registry(&registry_path) {
             Ok(registry) => sanitize_loaded_registry(&registry_path, registry)?,
             Err(err) => {
+                let Some(backup_path) =
+                    crate::core::utils::fs_safety::preserve_unreadable_file(&registry_path)
+                else {
+                    return Err(format!(
+                        "Games registry is unreadable and could not be preserved: {err}"
+                    ));
+                };
                 log::warn!(
-                    "Games registry is unreadable ({}); rewriting the default single-space registry",
-                    err
+                    "Games registry is unreadable ({}) and was preserved as {}; rewriting the default single-space registry",
+                    err,
+                    backup_path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
                 );
                 let registry = GamesRegistryFile::single_space_default();
                 save_games_registry(&registry_path, &registry)?;

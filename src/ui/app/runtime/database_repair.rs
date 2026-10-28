@@ -54,7 +54,8 @@ impl Foxy {
     }
 
     pub(crate) fn database_updates_blocked(&self) -> bool {
-        self.db_lock_conflict.is_some()
+        crate::core::tasks::db_turso::corrupt_rebuild_requires_discard()
+            || self.db_lock_conflict.is_some()
             || self.pending_db_schema_wipe.is_some()
             || self.database_wipe_in_flight
             || crate::core::tasks::db_schema_check::live_schema_incompatible()
@@ -68,6 +69,35 @@ impl Foxy {
         self.show_db_schema_wipe_prompt = true;
         self.needs_repaint = true;
         true
+    }
+
+    pub(super) fn render_corrupt_database_recovery(&mut self, ctx: &egui::Context) {
+        if !crate::core::tasks::db_turso::corrupt_rebuild_requires_discard() {
+            return;
+        }
+        let mut discard = false;
+        egui::Modal::new(egui::Id::unique("corrupt_database_discard")).show(ctx, |ui| {
+            ui.set_max_width(500.0);
+            ui.heading(self.t("Database recovery required"));
+            ui.label(self.t("The database is corrupt and Foxy could not preserve a backup. Discarding it permanently removes its cached records. Downloaded files and saved configuration are kept."));
+            ui.label(self.t("Restore access to the database folder to preserve it, or explicitly discard it and rebuild."));
+            discard = ui.add_enabled(!self.database_wipe_in_flight, egui::Button::new(self.t("Discard corrupt database and rebuild"))).clicked();
+            self.render_export_logs_button(ui);
+        });
+        if discard {
+            self.database_wipe_in_flight = true;
+            self.recheck_all_after_database_wipe = true;
+            let tx = self.database_wipe_tx.clone();
+            std::thread::spawn(move || {
+                let result =
+                    crate::core::tasks::db_turso::discard_corrupt_database().and_then(|()| {
+                        tokio::runtime::Runtime::new()
+                            .map_err(|err| err.to_string())?
+                            .block_on(crate::core::tasks::init_database::wipe_database_live())
+                    });
+                let _ = tx.send(result);
+            });
+        }
     }
 
     pub(crate) fn resume_database_launch(&mut self, ctx: &egui::Context) {

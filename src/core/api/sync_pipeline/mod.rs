@@ -2,6 +2,7 @@ mod backup;
 mod hashing;
 mod pipeline;
 mod remote_recovery;
+mod shared_conflicts;
 pub(crate) mod summary;
 mod verification;
 

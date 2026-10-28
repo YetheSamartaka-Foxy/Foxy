@@ -188,6 +188,20 @@ impl Foxy {
             Self::run_persistence_worker(persistence_request_rx, persistence_result_tx);
         });
         let mut app = Self {
+            interrupted_update_instances: HashSet::new(),
+            startup_recovery_rx: None,
+            pending_download_retry: None,
+            download_retry_attempts: HashMap::new(),
+            sync_retryable_failure: false,
+            sync_is_bulk: false,
+            sync_visual_folder_id: None,
+            paused_repository_instances: HashSet::new(),
+            pending_game_space_switch_save_error: None,
+            pending_game_space_switch_discard_save: false,
+            unreadable_config_replacements: HashMap::new(),
+            show_unreadable_config_replacement: false,
+            pending_update_launch: None,
+            scheduling_job_change_prompt: None,
             app_icon: None,
             tfr_logo: None,
             default_repo_image: None,
@@ -319,7 +333,6 @@ impl Foxy {
             pending_queries: Vec::new(),
             server_updates,
             updates_sender,
-            join_preflight_cache: HashMap::new(),
             join_preflight_worker: None,
             join_preflight_result_rx,
             join_preflight_result_tx,
@@ -611,6 +624,9 @@ impl Foxy {
         }
         app.direct_download_destination_input = app.effective_temp_directory();
         let rollback_cleanup_root = std::path::PathBuf::from(app.effective_temp_directory());
+        let recovery_space = Self::get_game_space_directory();
+        let (recovery_tx, recovery_rx) = std::sync::mpsc::channel();
+        app.startup_recovery_rx = Some(recovery_rx);
         std::thread::spawn(move || {
             let runtime = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -629,7 +645,14 @@ impl Foxy {
                 ),
             ) {
                 log::warn!("Rollback startup cleanup failed: {}", err);
+                let _ = recovery_tx.send(Err(err.to_string()));
+                return;
             }
+            let _ = recovery_tx.send(Ok(
+                crate::core::tasks::download_files::UpdateRollbackSession::recovery_notices(
+                    &recovery_space,
+                ),
+            ));
         });
         app.apply_runtime_palette_visuals(&cc.egui_ctx);
         app.apply_runtime_ui_scale(&cc.egui_ctx);

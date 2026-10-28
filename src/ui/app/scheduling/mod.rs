@@ -81,12 +81,27 @@ impl ScheduledJobRun {
 /// A post-action waiting out its cancellable countdown before it fires.
 #[derive(Debug, Clone)]
 pub struct PendingPostAction {
+    pub job_id: String,
     pub action: PostAction,
     pub job_name: String,
     pub deadline: Instant,
     /// The countdown ended while other work was running; it restarts once the
     /// work finishes so closing or shutting down never interrupts a download.
     pub deferred_for_work: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum ScheduledJobChange {
+    Save(crate::ui::types::ScheduledJob),
+    Delete,
+    SetEnabled(bool),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ScheduledJobChangePrompt {
+    pub job_id: String,
+    pub job_name: String,
+    pub change: ScheduledJobChange,
 }
 
 /// A due occurrence waiting for other work to finish before it starts.
@@ -101,6 +116,19 @@ pub struct HeldScheduledJob {
 /// "only on success" every target must have run and succeeded.
 fn post_action_allowed(run: &ScheduledJobRun) -> bool {
     !run.cancelled && (!run.post_action_only_on_success || (run.failed == 0 && run.skipped == 0))
+}
+
+fn scheduled_run_outcome(succeeded: usize, failed: usize, skipped: usize) -> JobRunOutcome {
+    let unsuccessful = failed + skipped;
+    if unsuccessful > 0 && succeeded > 0 {
+        JobRunOutcome::PartialFailure
+    } else if unsuccessful > 0 {
+        JobRunOutcome::Failed
+    } else if succeeded > 0 {
+        JobRunOutcome::Success
+    } else {
+        JobRunOutcome::Skipped
+    }
 }
 
 fn now_unix_ms() -> u64 {
@@ -134,6 +162,129 @@ enum SchedStep {
 }
 
 impl Foxy {
+    pub(crate) fn request_scheduled_job_save(&mut self, job: crate::ui::types::ScheduledJob) {
+        let id = job.id.clone();
+        let name = job.name.clone();
+        self.request_scheduled_job_change(&id, &name, ScheduledJobChange::Save(job));
+    }
+
+    pub(crate) fn request_scheduled_job_delete(&mut self, job_id: &str, job_name: &str) {
+        self.request_scheduled_job_change(job_id, job_name, ScheduledJobChange::Delete);
+    }
+
+    pub(crate) fn request_scheduled_job_enabled(
+        &mut self,
+        job_id: &str,
+        job_name: &str,
+        enabled: bool,
+    ) {
+        self.request_scheduled_job_change(
+            job_id,
+            job_name,
+            ScheduledJobChange::SetEnabled(enabled),
+        );
+    }
+
+    pub(crate) fn request_scheduled_job_change(
+        &mut self,
+        job_id: &str,
+        job_name: &str,
+        change: ScheduledJobChange,
+    ) {
+        if self.scheduling_job_change_prompt.is_some() {
+            return;
+        }
+        let affects_active = self
+            .scheduler_active_run
+            .as_ref()
+            .is_some_and(|run| run.job_id == job_id)
+            || self
+                .scheduler_pending_post_action
+                .as_ref()
+                .is_some_and(|pending| pending.job_id == job_id);
+        if affects_active {
+            self.scheduling_job_change_prompt = Some(ScheduledJobChangePrompt {
+                job_id: job_id.to_string(),
+                job_name: job_name.to_string(),
+                change,
+            });
+        } else {
+            self.apply_scheduled_job_change(job_id, change);
+        }
+    }
+
+    pub(crate) fn resolve_scheduled_job_change(&mut self, stop_current: bool) {
+        let Some(prompt) = self.scheduling_job_change_prompt.take() else {
+            return;
+        };
+        if stop_current {
+            let active_run_matches = self
+                .scheduler_active_run
+                .as_ref()
+                .is_some_and(|run| run.job_id == prompt.job_id);
+            if active_run_matches {
+                self.cancel_scheduled_job_run();
+                self.cancel_sync();
+            }
+            if self
+                .scheduler_pending_post_action
+                .as_ref()
+                .is_some_and(|pending| pending.job_id == prompt.job_id)
+            {
+                self.cancel_scheduled_post_action();
+            }
+        }
+        self.apply_scheduled_job_change(&prompt.job_id, prompt.change);
+    }
+
+    pub(crate) fn dismiss_scheduled_job_change(&mut self) {
+        let Some(prompt) = self.scheduling_job_change_prompt.take() else {
+            return;
+        };
+        if let ScheduledJobChange::Save(job) = prompt.change {
+            self.scheduling_editor = Some(crate::ui::types::ScheduleJobDraft::from_job(&job));
+        }
+    }
+
+    fn apply_scheduled_job_change(&mut self, job_id: &str, change: ScheduledJobChange) {
+        match change {
+            ScheduledJobChange::Save(mut job) => {
+                if let Some(slot) = self
+                    .settings_view_state
+                    .scheduled_jobs
+                    .iter_mut()
+                    .find(|existing| existing.id == job_id)
+                {
+                    job.enabled = slot.enabled;
+                    *slot = job;
+                    self.save_settings();
+                }
+            }
+            ScheduledJobChange::Delete => {
+                if let Some(index) = self
+                    .settings_view_state
+                    .scheduled_jobs
+                    .iter()
+                    .position(|job| job.id == job_id)
+                {
+                    self.settings_view_state.scheduled_jobs.remove(index);
+                    self.save_settings();
+                }
+            }
+            ScheduledJobChange::SetEnabled(enabled) => {
+                if let Some(job) = self
+                    .settings_view_state
+                    .scheduled_jobs
+                    .iter_mut()
+                    .find(|job| job.id == job_id)
+                {
+                    job.enabled = enabled;
+                    self.save_settings();
+                }
+            }
+        }
+    }
+
     /// Per-frame scheduler tick. Drives a pending post-action countdown, advances
     /// an in-progress run, or starts the next due job. Cheap when idle.
     pub fn process_scheduled_jobs(&mut self, ctx: &egui::Context) {
@@ -433,7 +584,10 @@ impl Foxy {
 
     fn advance_scheduled_job_run(&mut self) {
         // Wait while any sync/download is in flight (ours, or a manual one).
-        if self.repository_sync_active() || self.is_direct_download_running() {
+        if self.pending_download_retry.is_some()
+            || self.repository_sync_active()
+            || self.is_direct_download_running()
+        {
             return;
         }
 
@@ -539,12 +693,58 @@ impl Foxy {
         let Some(repo) = self.repository_view_state.repositories.get(repo_idx) else {
             return;
         };
-        let repo_url = Self::normalize_repo_url(&repo.address);
-        let repo_path_key = Self::repo_instance_path_key(&repo.path);
+        let target = RepoInstanceKey {
+            remote_url: repo.address.clone(),
+            local_path: repo.path.clone(),
+        };
+        self.record_scheduled_job_target_completion(&target, None, mode, finished_successfully);
+    }
+
+    pub(crate) fn scheduled_retry_owner(&self, target: &RepoInstanceKey) -> Option<String> {
+        let run = self.scheduler_active_run.as_ref()?;
+        if run.stage != JobRunStage::Download
+            || !run.in_flight.as_ref().is_some_and(|in_flight| {
+                Self::normalize_repo_url(&in_flight.remote_url)
+                    == Self::normalize_repo_url(&target.remote_url)
+                    && Self::repo_instance_path_key(&in_flight.local_path)
+                        == Self::repo_instance_path_key(&target.local_path)
+            })
+        {
+            return None;
+        }
+        Some(run.job_id.clone())
+    }
+
+    pub(crate) fn record_scheduled_retry_completion(
+        &mut self,
+        target: &RepoInstanceKey,
+        job_id: &str,
+        finished_successfully: bool,
+    ) {
+        self.record_scheduled_job_target_completion(
+            target,
+            Some(job_id),
+            Some(SyncMode::Download),
+            finished_successfully,
+        );
+    }
+
+    fn record_scheduled_job_target_completion(
+        &mut self,
+        target: &RepoInstanceKey,
+        expected_job_id: Option<&str>,
+        mode: Option<SyncMode>,
+        finished_successfully: bool,
+    ) {
+        let repo_url = Self::normalize_repo_url(&target.remote_url);
+        let repo_path_key = Self::repo_instance_path_key(&target.local_path);
 
         let Some(run) = self.scheduler_active_run.as_mut() else {
             return;
         };
+        if expected_job_id.is_some_and(|job_id| run.job_id != job_id) {
+            return;
+        }
         let Some(in_flight) = run.in_flight.as_ref() else {
             return;
         };
@@ -575,15 +775,7 @@ impl Foxy {
             return;
         };
 
-        let outcome = if run.failed > 0 && run.succeeded > 0 {
-            JobRunOutcome::PartialFailure
-        } else if run.failed > 0 {
-            JobRunOutcome::Failed
-        } else if run.succeeded > 0 {
-            JobRunOutcome::Success
-        } else {
-            JobRunOutcome::Skipped
-        };
+        let outcome = scheduled_run_outcome(run.succeeded, run.failed, run.skipped);
         info!(
             "Scheduled job '{}' finished: outcome={:?} ok={} failed={} skipped={}",
             run.job_name, outcome, run.succeeded, run.failed, run.skipped
@@ -634,6 +826,7 @@ impl Foxy {
             run.job_name, run.post_action, POST_ACTION_COUNTDOWN_SECS
         );
         self.scheduler_pending_post_action = Some(PendingPostAction {
+            job_id: run.job_id.clone(),
             action: run.post_action,
             job_name: run.job_name,
             deadline: Instant::now() + Duration::from_secs(POST_ACTION_COUNTDOWN_SECS),
@@ -669,7 +862,9 @@ impl Foxy {
     }
 
     fn process_scheduled_post_action(&mut self, ctx: &egui::Context) {
-        let work_running = self.repository_sync_active() || self.is_direct_download_running();
+        let work_running = self.pending_download_retry.is_some()
+            || self.repository_sync_active()
+            || self.is_direct_download_running();
         let Some(pending) = self.scheduler_pending_post_action.as_mut() else {
             return;
         };
@@ -838,6 +1033,16 @@ mod tests {
             skipped: 0,
             cancelled: false,
         }
+    }
+
+    #[test]
+    fn a_run_with_skipped_targets_is_reported_as_partial_or_failed() {
+        assert_eq!(
+            scheduled_run_outcome(2, 0, 1),
+            JobRunOutcome::PartialFailure
+        );
+        assert_eq!(scheduled_run_outcome(0, 0, 1), JobRunOutcome::Failed);
+        assert_eq!(scheduled_run_outcome(2, 0, 0), JobRunOutcome::Success);
     }
 
     #[test]

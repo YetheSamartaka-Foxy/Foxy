@@ -88,6 +88,66 @@ pub fn validate(case: &Value) -> Result<()> {
             "Perf case requires operations"
         );
         for operation in case["operations"].as_array().into_iter().flatten() {
+            if matches!(
+                operation["op"].as_str(),
+                Some(
+                    "cancel_after_promoted_file"
+                        | "kill_after_promoted_file"
+                        | "close_after_promoted_file"
+                )
+            ) {
+                bail!(
+                    "Use cancel_after_promoted_file or kill_after_promoted_file as a boolean on a download operation"
+                );
+            }
+            if operation["cancel_after_promoted_file"].as_bool() == Some(true)
+                || operation["kill_after_promoted_file"].as_bool() == Some(true)
+                || operation["close_after_promoted_file"].as_bool() == Some(true)
+                || operation["pause_after_s"].as_f64().is_some()
+            {
+                ensure!(
+                    case["harness"].as_str().unwrap_or("gui") == "gui"
+                        && matches!(
+                            operation["op"].as_str(),
+                            Some("download" | "force-redownload")
+                        ),
+                    "Promotion waits and pause_after_s require GUI download operations"
+                );
+            }
+            if matches!(
+                operation["op"].as_str(),
+                Some(
+                    "capture-file-state"
+                        | "assert-file-state"
+                        | "assert-download-paused"
+                        | "assert-repository-paused"
+                        | "assert-space-bulk-target-count"
+                        | "assert-space-bulk-completed-count"
+                        | "assert-space-bulk-failed-count"
+                        | "wait-for-space-bulk-target-count"
+                        | "prepare-test-directory"
+                        | "invoke-driver"
+                        | "wait-for-busy"
+                )
+            ) {
+                ensure!(harness == "gui", "State operations require the GUI harness");
+            }
+            let recovery_modes = [
+                operation["cancel_after_promoted_file"].as_bool() == Some(true),
+                operation["kill_after_promoted_file"].as_bool() == Some(true),
+                operation["close_after_promoted_file"].as_bool() == Some(true),
+                operation["pause_after_s"].as_f64().is_some(),
+                operation["cancel_after_s"].as_f64().is_some(),
+                operation["kill_after_s"].as_f64().is_some(),
+            ];
+            ensure!(
+                recovery_modes
+                    .into_iter()
+                    .filter(|enabled| *enabled)
+                    .count()
+                    <= 1,
+                "A download operation may select only one cancel, close, kill, or pause mode"
+            );
             if operation["op"].as_str() == Some("origin-switch") {
                 ensure!(
                     operation["root"].is_string(),
@@ -97,6 +157,23 @@ pub fn validate(case: &Value) -> Result<()> {
                     case["origin"]["root"].is_string(),
                     "origin-switch requires a case origin"
                 );
+            }
+        }
+    }
+    if let Some(versions) = case["origin"]["synthetic"].as_array() {
+        ensure!(
+            !versions.is_empty(),
+            "origin.synthetic must contain at least one version"
+        );
+        for version in versions {
+            ensure!(
+                version["root"].is_string(),
+                "Each synthetic origin version requires a root"
+            );
+            for field in ["mods", "files_per_mod", "file_bytes", "entry_bytes"] {
+                if let Some(value) = version[field].as_u64() {
+                    ensure!(value > 0, "origin.synthetic.{field} must be positive");
+                }
             }
         }
     }

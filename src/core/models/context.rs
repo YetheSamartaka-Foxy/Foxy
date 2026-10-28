@@ -38,6 +38,7 @@ pub(crate) struct FoxyContext {
     /// quick-scan sweep), stamped as `op_id` on every SOL line the action
     /// emits so a saved benchmark can keep only the records it owns.
     pub(crate) operation_id: Option<Arc<str>>,
+    transient_metadata_failure: Arc<AtomicBool>,
     /// Set by the metadata rebuild when the `subfiles` table is globally empty at
     /// rebuild start (the post-whole-wipe force-redownload / first-download case),
     /// so the per-mod part insert can use a plain `INSERT` into an index-deferred
@@ -113,6 +114,7 @@ impl FoxyContext {
             target_local_path: None,
             repository_space_shared_path: None,
             operation_id: None,
+            transient_metadata_failure: Arc::new(AtomicBool::new(false)),
             fresh_subfiles_load: Arc::new(AtomicBool::new(false)),
             fresh_addon_file_links: Arc::new(AtomicBool::new(false)),
             defer_part_inserts: Arc::new(AtomicBool::new(false)),
@@ -385,6 +387,7 @@ impl FoxyContext {
     }
 
     pub(crate) fn with_operation_id(mut self, operation_id: impl Into<Arc<str>>) -> Self {
+        self.transient_metadata_failure = Arc::new(AtomicBool::new(false));
         self.operation_id = Some(operation_id.into());
         self
     }
@@ -393,11 +396,45 @@ impl FoxyContext {
         self.operation_id.as_deref()
     }
 
+    pub(crate) fn mark_transient_metadata_failure(&self) {
+        self.transient_metadata_failure
+            .store(true, Ordering::Relaxed);
+    }
+
+    pub(crate) fn has_transient_metadata_failure(&self) -> bool {
+        self.transient_metadata_failure.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn clear_transient_metadata_failure(&self) {
+        self.transient_metadata_failure
+            .store(false, Ordering::Relaxed);
+    }
+
     /// Storage-neutral DB handle for the seam (plan.md §5.1). Converted call
     /// sites use `context.db()` instead of `context.database.as_ref()`. The arm
     /// returned follows the active storage feature: SeaORM by default, Turso
     /// under `--features turso` (the Phase-2 cutover wiring).
     pub(crate) fn db(&self) -> FoxyDb {
         FoxyDb::from_handle(self.database.clone())
+    }
+}
+
+#[cfg(test)]
+mod retry_scope_tests {
+    use super::FoxyContext;
+
+    #[tokio::test]
+    async fn metadata_retry_evidence_is_shared_only_within_one_operation() {
+        let database = crate::core::tasks::db_turso::build_test_database().await;
+        let base = FoxyContext::new(database, reqwest::Client::new());
+        let first = base.clone().with_operation_id("first");
+        let fetch = first.clone();
+        fetch.mark_transient_metadata_failure();
+        assert!(first.has_transient_metadata_failure());
+        assert!(!base.has_transient_metadata_failure());
+
+        let second = first.clone().with_operation_id("second");
+        assert!(!second.has_transient_metadata_failure());
+        assert!(first.has_transient_metadata_failure());
     }
 }

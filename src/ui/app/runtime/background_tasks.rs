@@ -419,6 +419,14 @@ impl Foxy {
                 payload.remote_changed_repositories.len(),
                 payload.pending_update_repositories.len(),
             );
+            for instance in payload
+                .prevalidated_repositories
+                .iter()
+                .chain(&payload.remote_changed_repositories)
+                .chain(&payload.pending_update_repositories)
+            {
+                self.note_successful_remote_check(&instance.repo_url, &instance.local_path);
+            }
             let mut remote_refreshes = payload.remote_changed_repositories;
             if !remote_refreshes.is_empty() {
                 info!(

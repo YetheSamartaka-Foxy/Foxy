@@ -1,5 +1,6 @@
 use std::net::{ToSocketAddrs, UdpSocket};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use log::{debug, warn};
@@ -7,13 +8,15 @@ use md5::Md5;
 use sha1::{Digest, Sha1};
 
 use crate::core::utils::proxy::SharedBlockingClient;
-use crate::ui::app::{DecodedImagePayload, Foxy, ImageLoadResult};
+use crate::ui::app::{DecodedImagePayload, Foxy, ImageLoadResult, JoinServerStatusResult};
 use crate::ui::types::{RepositoryServer, ServerOnlineStatus};
 
 /// Shared HTTP client for image downloads, enabling TLS session reuse and
 /// connection pooling across all image fetch operations.
 static IMAGE_HTTP_CLIENT: SharedBlockingClient =
     SharedBlockingClient::new(|builder| builder.timeout(Duration::from_secs(10)));
+
+static NEXT_JOIN_STATUS_QUERY_ID: AtomicU64 = AtomicU64::new(1);
 
 impl Foxy {
     /// Resolve the A2S query port for a listed game port through the active
@@ -190,6 +193,38 @@ impl Foxy {
         });
 
         self.pending_queries.push(handle);
+    }
+
+    pub(crate) fn start_join_server_status_query(
+        &mut self,
+        server: &RepositoryServer,
+    ) -> (
+        u64,
+        Instant,
+        std::sync::mpsc::Receiver<JoinServerStatusResult>,
+    ) {
+        let query_id = NEXT_JOIN_STATUS_QUERY_ID.fetch_add(1, Ordering::Relaxed);
+        let dispatched_at = Instant::now();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let address = server.address.clone();
+        let port = server.port.clone();
+        let query_port = Self::server_query_port(&port);
+
+        let handle = std::thread::spawn(move || {
+            let status = match query_port
+                .and_then(|query_port| Self::query_steam_a2s_info(&address, query_port))
+            {
+                Ok(players) => ServerOnlineStatus::Online { players },
+                Err(_) => ServerOnlineStatus::Offline,
+            };
+            let _ = tx.send(JoinServerStatusResult {
+                query_id,
+                dispatched_at,
+                status,
+            });
+        });
+        self.pending_queries.push(handle);
+        (query_id, dispatched_at, rx)
     }
 
     fn image_checksum_matches(bytes: &[u8], expected_hex: &str) -> (bool, String) {

@@ -1,3 +1,6 @@
+use super::launch_policy::{
+    join_preflight_fact_keys, merge_join_preflight_choices, paths_overlap, repository_launch_paths,
+};
 use super::{LaunchDispatchResult, spawn_launch_process};
 use crate::core::addon_metadata::load_addon_display_name_snapshot;
 use crate::core::arma3_missions::EditorMission;
@@ -7,19 +10,169 @@ use crate::core::arma3_server_query::{
 use crate::core::steam::{self, SteamEnsureResult};
 use crate::ui::app::{
     Foxy, JoinPreflightQueryResult, PendingJoinPreflightQuery, PendingJoinStatusQuery,
-    PendingMissionEditorLaunchWarningState,
+    PendingMissionEditorLaunchWarningState, PendingUpdateLaunch,
 };
 use crate::ui::types::{Repository, RepositoryServer, ServerOnlineStatus};
 use eframe::egui;
 use log::{info, warn};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 const EDITOR_LAUNCH_COOLDOWN: Duration = Duration::from_secs(30);
-const JOIN_PREFLIGHT_CACHE_TTL: Duration = Duration::from_secs(60);
+static NEXT_JOIN_PREFLIGHT_QUERY_ID: AtomicU64 = AtomicU64::new(1);
 
 impl Foxy {
+    fn repository_space_shared_path(&self, repository: &Repository) -> Option<&str> {
+        let space_id = repository.repository_space_id.as_deref()?;
+        self.repository_spaces
+            .iter()
+            .find(|space| space.id == space_id)
+            .map(|space| space.shared_path.as_str())
+    }
+
+    fn conflicting_download_instance(&self, target: &Repository) -> Option<String> {
+        if self.current_sync_mode != Some(crate::core::api::SyncMode::Download) {
+            return None;
+        }
+        let source = self
+            .syncing_repository
+            .and_then(|index| self.repository_view_state.repositories.get(index))?;
+        let source_shared = self.repository_space_shared_path(source);
+        let target_shared = self.repository_space_shared_path(target);
+        let source_paths = repository_launch_paths(source, source_shared);
+        let target_paths = repository_launch_paths(target, target_shared);
+        source_paths
+            .iter()
+            .any(|source_path| {
+                target_paths
+                    .iter()
+                    .any(|target_path| paths_overlap(source_path, target_path))
+            })
+            .then(|| Self::repo_instance_key(&source.address, &source.path))
+    }
+
+    fn queue_launch_if_conflicting_update(
+        &mut self,
+        effective: &Repository,
+        server: Option<&RepositoryServer>,
+        repo_name: &str,
+        launch_label: &str,
+    ) -> bool {
+        let target_instance_key = Self::repo_instance_key(&effective.address, &effective.path);
+        if self
+            .pending_update_launch
+            .as_ref()
+            .is_some_and(|pending| pending.target_instance_key == target_instance_key)
+        {
+            return true;
+        }
+        let Some(blocking_instance_key) = self.conflicting_download_instance(effective) else {
+            return false;
+        };
+        if self.pending_update_launch.is_some() {
+            self.show_error_toast(self.t("Another launch is already waiting for an update."));
+            return true;
+        }
+        info!(
+            "Queued {} for repository {} until overlapping update completes",
+            launch_label, repo_name
+        );
+        self.pending_update_launch = Some(PendingUpdateLaunch {
+            repository: effective.clone(),
+            server: server.cloned(),
+            repo_name: repo_name.to_string(),
+            blocking_instance_key,
+            target_instance_key,
+            update_finished: false,
+            update_succeeded: false,
+        });
+        true
+    }
+
+    pub(crate) fn finish_queued_update_launch(
+        &mut self,
+        blocking_instance_key: &str,
+        succeeded: bool,
+    ) {
+        let Some(pending) = self.pending_update_launch.as_mut() else {
+            return;
+        };
+        if pending.blocking_instance_key != blocking_instance_key {
+            return;
+        }
+        pending.update_finished = true;
+        pending.update_succeeded = succeeded;
+    }
+
+    pub(crate) fn render_queued_update_launch(&mut self, ctx: &egui::Context) {
+        let Some(pending) = self.pending_update_launch.clone() else {
+            return;
+        };
+        let mut cancel = false;
+        egui::Window::new(self.t("Launch queued for update"))
+            .frame(self.modal_window_chrome(ctx))
+            .title_frame(self.modal_window_chrome(ctx))
+            .title_bar(true)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .default_width(480.0)
+            .show(ctx, |ui| {
+                if pending.update_finished && !pending.update_succeeded {
+                    ui.label(self.t("The update did not complete. The game was not launched."));
+                } else {
+                    ui.label(self.t_fmt(
+                        "Waiting for the update to finish before launching {repository}.",
+                        &[("repository", pending.repo_name.clone())],
+                    ));
+                    if !pending.update_finished {
+                        ui.add(crate::ui::app::PacedSpinner::new());
+                    }
+                }
+                ui.add_space(12.0);
+                cancel = ui.button(self.t("Cancel queued launch")).clicked();
+            });
+        if cancel {
+            self.pending_update_launch = None;
+            return;
+        }
+        if !pending.update_finished {
+            return;
+        }
+        if !pending.update_succeeded {
+            self.pending_update_launch = None;
+            self.show_error_toast(
+                self.t("The update did not complete. The game was not launched."),
+            );
+            return;
+        }
+        if let Some(blocker) = self.conflicting_download_instance(&pending.repository) {
+            if let Some(queued) = self.pending_update_launch.as_mut() {
+                queued.blocking_instance_key = blocker;
+                queued.update_finished = false;
+                queued.update_succeeded = false;
+            }
+            return;
+        }
+        self.pending_update_launch = None;
+        if self
+            .repo_index_by_instance(
+                &Self::normalize_repo_url(&pending.repository.address),
+                &Self::repo_instance_path_key(&pending.repository.path),
+            )
+            .is_none()
+        {
+            return;
+        }
+        if let Some(server) = pending.server.as_ref() {
+            self.try_join_repository_server(ctx, &pending.repository, server, &pending.repo_name);
+        } else {
+            self.present_launch_preflight(ctx, &pending.repository, &pending.repo_name);
+        }
+    }
+
     fn activate_extra_files_before_launch(&mut self) {
         let space_dir = crate::core::game::spaces::active_game_space_dir();
         let game_dir = crate::core::game::registry()
@@ -93,6 +246,9 @@ impl Foxy {
         repo_name: &str,
         launch_label: &'static str,
     ) -> LaunchDispatchResult {
+        if self.queue_launch_if_conflicting_update(effective, server, repo_name, launch_label) {
+            return LaunchDispatchResult::Deferred;
+        }
         self.refresh_database_repair_requirement();
         if self.database_updates_blocked() {
             if self.pending_database_launch.is_none() {
@@ -384,14 +540,15 @@ impl Foxy {
         // round-trip). The join decision resumes in `poll_pending_join_status`
         // once a fresh status arrives, so a slow or unreachable server can no
         // longer freeze the UI.
+        let (query_id, started_at, result_rx) = self.start_join_server_status_query(server);
         self.pending_join_status_query = Some(PendingJoinStatusQuery {
             repo_name: repo_name.to_string(),
             server: server.clone(),
             effective_repository: effective.clone(),
-            key: (server.address.clone(), server.port.clone()),
-            started_at: Instant::now(),
+            query_id,
+            started_at,
+            result_rx,
         });
-        self.spawn_query_thread(server);
         self.needs_repaint = true;
     }
 
@@ -408,12 +565,10 @@ impl Foxy {
             return;
         };
 
-        // Accept the freshest status that landed at or after we dispatched.
-        let status = self
-            .server_statuses
-            .get(&pending.key)
-            .filter(|cache| cache.last_check >= pending.started_at)
-            .map(|cache| cache.status);
+        let result = pending.result_rx.try_recv().ok();
+        let status = result
+            .filter(|result| result.matches_pending(pending.query_id, pending.started_at))
+            .map(|result| result.status);
         if status.is_none() && pending.started_at.elapsed() < JOIN_STATUS_QUERY_TIMEOUT {
             return; // still waiting - no clone, no take
         }
@@ -433,6 +588,23 @@ impl Foxy {
                 self.show_error_toast(self.t("Cannot join: server appears offline."));
                 self.needs_repaint = true;
             }
+        }
+    }
+
+    pub(crate) fn render_pending_join_status(&mut self, ctx: &egui::Context) {
+        if self.pending_join_status_query.is_none() {
+            return;
+        }
+        let mut cancel = false;
+        egui::Modal::new(egui::Id::unique("pending_join_status_query")).show(ctx, |ui| {
+            ui.set_max_width(420.0);
+            ui.label(self.t("Refreshing server and local addon requirements..."));
+            ui.add(crate::ui::app::PacedSpinner::new());
+            cancel = ui.button(self.t("Cancel")).clicked();
+        });
+        if cancel {
+            self.pending_join_status_query = None;
+            self.needs_repaint = true;
         }
     }
 
@@ -464,15 +636,6 @@ impl Foxy {
                     );
                     match server.port.parse::<u16>() {
                         Ok(port) => {
-                            if self.handle_cached_join_preflight(
-                                ctx, effective, server, repo_name, port,
-                            ) {
-                                info!(
-                                    "Join addon preflight handled from cache for repository {} server {}:{}",
-                                    repo_name, server.address, server.port
-                                );
-                                return;
-                            }
                             self.spawn_join_preflight_query(
                                 ctx, effective, server, repo_name, port,
                             );
@@ -508,39 +671,6 @@ impl Foxy {
         }
     }
 
-    fn handle_cached_join_preflight(
-        &mut self,
-        ctx: &egui::Context,
-        effective: &Repository,
-        server: &RepositoryServer,
-        repo_name: &str,
-        port: u16,
-    ) -> bool {
-        let key = (server.address.clone(), port);
-        let Some(entry) = self.join_preflight_cache.get(&key) else {
-            return false;
-        };
-        if entry.cached_at.elapsed() > JOIN_PREFLIGHT_CACHE_TTL {
-            info!(
-                "Join addon preflight cache expired for repository {} server {}:{}",
-                repo_name, server.address, server.port
-            );
-            self.join_preflight_cache.remove(&key);
-            return false;
-        }
-        info!(
-            "Join addon preflight cache hit for repository {} server {}:{} with {} requirement(s)",
-            repo_name,
-            server.address,
-            server.port,
-            entry.result.requirements.len()
-        );
-        let result = entry.result.clone();
-        let display_names = entry.display_names.clone();
-        self.finish_join_preflight(ctx, effective, server, repo_name, &result, &display_names);
-        true
-    }
-
     fn spawn_join_preflight_query(
         &mut self,
         ctx: &egui::Context,
@@ -560,6 +690,7 @@ impl Foxy {
         }
 
         self.pending_join_preflight_query = Some(PendingJoinPreflightQuery {
+            query_id: NEXT_JOIN_PREFLIGHT_QUERY_ID.fetch_add(1, Ordering::Relaxed),
             repo_name: repo_name.to_string(),
             server: server.clone(),
             original_repository: effective.clone(),
@@ -579,6 +710,11 @@ impl Foxy {
             repo_name, address, port
         );
         let tx = self.join_preflight_result_tx.clone();
+        let query_id = self
+            .pending_join_preflight_query
+            .as_ref()
+            .expect("preflight request was just installed")
+            .query_id;
         let repaint_ctx = self.repaint_ctx.clone().or_else(|| Some(ctx.clone()));
         self.join_preflight_worker = Some(std::thread::spawn(move || {
             let started_at = Instant::now();
@@ -639,6 +775,7 @@ impl Foxy {
             }
             if tx
                 .send(JoinPreflightQueryResult {
+                    query_id,
                     address,
                     port,
                     result,
@@ -661,6 +798,15 @@ impl Foxy {
         display_names: &crate::core::addon_metadata::AddonDisplayNameSnapshot,
     ) {
         Self::log_join_preflight_query_output(repo_name, server, result);
+        let confirmation = self
+            .pending_join_preflight
+            .as_ref()
+            .filter(|pending| {
+                pending.server.address == server.address
+                    && pending.server.port == server.port
+                    && pending.final_confirmation_choice.is_some()
+            })
+            .cloned();
         let mut addon_state = Self::build_join_preflight_state(
             effective,
             &self.repository_view_state.repositories,
@@ -676,6 +822,32 @@ impl Foxy {
             repo_name,
             result,
         );
+        if let Some(previous) = confirmation {
+            let mut refreshed = addon_state.take().unwrap_or_else(|| {
+                crate::ui::app::PendingJoinPreflightState::empty(
+                    repo_name,
+                    server.clone(),
+                    effective.clone(),
+                    false,
+                )
+            });
+            merge_join_preflight_choices(&previous, &mut refreshed);
+            let facts_changed =
+                join_preflight_fact_keys(&previous) != join_preflight_fact_keys(&refreshed);
+            let keep_suggestions = previous.final_confirmation_choice.unwrap_or(false);
+            self.pending_join_preflight = None;
+            if facts_changed {
+                refreshed.final_facts_refreshed = true;
+                refreshed.final_confirmation_choice = None;
+                self.pending_join_preflight = Some(refreshed);
+                self.prelaunch_process_checks = Default::default();
+                ctx.request_repaint();
+                return;
+            }
+            refreshed.final_facts_refreshed = true;
+            self.dispatch_refreshed_join(ctx, &refreshed, keep_suggestions);
+            return;
+        }
         if let Some(preflight) = &addon_state {
             info!(
                 "Join addon preflight dialog opened for repository {} server {}:{}: requirements={}, suggestions={}, ambiguous={}, known_remote={}, extra_enabled={}",
@@ -699,6 +871,74 @@ impl Foxy {
             );
         }
         self.present_join_addon_preflight(ctx, effective, server, repo_name, addon_state);
+    }
+
+    fn dispatch_refreshed_join(
+        &mut self,
+        ctx: &egui::Context,
+        pending: &crate::ui::app::PendingJoinPreflightState,
+        keep_suggestions: bool,
+    ) {
+        let mut pending = pending.clone();
+        if pending.steam_required {
+            pending.steam_running =
+                steam::is_steam_running(&self.settings_view_state.steam_directory);
+            if !pending.can_launch() {
+                self.pending_join_preflight = Some(pending);
+                ctx.request_repaint();
+                return;
+            }
+        }
+        let repository = if keep_suggestions {
+            Self::repository_with_join_preflight_selections(&pending)
+        } else {
+            Self::repository_without_join_preflight_suggestions(&pending)
+        };
+        let result = self.launch_repository_with_database_guard(
+            &repository,
+            Some(&pending.server),
+            &pending.repo_name,
+            "join",
+        );
+        if result == super::LaunchDispatchResult::Launched {
+            self.handle_post_launch_window_behavior(ctx, "join launch completed");
+        }
+    }
+
+    pub(super) fn confirm_final_join_facts(
+        &mut self,
+        ctx: &egui::Context,
+        pending: &crate::ui::app::PendingJoinPreflightState,
+        keep_suggestions: bool,
+    ) -> bool {
+        if pending.launch_only {
+            return false;
+        }
+        if self.pending_join_preflight_query.is_some()
+            || self
+                .join_preflight_worker
+                .as_ref()
+                .is_some_and(|worker| !worker.is_finished())
+        {
+            return true;
+        }
+        let Ok(port) = pending.server.port.parse::<u16>() else {
+            self.show_error_toast(
+                self.t("Cannot refresh server requirements because its query port is invalid."),
+            );
+            return true;
+        };
+        let mut pending = pending.clone();
+        pending.final_confirmation_choice = Some(keep_suggestions);
+        self.pending_join_preflight = Some(pending.clone());
+        self.spawn_join_preflight_query(
+            ctx,
+            &pending.original_repository,
+            &pending.server,
+            &pending.repo_name,
+            port,
+        );
+        true
     }
 
     /// Adds the Creator DLC differences to the join modal. Skipped when the

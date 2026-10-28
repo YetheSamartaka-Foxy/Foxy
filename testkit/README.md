@@ -35,6 +35,28 @@ foxy-testkit run --case .\testkit\cases\ux-boot-smoke.json
 foxy-testkit run --case .\testkit\cases\perf-repo.json
 ```
 
+The tracked `examples/state-*-ssd.example.json` cases generate their own local
+origins and repository folders under each run directory. They exercise file
+rollback on cancel and normal close, forward recovery after a process kill,
+paused state across restart, and queued repository identity and membership
+changes. Run one after building the app, runner, and oracle:
+
+```powershell
+foxy-testkit run --case .\testkit\examples\state-recovery-ssd.example.json --no-build
+foxy-testkit run --case .\testkit\examples\state-paused-restart-ssd.example.json --no-build
+foxy-testkit run --case .\testkit\examples\state-bulk-queue-identity-ssd.example.json --no-build
+foxy-testkit run --case .\testkit\examples\state-delta-clean-check-ssd.example.json --no-build
+```
+
+These are correctness cases, not performance baselines. Their file-state
+assertions compare deterministic per-file BLAKE3 digests stored in the isolated
+run directory. The shared-path driver intent is accepted only when
+`FOXY_TESTKIT_RUN_DIR` and `FOXY_CONFIG_DIR` prove the app is inside that same
+synthetic run. To run the same cases against a preserved executable for a
+before/after comparison, pass `--foxy-binary` with an executable under the
+ignored repository `.local/` directory; e.g. `--foxy-binary
+.local/reference-build/Foxy.exe`. The override does not change any case fields.
+
 Run a whole suite (a failing case does not stop the rest):
 
 ```powershell

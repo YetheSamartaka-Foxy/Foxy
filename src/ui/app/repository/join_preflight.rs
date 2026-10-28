@@ -190,6 +190,8 @@ impl Foxy {
             steam_running: false,
             launch_only: false,
             query_server_before_join: false,
+            final_facts_refreshed: false,
+            final_confirmation_choice: None,
         })
     }
 
@@ -1633,6 +1635,8 @@ mod tests {
             steam_running: false,
             launch_only: false,
             query_server_before_join: false,
+            final_facts_refreshed: false,
+            final_confirmation_choice: None,
         }
     }
 

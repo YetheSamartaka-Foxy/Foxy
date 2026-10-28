@@ -58,6 +58,10 @@ impl Foxy {
 
         let path = Self::get_repository_spaces_path();
         let mut spaces = self.repository_spaces.clone();
+        if !self.persistence_path_is_confirmed_for_replacement(&path) {
+            self.show_unreadable_config_replacement = true;
+            return;
+        }
         sanitize_repository_spaces_paths(&mut spaces);
         match serde_json::to_string_pretty(&spaces) {
             Ok(json) => {
@@ -117,6 +121,10 @@ impl Foxy {
 
         let path = Self::get_repository_visual_folders_path();
         let mut folders = self.repository_visual_folders.clone();
+        if !self.persistence_path_is_confirmed_for_replacement(&path) {
+            self.show_unreadable_config_replacement = true;
+            return;
+        }
         sanitize_repository_visual_folders(&mut folders);
         match serde_json::to_string_pretty(&folders) {
             Ok(json) => {

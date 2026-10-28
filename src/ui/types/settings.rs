@@ -58,6 +58,8 @@ pub struct SettingsViewState {
     pub auto_quick_scan_on_launch: bool,
     #[serde(default)]
     pub auto_backup_on_update: bool,
+    #[serde(default = "default_auto_recheck_on_launch")]
+    pub retry_failed_downloads: bool,
     #[serde(default = "default_apply_repo_json_client_parameters")]
     pub apply_repo_json_client_parameters: bool,
     #[serde(default = "default_apply_repo_json_dlc_content")]
@@ -354,6 +356,7 @@ impl Default for SettingsViewState {
             auto_recheck_on_launch: default_auto_recheck_on_launch(),
             auto_quick_scan_on_launch: default_auto_quick_scan_on_launch(),
             auto_backup_on_update: false,
+            retry_failed_downloads: true,
             apply_repo_json_client_parameters: default_apply_repo_json_client_parameters(),
             apply_repo_json_dlc_content: default_apply_repo_json_dlc_content(),
             warn_editor_external_addons: default_warn_editor_external_addons(),
