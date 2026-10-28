@@ -1,3 +1,6 @@
+mod input;
+
+use input::{NavigationSteps, key_events};
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -56,6 +59,10 @@ pub struct AgentGuiRuntime {
     pending_screenshots: Vec<PendingScreenshot>,
     pending_waits: Vec<PendingWait>,
     pending_settles: Vec<PendingSettle>,
+    pending_navigation: VecDeque<PendingNavigation>,
+    pending_focus: Option<PendingFocus>,
+    native_modifiers: Modifiers,
+    restore_native_modifiers: bool,
     /// In-flight `drag` gestures, advanced one event per rendered frame.
     pending_drags: Vec<PendingDrag>,
     /// In-flight server-side `batch` pipelines, resumed across frames.
@@ -133,6 +140,7 @@ struct PendingBatch {
     deadline: Instant,
     /// Set while the current step is parked, awaiting its response.
     step_rx: Option<Receiver<AgentGuiResponse>>,
+    resume_after_frame: u64,
 }
 
 /// One semantic UI event for the `events` ring buffer.
@@ -176,6 +184,19 @@ struct PendingSettle {
     /// When set, include the resolved focused-widget name in the response (used
     /// by `nav` so the caller learns where focus landed).
     report_focus: bool,
+}
+
+#[derive(Debug)]
+struct PendingNavigation {
+    steps: NavigationSteps,
+    completion: PendingSettle,
+}
+
+#[derive(Debug)]
+struct PendingFocus {
+    id: egui::Id,
+    completion: PendingSettle,
+    response: AgentGuiResponse,
 }
 
 #[derive(Debug)]
@@ -821,6 +842,10 @@ impl AgentGuiRuntime {
             pending_screenshots: Vec::new(),
             pending_waits: Vec::new(),
             pending_settles: Vec::new(),
+            pending_navigation: VecDeque::new(),
+            pending_focus: None,
+            native_modifiers: Modifiers::default(),
+            restore_native_modifiers: false,
             pending_drags: Vec::new(),
             pending_batches: Vec::new(),
             diff_baselines: VecDeque::new(),
@@ -1254,10 +1279,63 @@ impl Foxy {
         }
     }
 
+    pub(crate) fn agent_gui_raw_input(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
+        if input.viewport_id != egui::ViewportId::ROOT {
+            return;
+        }
+        let Some(mut runtime) = self.agent_gui.take() else {
+            return;
+        };
+        for event in &input.events {
+            match event {
+                Event::ModifiersChanged(modifiers) => runtime.native_modifiers = *modifiers,
+                Event::WindowFocused(false) => runtime.native_modifiers = Modifiers::default(),
+                _ => {}
+            }
+        }
+        if runtime.restore_native_modifiers {
+            input
+                .events
+                .push(Event::ModifiersChanged(runtime.native_modifiers));
+        }
+        let native_event_count = input.events.len();
+        if runtime.pending_navigation.is_empty() && runtime.pending_focus.is_none() {
+            while let Ok(request) = runtime.rx.try_recv() {
+                self.handle_agent_gui_request(ctx, &mut runtime, input, request);
+                if input.events.len() > native_event_count
+                    || !runtime.pending_navigation.is_empty()
+                    || runtime.pending_focus.is_some()
+                {
+                    break;
+                }
+            }
+            if input.events.len() == native_event_count && runtime.pending_focus.is_none() {
+                self.agent_gui_advance_batches(ctx, &mut runtime, input);
+            }
+        }
+        if let Some(navigation) = runtime.pending_navigation.front_mut()
+            && Instant::now() < navigation.completion.deadline
+            && input.events.len() == native_event_count
+            && navigation.steps.apply_frame(input)
+        {
+            navigation.completion.target_frame = ctx.cumulative_frame_nr().saturating_add(1);
+            ctx.request_repaint();
+        }
+        if input.events.len() == native_event_count {
+            self.agent_gui_complete_drags(ctx, &mut runtime, input);
+        }
+        runtime.restore_native_modifiers = input.events[native_event_count..]
+            .iter()
+            .any(|event| matches!(event, Event::ModifiersChanged(_)));
+        self.agent_gui = Some(runtime);
+    }
+
     pub(crate) fn poll_agent_gui(&mut self, ctx: &egui::Context) {
         let Some(mut runtime) = self.agent_gui.take() else {
             return;
         };
+
+        self.agent_gui_complete_focus(ctx, &mut runtime);
 
         // Re-assert stable-render each frame so frozen animation time / disabled
         // blink survive egui's per-frame style reset while the mode is on.
@@ -1267,16 +1345,9 @@ impl Foxy {
 
         self.agent_gui_complete_screenshots(ctx, &mut runtime);
 
-        while let Ok(request) = runtime.rx.try_recv() {
-            self.handle_agent_gui_request(ctx, &mut runtime, request);
-        }
-
         self.agent_gui_complete_waits(ctx, &mut runtime);
         self.agent_gui_complete_settles(ctx, &mut runtime);
-        self.agent_gui_complete_drags(ctx, &mut runtime);
-        // Resume any parked batch pipelines after the per-step completion passes
-        // above so a step that finished this frame is picked up promptly.
-        self.agent_gui_advance_batches(ctx, &mut runtime);
+        self.agent_gui_complete_navigation(ctx, &mut runtime);
         // Derive view/modal/focus/toast/download transition events from the
         // frame we just observed (the causal feed behind `events`).
         self.agent_gui_record_state_events(ctx, &mut runtime);
@@ -1290,6 +1361,8 @@ impl Foxy {
         if !runtime.pending_waits.is_empty()
             || !runtime.pending_screenshots.is_empty()
             || !runtime.pending_settles.is_empty()
+            || !runtime.pending_navigation.is_empty()
+            || runtime.pending_focus.is_some()
             || !runtime.pending_drags.is_empty()
             || !runtime.pending_batches.is_empty()
         {
@@ -1303,6 +1376,7 @@ impl Foxy {
         &mut self,
         ctx: &egui::Context,
         runtime: &mut AgentGuiRuntime,
+        input: &mut egui::RawInput,
         request: AgentGuiUiRequest,
     ) {
         let started_at = Instant::now();
@@ -1409,6 +1483,7 @@ impl Foxy {
                 double,
             } => match self.agent_gui_click(
                 ctx,
+                input,
                 text.as_deref(),
                 id.as_deref(),
                 *x,
@@ -1432,15 +1507,14 @@ impl Foxy {
             } => {
                 let pos = self.agent_gui_pointer_pos(ctx, id.as_deref(), *x, *y);
                 let mods = modifiers.to_egui();
-                ctx.input_mut(|input| {
-                    input.events.push(Event::PointerMoved(pos));
-                    input.events.push(Event::MouseWheel {
-                        source: egui::MouseWheelSource::Unknown,
-                        unit: MouseWheelUnit::Point,
-                        delta: Vec2::new(*dx, *dy),
-                        phase: TouchPhase::Move,
-                        modifiers: mods,
-                    });
+                input.events.push(Event::ModifiersChanged(mods));
+                input.events.push(Event::PointerMoved(pos));
+                input.events.push(Event::MouseWheel {
+                    source: egui::MouseWheelSource::Unknown,
+                    unit: MouseWheelUnit::Point,
+                    delta: Vec2::new(*dx, *dy),
+                    phase: TouchPhase::Move,
+                    modifiers: mods,
                 });
                 ctx.request_repaint();
                 AgentGuiResponse::ok(
@@ -1452,7 +1526,7 @@ impl Foxy {
             }
             AgentGuiCommand::Hover { id, x, y } => {
                 let pos = self.agent_gui_pointer_pos(ctx, id.as_deref(), *x, *y);
-                ctx.input_mut(|input| input.events.push(Event::PointerMoved(pos)));
+                input.events.push(Event::PointerMoved(pos));
                 ctx.request_repaint();
                 AgentGuiResponse::ok(
                     &command,
@@ -1469,6 +1543,7 @@ impl Foxy {
                 button,
             } => match self.agent_gui_mouse_button(
                 ctx,
+                input,
                 id.as_deref(),
                 *x,
                 *y,
@@ -1493,6 +1568,7 @@ impl Foxy {
                 button,
             } => match self.agent_gui_mouse_button(
                 ctx,
+                input,
                 id.as_deref(),
                 *x,
                 *y,
@@ -1512,22 +1588,8 @@ impl Foxy {
             AgentGuiCommand::Key { key, modifiers } => match parse_agent_gui_key(key) {
                 Some(parsed) => {
                     let mods = modifiers.to_egui();
-                    ctx.input_mut(|input| {
-                        input.events.push(Event::Key {
-                            key: parsed,
-                            physical_key: None,
-                            pressed: true,
-                            repeat: false,
-                            modifiers: mods,
-                        });
-                        input.events.push(Event::Key {
-                            key: parsed,
-                            physical_key: None,
-                            pressed: false,
-                            repeat: false,
-                            modifiers: mods,
-                        });
-                    });
+                    input.events.push(Event::ModifiersChanged(mods));
+                    input.events.extend(key_events(parsed, mods));
                     ctx.request_repaint();
                     AgentGuiResponse::ok(&command, &view, started_at, json!({ "queued": true }))
                 }
@@ -1540,7 +1602,7 @@ impl Foxy {
                 ),
             },
             AgentGuiCommand::Type { text } => {
-                ctx.input_mut(|input| input.events.push(Event::Text(text.clone())));
+                input.events.push(Event::Text(text.clone()));
                 ctx.request_repaint();
                 AgentGuiResponse::ok(
                     &command,
@@ -1753,41 +1815,18 @@ impl Foxy {
                 }
             }
             AgentGuiCommand::Nav { count, reverse } => {
-                let mods = AgentGuiModifiers {
-                    shift: *reverse,
-                    ..Default::default()
-                }
-                .to_egui();
-                ctx.input_mut(|input| {
-                    for _ in 0..(*count).max(1) {
-                        input.events.push(Event::Key {
-                            key: Key::Tab,
-                            physical_key: None,
-                            pressed: true,
-                            repeat: false,
-                            modifiers: mods,
-                        });
-                        input.events.push(Event::Key {
-                            key: Key::Tab,
-                            physical_key: None,
-                            pressed: false,
-                            repeat: false,
-                            modifiers: mods,
-                        });
-                    }
-                });
-                ctx.request_repaint();
-                // Park one frame so egui consumes the Tab events, then report
-                // where focus landed.
-                runtime.pending_settles.push(PendingSettle {
-                    command: command.clone(),
-                    target_frame: ctx.cumulative_frame_nr().saturating_add(1),
-                    response_tx: request.response_tx,
-                    deadline: Instant::now()
-                        .checked_add(DEFAULT_COMMAND_TIMEOUT)
-                        .unwrap_or_else(Instant::now),
-                    requested_at: started_at,
-                    report_focus: true,
+                runtime.pending_navigation.push_back(PendingNavigation {
+                    steps: NavigationSteps::new(*count, *reverse),
+                    completion: PendingSettle {
+                        command: command.clone(),
+                        target_frame: u64::MAX,
+                        response_tx: request.response_tx,
+                        deadline: Instant::now()
+                            .checked_add(DEFAULT_COMMAND_TIMEOUT)
+                            .unwrap_or_else(Instant::now),
+                        requested_at: started_at,
+                        report_focus: true,
+                    },
                 });
                 ctx.request_repaint_after(Duration::from_millis(16));
                 return;
@@ -1920,6 +1959,7 @@ impl Foxy {
                 // text with a follow-up snapshot/text call.
                 match self.agent_gui_mouse_button(
                     ctx,
+                    input,
                     id.as_deref(),
                     *x,
                     *y,
@@ -1930,6 +1970,7 @@ impl Foxy {
                     Ok(down) => {
                         let _ = self.agent_gui_mouse_button(
                             ctx,
+                            input,
                             id.as_deref(),
                             down.get("x").and_then(Value::as_f64).map(|v| v as f32),
                             down.get("y").and_then(Value::as_f64).map(|v| v as f32),
@@ -1958,6 +1999,7 @@ impl Foxy {
                 // path to activate one by its visible label.
                 match self.agent_gui_click(
                     ctx,
+                    input,
                     Some(item),
                     None,
                     None,
@@ -2086,6 +2128,7 @@ impl Foxy {
                 self.agent_gui_start_batch(
                     ctx,
                     runtime,
+                    input,
                     steps.clone(),
                     *stop_on_error,
                     request.response_tx,
@@ -2270,7 +2313,66 @@ impl Foxy {
             }
         }
 
-        let _ = request.response_tx.send(response);
+        let focus_id = if response.ok {
+            match &command {
+                AgentGuiCommand::Focus { .. } => response.data["focused"]
+                    .as_str()
+                    .and_then(agent_gui_focus_target_id),
+                AgentGuiCommand::Fill { target, .. } => {
+                    agent_gui_focus_target_id(&normalize_selector(target))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(id) = focus_id {
+            runtime.pending_focus = Some(PendingFocus {
+                id,
+                completion: PendingSettle {
+                    command,
+                    target_frame: u64::MAX,
+                    response_tx: request.response_tx,
+                    deadline: started_at + DEFAULT_COMMAND_TIMEOUT,
+                    requested_at: started_at,
+                    report_focus: false,
+                },
+                response,
+            });
+            ctx.request_repaint();
+        } else {
+            let _ = request.response_tx.send(response);
+        }
+    }
+
+    fn agent_gui_complete_focus(&self, ctx: &egui::Context, runtime: &mut AgentGuiRuntime) {
+        let Some(mut pending) = runtime.pending_focus.take() else {
+            return;
+        };
+        if ctx.cumulative_frame_nr() >= pending.completion.target_frame
+            && ctx.memory(|memory| memory.focused()) == Some(pending.id)
+        {
+            let _ = pending.completion.response_tx.send(pending.response);
+        } else if Instant::now() >= pending.completion.deadline {
+            let response = AgentGuiResponse::error(
+                pending.completion.command.name(),
+                self.agent_gui_view_name(),
+                pending.completion.requested_at,
+                "timeout",
+                "Timed out waiting for the focus target to become available",
+            );
+            let _ = pending.completion.response_tx.send(response);
+        } else {
+            if ctx
+                .read_response(pending.id)
+                .is_some_and(|response| response.enabled())
+            {
+                ctx.memory_mut(|memory| memory.request_focus(pending.id));
+                pending.completion.target_frame = ctx.cumulative_frame_nr().saturating_add(1);
+            }
+            runtime.pending_focus = Some(pending);
+            ctx.request_repaint();
+        }
     }
 
     fn agent_gui_complete_screenshots(
@@ -2422,18 +2524,55 @@ impl Foxy {
             }
             if now >= runtime.pending_settles[index].deadline {
                 let pending = runtime.pending_settles.remove(index);
-                // A settle that times out still returns the current snapshot:
-                // the frame simply did not advance, which is itself observable.
-                let response = AgentGuiResponse::ok(
-                    &pending.command,
+                let mut response = AgentGuiResponse::error(
+                    pending.command.name(),
                     self.agent_gui_view_name(),
                     pending.requested_at,
-                    self.agent_gui_snapshot_value(ctx),
+                    "timeout",
+                    "Timed out waiting for the requested frame to finish",
                 );
+                response.data = self.agent_gui_snapshot_value(ctx);
                 let _ = pending.response_tx.send(response);
                 continue;
             }
             index += 1;
+        }
+    }
+
+    fn agent_gui_complete_navigation(
+        &mut self,
+        ctx: &egui::Context,
+        runtime: &mut AgentGuiRuntime,
+    ) {
+        while let Some(navigation) = runtime.pending_navigation.front() {
+            let now = Instant::now();
+            let completed = navigation.steps.is_finished()
+                && ctx.cumulative_frame_nr() >= navigation.completion.target_frame;
+            if !completed && now < navigation.completion.deadline {
+                break;
+            }
+            let pending = runtime
+                .pending_navigation
+                .pop_front()
+                .expect("navigation present")
+                .completion;
+            let response = if completed {
+                AgentGuiResponse::ok(
+                    &pending.command,
+                    self.agent_gui_view_name(),
+                    pending.requested_at,
+                    self.agent_gui_snapshot_value(ctx),
+                )
+            } else {
+                AgentGuiResponse::error(
+                    pending.command.name(),
+                    self.agent_gui_view_name(),
+                    pending.requested_at,
+                    "timeout",
+                    "Timed out before keyboard navigation completed",
+                )
+            };
+            let _ = pending.response_tx.send(response);
         }
     }
 
@@ -2514,6 +2653,7 @@ impl Foxy {
     fn agent_gui_click(
         &mut self,
         ctx: &egui::Context,
+        input: &mut egui::RawInput,
         text: Option<&str>,
         id: Option<&str>,
         x: Option<f32>,
@@ -2545,23 +2685,22 @@ impl Foxy {
         let button = parse_pointer_button(button)?;
         let mods = modifiers.to_egui();
         let clicks = if double { 2 } else { 1 };
-        ctx.input_mut(|input| {
-            input.events.push(Event::PointerMoved(pos));
-            for _ in 0..clicks {
-                input.events.push(Event::PointerButton {
-                    pos,
-                    button,
-                    pressed: true,
-                    modifiers: mods,
-                });
-                input.events.push(Event::PointerButton {
-                    pos,
-                    button,
-                    pressed: false,
-                    modifiers: mods,
-                });
-            }
-        });
+        input.events.push(Event::ModifiersChanged(mods));
+        input.events.push(Event::PointerMoved(pos));
+        for _ in 0..clicks {
+            input.events.push(Event::PointerButton {
+                pos,
+                button,
+                pressed: true,
+                modifiers: mods,
+            });
+            input.events.push(Event::PointerButton {
+                pos,
+                button,
+                pressed: false,
+                modifiers: mods,
+            });
+        }
         ctx.request_repaint();
         Ok(json!({ "queued": true, "x": pos.x, "y": pos.y, "double": double }))
     }
@@ -2570,6 +2709,7 @@ impl Foxy {
     fn agent_gui_mouse_button(
         &self,
         ctx: &egui::Context,
+        input: &mut egui::RawInput,
         id: Option<&str>,
         x: Option<f32>,
         y: Option<f32>,
@@ -2580,14 +2720,13 @@ impl Foxy {
         let button = parse_pointer_button(button)?;
         let pos = self.agent_gui_pointer_pos(ctx, id, x, y);
         let mods = modifiers.to_egui();
-        ctx.input_mut(|input| {
-            input.events.push(Event::PointerMoved(pos));
-            input.events.push(Event::PointerButton {
-                pos,
-                button,
-                pressed,
-                modifiers: mods,
-            });
+        input.events.push(Event::ModifiersChanged(mods));
+        input.events.push(Event::PointerMoved(pos));
+        input.events.push(Event::PointerButton {
+            pos,
+            button,
+            pressed,
+            modifiers: mods,
         });
         ctx.request_repaint();
         Ok(json!({ "queued": true, "x": pos.x, "y": pos.y, "pressed": pressed }))
@@ -3597,6 +3736,10 @@ impl Foxy {
             }
         };
         push(self.update_modal_open, "update");
+        push(
+            self.show_unreadable_config_replacement,
+            "unreadable-config-replacement",
+        );
         push(self.show_add_repository_modal, "add-repository");
         push(
             self.pending_repository_duplicate_add.is_some(),
@@ -3696,19 +3839,15 @@ impl Foxy {
         }
         let target = target.ok_or_else(|| "Provide --target <name> or --clear".to_string())?;
         let normalized = normalize_selector(target);
-        let id = agent_gui_focus_target_id(&normalized).ok_or_else(|| {
+        agent_gui_focus_target_id(&normalized).ok_or_else(|| {
             format!(
                 "No focusable widget registered for target '{target}'. Registered: {}. Use fill/set-filter for other text fields.",
                 agent_gui_focus_target_names().join(", ")
             )
         })?;
-        // The widget must actually render this frame, or egui reports a focused
-        // id that AccessKit's tree does not contain and the UI thread panics
-        // (`Focused ID ... is not in the node list`). `poll_agent_gui` runs
-        // before the views draw, so opening the container here makes the widget
-        // present in the same frame it claims focus.
+        // AccessKit requires the focused widget in this frame's tree, so open
+        // its container before requesting focus.
         self.agent_gui_ensure_focus_target_visible(&normalized);
-        ctx.memory_mut(|memory| memory.request_focus(id));
         ctx.request_repaint();
         Ok(json!({ "focused": normalized, "requested": true }))
     }
@@ -3717,6 +3856,8 @@ impl Foxy {
     /// (see the AccessKit panic note in `agent_gui_focus`).
     fn agent_gui_ensure_focus_target_visible(&mut self, normalized_target: &str) {
         if normalized_target == "add-repository-input" {
+            self.current_view = FoxyView::RepositoryList;
+            self.last_view = FoxyView::None;
             self.show_add_repository_modal = true;
         }
     }
@@ -3735,9 +3876,8 @@ impl Foxy {
         // re-running the same step sees a caret in the box. Make the container
         // visible first to avoid the AccessKit focus panic (see `agent_gui_focus`).
         let normalized = normalize_selector(target);
-        if let Some(id) = agent_gui_focus_target_id(&normalized) {
+        if agent_gui_focus_target_id(&normalized).is_some() {
             self.agent_gui_ensure_focus_target_visible(&normalized);
-            ctx.memory_mut(|memory| memory.request_focus(id));
         }
         ctx.request_repaint();
         Ok(json!({ "target": canonical, "value": value }))
@@ -4444,23 +4584,37 @@ impl Foxy {
     /// Drive parked `drag` gestures: emit the down event, then `steps`
     /// interpolated moves, then the up event - one per frame so egui classifies
     /// the sequence as a real drag.
-    fn agent_gui_complete_drags(&mut self, ctx: &egui::Context, runtime: &mut AgentGuiRuntime) {
+    fn agent_gui_complete_drags(
+        &mut self,
+        ctx: &egui::Context,
+        runtime: &mut AgentGuiRuntime,
+        input: &mut egui::RawInput,
+    ) {
         let now = Instant::now();
         let mut index = 0;
         while index < runtime.pending_drags.len() {
             let current_frame = ctx.cumulative_frame_nr();
-            if current_frame < runtime.pending_drags[index].next_frame {
-                if now >= runtime.pending_drags[index].deadline {
-                    let drag = runtime.pending_drags.remove(index);
-                    let response = AgentGuiResponse::ok(
-                        &drag.command,
-                        self.agent_gui_view_name(),
-                        drag.requested_at,
-                        self.agent_gui_snapshot_value(ctx),
-                    );
-                    let _ = drag.response_tx.send(response);
-                    continue;
+            if now >= runtime.pending_drags[index].deadline {
+                let drag = runtime.pending_drags.remove(index);
+                if drag.phase > 0 {
+                    input.events.push(Event::PointerButton {
+                        pos: drag.to,
+                        button: drag.button,
+                        pressed: false,
+                        modifiers: Modifiers::default(),
+                    });
                 }
+                let response = AgentGuiResponse::error(
+                    drag.command.name(),
+                    self.agent_gui_view_name(),
+                    drag.requested_at,
+                    "timeout",
+                    "Timed out before the drag completed",
+                );
+                let _ = drag.response_tx.send(response);
+                continue;
+            }
+            if current_frame < runtime.pending_drags[index].next_frame {
                 ctx.request_repaint_after(Duration::from_millis(16));
                 index += 1;
                 continue;
@@ -4472,42 +4626,38 @@ impl Foxy {
             };
             let mods = Modifiers::default();
             if phase == 0 {
-                ctx.input_mut(|input| {
-                    input.events.push(Event::PointerMoved(from));
-                    input.events.push(Event::PointerButton {
-                        pos: from,
-                        button,
-                        pressed: true,
-                        modifiers: mods,
-                    });
+                input.events.push(Event::PointerMoved(from));
+                input.events.push(Event::PointerButton {
+                    pos: from,
+                    button,
+                    pressed: true,
+                    modifiers: mods,
                 });
             } else if phase <= steps {
                 let t = phase as f32 / steps as f32;
                 let pos = Pos2::new(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t);
-                ctx.input_mut(|input| input.events.push(Event::PointerMoved(pos)));
+                input.events.push(Event::PointerMoved(pos));
             } else {
-                ctx.input_mut(|input| {
-                    input.events.push(Event::PointerMoved(to));
-                    input.events.push(Event::PointerButton {
-                        pos: to,
-                        button,
-                        pressed: false,
-                        modifiers: mods,
-                    });
+                input.events.push(Event::PointerMoved(to));
+                input.events.push(Event::PointerButton {
+                    pos: to,
+                    button,
+                    pressed: false,
+                    modifiers: mods,
                 });
             }
             ctx.request_repaint();
 
-            // phase > steps means we just emitted the pointer-up: gesture done.
             if phase > steps {
                 let drag = runtime.pending_drags.remove(index);
-                let response = AgentGuiResponse::ok(
-                    &drag.command,
-                    self.agent_gui_view_name(),
-                    drag.requested_at,
-                    self.agent_gui_snapshot_value(ctx),
-                );
-                let _ = drag.response_tx.send(response);
+                runtime.pending_settles.push(PendingSettle {
+                    command: drag.command,
+                    target_frame: current_frame.saturating_add(1),
+                    response_tx: drag.response_tx,
+                    deadline: drag.deadline,
+                    requested_at: drag.requested_at,
+                    report_focus: false,
+                });
                 continue;
             }
             let drag = &mut runtime.pending_drags[index];
@@ -4521,10 +4671,12 @@ impl Foxy {
 
     /// Begin a `batch`: drive it immediately, parking it for later resumption
     /// only if a step has not yet completed.
+    #[allow(clippy::too_many_arguments)]
     fn agent_gui_start_batch(
         &mut self,
         ctx: &egui::Context,
         runtime: &mut AgentGuiRuntime,
+        input: &mut egui::RawInput,
         steps: Vec<AgentGuiCommand>,
         stop_on_error: bool,
         response_tx: Sender<AgentGuiResponse>,
@@ -4551,8 +4703,9 @@ impl Foxy {
             requested_at: started_at,
             deadline,
             step_rx: None,
+            resume_after_frame: ctx.cumulative_frame_nr(),
         };
-        match self.drive_batch(ctx, runtime, &mut batch) {
+        match self.drive_batch(ctx, runtime, input, &mut batch) {
             Some(response) => {
                 let _ = batch.response_tx.send(response);
             }
@@ -4564,11 +4717,17 @@ impl Foxy {
     }
 
     /// Resume parked batch pipelines whose current step may have completed.
-    fn agent_gui_advance_batches(&mut self, ctx: &egui::Context, runtime: &mut AgentGuiRuntime) {
+    fn agent_gui_advance_batches(
+        &mut self,
+        ctx: &egui::Context,
+        runtime: &mut AgentGuiRuntime,
+        input: &mut egui::RawInput,
+    ) {
         let mut index = 0;
+        let events_before = input.events.len();
         while index < runtime.pending_batches.len() {
             let mut batch = runtime.pending_batches.remove(index);
-            match self.drive_batch(ctx, runtime, &mut batch) {
+            match self.drive_batch(ctx, runtime, input, &mut batch) {
                 Some(response) => {
                     let _ = batch.response_tx.send(response);
                 }
@@ -4576,6 +4735,12 @@ impl Foxy {
                     runtime.pending_batches.insert(index, batch);
                     index += 1;
                 }
+            }
+            if input.events.len() > events_before
+                || runtime.pending_focus.is_some()
+                || !runtime.pending_navigation.is_empty()
+            {
+                break;
             }
         }
     }
@@ -4586,9 +4751,15 @@ impl Foxy {
         &mut self,
         ctx: &egui::Context,
         runtime: &mut AgentGuiRuntime,
+        input: &mut egui::RawInput,
         batch: &mut PendingBatch,
     ) -> Option<AgentGuiResponse> {
         use std::sync::mpsc::TryRecvError;
+
+        if ctx.cumulative_frame_nr() < batch.resume_after_frame {
+            ctx.request_repaint();
+            return None;
+        }
 
         // Resolve a parked step first.
         if batch.step_rx.is_some() {
@@ -4648,12 +4819,20 @@ impl Foxy {
                 command: step,
                 response_tx: tx,
             };
-            self.handle_agent_gui_request(ctx, runtime, sub);
+            let events_before = input.events.len();
+            self.handle_agent_gui_request(ctx, runtime, input, sub);
+            let queued_input = input.events.len() > events_before;
             match rx.try_recv() {
                 Ok(response) => {
                     self.absorb_batch_step(batch, response);
                     if !batch.all_ok && batch.stop_on_error {
                         return Some(self.finish_batch(batch));
+                    }
+                    if queued_input {
+                        // Backward focus is applied at the start of egui's following pass.
+                        batch.resume_after_frame = ctx.cumulative_frame_nr().saturating_add(2);
+                        ctx.request_repaint();
+                        return None;
                     }
                 }
                 Err(TryRecvError::Empty) => {

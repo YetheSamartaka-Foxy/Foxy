@@ -83,6 +83,15 @@ After Steam, TeamSpeak, external-addon, server-addon, and DLC readiness steps, e
 
 A live wipe stays marked in flight until its result is received, preventing another wipe or game-space switch during the rebuild. Successful repair resumes the exact saved Launch or Join continuation with its addon/DLC selections. Failure retains the repair requirement and pending action; cancel stops that action. Continuing without wiping resumes only that saved action and leaves the next Launch or Join eligible for the reminder.
 
+### Agent GUI input
+
+- Driver input enters the root viewport through `eframe::App::raw_input_hook`, before egui derives keyboard focus, held keys, and pointer interactions. Do not append synthetic events to the current `InputState` from UI polling.
+- Keep native window and viewport focus unchanged. Inject modifier changes with the input and restore native modifier state on the following frame.
+- Named focus requests open the owning view and container, wait for an enabled rendered widget, and confirm that focus persists through the following pass before replying. New windows may need a sizing pass before their widgets accept focus.
+- Send repeated Tab navigation one step per rendered frame; multiple Tab presses in one raw pass collapse into one focus move. Navigation replies observe the final completed input frame.
+- A batch pauses after a raw input step through egui's deferred focus pass before evaluating its next command. Drag replies wait for the release frame. An incomplete navigation, drag, or settle returns a timeout error, never a successful partial result.
+- Verify keyboard flow through actual focus changes and activation outcomes. A queued-input acknowledgement or an accepted command alone does not prove the widget received it. Register decision overlays in the driver's modal list so waits and snapshots can identify them.
+
 ### Accepted status, queue, and launch contracts
 
 - A locally verified repository with unknown remote freshness stays launchable. Show persistent inline status such as "Locally verified; server not checked" and the last successful remote-check time. Do not add a launch dialog for this state.

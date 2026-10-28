@@ -280,9 +280,6 @@ impl Foxy {
         ));
         self.update_fps_estimate(&ctx);
         self.poll_agent_gui(&ctx);
-        // After `poll_agent_gui`: the driver pushes injected key events into the
-        // current frame's `InputState`, which egui rebuilds from RawInput next
-        // frame, so a handler running before it never sees them.
         self.handle_global_accessibility_shortcuts(&ctx);
 
         if self.close_requested_at.is_none() && ctx.input(|i| i.viewport().close_requested()) {
@@ -903,6 +900,10 @@ fn resize(ui: &mut Ui) {
 }
 
 impl eframe::App for Foxy {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
+        self.agent_gui_raw_input(ctx, input);
+    }
+
     fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
         egui::Rgba::from(visuals.window_fill()).to_array()
     }

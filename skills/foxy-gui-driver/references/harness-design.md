@@ -26,6 +26,16 @@ Implemented commands: `status`, `open-view` (with `--repo-index` and `--tab`), `
 
 The CLI supports `--toon` for agent-facing machine output. TOON encodes the whole `CliEnvelope` at stdout and accepts TOON for whole-document inputs (`scenario`, `batch --steps`/`--stdin`, `invoke --params`) when enabled, with JSON fallback. `FOXY_AGENT_TOON=1` makes agent-gui CLI calls default to TOON. The app-side TCP wire remains newline-delimited JSON because no LLM reads that internal loopback protocol.
 
+## Input delivery
+
+The app drains driver commands in `eframe::App::raw_input_hook` for the root viewport. Pointer, key, modifier, and text events enter `RawInput` before egui computes focus and interaction state. Appending events to an already-derived `InputState` during UI polling does not deliver equivalent input. Native window and viewport focus remain unchanged; injected modifier state is restored to native values on the following frame.
+
+`nav --count N` delivers one Tab press and release per frame and replies after the last input frame has rendered. `--reverse` uses Shift+Tab. Standalone input commands acknowledge queuing; use `settle` or an outcome-based `wait` before inspecting a resulting change. Batches pause automatically after a raw input step through egui's deferred backward-focus pass so their following command sees consumed input. Drag completion waits for the pointer-release frame. Incomplete navigation, drag, and settle requests return timeout errors instead of successful partial snapshots.
+
+Screenshot, wait, settle, and navigation completion observations stay in UI polling. Add decision overlays to `agent_gui_modal_names` when they are introduced so the driver can recognize them.
+
+Named `focus` and registered-field `fill` requests open the owning view and container, then park until the target has rendered and accepts focus. Focus is requested during UI polling after egui begins its pass, and the reply waits until focus persists through the following pass. This also handles a new window's initial sizing pass. Batches await these replies before typing or navigating.
+
 ## Research Notes
 
 - `egui_kittest` supports querying egui widgets by semantic labels and can do snapshot tests with its `snapshot` and `wgpu` features. Use it for headless component-level tests, not as the live desktop control channel.
@@ -409,7 +419,7 @@ Drive a named app-action by intent rather than by pixels. `AgentGuiCommand::Invo
 
 ### `batch`
 
-Server-side pipeline. `AgentGuiCommand::Batch { steps, stop_on_error }`. `agent_gui_start_batch` drives steps in order on the UI thread; each step runs through `handle_agent_gui_request` with an **internal response channel**. A step that parks (`settle`/`wait`/`screenshot`/`drag`) leaves its channel empty, so the batch stores the receiver (`PendingBatch.step_rx`) and `poll_agent_gui` resumes it via `agent_gui_advance_batches` once the per-step completion pass fires. Reuses the existing `PendingSettle`/`PendingWait`/`PendingScreenshot`/`PendingDrag` machinery - never blocks the UI thread. Nested batches are rejected. Response: `{ ok, total, results:[ <AgentGuiResponse>, … ] }`. Distinct from `exec` (client-side, one-at-a-time) and `scenario` (client-side, reconnect per step).
+Server-side pipeline. `AgentGuiCommand::Batch { steps, stop_on_error }`. `agent_gui_start_batch` drives steps in order on the UI thread; each step runs through `handle_agent_gui_request` with an **internal response channel**. A step that parks (`focus`/registered `fill`/`nav`/`settle`/`wait`/`screenshot`/`drag`) leaves its channel empty, so the batch stores the receiver (`PendingBatch.step_rx`). The raw-input hook resumes it via `agent_gui_advance_batches` after UI polling completes that step. Raw input steps also wait for their input frame before advancing. Reuses the existing completion machinery and never blocks the UI thread. Nested batches are rejected. Response: `{ ok, total, results:[ <AgentGuiResponse>, … ] }`. Distinct from `exec` (client-side, one-at-a-time) and `scenario` (client-side, reconnect per step).
 
 ### `diff`
 
@@ -457,7 +467,7 @@ Native file/folder picker automation. `AgentGuiCommand::Dialog { action, path, c
 
 Bugs that **passed `cargo fmt`, `clippy -D warnings`, and the unit tests** yet only surfaced when driving the real GUI. Always live-smoke a new command against an isolated `FOXY_CONFIG_DIR` before calling it done - the unit layer cannot see these:
 
-- **Never `request_focus` on a widget that is not rendered this frame.** egui forwards the focused id to AccessKit, and `accesskit_consumer` panics the UI thread with `Focused ID #… is not in the node list` if no node claims it. So a `focus`/`fill` command that targets a widget must make its container visible in the *same* frame first. `poll_agent_gui` runs before the views draw (`update_loop.rs`), so setting e.g. `self.show_add_repository_modal = true` and then `request_focus` works; the widget renders and claims focus before the end-of-frame AccessKit tree is built. Registered focus targets live in `AGENT_FOCUS_TARGETS`, and each must have a matching "ensure visible" branch in `agent_gui_ensure_focus_target_visible`.
+- **Never `request_focus` on a widget that is not rendered this frame.** egui forwards the focused id to AccessKit, which requires a matching node. Named focus requests open the owning view and container, then wait for an enabled response before requesting focus during UI polling. Waiting also prevents a new window's sizing pass from dropping focus. Registered targets live in `AGENT_FOCUS_TARGETS`, and each needs a matching visibility branch in `agent_gui_ensure_focus_target_visible`.
 - **Do not name a subcommand arg the same as a `global = true` arg.** The global `--field` (the `--flat`/`--field` projection) and the `assert` positional `field` shared the clap id `field`; clap silently bound the positional value to the global `--field`, so `assert view --equals x` set `cli.field = "view"` and the projection nulled the payload (`data: null`) - no panic, no clippy warning. Give colliding args a distinct id (`#[arg(id = "assert_field")]`).
 - **A positional `bool` defaults to a flag action and clap debug-asserts at runtime** (`positional … must take a value but action is SetTrue`). Use `#[arg(action = clap::ArgAction::Set)]` so `stable-render true|false` parses.
 - **The agent-gui FPS probe keeps the app repainting continuously**, so `snapshot --since-frame N` rarely returns `{changed:false}` live (the frame number has already advanced). The delta gate is still correct; it just won't be observed under a continuously-repainting probe.
