@@ -152,6 +152,8 @@
     "Display update view": "Frissítési nézet megjelenítése",
     "Download Summary": "Letöltési összegzés",
     "Enable all": "Összes engedélyezése",
+    "Filtered only": "Csak a szűrtek",
+    "When checked, Enable all and Disable all affect only addons matching the current filters. When unchecked, they affect all addons in this tab.": "Bejelölve az „Összes engedélyezése” és az „Összes letiltása” csak az aktuális szűrőknek megfelelő kiegészítőkre vonatkozik. Bejelölés nélkül a lap összes kiegészítőjére vonatkozik.",
     "English": "Angol",
     "Arabic": "Arab",
     "Bengali": "Bengáli",

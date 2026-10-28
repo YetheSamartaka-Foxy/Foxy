@@ -152,6 +152,8 @@
     "Display update view": "Ipakita ang view ng update",
     "Download Summary": "Buod ng Download",
     "Enable all": "I-enable lahat",
+    "Filtered only": "Mga na-filter lang",
+    "When checked, Enable all and Disable all affect only addons matching the current filters. When unchecked, they affect all addons in this tab.": "Kapag nilagyan ng tsek, ang “I-enable lahat” at “I-disable lahat” ay makaaapekto lang sa mga addon na tumutugma sa kasalukuyang mga filter. Kapag walang tsek, maaapektuhan ang lahat ng addon sa tab na ito.",
     "English": "Ingles",
     "Arabic": "Arabik",
     "Bengali": "Bengali",

@@ -152,6 +152,8 @@
     "Display update view": "Vis opdateringsvisning",
     "Download Summary": "Downloadoversigt",
     "Enable all": "Aktivér alle",
+    "Filtered only": "Kun filtrerede",
+    "When checked, Enable all and Disable all affect only addons matching the current filters. When unchecked, they affect all addons in this tab.": "Når denne indstilling er markeret, påvirker „Aktivér alle“ og „Deaktivér alle“ kun tilføjelser, der matcher de aktuelle filtre. Når den ikke er markeret, påvirker de alle tilføjelser på denne fane.",
     "English": "Engelsk",
     "Arabic": "Arabisk",
     "Bengali": "Bengali",

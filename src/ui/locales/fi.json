@@ -152,6 +152,8 @@
     "Display update view": "Näytä päivitysnäkymä",
     "Download Summary": "Latauksen yhteenveto",
     "Enable all": "Ota kaikki käyttöön",
+    "Filtered only": "Vain suodatetut",
+    "When checked, Enable all and Disable all affect only addons matching the current filters. When unchecked, they affect all addons in this tab.": "Kun tämä on valittuna, ”Ota kaikki käyttöön” ja ”Poista kaikki käytöstä” vaikuttavat vain nykyisiä suodattimia vastaaviin lisäosiin. Kun sitä ei ole valittu, ne vaikuttavat kaikkiin tämän välilehden lisäosiin.",
     "English": "Englanti",
     "Arabic": "Arabia",
     "Bengali": "Bengali",

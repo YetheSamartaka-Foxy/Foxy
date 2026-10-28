@@ -152,6 +152,8 @@
     "Display update view": "Update-Ansicht anzeigen",
     "Download Summary": "Download-Zusammenfassung",
     "Enable all": "Alle aktivieren",
+    "Filtered only": "Nur gefilterte",
+    "When checked, Enable all and Disable all affect only addons matching the current filters. When unchecked, they affect all addons in this tab.": "Wenn diese Option aktiviert ist, wirken sich „Alle aktivieren“ und „Alle deaktivieren“ nur auf Add-ons aus, die den aktuellen Filtern entsprechen. Ist sie deaktiviert, wirken sie sich auf alle Add-ons in diesem Tab aus.",
     "English": "Englisch",
     "Arabic": "Arabisch",
     "Bengali": "Bengalisch",

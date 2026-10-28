@@ -152,6 +152,8 @@
     "Display update view": "Показать окно обновления",
     "Download Summary": "Сводка загрузки",
     "Enable all": "Включить все",
+    "Filtered only": "Только отфильтрованные",
+    "When checked, Enable all and Disable all affect only addons matching the current filters. When unchecked, they affect all addons in this tab.": "Если флажок установлен, команды «Включить все» и «Отключить все» затрагивают только дополнения, соответствующие текущим фильтрам. Если флажок снят, они затрагивают все дополнения на этой вкладке.",
     "English": "Английский",
     "Arabic": "Арабский",
     "Bengali": "Бенгальский",

@@ -152,6 +152,8 @@
     "Display update view": "Εμφάνιση προβολής ενημέρωσης",
     "Download Summary": "Σύνοψη λήψης",
     "Enable all": "Ενεργοποίηση όλων",
+    "Filtered only": "Μόνο τα φιλτραρισμένα",
+    "When checked, Enable all and Disable all affect only addons matching the current filters. When unchecked, they affect all addons in this tab.": "Όταν είναι επιλεγμένο, τα «Ενεργοποίηση όλων» και «Απενεργοποίηση όλων» επηρεάζουν μόνο τα πρόσθετα που ταιριάζουν στα τρέχοντα φίλτρα. Όταν δεν είναι επιλεγμένο, επηρεάζουν όλα τα πρόσθετα σε αυτήν την καρτέλα.",
     "English": "Αγγλικά",
     "Arabic": "Αραβικά",
     "Bengali": "Βεγγαλικά",

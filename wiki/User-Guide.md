@@ -354,7 +354,7 @@ Repository Settings has three addon tabs: **Addons**, **Optional Addons**, and *
 
 Lists the addons provided by the repository. Each addon is a card with its name and local path. You can:
 - **Click a card** or its **checkbox** to enable or disable the addon.
-- Use **Enable all** / **Disable all**.
+- Use **Enable all** / **Disable all**. In all three addon tabs, **Filtered only** is off by default, so these buttons affect every addon in the tab. Turn it on to affect only addons matching the current filters, including matching addons outside the visible scroll area. Hover over **Filtered only** for an explanation.
 - **Filter** by name, by state (All, Enabled, Disabled), or by favorites, and mark addons as favorites.
 - Turn on **Search addon files** to match the filter against files inside addon folders; matching addons expand automatically.
 - **Right-click** a card for more actions:

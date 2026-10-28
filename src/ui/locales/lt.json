@@ -152,6 +152,8 @@
     "Display update view": "Rodyti atnaujinimo rodinį",
     "Download Summary": "Atsisiuntimo suvestinė",
     "Enable all": "Įjungti viską",
+    "Filtered only": "Tik filtruoti",
+    "When checked, Enable all and Disable all affect only addons matching the current filters. When unchecked, they affect all addons in this tab.": "Pažymėjus „Įjungti viską“ ir „Išjungti viską“ veikia tik priedus, atitinkančius dabartinius filtrus. Nepažymėjus jie veikia visus šio skirtuko priedus.",
     "English": "Anglų",
     "Arabic": "Arabų",
     "Bengali": "Bengalų",

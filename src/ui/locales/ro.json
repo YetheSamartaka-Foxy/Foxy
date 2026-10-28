@@ -152,6 +152,8 @@
     "Display update view": "Afișați vizualizarea actualizării",
     "Download Summary": "Rezumatul descărcării",
     "Enable all": "Activați toate",
+    "Filtered only": "Doar cele filtrate",
+    "When checked, Enable all and Disable all affect only addons matching the current filters. When unchecked, they affect all addons in this tab.": "Când este bifată, „Activați toate” și „Dezactivați toate” afectează doar extensiile care corespund filtrelor curente. Când nu este bifată, afectează toate extensiile din această filă.",
     "English": "Engleză",
     "Arabic": "Arabă",
     "Bengali": "Bengaleză",

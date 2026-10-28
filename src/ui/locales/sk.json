@@ -152,6 +152,8 @@
     "Display update view": "Zobraziť zobrazenie aktualizácie",
     "Download Summary": "Súhrn sťahovania",
     "Enable all": "Povoliť všetko",
+    "Filtered only": "Iba filtrované",
+    "When checked, Enable all and Disable all affect only addons matching the current filters. When unchecked, they affect all addons in this tab.": "Ak je táto možnosť začiarknutá, „Povoliť všetko“ a „Zakázať všetky“ sa týka iba doplnkov zodpovedajúcich aktuálnym filtrom. Ak začiarknutá nie je, týka sa všetkých doplnkov na tejto karte.",
     "English": "Angličtina",
     "Arabic": "Arabčina",
     "Bengali": "Bengálčina",

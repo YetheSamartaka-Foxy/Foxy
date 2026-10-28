@@ -1,5 +1,6 @@
 # 1.2.2
 ## Added
+- Addons, Optional Addons, and External Addons now have a default-off Filtered only checkbox. Turn it on to make Enable all and Disable all affect only addons matching the current filters.
 - Right-click an addon to open its Steam Workshop or Arma Reforger Workshop page in your browser, including optional and external addons.
 - Generic game spaces can now use repositories, including repositories that deliver the game itself. The game shows in its own Game section instead of the addon list, always stays up to date, and Launch starts it directly without any game directory or Steam setup. Updates to the game download only the changed parts of its files.
 - Server tool: `new --game generic` writes a config for publishing a custom game, with a `gameBuild` setting that names the game folder and the executable to start. Its new `"chunking": "content"` setting lets players download only the changed parts of rebuilt executables and data archives instead of whole files. Existing repositories are generated exactly as before.

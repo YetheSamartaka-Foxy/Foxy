@@ -152,6 +152,8 @@
     "Display update view": "আপডেট ভিউ প্রদর্শন করুন",
     "Download Summary": "ডাউনলোড সারাংশ",
     "Enable all": "সব সক্ষম করুন",
+    "Filtered only": "শুধু ফিল্টার করা",
+    "When checked, Enable all and Disable all affect only addons matching the current filters. When unchecked, they affect all addons in this tab.": "চেক করা থাকলে, সব সক্ষম করুন এবং সব অক্ষম করুন শুধু বর্তমান ফিল্টারের সঙ্গে মেলে এমন অ্যাডঅনগুলোর ওপর প্রভাব ফেলবে। চেক করা না থাকলে, এই ট্যাবের সব অ্যাডঅন প্রভাবিত হবে।",
     "English": "ইংরেজি",
     "Arabic": "আরবি",
     "Bengali": "বাংলা",

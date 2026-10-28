@@ -357,12 +357,15 @@ impl Foxy {
         self.repository_addon_size_bytes_by_repo_and_addon.clear();
         self.addons_filter.clear();
         self.addons_search_files = false;
+        self.addons_bulk_filtered_only = false;
         self.optional_addons_filter.clear();
         self.external_addons_filter.clear();
         self.external_addons_origin_filter = "All".to_string();
         self.external_addons_group_by_origin = false;
         self.optional_addons_search_files = false;
         self.external_addons_search_files = false;
+        self.optional_addons_bulk_filtered_only = false;
+        self.external_addons_bulk_filtered_only = false;
         self.addon_state_filter.clear();
         self.addon_favorites_only_filter = false;
         self.addon_client_side_only_filter = false;

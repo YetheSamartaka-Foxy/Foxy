@@ -152,6 +152,8 @@
     "Display update view": "Hiển thị giao diện cập nhật",
     "Download Summary": "Tóm tắt tải xuống",
     "Enable all": "Bật tất cả",
+    "Filtered only": "Chỉ mục đã lọc",
+    "When checked, Enable all and Disable all affect only addons matching the current filters. When unchecked, they affect all addons in this tab.": "Khi được chọn, “Bật tất cả” và “Tắt tất cả” chỉ ảnh hưởng đến các addon khớp với bộ lọc hiện tại. Khi không được chọn, chúng ảnh hưởng đến mọi addon trong thẻ này.",
     "English": "Tiếng Anh",
     "Arabic": "Tiếng Ả Rập",
     "Bengali": "Tiếng Bengal",

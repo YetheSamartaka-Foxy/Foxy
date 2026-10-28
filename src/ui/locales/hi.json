@@ -152,6 +152,8 @@
     "Display update view": "अद्यतन दृश्य प्रदर्शित करें",
     "Download Summary": "सारांश डाउनलोड करें",
     "Enable all": "सभी को सक्षम करें",
+    "Filtered only": "केवल फ़िल्टर किए गए",
+    "When checked, Enable all and Disable all affect only addons matching the current filters. When unchecked, they affect all addons in this tab.": "चेक होने पर, सभी सक्षम करें और सबको सक्षम कर दो केवल मौजूदा फ़िल्टर से मेल खाने वाले ऐडऑन पर असर डालते हैं। चेक न होने पर, वे इस टैब के सभी ऐडऑन पर असर डालते हैं।",
     "English": "अंग्रेज़ी",
     "Arabic": "अरबी",
     "Bengali": "बंगाली",

@@ -1,4 +1,5 @@
 use super::AddonContextAction;
+use super::addon_bulk_actions::render_filtered_only_checkbox;
 use crate::ui::app::{AddonDestructiveConfirmAction, Foxy, RepositoryAddonListKind};
 use crate::ui::context_menu::{ContextMenuItem, attach_context_menu};
 use crate::ui::i18n::{fmt_bytes, tr, tr_fmt};
@@ -663,7 +664,17 @@ impl Foxy {
         search_files: &mut bool,
         addon_state_filter: &mut String,
     ) {
-        self.ensure_repository_addon_list_cache_cached(repo_index, kind);
+        self.ensure_filtered_repository_addon_indices_cached(
+            repo_index,
+            kind,
+            filter,
+            addon_state_filter,
+            self.addon_favorites_only_filter && kind == RepositoryAddonListKind::OptionalAddons,
+            self.addon_client_side_only_filter
+                && Self::client_side_addons_supported()
+                && kind == RepositoryAddonListKind::OptionalAddons,
+            *search_files,
+        );
 
         let label = match kind {
             RepositoryAddonListKind::Addons => "addons",
@@ -759,6 +770,14 @@ impl Foxy {
                         self.persist_repository_addon_row_state_cached(repo_index, kind);
                     }
 
+                    ui.add_space(10.0);
+                    let filtered_only = match kind {
+                        RepositoryAddonListKind::Addons => &mut self.addons_bulk_filtered_only,
+                        RepositoryAddonListKind::OptionalAddons => {
+                            &mut self.optional_addons_bulk_filtered_only
+                        }
+                    };
+                    render_filtered_only_checkbox(ui, filtered_only);
                     ui.add_space(10.0);
                     ui.add(
                         egui::Label::new(RichText::new(info_text).italics().color(info_color))

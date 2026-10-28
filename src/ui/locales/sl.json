@@ -152,6 +152,8 @@
     "Display update view": "Prikaži pogled posodobitve",
     "Download Summary": "Povzetek prenosa",
     "Enable all": "Omogoči vse",
+    "Filtered only": "Samo filtrirani",
+    "When checked, Enable all and Disable all affect only addons matching the current filters. When unchecked, they affect all addons in this tab.": "Ko je označeno, »Omogoči vse« in »Onemogoči vse« vplivata samo na dodatke, ki ustrezajo trenutnim filtrom. Ko ni označeno, vplivata na vse dodatke na tem zavihku.",
     "English": "Angleščina",
     "Arabic": "Arabščina",
     "Bengali": "Bengalščina",

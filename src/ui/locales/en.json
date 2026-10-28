@@ -152,6 +152,8 @@
     "Display update view":  "Display update view",
     "Download Summary":  "Download Summary",
     "Enable all":  "Enable all",
+    "Filtered only": "Filtered only",
+    "When checked, Enable all and Disable all affect only addons matching the current filters. When unchecked, they affect all addons in this tab.": "When checked, Enable all and Disable all affect only addons matching the current filters. When unchecked, they affect all addons in this tab.",
     "English":  "English",
     "Arabic":  "Arabic",
     "Bengali":  "Bengali",

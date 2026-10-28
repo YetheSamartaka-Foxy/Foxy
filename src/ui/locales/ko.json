@@ -152,6 +152,8 @@
     "Display update view": "업데이트 화면 표시",
     "Download Summary": "다운로드 요약",
     "Enable all": "모두 활성화",
+    "Filtered only": "필터된 항목만",
+    "When checked, Enable all and Disable all affect only addons matching the current filters. When unchecked, they affect all addons in this tab.": "선택하면 ‘모두 활성화’와 ‘모두 비활성화’가 현재 필터와 일치하는 애드온에만 적용됩니다. 선택하지 않으면 이 탭의 모든 애드온에 적용됩니다.",
     "English": "영어",
     "Arabic": "아랍어",
     "Bengali": "벵골어",

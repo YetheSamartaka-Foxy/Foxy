@@ -152,6 +152,8 @@
     "Display update view": "Tampilkan tampilan pembaruan",
     "Download Summary": "Ringkasan Unduhan",
     "Enable all": "Aktifkan semua",
+    "Filtered only": "Hanya yang difilter",
+    "When checked, Enable all and Disable all affect only addons matching the current filters. When unchecked, they affect all addons in this tab.": "Jika dicentang, “Aktifkan semua” dan “Nonaktifkan semua” hanya memengaruhi addon yang cocok dengan filter saat ini. Jika tidak dicentang, keduanya memengaruhi semua addon di tab ini.",
     "English": "Inggris",
     "Arabic": "Arab",
     "Bengali": "Bengali",

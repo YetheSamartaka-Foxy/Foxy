@@ -152,6 +152,8 @@
     "Display update view": "更新画面を表示",
     "Download Summary": "ダウンロード概要",
     "Enable all": "すべて有効",
+    "Filtered only": "フィルター結果のみ",
+    "When checked, Enable all and Disable all affect only addons matching the current filters. When unchecked, they affect all addons in this tab.": "オンにすると、「すべて有効」と「すべて無効」は現在のフィルターに一致するアドオンだけに作用します。オフにすると、このタブのすべてのアドオンに作用します。",
     "English": "英語",
     "Arabic": "アラビア語",
     "Bengali": "ベンガル語",

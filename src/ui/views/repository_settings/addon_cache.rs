@@ -1,3 +1,4 @@
+use super::addon_bulk_actions::set_bulk_addon_enabled;
 use super::normalize_local_path_for_compare;
 use crate::core::db::{FoxyDb, params};
 use crate::ui::app::{
@@ -613,14 +614,16 @@ impl Foxy {
         kind: RepositoryAddonListKind,
         enabled: bool,
     ) -> bool {
+        let filtered_only = match kind {
+            RepositoryAddonListKind::Addons => self.addons_bulk_filtered_only,
+            RepositoryAddonListKind::OptionalAddons => self.optional_addons_bulk_filtered_only,
+        };
         let cache = self.repository_addon_list_cache_mut_cached(kind);
-        let mut changed = false;
-        for current_enabled in &mut cache.enabled_by_source {
-            if *current_enabled != enabled {
-                *current_enabled = enabled;
-                changed = true;
-            }
-        }
+        let changed = set_bulk_addon_enabled(
+            &mut cache.enabled_by_source,
+            filtered_only.then_some(cache.filtered_indices.as_slice()),
+            enabled,
+        );
         if changed {
             cache.filters_dirty = true;
         }
@@ -1336,28 +1339,25 @@ impl Foxy {
         enabled: bool,
     ) -> bool {
         let cache = &mut self.repository_external_addons_list_cache;
-        let mut changed = false;
-        for current_enabled in &mut cache.enabled_by_row {
-            if *current_enabled != enabled {
-                *current_enabled = enabled;
-                changed = true;
-            }
-        }
+        let changed = set_bulk_addon_enabled(
+            &mut cache.enabled_by_row,
+            self.external_addons_bulk_filtered_only
+                .then_some(cache.filtered_indices.as_slice()),
+            enabled,
+        );
         if changed {
-            cache.enabled_count = if enabled {
-                cache.enabled_by_row.len()
-            } else {
-                0
-            };
-            cache.enabled_size_bytes = if enabled {
-                cache
-                    .rows
-                    .iter()
-                    .filter_map(|row| row.local_size_bytes)
-                    .sum()
-            } else {
-                0
-            };
+            cache.enabled_count = cache
+                .enabled_by_row
+                .iter()
+                .filter(|enabled| **enabled)
+                .count();
+            cache.enabled_size_bytes = cache
+                .rows
+                .iter()
+                .zip(&cache.enabled_by_row)
+                .filter(|(_, enabled)| **enabled)
+                .filter_map(|(row, _)| row.local_size_bytes)
+                .sum();
             cache.filters_dirty = true;
         }
         changed

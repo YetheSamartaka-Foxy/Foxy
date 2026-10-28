@@ -152,6 +152,8 @@
     "Display update view": "Показати вікно оновлення",
     "Download Summary": "Підсумок завантаження",
     "Enable all": "Увімкнути все",
+    "Filtered only": "Лише відфільтровані",
+    "When checked, Enable all and Disable all affect only addons matching the current filters. When unchecked, they affect all addons in this tab.": "Якщо позначено, команди «Увімкнути все» та «Вимкнути все» впливають лише на доповнення, що відповідають поточним фільтрам. Якщо не позначено, вони впливають на всі доповнення на цій вкладці.",
     "English": "Англійська",
     "Arabic": "Арабська",
     "Bengali": "Бенгальська",

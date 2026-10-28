@@ -152,6 +152,8 @@
     "Display update view": "แสดงมุมมองการอัพเดต",
     "Download Summary": "ดาวน์โหลดข้อมูลสรุป",
     "Enable all": "เปิดใช้งานทั้งหมด",
+    "Filtered only": "เฉพาะรายการที่กรองแล้ว",
+    "When checked, Enable all and Disable all affect only addons matching the current filters. When unchecked, they affect all addons in this tab.": "เมื่อเลือกตัวเลือกนี้ “เปิดใช้งานทั้งหมด” และ “ปิดการใช้งานทั้งหมด” จะมีผลเฉพาะกับส่วนเสริมที่ตรงกับตัวกรองปัจจุบันเท่านั้น เมื่อไม่ได้เลือก จะมีผลกับส่วนเสริมทั้งหมดในแท็บนี้",
     "English": "ภาษาอังกฤษ",
     "Arabic": "ภาษาอาหรับ",
     "Bengali": "เบงกาลี",

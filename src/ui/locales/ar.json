@@ -152,6 +152,8 @@
     "Display update view": "عرض شاشة التحديث",
     "Download Summary": "ملخص التنزيل",
     "Enable all": "تفعيل الكل",
+    "Filtered only": "نتائج التصفية فقط",
+    "When checked, Enable all and Disable all affect only addons matching the current filters. When unchecked, they affect all addons in this tab.": "عند تحديد هذا الخيار، يؤثر تفعيل الكل وتعطيل الكل على الإضافات المطابقة للفلاتر الحالية فقط. عند إلغاء تحديده، يؤثران على جميع الإضافات في علامة التبويب هذه.",
     "English": "الإنجليزية",
     "Arabic": "العربية",
     "Bengali": "بنغالية",

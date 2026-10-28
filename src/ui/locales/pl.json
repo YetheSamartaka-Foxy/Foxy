@@ -152,6 +152,8 @@
     "Display update view": "Wyświetl widok aktualizacji",
     "Download Summary": "Podsumowanie pobierania",
     "Enable all": "Włącz wszystko",
+    "Filtered only": "Tylko przefiltrowane",
+    "When checked, Enable all and Disable all affect only addons matching the current filters. When unchecked, they affect all addons in this tab.": "Po zaznaczeniu tej opcji „Włącz wszystko” i „Wyłącz wszystko” dotyczą tylko dodatków pasujących do bieżących filtrów. Po jej odznaczeniu dotyczą wszystkich dodatków na tej karcie.",
     "English": "Angielski",
     "Arabic": "Arabski",
     "Bengali": "Bengalski",

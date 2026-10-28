@@ -152,6 +152,8 @@
     "Display update view": "Zobrazit aktualizace",
     "Download Summary": "Souhrn stahování",
     "Enable all": "Zapnout vše",
+    "Filtered only": "Pouze filtrované",
+    "When checked, Enable all and Disable all affect only addons matching the current filters. When unchecked, they affect all addons in this tab.": "Je-li zaškrtnuto, „Zapnout vše“ a „Vypnout vše“ se týká pouze doplňků odpovídajících aktuálním filtrům. Není-li zaškrtnuto, týká se všech doplňků na této kartě.",
     "English": "Angličtina",
     "Arabic": "Arabština",
     "Bengali": "Bengálština",

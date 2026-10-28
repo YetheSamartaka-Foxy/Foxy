@@ -152,6 +152,8 @@
     "Display update view": "اپ ڈیٹ ویو دکھائیں",
     "Download Summary": "ڈاؤن لوڈ کا خلاصہ",
     "Enable all": "سب فعال کریں",
+    "Filtered only": "صرف فلٹر کردہ",
+    "When checked, Enable all and Disable all affect only addons matching the current filters. When unchecked, they affect all addons in this tab.": "منتخب ہونے پر، سب فعال کریں اور سب غیر فعال کریں صرف موجودہ فلٹرز سے میل کھانے والے ایڈ آنز پر اثر انداز ہوتے ہیں۔ منتخب نہ ہونے پر، یہ اس ٹیب کے تمام ایڈ آنز پر اثر انداز ہوتے ہیں۔",
     "English": "انگریزی",
     "Arabic": "عربی",
     "Bengali": "بنگالی",

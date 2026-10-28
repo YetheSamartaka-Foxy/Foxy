@@ -152,6 +152,8 @@
     "Display update view": "Updateweergave tonen",
     "Download Summary": "Downloadoverzicht",
     "Enable all": "Alles inschakelen",
+    "Filtered only": "Alleen gefilterde",
+    "When checked, Enable all and Disable all affect only addons matching the current filters. When unchecked, they affect all addons in this tab.": "Als deze optie is aangevinkt, hebben ‘Alles inschakelen’ en ‘Alles uitschakelen’ alleen invloed op addons die aan de huidige filters voldoen. Als de optie niet is aangevinkt, hebben ze invloed op alle addons in dit tabblad.",
     "English": "Engels",
     "Arabic": "Arabisch",
     "Bengali": "Bengaals",

@@ -1,4 +1,5 @@
 use super::ExternalAddonContextAction;
+use super::addon_bulk_actions::render_filtered_only_checkbox;
 use crate::ui::app::{
     AddonDestructiveConfirmAction, ExternalAddonRowCache, Foxy, RepositoryExternalAddonsListCache,
 };
@@ -1097,7 +1098,19 @@ impl Foxy {
             return;
         }
 
-        self.ensure_repository_external_addons_base_cache_cached(repo_index);
+        if origin_filter.is_empty() {
+            *origin_filter = "All".to_string();
+        }
+
+        self.ensure_filtered_repository_external_addon_indices_cached(
+            repo_index,
+            filter,
+            origin_filter,
+            addon_state_filter,
+            self.addon_favorites_only_filter,
+            self.addon_client_side_only_filter && Self::client_side_addons_supported(),
+            *search_files,
+        );
 
         let color_text_dim = self.color_text_dim();
         let horizontal_padding = 15.0;
@@ -1108,10 +1121,6 @@ impl Foxy {
             String,
             ExternalAddonContextAction,
         )> = None;
-
-        if origin_filter.is_empty() {
-            *origin_filter = "All".to_string();
-        }
 
         let context_menu_labels = ExternalAddonContextMenuLabels {
             open_directory: tr("Open addon directory"),
@@ -1185,6 +1194,8 @@ impl Foxy {
                         self.persist_repository_external_addon_row_state_cached(repo_index);
                     }
 
+                    ui.add_space(10.0);
+                    render_filtered_only_checkbox(ui, &mut self.external_addons_bulk_filtered_only);
                     ui.add_space(10.0);
                     ui.add(
                         egui::Label::new(

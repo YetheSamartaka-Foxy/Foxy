@@ -152,6 +152,8 @@
     "Display update view": "Показване на изглед за обновяване",
     "Download Summary": "Резюме на изтеглянето",
     "Enable all": "Активиране на всички",
+    "Filtered only": "Само филтрираните",
+    "When checked, Enable all and Disable all affect only addons matching the current filters. When unchecked, they affect all addons in this tab.": "Когато е отметнато, „Активиране на всички“ и „Деактивиране на всички“ засягат само добавките, които отговарят на текущите филтри. Когато не е отметнато, засягат всички добавки в този раздел.",
     "English": "Английски",
     "Arabic": "Арабски",
     "Bengali": "Бенгалски",

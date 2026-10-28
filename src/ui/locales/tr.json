@@ -152,6 +152,8 @@
     "Display update view": "Güncelleme görünümünü göster",
     "Download Summary": "İndirme Özeti",
     "Enable all": "Tümünü etkinleştir",
+    "Filtered only": "Yalnızca filtrelenenler",
+    "When checked, Enable all and Disable all affect only addons matching the current filters. When unchecked, they affect all addons in this tab.": "İşaretlendiğinde, “Tümünü etkinleştir” ve “Tümünü devre dışı bırak” yalnızca geçerli filtrelerle eşleşen eklentileri etkiler. İşaret kaldırıldığında bu sekmedeki tüm eklentileri etkiler.",
     "English": "İngilizce",
     "Arabic": "Arapça",
     "Bengali": "Bengalce",

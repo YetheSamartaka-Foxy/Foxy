@@ -152,6 +152,8 @@
     "Display update view": "Rādīt atjaunināšanas skatu",
     "Download Summary": "Lejupielādes kopsavilkums",
     "Enable all": "Iespējot visus",
+    "Filtered only": "Tikai filtrētie",
+    "When checked, Enable all and Disable all affect only addons matching the current filters. When unchecked, they affect all addons in this tab.": "Ja šī opcija ir atzīmēta, „Iespējot visus” un „Atspējot visus” ietekmē tikai papildinājumus, kas atbilst pašreizējiem filtriem. Ja tā nav atzīmēta, tie ietekmē visus šīs cilnes papildinājumus.",
     "English": "Angļu",
     "Arabic": "Arābu",
     "Bengali": "Bengāļu",

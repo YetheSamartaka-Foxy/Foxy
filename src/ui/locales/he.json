@@ -152,6 +152,8 @@
     "Display update view": "הצג תצוגת עדכון",
     "Download Summary": "סיכום הורדה",
     "Enable all": "הפעל הכל",
+    "Filtered only": "המסוננים בלבד",
+    "When checked, Enable all and Disable all affect only addons matching the current filters. When unchecked, they affect all addons in this tab.": "כאשר האפשרות מסומנת, „הפעל הכל” ו„השבת הכל” משפיעים רק על תוספים שתואמים למסננים הנוכחיים. כאשר היא אינה מסומנת, הם משפיעים על כל התוספים בכרטיסייה זו.",
     "English": "אנגלית",
     "Arabic": "ערבית",
     "Bengali": "בנגלית",

@@ -152,6 +152,8 @@
     "Display update view": "Kuva uuenduste vaade",
     "Download Summary": "Allalaadimise kokkuvõte",
     "Enable all": "Luba kõik",
+    "Filtered only": "Ainult filtreeritud",
+    "When checked, Enable all and Disable all affect only addons matching the current filters. When unchecked, they affect all addons in this tab.": "Märgituna mõjutavad „Luba kõik“ ja „Keela kõik“ ainult praegustele filtritele vastavaid lisasid. Märkimata olekus mõjutavad need kõiki selle vahekaardi lisasid.",
     "English": "Inglise",
     "Arabic": "Araabia",
     "Bengali": "Bengali",

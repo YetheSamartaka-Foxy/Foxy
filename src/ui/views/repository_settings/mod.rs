@@ -1,3 +1,4 @@
+mod addon_bulk_actions;
 mod addon_cache;
 mod addons;
 mod cached_views;
