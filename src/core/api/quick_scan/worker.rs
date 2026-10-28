@@ -67,8 +67,141 @@ pub struct StartupQuickScanPlan {
     pub eligible_repositories: Vec<StartupRepositoryInstance>,
     pub prevalidated_repositories: Vec<StartupRepositoryInstance>,
     pub remote_changed_repositories: Vec<StartupRepositoryInstance>,
+    /// Unchanged `repo.json`, but a saved pending update still has to be
+    /// confirmed with the server. Routed like [`Self::remote_changed_repositories`].
+    pub pending_update_repositories: Vec<StartupRepositoryInstance>,
+    /// Probe got no answer. The local quick scan still runs when the repository
+    /// is eligible; a later retry probes these again.
+    pub remote_unknown_repositories: Vec<StartupRepositoryInstance>,
     /// True when eligibility planning ran to completion.
     pub completed: bool,
+}
+
+/// What one later probe of repositories that did not answer at launch decided.
+#[derive(Debug, Default)]
+pub struct StartupProbeRetryPlan {
+    pub remote_changed_repositories: Vec<StartupRepositoryInstance>,
+    pub pending_update_repositories: Vec<StartupRepositoryInstance>,
+    pub still_unknown_repositories: Vec<StartupRepositoryInstance>,
+}
+
+/// First retry after the startup checks settle, then the same cadence as a
+/// failed app-update check.
+pub const STARTUP_PROBE_RETRY_INITIAL: Duration = Duration::from_secs(60);
+pub const STARTUP_PROBE_RETRY_INTERVAL: Duration = Duration::from_secs(15 * 60);
+
+pub fn startup_probe_retry_delay(retries_completed: u32) -> Duration {
+    if retries_completed == 0 {
+        STARTUP_PROBE_RETRY_INITIAL
+    } else {
+        STARTUP_PROBE_RETRY_INTERVAL
+    }
+}
+
+/// A retry must not run beside work the user is already waiting on.
+pub fn startup_probe_retry_is_blocked(
+    sync_running: bool,
+    download_running: bool,
+    quick_scan_running: bool,
+    startup_recheck_queued: bool,
+) -> bool {
+    sync_running || download_running || quick_scan_running || startup_recheck_queued
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StartupRepositoryRoute {
+    RemoteRefresh { pending_update: bool },
+    QuickScan { prevalidated: bool },
+    Idle,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct StartupRepositoryFacts {
+    pub freshness: RemoteFreshness,
+    /// False when this instance was not probed, for example because it has no
+    /// database row. That is not [`RemoteFreshness::Unknown`].
+    pub probed: bool,
+    pub has_pending_update: bool,
+    pub eligibility: StartupQuickScanEligibility,
+}
+
+pub(crate) fn route_startup_repository(facts: StartupRepositoryFacts) -> StartupRepositoryRoute {
+    if !facts.probed {
+        return match facts.eligibility {
+            StartupQuickScanEligibility::Ineligible => StartupRepositoryRoute::Idle,
+            StartupQuickScanEligibility::NeedsBootstrap => StartupRepositoryRoute::QuickScan {
+                prevalidated: false,
+            },
+            StartupQuickScanEligibility::Prevalidated => {
+                StartupRepositoryRoute::QuickScan { prevalidated: true }
+            }
+        };
+    }
+    match facts.freshness {
+        RemoteFreshness::Changed => StartupRepositoryRoute::RemoteRefresh {
+            pending_update: false,
+        },
+        RemoteFreshness::Unchanged if facts.has_pending_update => {
+            StartupRepositoryRoute::RemoteRefresh {
+                pending_update: true,
+            }
+        }
+        RemoteFreshness::Unknown => match facts.eligibility {
+            StartupQuickScanEligibility::Ineligible => StartupRepositoryRoute::Idle,
+            StartupQuickScanEligibility::NeedsBootstrap
+            | StartupQuickScanEligibility::Prevalidated => StartupRepositoryRoute::QuickScan {
+                prevalidated: false,
+            },
+        },
+        RemoteFreshness::Unchanged => match facts.eligibility {
+            StartupQuickScanEligibility::Ineligible => StartupRepositoryRoute::Idle,
+            StartupQuickScanEligibility::NeedsBootstrap => StartupRepositoryRoute::QuickScan {
+                prevalidated: false,
+            },
+            StartupQuickScanEligibility::Prevalidated => {
+                StartupRepositoryRoute::QuickScan { prevalidated: true }
+            }
+        },
+    }
+}
+
+pub(crate) fn startup_repository_is_unknown(facts: StartupRepositoryFacts) -> bool {
+    facts.probed && facts.freshness == RemoteFreshness::Unknown
+}
+
+pub(crate) fn partition_startup_repositories(
+    repositories: &[StartupRepositoryInstance],
+    facts: &[StartupRepositoryFacts],
+) -> StartupQuickScanPlan {
+    let mut plan = StartupQuickScanPlan {
+        completed: true,
+        ..StartupQuickScanPlan::default()
+    };
+    for (repository, repository_facts) in repositories.iter().zip(facts.iter().copied()) {
+        if startup_repository_is_unknown(repository_facts) {
+            plan.remote_unknown_repositories.push(repository.clone());
+        }
+        match route_startup_repository(repository_facts) {
+            StartupRepositoryRoute::RemoteRefresh {
+                pending_update: true,
+            } => {
+                plan.pending_update_repositories.push(repository.clone());
+            }
+            StartupRepositoryRoute::RemoteRefresh {
+                pending_update: false,
+            } => {
+                plan.remote_changed_repositories.push(repository.clone());
+            }
+            StartupRepositoryRoute::QuickScan { prevalidated } => {
+                plan.eligible_repositories.push(repository.clone());
+                if prevalidated {
+                    plan.prevalidated_repositories.push(repository.clone());
+                }
+            }
+            StartupRepositoryRoute::Idle => {}
+        }
+    }
+    plan
 }
 
 pub async fn recalculate_hashes_for_addon_by_name(
@@ -301,46 +434,55 @@ pub fn plan_startup_quick_scan_repos(
         };
         let (probe, (eligible_set, prevalidated_set)) =
             tokio::join!(remote_probe, local_eligibility);
-        let StartupRemoteProbe {
-            changed: remote_changed_set,
-            unknown: remote_unknown_set,
-        } = probe;
-        if !remote_changed_set.is_empty() {
-            info!(
-                "Startup remote checksum probe found {} changed repositories",
-                remote_changed_set.len()
-            );
-        }
-
-        // Preserve original insertion order
-        let eligible_repositories: Vec<StartupRepositoryInstance> = normalized_unique
+        let pending = repositories_with_pending_updates(&context, &normalized_unique).await;
+        let facts: Vec<StartupRepositoryFacts> = normalized_unique
             .iter()
-            .filter(|repository| {
-                eligible_set.contains(*repository) && !remote_changed_set.contains(*repository)
+            .map(|repository| {
+                let probed = probe.changed.contains(repository)
+                    || probe.unchanged.contains(repository)
+                    || probe.unknown.contains(repository);
+                let freshness = if probe.changed.contains(repository) {
+                    RemoteFreshness::Changed
+                } else if probe.unknown.contains(repository) {
+                    RemoteFreshness::Unknown
+                } else {
+                    RemoteFreshness::Unchanged
+                };
+                let eligibility = if !eligible_set.contains(repository) {
+                    StartupQuickScanEligibility::Ineligible
+                } else if prevalidated_set.contains(repository) {
+                    StartupQuickScanEligibility::Prevalidated
+                } else {
+                    StartupQuickScanEligibility::NeedsBootstrap
+                };
+                StartupRepositoryFacts {
+                    freshness,
+                    probed,
+                    has_pending_update: pending.contains(repository),
+                    eligibility,
+                }
             })
-            .cloned()
             .collect();
-        // A repository whose remote freshness the probe could not establish is
-        // not prevalidated. Prevalidation is the claim "nothing to check here",
-        // and an unanswered probe is exactly the case where that claim is
-        // unearned - the local scan still runs, it just does not get to skip.
-        let prevalidated_repositories = eligible_repositories
-            .iter()
-            .filter(|repository| {
-                prevalidated_set.contains(*repository) && !remote_unknown_set.contains(*repository)
-            })
-            .cloned()
-            .collect();
-        let remote_changed_repositories = normalized_unique
-            .into_iter()
-            .filter(|repository| remote_changed_set.contains(repository))
-            .collect();
-        StartupQuickScanPlan {
-            eligible_repositories,
-            prevalidated_repositories,
-            remote_changed_repositories,
-            completed: true,
+        for (repository, repository_facts) in normalized_unique.iter().zip(facts.iter().copied()) {
+            if matches!(
+                route_startup_repository(repository_facts),
+                StartupRepositoryRoute::RemoteRefresh {
+                    pending_update: true
+                }
+            ) {
+                info!(
+                    "Startup route PendingUpdate for repo={}",
+                    repository.repo_url
+                );
+            }
         }
+        let plan = partition_startup_repositories(&normalized_unique, &facts);
+        log_startup_probe(
+            "startup_probe",
+            &probe,
+            plan.pending_update_repositories.len(),
+        );
+        plan
     })
 }
 
@@ -351,7 +493,7 @@ pub fn plan_startup_quick_scan_repos(
 /// reporting that as "up to date" is how a real remote update goes unnoticed
 /// until the user rechecks by hand.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RemoteFreshness {
+pub(crate) enum RemoteFreshness {
     Changed,
     Unchanged,
     Unknown,
@@ -368,7 +510,7 @@ enum RemoteFreshness {
 /// are the same width - a FoxyMode repository stores a BLAKE3 rollup locally
 /// while `repo.json` may publish a SHA-1, and comparing those can only ever
 /// produce a false "changed".
-fn remote_freshness(
+pub(crate) fn remote_freshness(
     remote_checksum: &str,
     stored_remote_checksum: &str,
     local_checksum: &str,
@@ -401,7 +543,14 @@ fn remote_freshness(
 
 struct StartupRemoteProbe {
     changed: HashSet<StartupRepositoryInstance>,
+    unchanged: HashSet<StartupRepositoryInstance>,
     unknown: HashSet<StartupRepositoryInstance>,
+    probed: usize,
+    answered: usize,
+    elapsed: Duration,
+    first_answer: Option<Duration>,
+    last_answer: Option<Duration>,
+    recorded: bool,
 }
 
 async fn startup_remote_changed_repositories(
@@ -410,7 +559,14 @@ async fn startup_remote_changed_repositories(
 ) -> StartupRemoteProbe {
     let empty = || StartupRemoteProbe {
         changed: HashSet::new(),
+        unchanged: HashSet::new(),
         unknown: HashSet::new(),
+        probed: 0,
+        answered: 0,
+        elapsed: Duration::ZERO,
+        first_answer: None,
+        last_answer: None,
+        recorded: false,
     };
     if repositories.is_empty() {
         return empty();
@@ -450,6 +606,7 @@ async fn startup_remote_changed_repositories(
         };
 
     let mut join_set: JoinSet<(StartupRepositoryInstance, RemoteFreshness)> = JoinSet::new();
+    let mut outstanding: HashSet<StartupRepositoryInstance> = HashSet::new();
     for repository in repositories {
         let Some((_, _, local_checksum, stored_remote_checksum)) =
             rows.iter().find(|(repo_url, local_path, _, _)| {
@@ -460,6 +617,7 @@ async fn startup_remote_changed_repositories(
             continue;
         };
         let repository = repository.clone();
+        outstanding.insert(repository.clone());
         let repo_url = repository.repo_url.clone();
         let local_checksum = local_checksum.clone();
         let stored_remote_checksum = stored_remote_checksum.clone();
@@ -526,16 +684,19 @@ async fn startup_remote_changed_repositories(
             Ok(None) => break,
             Ok(Some(Ok((repository, freshness)))) => {
                 answered += 1;
+                outstanding.remove(&repository);
                 first_answer.get_or_insert(started.elapsed());
                 last_answer = Some(started.elapsed());
                 match freshness {
                     RemoteFreshness::Changed => {
                         probe.changed.insert(repository);
                     }
+                    RemoteFreshness::Unchanged => {
+                        probe.unchanged.insert(repository);
+                    }
                     RemoteFreshness::Unknown => {
                         probe.unknown.insert(repository);
                     }
-                    RemoteFreshness::Unchanged => {}
                 }
             }
             Ok(Some(Err(err))) => {
@@ -553,8 +714,8 @@ async fn startup_remote_changed_repositories(
             }
         }
     }
-    // Everything the budget cut off is unknown too, not merely uncounted.
-    let unanswered = probed.saturating_sub(answered);
+    // Everything the budget cut off, or whose task failed, is unknown too.
+    let unanswered = outstanding.len();
     if unanswered > 0 || !probe.unknown.is_empty() {
         warn!(
             "Startup remote freshness is unknown for {} of {} repositories ({} unreachable or not comparable, {} unanswered); the local quick scan decides for those",
@@ -564,46 +725,191 @@ async fn startup_remote_changed_repositories(
             unanswered
         );
     }
+    probe.unknown.extend(outstanding);
+    probe.probed = probed;
+    probe.answered = answered;
+    probe.elapsed = started.elapsed();
+    probe.first_answer = first_answer;
+    probe.last_answer = last_answer;
+    probe.recorded = true;
+    probe
+}
 
+fn log_startup_probe(op: &str, probe: &StartupRemoteProbe, pending: usize) {
+    if !probe.recorded {
+        return;
+    }
+    let unknown = probe.unknown.len();
+    if op == "startup_probe_retry" {
+        info!(
+            "Startup probe retry: repos={} answered={} changed={} pending={} still_unknown={}",
+            probe.probed,
+            probe.answered,
+            probe.changed.len(),
+            pending,
+            unknown
+        );
+    }
+    let mut fields = vec![
+        ("repos", probe.probed.to_string()),
+        ("answered", probe.answered.to_string()),
+        ("changed", probe.changed.len().to_string()),
+        ("unknown", unknown.to_string()),
+        ("pending", pending.to_string()),
+    ];
+    if op == "startup_probe_retry" {
+        fields.push(("still_unknown", unknown.to_string()));
+    }
+    fields.push((
+        "first_answer_s",
+        probe
+            .first_answer
+            .map_or_else(|| "na".to_string(), |d| format!("{:.3}", d.as_secs_f64())),
+    ));
+    fields.push((
+        "last_answer_s",
+        probe
+            .last_answer
+            .map_or_else(|| "na".to_string(), |d| format!("{:.3}", d.as_secs_f64())),
+    ));
+    fields.push((
+        "outcome",
+        if unknown == 0 { "complete" } else { "partial" }.to_string(),
+    ));
+    fields.push((
+        "op_id",
+        super::super::logging::startup_operation_id().to_string(),
+    ));
     info!(
         "{}",
         crate::core::utils::speed_of_light::sol_line(
-            "startup_probe",
+            op,
             0,
-            started.elapsed(),
+            probe.elapsed,
             &crate::core::utils::speed_of_light::SolLight::SelfBaseline,
-            &[
-                ("repos", probed.to_string()),
-                ("answered", answered.to_string()),
-                ("changed", probe.changed.len().to_string()),
-                ("unknown", (probe.unknown.len() + unanswered).to_string()),
-                (
-                    "first_answer_s",
-                    first_answer
-                        .map_or_else(|| "na".to_string(), |d| format!("{:.3}", d.as_secs_f64())),
-                ),
-                (
-                    "last_answer_s",
-                    last_answer
-                        .map_or_else(|| "na".to_string(), |d| format!("{:.3}", d.as_secs_f64())),
-                ),
-                (
-                    "outcome",
-                    if probe.unknown.is_empty() && unanswered == 0 {
-                        "complete"
-                    } else {
-                        "partial"
-                    }
-                    .to_string(),
-                ),
-                (
-                    "op_id",
-                    super::super::logging::startup_operation_id().to_string(),
-                ),
-            ],
+            &fields,
         )
     );
-    probe
+}
+
+async fn repositories_with_pending_updates(
+    context: &FoxyContext,
+    repositories: &[StartupRepositoryInstance],
+) -> HashSet<StartupRepositoryInstance> {
+    if repositories.is_empty() {
+        return HashSet::new();
+    }
+    let wanted: HashSet<StartupRepositoryInstance> = repositories.iter().cloned().collect();
+    let mut urls = Vec::new();
+    let mut seen_urls = HashSet::new();
+    for repository in repositories {
+        if seen_urls.insert(repository.repo_url.clone()) {
+            urls.push(repository.repo_url.clone());
+        }
+    }
+    let placeholders = vec!["?"; urls.len()].join(", ");
+    let sql = format!(
+        "SELECT repository_url, local_path FROM pending_updates WHERE repository_url IN ({placeholders})"
+    );
+    let values: Vec<DbValue> = urls.into_iter().map(DbValue::from).collect();
+    match context.db().query_all(&sql, values).await {
+        Ok(rows) => rows
+            .iter()
+            .filter_map(|row| {
+                let repo_url = crate::core::models::repository::normalize_repository_url(
+                    &row.get_string("repository_url").ok()?,
+                );
+                let local_path = normalize_instance_path(&row.get_string("local_path").ok()?);
+                let instance = StartupRepositoryInstance {
+                    repo_url,
+                    local_path,
+                };
+                wanted.contains(&instance).then_some(instance)
+            })
+            .collect(),
+        Err(err) => {
+            warn!(
+                "Failed to load pending updates for startup routing: {}",
+                err
+            );
+            HashSet::new()
+        }
+    }
+}
+
+/// Probe repositories that did not answer at launch, and route the answers the
+/// same way startup does. Unchanged repositories with no saved pending update
+/// are left as the launch quick scan already decided them.
+pub fn plan_startup_probe_retry(
+    repositories: Vec<StartupRepositoryInstance>,
+) -> StartupProbeRetryPlan {
+    if repositories.is_empty() {
+        return StartupProbeRetryPlan::default();
+    }
+    let Some(rt) = background_runtime() else {
+        warn!("Shared background runtime unavailable for startup probe retry");
+        return StartupProbeRetryPlan {
+            still_unknown_repositories: repositories,
+            ..StartupProbeRetryPlan::default()
+        };
+    };
+    rt.block_on(async move {
+        ensure_logger();
+        if let Err(message) =
+            crate::core::tasks::db_schema_version::ensure_database_ready_for_updates().await
+        {
+            warn!("Startup probe retry skipped: {}", message);
+            return StartupProbeRetryPlan {
+                still_unknown_repositories: repositories,
+                ..StartupProbeRetryPlan::default()
+            };
+        }
+        let context = crate::core::tasks::create_context::shared_background_context().await;
+        let normalized = normalize_startup_repositories(repositories);
+        let probe = startup_remote_changed_repositories(context.clone(), &normalized).await;
+        let pending = repositories_with_pending_updates(&context, &normalized).await;
+        let mut retry = StartupProbeRetryPlan::default();
+        for repository in &normalized {
+            let probed = probe.changed.contains(repository)
+                || probe.unchanged.contains(repository)
+                || probe.unknown.contains(repository);
+            let freshness = if probe.changed.contains(repository) {
+                RemoteFreshness::Changed
+            } else if probe.unknown.contains(repository) {
+                RemoteFreshness::Unknown
+            } else {
+                RemoteFreshness::Unchanged
+            };
+            let facts = StartupRepositoryFacts {
+                freshness,
+                probed,
+                has_pending_update: pending.contains(repository),
+                eligibility: StartupQuickScanEligibility::Ineligible,
+            };
+            if startup_repository_is_unknown(facts) {
+                retry.still_unknown_repositories.push(repository.clone());
+            }
+            match route_startup_repository(facts) {
+                StartupRepositoryRoute::RemoteRefresh {
+                    pending_update: true,
+                } => {
+                    retry.pending_update_repositories.push(repository.clone());
+                }
+                StartupRepositoryRoute::RemoteRefresh {
+                    pending_update: false,
+                } => {
+                    retry.remote_changed_repositories.push(repository.clone());
+                }
+                StartupRepositoryRoute::QuickScan { .. } | StartupRepositoryRoute::Idle => {}
+            }
+        }
+        log_startup_probe(
+            "startup_probe_retry",
+            &probe,
+            retry.pending_update_repositories.len(),
+        );
+        retry
+    })
 }
 
 struct QuickScanWorkerRepoOutcome {
@@ -1108,9 +1414,32 @@ pub fn spawn_quick_local_scan_instances(
 #[cfg(test)]
 mod tests {
     use super::{
-        RemoteFreshness, StartupRepositoryInstance, normalize_startup_repositories,
-        remote_freshness,
+        RemoteFreshness, StartupQuickScanEligibility, StartupRepositoryFacts,
+        StartupRepositoryInstance, StartupRepositoryRoute, normalize_startup_repositories,
+        partition_startup_repositories, remote_freshness, route_startup_repository,
+        startup_probe_retry_delay, startup_probe_retry_is_blocked, startup_repository_is_unknown,
     };
+    use std::time::Duration;
+
+    fn facts(
+        freshness: RemoteFreshness,
+        pending: bool,
+        eligibility: StartupQuickScanEligibility,
+    ) -> StartupRepositoryFacts {
+        StartupRepositoryFacts {
+            freshness,
+            probed: true,
+            has_pending_update: pending,
+            eligibility,
+        }
+    }
+
+    fn instance(name: &str) -> StartupRepositoryInstance {
+        StartupRepositoryInstance {
+            repo_url: format!("https://repo.example.invalid/{name}/"),
+            local_path: format!("R:/Mods/{name}"),
+        }
+    }
 
     #[test]
     fn startup_repositories_deduplicate_only_matching_url_and_path() {
@@ -1187,5 +1516,145 @@ mod tests {
         assert_eq!(remote_freshness("abc", "", ""), RemoteFreshness::Changed);
         assert_eq!(remote_freshness("", "abc", "abc"), RemoteFreshness::Unknown);
         assert_eq!(remote_freshness("   ", "", ""), RemoteFreshness::Unknown);
+    }
+
+    #[test]
+    fn an_interrupted_refresh_keeps_the_probe_on_changed() {
+        assert_eq!(
+            remote_freshness("NEWREPO", "OLDREPO", "LOCAL"),
+            RemoteFreshness::Changed
+        );
+    }
+
+    #[test]
+    fn startup_plan_routes_an_unchanged_pending_update_to_a_remote_refresh() {
+        let repositories = vec![instance("pending"), instance("clean"), instance("offline")];
+        let plan = partition_startup_repositories(
+            &repositories,
+            &[
+                facts(
+                    RemoteFreshness::Unchanged,
+                    true,
+                    StartupQuickScanEligibility::Prevalidated,
+                ),
+                facts(
+                    RemoteFreshness::Unchanged,
+                    false,
+                    StartupQuickScanEligibility::Prevalidated,
+                ),
+                facts(
+                    RemoteFreshness::Unknown,
+                    true,
+                    StartupQuickScanEligibility::Prevalidated,
+                ),
+            ],
+        );
+        assert_eq!(
+            plan.pending_update_repositories,
+            vec![repositories[0].clone()]
+        );
+        assert!(plan.remote_changed_repositories.is_empty());
+        assert_eq!(
+            plan.eligible_repositories,
+            vec![repositories[1].clone(), repositories[2].clone()]
+        );
+        assert_eq!(
+            plan.prevalidated_repositories,
+            vec![repositories[1].clone()]
+        );
+        assert_eq!(
+            plan.remote_unknown_repositories,
+            vec![repositories[2].clone()]
+        );
+        assert!(!plan.eligible_repositories.contains(&repositories[0]));
+    }
+
+    #[test]
+    fn startup_plan_routes_an_ineligible_pending_update_to_a_remote_refresh() {
+        let repository = instance("ineligible");
+        let plan = partition_startup_repositories(
+            std::slice::from_ref(&repository),
+            &[facts(
+                RemoteFreshness::Unchanged,
+                true,
+                StartupQuickScanEligibility::Ineligible,
+            )],
+        );
+        assert_eq!(plan.pending_update_repositories, vec![repository]);
+        assert!(plan.eligible_repositories.is_empty());
+    }
+
+    #[test]
+    fn startup_plan_keeps_an_unknown_probe_on_the_quick_scan() {
+        let route = route_startup_repository(facts(
+            RemoteFreshness::Unknown,
+            true,
+            StartupQuickScanEligibility::NeedsBootstrap,
+        ));
+        assert_eq!(
+            route,
+            StartupRepositoryRoute::QuickScan {
+                prevalidated: false
+            }
+        );
+        assert!(startup_repository_is_unknown(facts(
+            RemoteFreshness::Unknown,
+            true,
+            StartupQuickScanEligibility::Ineligible,
+        )));
+    }
+
+    #[test]
+    fn startup_probe_retry_routes_like_the_launch_plan() {
+        assert_eq!(
+            route_startup_repository(facts(
+                RemoteFreshness::Changed,
+                false,
+                StartupQuickScanEligibility::Ineligible,
+            )),
+            StartupRepositoryRoute::RemoteRefresh {
+                pending_update: false
+            }
+        );
+        assert_eq!(
+            route_startup_repository(facts(
+                RemoteFreshness::Unchanged,
+                true,
+                StartupQuickScanEligibility::Ineligible,
+            )),
+            StartupRepositoryRoute::RemoteRefresh {
+                pending_update: true
+            }
+        );
+        assert_eq!(
+            route_startup_repository(facts(
+                RemoteFreshness::Unchanged,
+                false,
+                StartupQuickScanEligibility::Ineligible,
+            )),
+            StartupRepositoryRoute::Idle
+        );
+        let still_unknown = facts(
+            RemoteFreshness::Unknown,
+            true,
+            StartupQuickScanEligibility::Ineligible,
+        );
+        assert!(startup_repository_is_unknown(still_unknown));
+        assert_eq!(
+            route_startup_repository(still_unknown),
+            StartupRepositoryRoute::Idle
+        );
+    }
+
+    #[test]
+    fn startup_probe_retry_waits_and_does_not_run_beside_user_work() {
+        assert_eq!(startup_probe_retry_delay(0), Duration::from_secs(60));
+        assert_eq!(startup_probe_retry_delay(1), Duration::from_secs(15 * 60));
+        assert_eq!(startup_probe_retry_delay(4), Duration::from_secs(15 * 60));
+        assert!(startup_probe_retry_is_blocked(true, false, false, false));
+        assert!(startup_probe_retry_is_blocked(false, true, false, false));
+        assert!(startup_probe_retry_is_blocked(false, false, true, false));
+        assert!(startup_probe_retry_is_blocked(false, false, false, true));
+        assert!(!startup_probe_retry_is_blocked(false, false, false, false));
     }
 }

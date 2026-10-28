@@ -89,6 +89,41 @@ fn checksum_eq(left: &str, right: &str) -> bool {
     !left.is_empty() && left == right.trim()
 }
 
+/// The repository checksum stored at the start of a refresh. A new instance
+/// keeps an empty value until its addon data is applied, so an interrupted
+/// refresh still looks changed to the next probe.
+fn repository_remote_checksum_until_applied(previous: Option<&str>) -> &str {
+    previous
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("")
+}
+
+async fn store_repository_remote_checksum(
+    context: &FoxyContext,
+    repository_id: u64,
+    remote_checksum: &str,
+) -> bool {
+    match context
+        .db()
+        .execute_retry(
+            "store repository remote checksum",
+            "UPDATE repositories SET remote_checksum = ? WHERE id = ?",
+            params![remote_checksum, repository_id as i64],
+        )
+        .await
+    {
+        Ok(_) => true,
+        Err(err) => {
+            error!(
+                "Failed to store repository remote checksum for repository_id={}: {}",
+                repository_id, err
+            );
+            false
+        }
+    }
+}
+
 fn local_path_identity_unchanged(existing: &FoxyRepository, normalized_local_path: &str) -> bool {
     normalized_local_path.is_empty()
         || normalize_local_path_identity(&existing.local_path)
@@ -652,7 +687,7 @@ pub(crate) async fn remote_repository(
         &normalized_url,
         &name,
         &image,
-        &remote_checksum,
+        repository_remote_checksum_until_applied(previous_remote_checksum.as_deref()),
         "",
         "",
         &normalized_local_path,
@@ -670,6 +705,9 @@ pub(crate) async fn remote_repository(
             return None;
         }
     };
+    // Decisions below compare the fetched checksum. The database row keeps the
+    // previous value until the data behind this one has been applied.
+    repository.remote_checksum = remote_checksum.clone();
 
     let has_linked_addons =
         repository_has_linked_addons(context.clone(), repository.id as i64).await;
@@ -770,6 +808,10 @@ pub(crate) async fn remote_repository(
             || !remote_addon_properties_match
             || !repository_space_paths_match,
     ) {
+        if !store_repository_remote_checksum(&context, repository.id, &remote_checksum).await {
+            log_remote_refresh_sol(&context, refresh_started, "failed", index_requests, None);
+            return None;
+        }
         info!("Up-to-date: Repository {}.", repository.remote_url.clone());
         log_remote_refresh_sol(
             &context,
@@ -897,6 +939,29 @@ pub(crate) async fn remote_repository(
         repository_has_linked_addons(context.clone(), repository.id as i64).await;
     let final_has_remote_state =
         repository_has_remote_state(context.clone(), repository.id as i64, enabled_overrides).await;
+    let stored_addon_checksums =
+        repository_linked_addon_checksums(context.clone(), repository.id as i64).await;
+    let published_addons_applied = remote_addon_checksums.as_ref().is_none_or(|published| {
+        stored_addon_checksums
+            .as_ref()
+            .is_some_and(|stored| remote_addon_checksums_match(published, stored))
+    });
+    let graph_ready = final_has_linked_addons
+        && final_has_remote_state
+        && published_addons_applied
+        && !remote_checksum.trim().is_empty();
+    if !graph_ready
+        || !store_repository_remote_checksum(&context, repository.id, &remote_checksum).await
+    {
+        log_remote_refresh_sol(
+            &context,
+            refresh_started,
+            "failed",
+            index_requests,
+            Some(rebuild_work),
+        );
+        return None;
+    }
     let final_repository = load_repository_by_remote_url_and_local_path(
         context.clone(),
         &normalized_url,

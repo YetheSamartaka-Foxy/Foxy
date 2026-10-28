@@ -265,7 +265,7 @@ fn scopes_tree_bootstrap(
 /// manifests: those of the saved pending update, so stored metadata that
 /// disagrees with the server cannot keep the update pending through every
 /// recheck. A download plan forces its own quick-verify scope instead.
-fn recheck_reapplied_addons(saved_pending_mods: &[ModDiffSummary]) -> HashSet<String> {
+pub(crate) fn recheck_reapplied_addons(saved_pending_mods: &[ModDiffSummary]) -> HashSet<String> {
     saved_pending_mods
         .iter()
         .filter(|m| m.needs_update)

@@ -207,6 +207,8 @@ Available from **Repository Settings > Configuration**, this performs a full rem
 
 Before preparing an update, Foxy checks the current server metadata and refreshes the manifests and file-part metadata for pending addons even if the repository checksum is unchanged. Changed addon versions, pending addon refreshes, and integrity rechecks bypass cached HTTP validators. This lets it download files missing from older metadata and recognize manually copied files that the server publishes before cleaning up obsolete files.
 
+At startup, a saved update is shown immediately and then checked with the server when **Auto recheck on launch** or **Auto quick scan on launch** is on for that repository. The check runs even when the repository checksum has not changed, and it includes a repository the quick local check cannot scan yet. The saved update stays on screen while that check runs. If the server does not answer, the local check stands and Foxy asks again later in the same session: one minute after startup finishes, then every 15 minutes, until the server answers or you check the repository yourself. Turning both startup settings off leaves the repository alone until you check it.
+
 If the server changes after an automatic startup check or while an update confirmation is open, Foxy checks the repository version and published addon list again before reusing a saved update plan. Changed addon versions or membership rebuild the plan automatically, even if the repository checksum stayed the same. Newly changed addons join the update even when they were absent from the startup list. A clean local check alone cannot finish an update without checking the server.
 
 Foxy checks that published file parts cover the declared file size before applying a manifest. It retries inconsistent metadata with a fresh request and stops before cleanup if it remains invalid. A database wipe can reuse server-validated manifest caches, but invalid cached layouts are refreshed automatically. If fresh metadata is still inconsistent, the repository administrator must republish it. Downloaded files must pass checksum verification before the update succeeds; a failure restores the previous files and invalidates remote metadata for the next attempt.
@@ -223,7 +225,7 @@ Foxy also checks that no other program holds the files it is about to replace. A
 
 A saved update plan is reused only while the files it does not touch are still on disk at their recorded size. If you deleted or replaced a mod file after the check, the update checks the repository again and repairs that file too.
 
-Each game space keeps one saved update plan at a time, for the repository that was checked last. Checking or updating any other repository replaces it. After a startup check finds updates in several repositories, only the last one checked starts downloading right away. The others still show their update, but each first rebuilds its plan, which takes about as long as a check. Nothing is downloaded twice.
+Each game space keeps one saved update plan at a time, for the repository that was checked last. Checking or updating any other repository replaces it. After a startup check finds updates in several repositories, only the last one checked starts downloading right away. The others still show their update, but each first rebuilds its plan, which takes about as long as a check. Nothing is downloaded twice. A saved update from an earlier session is checked again at the next startup, so a plan left over from an interrupted check is rebuilt or cleared before you download it.
 
 ### Delta patching
 
@@ -275,8 +277,8 @@ While a check, update, or database wipe of the repository is running, **Address*
 
 Each of these can be **Use global** (inherits from Application or Game space settings), **On (override)**, or **Off (override)**. Only the settings that apply to the open game appear:
 
-- **Auto recheck on launch** - refresh this repository's remote data when Foxy starts.
-- **Auto quick scan on launch** - run a quick local check on this repository when Foxy starts.
+- **Auto recheck on launch** - refresh this repository's remote data when Foxy starts. A saved update is confirmed with the server even when the repository checksum has not changed.
+- **Auto quick scan on launch** - run a quick local check on this repository when Foxy starts. A saved update is confirmed with the server first, instead of only comparing the stored file list with the disk. If the server does not answer, the local check runs and Foxy tries the server again later in the session.
 - **Auto backup addons before update** - back up changed addons before downloading updates.
 - **Auto apply repo.json launch parameters** - apply launch parameters published by the repository.
 - **Auto apply repo.json DLC content** - apply the Creator DLC selection published by the repository (Arma 3).
@@ -505,8 +507,8 @@ Open Settings with the gear icon or **F2**. The Settings view has these tabs: **
 - **Download Speed Limit** - a maximum download speed in Mbps, or **Unlimited**.
 - **Proxy** - how Foxy reaches repositories, app updates, Steam Workshop details, and images. **System proxy settings** (the default) uses the proxy set in Windows or in the `HTTP_PROXY` and `HTTPS_PROXY` environment variables. **No proxy** connects directly. **Manual proxy** uses an HTTP or HTTPS proxy you enter, such as `http://proxy.example:8080`, with an optional user name and password and a comma-separated list of hosts to connect to directly. The password is stored in Foxy's settings file as plain text and is hidden from `foxy settings show`. SOCKS proxies are not supported. From the command line, use `foxy settings set --proxy-mode <system|none|manual>`, `--proxy-url`, `--proxy-username`, `--proxy-password`, and `--proxy-bypass`.
 - **Auto backup addons before update** - back up addons before any download.
-- **Auto recheck repositories on launch** - refresh all repository metadata when Foxy starts.
-- **Auto quick scan for changes on launch** - run quick local checks on all repositories when Foxy starts.
+- **Auto recheck repositories on launch** - refresh repository metadata when Foxy starts, and confirm any saved update with the server.
+- **Auto quick scan for changes on launch** - run quick local checks when Foxy starts. A repository with a saved update is confirmed with the server first. A server that does not answer is tried again later in the session, first after a minute and then every 15 minutes.
 - **Hide repository image** - hide the banner image at the top of repository and repository space views.
 - **Reduce motion** - stop the blinking, bubbling, and sparkling animations on progress indicators and turn off interface transitions. Progress and status text still update. See [Progress and status banners](#progress-and-status-banners).
 - **Close after launch** / **Hide to tray after launch** - see [Launching the Game](#launching-the-game).

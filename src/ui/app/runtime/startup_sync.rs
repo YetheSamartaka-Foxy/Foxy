@@ -21,6 +21,7 @@ pub(crate) struct StartupSyncTracker {
     eligible: usize,
     prevalidated: usize,
     remote_changed: usize,
+    pending_update: usize,
     rechecks_queued: usize,
     settled: bool,
 }
@@ -37,6 +38,7 @@ impl StartupSyncTracker {
             eligible: 0,
             prevalidated: 0,
             remote_changed: 0,
+            pending_update: 0,
             rechecks_queued: 0,
             settled: false,
         }
@@ -68,12 +70,14 @@ impl Foxy {
         eligible: usize,
         prevalidated: usize,
         remote_changed: usize,
+        pending_update: usize,
     ) {
         if let Some(tracker) = self.startup_sync.as_mut() {
             tracker.eligibility_elapsed = Some(tracker.dispatched_at.elapsed());
             tracker.eligible = eligible;
             tracker.prevalidated = prevalidated;
             tracker.remote_changed = remote_changed;
+            tracker.pending_update = pending_update;
         }
     }
 
@@ -174,6 +178,7 @@ impl Foxy {
                     ("eligible", tracker.eligible.to_string()),
                     ("prevalidated", tracker.prevalidated.to_string()),
                     ("remote_changed", tracker.remote_changed.to_string()),
+                    ("pending_update", tracker.pending_update.to_string()),
                     ("rechecks", tracker.rechecks_queued.to_string()),
                     ("first_frame_s", secs(tracker.to_first_frame)),
                     ("dispatch_s", secs(tracker.to_dispatch)),

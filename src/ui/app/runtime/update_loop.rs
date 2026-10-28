@@ -390,6 +390,7 @@ impl Foxy {
         self.poll_mission_scan();
         self.poll_restore_pending_updates();
         self.poll_startup_quick_scan_filter_results();
+        self.service_startup_probe_retry(&ctx);
         if self.startup_tasks_started {
             self.refresh_fs_watcher_if_stale();
         }

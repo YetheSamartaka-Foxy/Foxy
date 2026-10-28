@@ -764,6 +764,20 @@ pub(crate) async fn apply_mod_file_rows(
     }
 
     let parts_persist_duration = parts_start.elapsed();
+    if let Err(error) = context
+        .db()
+        .execute_retry(
+            "store applied addon remote checksum",
+            "UPDATE addons SET remote_checksum = ? WHERE id = ?",
+            params![mod_parent.remote_checksum.clone(), mod_parent.id as i64],
+        )
+        .await
+    {
+        error!(
+            "Could not store applied addon remote checksum for addon_id={}: {}",
+            mod_parent.id, error
+        );
+    }
 
     ModRecheckStats {
         mod_path: mod_parent.remote_path.clone(),

@@ -19,6 +19,7 @@ mod references;
 mod replay;
 mod report;
 mod run;
+mod seed_state;
 mod suite;
 
 #[derive(Parser)]

@@ -567,6 +567,7 @@
     "Enable addon backups before updates if you want recovery points. You can manage stored backups centrally and restore a specific addon from repository settings.": "復旧ポイントが必要な場合は、更新前のアドオンバックアップを有効にしてください。保存済みバックアップを一元管理し、リポジトリ設定から特定のアドオンを復元できます。",
     "Settings lets you change app paths, language, fonts, colors, backup rules, and startup behavior.": "設定では、アプリのパス、言語、フォント、色、バックアップルール、起動時の動作、レンダラーの選択、アプリ更新の動作を変更できます。",
     "Use Auto recheck repositories on launch and Auto quick scan for changes on launch in Application settings to start background verification automatically.": "アプリケーション設定の「起動時にリポジトリを自動再チェック」と「起動時に変更のクイックスキャンを自動実行」を使用して、バックグラウンド検証を自動的に開始できます。 起動時のタスクは最初の描画後に実行されるため、UIの応答性が保たれます。",
+    "With either startup check on, Foxy confirms a saved update with the server at startup, including a repository the quick local check cannot scan yet. A server that does not answer is tried again later in the same session.": "起動時のチェックがいずれか有効になっている場合、Foxy は起動時に保存済みの更新をサーバーに確認します。高速ローカルチェックでまだスキャンできないリポジトリも対象です。サーバーから応答がない場合は、同じセッション中に後で再試行します。",
     "Repository settings can override these startup checks per repository when needed.": "必要に応じて、リポジトリ設定でリポジトリごとにこれらの起動チェックをオーバーライドできます。",
     "The info icon opens About, the question mark opens this Help page, and the version number opens the changelog.": "情報アイコンで「Foxyについて」、疑問符アイコンでこのヘルプページ、バージョン番号で変更履歴が開きます。",
     "Foxy also includes a full command-line interface in the same binary for scripting and automation.": "Foxyにはスクリプトや自動化のためのフル機能のコマンドラインインターフェースも同じバイナリに含まれています。",

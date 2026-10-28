@@ -499,17 +499,24 @@ correctness gates.
 3. **Comparisons**: the disputed 74% and the corrected arithmetic are in the
    measurements file.
 4. **Work**: launch/setup, renderer initialization, background eligibility and
-   probes, local validation, queued rechecks, UI presentation. An unknown or
-   timed-out repository is not a successful verdict; report answered, unknown,
-   changed and failed counts (`SOL op=startup_probe`).
+   probes, local validation, queued rechecks, UI presentation. A repository
+   with a saved pending update is verified with the server at startup when
+   auto quick scan or auto recheck is on, and that refresh is part of the
+   startup verdict. An unknown or timed-out repository is not a successful
+   remote verdict; it keeps the local quick scan and is probed again later in
+   the session. Report answered, unknown, changed, and pending counts
+   (`SOL op=startup_probe`). Retries emit `SOL op=startup_probe_retry` and are
+   not part of the launch verdict.
 5. **Timers**: `first_frame_s` and `dispatch_s` are offsets from launch;
    `eligibility_s` and `verdict_s` are durations from dispatch.
    `dependency_bound_s`, `join_s` and `dependency_coverage_percent` preserve
    those origins and expose any action time not explained by the two required
    completion branches.
 6. **Counters**: `SOL op=startup` (`repos`, `quick_scan_repos`, `eligible`,
-   `prevalidated`, `remote_changed`, `rechecks` and the four timers);
-   `Quick scan preflight timings:` per repository.
+   `prevalidated`, `remote_changed`, `pending_update`, `rechecks` and the four
+   timers); `SOL op=startup_probe` (`repos`, `answered`, `changed`, `unknown`,
+   `pending`); `SOL op=startup_probe_retry` (`repos`, `answered`, `changed`,
+   `pending`, `still_unknown`); `Quick scan preflight timings:` per repository.
 7. **Invariant**: startup work must not block first paint; a frame stall
    during probes is a regression regardless of ratios. One slow or offline
    host must not hold the others: the test kit's in-process origin takes a

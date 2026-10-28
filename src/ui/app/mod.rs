@@ -297,6 +297,12 @@ pub struct Foxy {
     pub quick_scan_worker: Option<std::thread::JoinHandle<()>>,
     startup_quick_scan_filter_rx: Option<StdReceiver<StartupQuickScanFilterResult>>,
     startup_quick_scan_filter_worker: Option<std::thread::JoinHandle<()>>,
+    /// Repositories whose launch probe got no answer. Retried off the paint path.
+    startup_probe_unknown: Vec<crate::core::api::StartupRepositoryInstance>,
+    startup_probe_retry_armed_at: Option<Instant>,
+    startup_probe_retries_completed: u32,
+    startup_probe_retry_rx: Option<StdReceiver<crate::core::api::StartupProbeRetryPlan>>,
+    startup_probe_retry_worker: Option<std::thread::JoinHandle<()>>,
     pub fs_watch_rx: StdReceiver<api::FsChangeEvent>,
     pub fs_watch_tx: StdSender<api::FsChangeEvent>,
     pub fs_watch_worker: Option<std::thread::JoinHandle<()>>,

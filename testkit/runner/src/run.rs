@@ -237,6 +237,26 @@ impl ContextRun<'_> {
     /// counters cost a handle open per tick, and a footprint regression that
     /// only shows up under a download is exactly the one no dedicated case
     /// would have caught.
+    fn seed_startup_state(&self, operation: &Value) -> Result<()> {
+        if let Some(gui) = self.gui.borrow_mut().as_mut() {
+            launch::stop_gui(gui, self.exe, self.config, self.env);
+        }
+        memory::set(self.pid, None);
+        drop(self.gui.borrow_mut().take());
+        let address = self.case["repository"]["address"]
+            .as_str()
+            .context("seed-startup-state requires the case repository address")?;
+        let path = self.case["repository"]["path"]
+            .as_str()
+            .context("seed-startup-state requires the case repository path")?;
+        crate::seed_state::apply(
+            self.config,
+            address,
+            path,
+            operation["stale_link"].as_bool().unwrap_or(false),
+        )
+    }
+
     fn operation(&self, operation: &Value) -> Result<Value> {
         let settle = operation["memory_settle_ms"]
             .as_u64()
@@ -662,6 +682,22 @@ impl ContextRun<'_> {
                 .into();
             finished_between_polls = true;
         }
+        // A killed process cannot finish the refresh, so the checksum commit
+        // inside it must not land. The next operation restarts the app.
+        let mut killed = false;
+        if let Some(after) = operation["kill_after_s"].as_f64()
+            && !finished_between_polls
+        {
+            thread::sleep(Duration::from_secs_f64(after));
+            if let Some(gui) = self.gui.borrow_mut().as_mut() {
+                let _ = gui.child.kill();
+                let _ = gui.wait(Duration::from_secs(15));
+            }
+            memory::set(self.pid, None);
+            drop(self.gui.borrow_mut().take());
+            killed = true;
+            finished_between_polls = true;
+        }
         if !finished_between_polls {
             let wait = operation["wait_timeout_s"]
                 .as_u64()
@@ -685,9 +721,15 @@ impl ContextRun<'_> {
             }
         }
         let elapsed = started.elapsed().as_secs_f64();
-        let ui_probe = probe.map(UiProbe::finish);
-        let progress_probe = progress_probe.map(|probe| probe.finish(elapsed));
-        let mut summary = self.data(&["download-summary", "--include-telemetry"])?;
+        let ui_probe = (!killed).then(|| probe.map(UiProbe::finish)).flatten();
+        let progress_probe = (!killed)
+            .then(|| progress_probe.map(|probe| probe.finish(elapsed)))
+            .flatten();
+        let mut summary = if killed {
+            json!({"killed": true})
+        } else {
+            self.data(&["download-summary", "--include-telemetry"])?
+        };
         if !cancel_quiescent_ms.is_null() {
             summary["cancel_quiescent_ms"] = cancel_quiescent_ms;
         }
@@ -697,15 +739,27 @@ impl ContextRun<'_> {
         if let Some(progress_probe) = progress_probe {
             summary["progress_probe"] = progress_probe;
         }
-        let progress = self.data(&["progress"])?;
-        let snapshot = self.data(&["snapshot"])?;
-        let captured = self.data(&[
-            "logs",
-            "--since-generation",
-            &generation.to_string(),
-            "--limit",
-            "2000",
-        ])?;
+        let progress = if killed {
+            Value::Null
+        } else {
+            self.data(&["progress"])?
+        };
+        let snapshot = if killed {
+            Value::Null
+        } else {
+            self.data(&["snapshot"])?
+        };
+        let captured = if killed {
+            Value::Null
+        } else {
+            self.data(&[
+                "logs",
+                "--since-generation",
+                &generation.to_string(),
+                "--limit",
+                "2000",
+            ])?
+        };
         let messages = captured["entries"]
             .as_array()
             .into_iter()
@@ -1235,6 +1289,10 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                         );
                         continue;
                     }
+                    "seed-startup-state" => {
+                        context.seed_startup_state(operation)?;
+                        continue;
+                    }
                     _ => {}
                 }
                 let burst_before = _origin.as_ref().map(|origin| origin.burst_snapshot());
@@ -1306,6 +1364,8 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                     "download": sol::operation(&sol, "download"),
                     "quick_scan": sol::operation(&sol, "quick_scan"),
                     "startup": sol::operation(&sol, "startup"),
+                    "startup_probe": sol::operation(&sol, "startup_probe"),
+                    "startup_probe_retry": sol::operation(&sol, "startup_probe_retry"),
                     "remote_refresh": sol::operation(&sol, "remote_refresh"),
                     "db_persist": sol::operation(&sol, "db_persist"),
                     "db_purge": sol::operation(&sol, "db_purge"),

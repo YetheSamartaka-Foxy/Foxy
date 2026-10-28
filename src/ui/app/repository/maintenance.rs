@@ -731,6 +731,7 @@ impl Foxy {
         let files_kept =
             Self::delete_files_kept_reason(&self.repository_view_state.repositories, repo_idx);
         let removed = self.repository_view_state.repositories.remove(repo_idx);
+        self.forget_startup_probe_unknown(&removed.address, &removed.path);
         let removed_visual_folder_key = Self::repo_instance_key(&removed.address, &removed.path);
         let mut visual_folders_changed = false;
         for folder in &mut self.repository_visual_folders {

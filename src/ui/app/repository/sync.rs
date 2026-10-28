@@ -118,6 +118,7 @@ impl Foxy {
                 }
                 return;
             }
+            self.forget_startup_probe_unknown(&repo.address, &repo.path);
             info!(
                 "Starting repository sync: repo={} mode={:?}",
                 repo.name, mode

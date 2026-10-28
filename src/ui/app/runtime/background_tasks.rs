@@ -4,6 +4,7 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc::TryRecvError as StdTryRecvError;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use eframe::egui;
 use log::{debug, info, warn};
 
 use crate::core::api::{self, SyncMode};
@@ -363,6 +364,7 @@ impl Foxy {
                 && !plan.completed
                 && plan.eligible_repositories.is_empty()
                 && plan.remote_changed_repositories.is_empty()
+                && plan.pending_update_repositories.is_empty()
             {
                 info!(
                     "Startup quick scan eligibility worker could not run for {} repositories; falling back to requested set",
@@ -372,6 +374,7 @@ impl Foxy {
             } else if plan.completed
                 && plan.eligible_repositories.is_empty()
                 && plan.remote_changed_repositories.is_empty()
+                && plan.pending_update_repositories.is_empty()
             {
                 info!(
                     "Startup quick scan eligibility found 0 of {} repositories ready; respecting the verdict",
@@ -384,6 +387,8 @@ impl Foxy {
                     eligible_repositories: plan.eligible_repositories,
                     prevalidated_repositories: plan.prevalidated_repositories,
                     remote_changed_repositories: plan.remote_changed_repositories,
+                    pending_update_repositories: plan.pending_update_repositories,
+                    remote_unknown_repositories: plan.remote_unknown_repositories,
                 })
                 .is_ok()
             {
@@ -412,14 +417,28 @@ impl Foxy {
                 payload.eligible_repositories.len(),
                 payload.prevalidated_repositories.len(),
                 payload.remote_changed_repositories.len(),
+                payload.pending_update_repositories.len(),
             );
-            if !payload.remote_changed_repositories.is_empty() {
+            let mut remote_refreshes = payload.remote_changed_repositories;
+            if !remote_refreshes.is_empty() {
                 info!(
                     "Scheduling startup remote refresh for {} repositories with changed remote checksums",
-                    payload.remote_changed_repositories.len()
+                    remote_refreshes.len()
                 );
-                self.queue_startup_remote_refreshes(payload.remote_changed_repositories);
             }
+            if !payload.pending_update_repositories.is_empty() {
+                info!(
+                    "Scheduling startup remote refresh for {} repositories with a saved pending update",
+                    payload.pending_update_repositories.len()
+                );
+                remote_refreshes.extend(payload.pending_update_repositories);
+            }
+            if !remote_refreshes.is_empty() {
+                self.queue_startup_remote_refreshes(remote_refreshes);
+            }
+            self.startup_probe_unknown = payload.remote_unknown_repositories;
+            self.startup_probe_retry_armed_at = None;
+            self.startup_probe_retries_completed = 0;
             info!(
                 "Scheduling startup quick scan for {} of {} repositories",
                 payload.eligible_repositories.len(),
@@ -1144,6 +1163,140 @@ impl Foxy {
                 break;
             }
         }
+    }
+
+    /// Drop a repository from the unanswered startup-probe set once the user
+    /// rechecks it, updates it, or removes it.
+    pub(in crate::ui::app) fn forget_startup_probe_unknown(
+        &mut self,
+        repo_url: &str,
+        local_path: &str,
+    ) {
+        let repo_url = Self::normalize_repo_url(repo_url);
+        let local_path = Self::repo_instance_path_key(local_path);
+        let before = self.startup_probe_unknown.len();
+        self.startup_probe_unknown.retain(|repository| {
+            repository.repo_url != repo_url || repository.local_path != local_path
+        });
+        if before > 0 && self.startup_probe_unknown.is_empty() {
+            self.startup_probe_retry_armed_at = None;
+            self.startup_probe_retries_completed = 0;
+        }
+    }
+
+    fn startup_probe_retry_candidates(&self) -> Vec<api::StartupRepositoryInstance> {
+        self.startup_probe_unknown
+            .iter()
+            .filter(|instance| {
+                self.repository_view_state.repositories.iter().any(|repo| {
+                    Self::normalize_repo_url(&repo.address) == instance.repo_url
+                        && Self::repo_instance_path_key(&repo.path) == instance.local_path
+                        && (self.repo_auto_quick_scan_on_launch(repo)
+                            || self.repo_auto_recheck_on_launch(repo))
+                })
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Probe repositories that did not answer at launch, once the startup checks
+    /// have settled and nothing else is using the sync slot.
+    pub(in crate::ui::app) fn service_startup_probe_retry(&mut self, ctx: &egui::Context) {
+        let mut result = None;
+        let mut disconnected = false;
+        if let Some(rx) = self.startup_probe_retry_rx.as_ref() {
+            match rx.try_recv() {
+                Ok(payload) => result = Some(payload),
+                Err(StdTryRecvError::Empty) => {}
+                Err(StdTryRecvError::Disconnected) => disconnected = true,
+            }
+        }
+        if let Some(payload) = result {
+            self.startup_probe_retry_rx = None;
+            let still_tracked: HashSet<api::StartupRepositoryInstance> =
+                self.startup_probe_unknown.iter().cloned().collect();
+            let mut refresh = payload.remote_changed_repositories;
+            let mut pending_updates = payload.pending_update_repositories;
+            refresh.retain(|repository| still_tracked.contains(repository));
+            pending_updates.retain(|repository| still_tracked.contains(repository));
+            let pending = pending_updates.len();
+            refresh.extend(pending_updates);
+            if !refresh.is_empty() {
+                info!(
+                    "Startup probe retry queued remote refresh for {} repositories (pending={})",
+                    refresh.len(),
+                    pending
+                );
+                self.queue_startup_remote_refreshes(refresh);
+            }
+            self.startup_probe_unknown = payload
+                .still_unknown_repositories
+                .into_iter()
+                .filter(|repository| still_tracked.contains(repository))
+                .collect();
+            self.startup_probe_retries_completed =
+                self.startup_probe_retries_completed.saturating_add(1);
+            self.startup_probe_retry_armed_at = Some(Instant::now());
+            if self.startup_probe_unknown.is_empty() {
+                self.startup_probe_retry_armed_at = None;
+                self.startup_probe_retries_completed = 0;
+            }
+            self.needs_repaint = true;
+        } else if disconnected {
+            warn!("Startup probe retry worker disconnected before delivering results");
+            self.startup_probe_retry_rx = None;
+        }
+        if self
+            .startup_probe_retry_worker
+            .as_ref()
+            .is_some_and(|worker| worker.is_finished())
+        {
+            self.startup_probe_retry_worker = None;
+        }
+
+        if self.startup_probe_unknown.is_empty() || self.startup_probe_retry_worker.is_some() {
+            return;
+        }
+        if !self.startup_tasks_started || !self.startup_sync_settled() {
+            return;
+        }
+        if self.startup_probe_retry_armed_at.is_none() {
+            self.startup_probe_retry_armed_at = Some(Instant::now());
+        }
+        let armed_at = self
+            .startup_probe_retry_armed_at
+            .unwrap_or_else(Instant::now);
+        let delay = api::startup_probe_retry_delay(self.startup_probe_retries_completed);
+        let elapsed = armed_at.elapsed();
+        if elapsed < delay {
+            ctx.request_repaint_after(delay.saturating_sub(elapsed));
+            return;
+        }
+        if api::startup_probe_retry_is_blocked(
+            self.repository_sync_active(),
+            self.is_direct_download_running(),
+            self.quick_scan_worker.is_some() || !self.pending_quick_scan_urls.is_empty(),
+            !self.startup_recheck_queue.is_empty(),
+        ) {
+            ctx.request_repaint_after(Duration::from_secs(1));
+            return;
+        }
+        let candidates = self.startup_probe_retry_candidates();
+        self.startup_probe_unknown.clone_from(&candidates);
+        if candidates.is_empty() {
+            self.startup_probe_retry_armed_at = None;
+            self.startup_probe_retries_completed = 0;
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.startup_probe_retry_rx = Some(rx);
+        let repaint_ctx = self.repaint_ctx.clone();
+        self.startup_probe_retry_worker = Some(std::thread::spawn(move || {
+            let plan = api::plan_startup_probe_retry(candidates);
+            if tx.send(plan).is_ok() {
+                Self::request_background_repaint(repaint_ctx.as_ref());
+            }
+        }));
     }
 }
 

@@ -424,6 +424,11 @@ impl Foxy {
         self.quick_scan_worker = None;
         self.startup_quick_scan_filter_rx = None;
         self.startup_quick_scan_filter_worker = None;
+        self.startup_probe_unknown.clear();
+        self.startup_probe_retry_armed_at = None;
+        self.startup_probe_retries_completed = 0;
+        self.startup_probe_retry_rx = None;
+        self.startup_probe_retry_worker = None;
         self.deferred_fs_scan.clear();
         self.pending_quick_scan_urls.clear();
         self.pending_quick_scan_prevalidated_urls.clear();

@@ -272,8 +272,10 @@ checksum empty, and an incomplete refresh must fail before downloading.
 13. Patch-first execution is an optimization. Full-file download is always the
     correctness fallback.
 14. Pending update cache is derived state. It may speed UI startup, but it must
-    be invalidated by clean quick scan, clean tree verification, successful
-    download, repository removal, or local path changes.
+    be invalidated or recomputed by the startup check, a clean quick scan, clean
+    tree verification, a successful download, repository removal, or local path
+    changes. A saved pending update is provisional until that startup check
+    finishes.
 
 ### Addon Enabled State
 
@@ -636,17 +638,23 @@ For each configured repository:
 
 1. Normalize repository URL with trailing slash.
 2. Restore cached pending update payload if present, but treat it as provisional.
+   When auto quick scan or auto recheck is on for that repository, startup
+   confirms the saved update with the server even if `repo.json` is unchanged,
+   including a repository the quick scan cannot check. Both settings off leaves
+   the repository alone.
 3. If auto remote recheck is enabled:
    - run the remote repository gate
    - if `repo_json.checksum == local_checksum`, finish clean for remote state
    - if remote changed or DB incomplete, enqueue remote refresh
 4. If auto quick scan is enabled:
    - first run a cheap remote checksum probe against `repo.json`
-   - if remote checksum differs from local checksum, do not quick scan as the
-     final answer; enqueue remote refresh or mark remote update pending
-   - if remote checksum matches local checksum and baselines are ready, run quick
-     local content check
-   - if baselines are not ready, skip quick scan and leave a clear reason in logs
+   - if remote checksum differs from the stored remote checksum, or the
+     repository has a saved pending update, do not quick scan as the final
+     answer; enqueue a remote refresh
+   - if remote checksum matches, there is no saved pending update, and baselines
+     are ready, run quick local content check
+   - if baselines are not ready and there is no saved pending update, skip quick
+     scan and leave a clear reason in logs
 5. Persist only final results:
    - clean quick scan clears pending cache
    - dirty quick scan saves pending cache
@@ -669,7 +677,16 @@ against local state all mean the same thing - nothing was learned - and
 collapsing them into "unchanged" is how a real remote update goes unnoticed
 until the user rechecks by hand. An unknown repository still runs its local quick
 scan, but it is never *prevalidated*: prevalidation is the claim "nothing to
-check here", and an unanswered probe does not earn it.
+check here", and an unanswered probe does not earn it. Unknown keeps that local
+verdict at launch. The same repositories are probed again in the session, 60
+seconds after the startup checks settle and then every 15 minutes while they
+stay unknown, off the paint path and never beside a sync, download, quick scan,
+or queued startup recheck. A later answer uses the same routing as launch:
+changed, or unchanged with a saved pending update, queues a remote refresh;
+unchanged without one leaves the launch verdict in place. A repository leaves
+the retry set once it answers, the user rechecks or updates it, it is removed,
+or the game space changes. `SOL op=startup_probe_retry` records those retries
+separately from `SOL op=startup_probe`.
 
 Compare **remote against the last remote**, not remote against local. The
 `repositories.remote_checksum` column holds the value `repo.json` published the
@@ -877,7 +894,10 @@ Repository stage:
 
 1. Fetch `repo.json`.
 2. Normalize URL and local path.
-3. Upsert repository remote checksum and metadata.
+3. Upsert repository metadata. Keep the previous `remote_checksum`, or an empty
+   value for a new instance. The fetched checksum is stored only after the
+   addon data behind it has been applied, so a stored repository checksum means
+   that refresh finished.
 4. Check graph completeness without loading the entire tree.
 5. If remote checksum equals local checksum and graph is complete, early exit.
 6. If graph is incomplete or remote checksum changed, continue.
@@ -887,7 +907,10 @@ Addon stage:
 1. Fetch addon list from `repo.json` or `foxy_addons.json` depending on FoxyMode.
 2. Diff the remote addon list against stored DB addon/link state before
    fetching any per-addon file manifests.
-3. Upsert addons by stable remote/local identity.
+3. Upsert addons by stable remote/local identity. An enabled addon whose
+   published checksum changed keeps its previous `remote_checksum` until that
+   addon's manifest is applied and its links are reconciled. A disabled addon
+   has no manifest to apply, so its published checksum is stored in the upsert.
 4. Preserve addon `local_checksum` and `local_content_hash` only when local path
    identity is unchanged.
 5. Link addons to repository.

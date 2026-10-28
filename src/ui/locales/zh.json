@@ -567,6 +567,7 @@
     "Enable addon backups before updates if you want recovery points. You can manage stored backups centrally and restore a specific addon from repository settings.": "如果您需要恢复点，请启用更新前模组备份。您可以集中管理已存储的备份，并从仓库设置中恢复特定模组。",
     "Settings lets you change app paths, language, fonts, colors, backup rules, and startup behavior.": "“设置”可更改应用路径、语言、字体、颜色、备份规则、启动行为、渲染器偏好和应用更新行为。",
     "Use Auto recheck repositories on launch and Auto quick scan for changes on launch in Application settings to start background verification automatically.": "在\"应用程序\"设置中使用\"启动时自动重新检查仓库\"和\"启动时自动快速扫描变更\"以自动启动后台验证。 启动任务会在首次渲染后运行，以保持界面响应。",
+    "With either startup check on, Foxy confirms a saved update with the server at startup, including a repository the quick local check cannot scan yet. A server that does not answer is tried again later in the same session.": "启用任一启动检查后，Foxy 会在启动时向服务器确认已保存的更新，包括快速本地检查尚无法扫描的仓库。如果服务器没有响应，Foxy 会在同一会话中稍后重试。",
     "Repository settings can override these startup checks per repository when needed.": "仓库设置可以在需要时按仓库覆盖这些启动检查。",
     "The info icon opens About, the question mark opens this Help page, and the version number opens the changelog.": "信息图标打开\"关于\"，问号图标打开本帮助页面，版本号打开更新日志。",
     "Foxy also includes a full command-line interface in the same binary for scripting and automation.": "Foxy还在同一个二进制文件中包含了完整的命令行界面，用于脚本编写和自动化。",

@@ -468,6 +468,7 @@ impl Foxy {
                     "Use the Application settings tab to configure language, Steam path, temporary storage, startup behavior, and other global options.",
                     "Set a global download speed limit in Application settings, or leave it unlimited.",
                     "Use Auto recheck repositories on launch and Auto quick scan for changes on launch in Application settings to start background verification automatically.",
+                    "With either startup check on, Foxy confirms a saved update with the server at startup, including a repository the quick local check cannot scan yet. A server that does not answer is tried again later in the same session.",
                     "Repository settings can override these startup checks per repository when needed.",
                     "Use Game space settings to show or hide the Editor Missions list and Servers list for that game space, with per-repository overrides when needed.",
                     "Use the Customization tab if you want to change UI font sizes or palette colors without touching repository data.",

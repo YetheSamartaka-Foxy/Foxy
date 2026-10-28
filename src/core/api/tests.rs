@@ -1545,3 +1545,72 @@ async fn persisting_addon_selection_updates_only_changed_rows() {
         persist_repository_addon_enabled_states(context, repo_url, local_path, &overrides).await;
     assert_eq!(changed_again, 0);
 }
+
+#[tokio::test]
+async fn a_sibling_receives_propagated_checksums_only_after_the_source_checksum_is_stored() {
+    let db = build_db().await;
+    let fdb = FoxyDb::from_turso(db.clone());
+    let context = Arc::new(FoxyContext::new(db, reqwest::Client::new()));
+    let shared = "R:/Mods/Shared/@mod_01";
+    seed_repository(
+        &fdb,
+        1,
+        "RepoAlpha",
+        "https://repo.example.invalid/RepoAlpha/",
+        "R:/Mods/Shared",
+        "OLD",
+        "OLD",
+        "CONTENT",
+    )
+    .await;
+    seed_repository(
+        &fdb,
+        2,
+        "RepoBeta",
+        "https://repo.example.invalid/RepoBeta/",
+        "R:/Mods/Shared",
+        "",
+        "NEW",
+        "",
+    )
+    .await;
+    seed_addon(
+        &fdb,
+        1,
+        "@mod_01",
+        "https://repo.example.invalid/RepoAlpha/@mod_01",
+        shared,
+        "OLD",
+        "OLD",
+        "CONTENT",
+        true,
+    )
+    .await;
+    seed_addon(
+        &fdb,
+        2,
+        "@mod_01",
+        "https://repo.example.invalid/RepoBeta/@mod_01",
+        shared,
+        "",
+        "NEW",
+        "",
+        true,
+    )
+    .await;
+    seed_repository_addon(&fdb, 1, 1).await;
+    seed_repository_addon(&fdb, 2, 2).await;
+
+    propagate_checksums_to_siblings(context.clone(), "https://repo.example.invalid/RepoAlpha/")
+        .await;
+    assert_eq!(checksums(&fdb, "addons", 2).await.0, "");
+
+    fdb.execute(
+        "UPDATE addons SET remote_checksum = 'NEW', local_checksum = 'NEW' WHERE id = 1",
+        params![],
+    )
+    .await
+    .unwrap();
+    propagate_checksums_to_siblings(context, "https://repo.example.invalid/RepoAlpha/").await;
+    assert_eq!(checksums(&fdb, "addons", 2).await.0, "NEW");
+}

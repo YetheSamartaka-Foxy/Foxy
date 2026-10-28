@@ -26,6 +26,24 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Semaphore;
 
+/// Checksum written by the addon upsert. An enabled addon's published value is
+/// stored only after its manifest is applied, so a crash leaves the previous
+/// checksum and the next refresh still fetches the addon.
+pub(crate) fn addon_remote_checksum_for_upsert(
+    previous: Option<&str>,
+    published: &str,
+    applies_manifest: bool,
+) -> String {
+    if !applies_manifest {
+        return published.to_string();
+    }
+    match previous.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(previous) if previous != published.trim() => previous.to_string(),
+        Some(previous) => previous.to_string(),
+        None => String::new(),
+    }
+}
+
 #[derive(Clone)]
 struct ParsedMod {
     mod_name: String,
@@ -249,7 +267,7 @@ pub(super) async fn process_mods_upsert(
     let db = context.db();
 
     // Prefetch existing mods to preserve local checksums and reuse after upsert
-    let mut existing_mods: HashMap<String, FoxyMod> =
+    let existing_mods: HashMap<String, FoxyMod> =
         load_existing_mods_by_identity(&db, &parsed_mods).await;
 
     // Single batched upsert instead of per-row insert + fetch
@@ -275,7 +293,14 @@ pub(super) async fn process_mods_upsert(
                         .unwrap_or_default()
                         .into(),
                 );
-                values.push(m.checksum.clone().into());
+                values.push(
+                    addon_remote_checksum_for_upsert(
+                        existing.map(|entry| entry.remote_checksum.as_str()),
+                        &m.checksum,
+                        m.enabled,
+                    )
+                    .into(),
+                );
                 values.push(
                     existing
                         .map(|e| e.local_content_hash.clone())
@@ -318,21 +343,22 @@ pub(super) async fn process_mods_upsert(
         .iter()
         .any(|m| !existing_mods.contains_key(&m.key));
 
-    let mods_by_key: HashMap<String, FoxyMod> = if has_new_mods {
+    let mut mods_by_key: HashMap<String, FoxyMod> = if has_new_mods {
         load_existing_mods_by_identity(&db, &parsed_mods).await
     } else {
-        // Overlay fields updated by the upsert onto prefetched models
-        for m in &parsed_mods {
-            if let Some(existing) = existing_mods.get_mut(&m.key) {
-                existing.remote_checksum = m.checksum.clone();
-                existing.enabled = m.enabled;
-                existing.client_side = m.client_side;
-                existing.required = required;
-                existing.data_order = m.data_order;
-            }
-        }
         existing_mods
     };
+    // The database still holds the previous checksum. The in-memory model
+    // carries the published one so this refresh can tell that the addon changed.
+    for m in &parsed_mods {
+        if let Some(existing) = mods_by_key.get_mut(&m.key) {
+            existing.remote_checksum = m.checksum.clone();
+            existing.enabled = m.enabled;
+            existing.client_side = m.client_side;
+            existing.required = required;
+            existing.data_order = m.data_order;
+        }
+    }
 
     let mut all_mods: Vec<FoxyMod> = Vec::with_capacity(parsed_mods.len());
     for parsed in &parsed_mods {
@@ -610,6 +636,23 @@ async fn apply_staged_mods(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn addon_upsert_keeps_the_previous_checksum_until_the_manifest_is_applied() {
+        assert_eq!(
+            addon_remote_checksum_for_upsert(Some("OLD"), "NEW", true),
+            "OLD"
+        );
+        assert_eq!(addon_remote_checksum_for_upsert(None, "NEW", true), "");
+        assert_eq!(
+            addon_remote_checksum_for_upsert(Some("SAME"), "SAME", true),
+            "SAME"
+        );
+        assert_eq!(
+            addon_remote_checksum_for_upsert(Some("OLD"), "NEW", false),
+            "NEW"
+        );
+    }
 
     #[test]
     fn mod_remote_graph_state_complete_requires_existing_link_files_and_parts() {

@@ -219,6 +219,8 @@ pub struct StartupQuickScanFilterResult {
     pub eligible_repositories: Vec<crate::core::api::StartupRepositoryInstance>,
     pub prevalidated_repositories: Vec<crate::core::api::StartupRepositoryInstance>,
     pub remote_changed_repositories: Vec<crate::core::api::StartupRepositoryInstance>,
+    pub pending_update_repositories: Vec<crate::core::api::StartupRepositoryInstance>,
+    pub remote_unknown_repositories: Vec<crate::core::api::StartupRepositoryInstance>,
 }
 
 #[derive(Debug)]

@@ -545,18 +545,29 @@ impl Foxy {
                 };
                 let normalized_url = Self::normalize_repo_url(&repo_address);
 
-                let state =
-                    if record.state == RepoState::PendingUpdate && record.verify_with_quick_scan {
-                        RepoState::Unknown
-                    } else {
-                        record.state
-                    };
+                let path_key = Self::repo_instance_path_key(&repo_path);
+                // A saved update that startup will refresh must not also be
+                // quick-scanned. The scan's clean verdict would clear the
+                // pending row before the refresh re-applied its manifests.
+                let startup_refresh_queued =
+                    self.startup_recheck_queue.iter().any(|(address, path, _)| {
+                        Self::normalize_repo_url(address) == normalized_url
+                            && Self::repo_instance_path_key(path) == path_key
+                    });
+                let state = if record.state == RepoState::PendingUpdate
+                    && record.verify_with_quick_scan
+                    && !startup_refresh_queued
+                {
+                    RepoState::Unknown
+                } else {
+                    record.state
+                };
                 self.set_repo_state_for_address(&repo_address, &repo_path, state);
                 if let Some(is_foxy) = record.is_foxy {
                     self.set_repo_foxy_mode_for_address(&repo_address, is_foxy);
                 }
                 if record.state == RepoState::PendingUpdate {
-                    if record.verify_with_quick_scan {
+                    if record.verify_with_quick_scan && !startup_refresh_queued {
                         self.quick_scan_pending.insert(normalized_url.clone());
                         verify_urls.push(normalized_url);
                     } else {

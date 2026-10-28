@@ -116,7 +116,10 @@ and `settings` fixture fields described below.
 Supported operations are `startup`, `ui-walk`, `switch-game-space`,
 `remote-refresh`, `quick-check`, `recheck`, `recheck-integrity`,
 `force-redownload`, `download`, `download-full-files`, `wipe-db`, `mutate`, `restore`,
-`evict-cache`, and `origin-switch`. `origin-switch` makes the running case origin serve the operation's `root`
+`evict-cache`, `origin-switch`, and `seed-startup-state`. `seed-startup-state` stops the
+app, then in the case repository's database ensures a saved pending update (an
+existing row is left as it is) and, when `stale_link` is true, an addon file
+link the published manifest does not list. It is not ledgered. `origin-switch` makes the running case origin serve the operation's `root`
 from the next request on, on the same listener and port, which models a server
 republishing the repository in place. Every `.json` manifest under the new root gets a fresh
 modification time, as a regenerated repository has, because the origin answers
@@ -383,6 +386,9 @@ copied from the local source, so an adjacent mutation and a scattered one are
 told apart by resource cost, not only elapsed. `cancel_after_s` works on every
 GUI sync operation (a `recheck-integrity` cancelled in its hash stage, a
 patching `download` cancelled while applying), not only on full downloads.
+`kill_after_s` on a GUI sync operation stops the process that many seconds
+after it reports busy, without a cooperative cancel, and the next operation
+starts the app again. The killed row has no pipeline outcome.
 
 The ledger row also retains `delta_patch_stages`, the typed per-file planning,
 fetch, apply, promote, verify and finalize spans emitted during the operation.
