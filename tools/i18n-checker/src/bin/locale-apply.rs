@@ -14,9 +14,10 @@
 //! their en.json neighbour, so the diff stays value-only.
 
 use i18n_checker::{
-    detect_line_ending, entry_indent, find_entry_line, locale_entry_line_indented,
-    parse_locale_object, placeholder_names, previous_present_key, read_locale_text,
-    serialize_locale_value, split_lines_keep_ends, top_level_keys, truncate, write_key_file,
+    detect_line_ending, english_source_key, entry_indent, find_entry_line, is_valid_plural_extra,
+    locale_entry_line_indented, parse_locale_object, placeholder_names, previous_present_key,
+    read_locale_text, serialize_locale_value, split_lines_keep_ends, top_level_keys, truncate,
+    write_key_file,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -39,6 +40,7 @@ fn main() {
     let en_raw = or_die(read_locale_text(&en_path));
     let en_map = or_die(parse_locale_object(&en_raw, "en.json"));
     let en_keys = top_level_keys(&en_raw);
+    let en_key_set: BTreeSet<&str> = en_map.keys().map(String::as_str).collect();
 
     let batch = or_die(read_batch(&config.translations));
 
@@ -70,17 +72,21 @@ fn main() {
         // Insertion anchors are always earlier en.json keys, so applying the
         // batch in en.json order guarantees an anchor is already in the file.
         let mut ordered: Vec<(&String, &Value)> = translations.iter().collect();
-        ordered.sort_by_key(|(key, _)| en_keys.iter().position(|en| en == *key));
+        ordered.sort_by_key(|(key, _)| {
+            english_source_key(key, &en_map)
+                .and_then(|source| en_keys.iter().position(|en| en == source))
+        });
 
         let mut available: BTreeSet<&str> = locale_map.keys().map(String::as_str).collect();
         available.extend(translations.keys().map(String::as_str));
 
         let mut changed_here = 0usize;
         for (key, translated) in ordered {
-            let Some(english) = en_map.get(key) else {
+            let Some(source_key) = english_source_key(key, &en_map) else {
                 errors.push(format!("{locale}: key is not present in en.json: {key:?}"));
                 continue;
             };
+            let english = &en_map[source_key];
             if !matches!(translated, Value::String(_) | Value::Object(_)) {
                 errors.push(format!(
                     "{locale}: translated value must be a string or plural object for {key:?}"
@@ -118,6 +124,7 @@ fn main() {
 
             let anchor = match &config.after_key {
                 Some(explicit) => Some(explicit.as_str()),
+                None if source_key != key => Some(source_key),
                 None => previous_present_key(&en_keys, key, &available),
             };
             let Some(anchor) = anchor else {
@@ -153,7 +160,9 @@ fn main() {
         if config.remove_extra {
             let mut extra_indices = locale_map
                 .keys()
-                .filter(|key| !en_map.contains_key(*key))
+                .filter(|key| {
+                    !en_map.contains_key(*key) && !is_valid_plural_extra(key, &en_key_set)
+                })
                 .filter_map(|key| find_entry_line(&lines, key))
                 .collect::<Vec<_>>();
             extra_indices.sort_unstable_by(|left, right| right.cmp(left));

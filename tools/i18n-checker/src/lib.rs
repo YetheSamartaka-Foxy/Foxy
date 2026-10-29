@@ -235,6 +235,19 @@ pub fn is_valid_plural_extra(key: &str, en_keys: &BTreeSet<&str>) -> bool {
     false
 }
 
+pub fn english_source_key<'a>(
+    key: &'a str,
+    en: &serde_json::Map<String, Value>,
+) -> Option<&'a str> {
+    if en.contains_key(key) {
+        return Some(key);
+    }
+    VALID_PLURAL_SUFFIXES
+        .iter()
+        .filter_map(|suffix| key.strip_suffix(suffix))
+        .find(|base| en.contains_key(*base))
+}
+
 /// Splits on `\n` only, keeping the terminator so `\r\n` files round-trip
 /// byte-for-byte. JSON forbids raw control characters inside strings, so no
 /// value can be split apart by this.
@@ -388,6 +401,27 @@ mod tests {
             placeholder_names(&json!({ "one": "{count} file", "other": "{count} files" })),
             ["count"].into_iter().map(String::from).collect()
         );
+    }
+
+    #[test]
+    fn locale_plural_variants_use_the_english_base() {
+        let english = parse_locale_object(
+            r#"{"Files {count}": "Files {count}", "Files {count}.one": "One file"}"#,
+            "English fixture",
+        )
+        .unwrap();
+        assert_eq!(
+            english_source_key("Files {count}.one", &english),
+            Some("Files {count}.one")
+        );
+        let source = english_source_key("Files {count}.few", &english).unwrap();
+        assert_eq!(source, "Files {count}");
+        assert_ne!(
+            placeholder_names(&english[source]),
+            placeholder_names(&json!("Soubory {pocet}"))
+        );
+        assert!(english_source_key("Files {count}.typo", &english).is_none());
+        assert!(english_source_key("Missing.few", &english).is_none());
     }
 
     #[test]
