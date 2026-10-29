@@ -57,7 +57,7 @@
 
 \- Fields and queues that name a repository by list position (`syncing\_repository`, `update\_ready\_repo`, `download\_finished\_repo`, the folder and space sync queues, the bulk dialog, the completed-check banner) are re-pointed in one place, `Foxy::remap\_repository\_indices`, which delete, reorder, and clone all call. A new index-keyed field must be added there; queued work for a removed repository is dropped, never left to start on the repository that moved into its slot. Background results resolve their target by `(url, local\_path)` on arrival (`repo\_index\_by\_instance`); the URL-only fallback of `repo\_index\_by\_url\_and\_path` applies only when exactly one instance has the URL, and scheduled jobs never use it.
 
-\- Deleting a repository with "Delete files" removes nothing while another entry uses the same address (`Foxy::delete\_files\_kept\_reason`). Both delete dialogs show the matching warning in place of the usual "also delete downloaded files" line, and `delete\_repository\_by\_index` takes its purge decision from the same helper so the dialog and the result cannot disagree.
+\- Deleting a repository with "Delete files" scopes removal to its exact URL/path instance. Another same-URL installation in an independent physical folder does not prevent removal. Protect shared or overlapping physical folders using the same ownership helper for both confirmation and execution. See N02 in [accepted behavior contracts](BEHAVIOR_CONTRACTS.md).
 
 \- A repository's Address and Local Path are read-only while that instance syncs, quick-scans, or has a database wipe pending (`Foxy::repository\_identity\_locked`): the running work would otherwise land its results on the new identity and the folder change would wipe rows the worker is still writing. A database wipe is refused while a quick scan of the instance runs, and a quick scan does not start while its repository is being purged.
 
@@ -93,6 +93,10 @@ A live wipe stays marked in flight until its result is received, preventing anot
 - Verify keyboard flow through actual focus changes and activation outcomes. A queued-input acknowledgement or an accepted command alone does not prove the widget received it. Register decision overlays in the driver's modal list so waits and snapshots can identify them.
 
 ### Accepted status, queue, and launch contracts
+
+The [accepted behavior contracts](BEHAVIOR_CONTRACTS.md) add settled N01-N18 for
+preparation consent/recovery, launch handoff, imported selections and queued
+intent. Enforce these choices and investigate new gaps rather than asking again.
 
 - A locally verified repository with unknown remote freshness stays launchable. Show persistent inline status such as "Locally verified; server not checked" and the last successful remote-check time. Do not add a launch dialog for this state.
 - A terminal retryable transfer error gets automatic retries by default while Foxy stays open, controlled by app-global `retry_failed_downloads` (default enabled). Show countdown and Stop. Explicit cancellation never retries. A multi-repository run retries a target once when the error may be transient, then continues unaffected targets and reports a partial result with failed-target retry available. Never report the overall run as successful when any target failed or was skipped.

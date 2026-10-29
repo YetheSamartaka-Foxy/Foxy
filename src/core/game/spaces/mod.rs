@@ -1,5 +1,8 @@
 mod migration;
+mod preservation;
 mod settings_split;
+
+pub use preservation::PrivatePayloadPreview;
 
 pub use settings_split::{
     merge_value_over_defaults, read_merged_settings_value, write_game_settings_half,
@@ -31,6 +34,11 @@ pub struct GameSpaceEntry {
     pub display_name: String,
     #[serde(default)]
     pub created_at: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct GameSpaceRemovalPolicy {
+    pub preserve_private_payloads_to: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -331,14 +339,28 @@ fn rename_game_space_at(
     Ok(entry.clone())
 }
 
-/// Remove a game space: delete Foxy's `games/<id>/` workspace (never any game
-/// install or mod folders outside it), then drop the registry entry. The
-/// active space cannot be removed.
-pub fn remove_game_space(space_id: &str) -> Result<GameSpaceEntry, String> {
-    remove_game_space_at(&app_paths::foxy_data_dir(), space_id)
+pub fn private_payload_preview(space_id: &str) -> Result<PrivatePayloadPreview, String> {
+    let space_id = validated_space_id(space_id)?;
+    preservation::preview(&game_space_dir_at(&app_paths::foxy_data_dir(), space_id))
 }
 
+pub fn remove_game_space_with_policy(
+    space_id: &str,
+    policy: GameSpaceRemovalPolicy,
+) -> Result<GameSpaceEntry, String> {
+    remove_game_space_at_with_policy(&app_paths::foxy_data_dir(), space_id, policy)
+}
+
+#[cfg(test)]
 fn remove_game_space_at(root: &Path, space_id: &str) -> Result<GameSpaceEntry, String> {
+    remove_game_space_at_with_policy(root, space_id, GameSpaceRemovalPolicy::default())
+}
+
+fn remove_game_space_at_with_policy(
+    root: &Path,
+    space_id: &str,
+    policy: GameSpaceRemovalPolicy,
+) -> Result<GameSpaceEntry, String> {
     let space_id = validated_space_id(space_id)?;
     let path = games_registry_path(root);
     let mut registry = load_games_registry(&path)?;
@@ -354,6 +376,10 @@ fn remove_game_space_at(root: &Path, space_id: &str) -> Result<GameSpaceEntry, S
     // Workspace first so a failure leaves the entry in place and the removal
     // can simply be retried.
     let space_dir = game_space_dir_at(root, &entry.id);
+    let _ownership = preservation::claim_for_removal(&space_dir)?;
+    if let Some(destination) = policy.preserve_private_payloads_to {
+        preservation::preserve(&space_dir, &destination, &entry.id)?;
+    }
     if let Err(err) = fs::remove_dir_all(&space_dir)
         && err.kind() != std::io::ErrorKind::NotFound
     {
@@ -798,6 +824,105 @@ mod tests {
             load_games_registry(&dir.path().join(GAMES_REGISTRY_FILE)).expect("registry");
         assert_eq!(registry.game_spaces.len(), 1);
         assert!(remove_game_space_at(dir.path(), &created.id).is_err());
+    }
+
+    #[test]
+    fn remove_game_space_refuses_another_process_ownership_claim() {
+        let dir = tempfile::tempdir().unwrap();
+        ensure_layout_at(dir.path()).unwrap();
+        let entry = create_game_space_at(dir.path(), "arma3", "Second").unwrap();
+        let space = game_space_dir_at(dir.path(), &entry.id);
+        let owner = preservation::claim_for_removal(&space).unwrap();
+        assert!(remove_game_space_at(dir.path(), &entry.id).is_err());
+        assert!(space.exists());
+        assert!(
+            load_games_registry(&games_registry_path(dir.path()))
+                .unwrap()
+                .entry(&entry.id)
+                .is_some()
+        );
+        drop(owner);
+        remove_game_space_at(dir.path(), &entry.id).unwrap();
+        assert!(!space.exists());
+    }
+
+    #[test]
+    fn remove_game_space_preserves_private_payloads_before_deletion() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        ensure_layout_at(dir.path()).expect("layout");
+        let created = create_game_space_at(dir.path(), "arma3", "Second").expect("create");
+        let space_dir = game_space_dir_at(dir.path(), &created.id);
+        std::fs::create_dir_all(space_dir.join("workshop/frozen/123/hash_mod")).expect("workshop");
+        std::fs::create_dir_all(space_dir.join("extra_files/entry-a")).expect("extra files");
+        std::fs::write(
+            space_dir.join("workshop/frozen/123/hash_mod/file.pbo"),
+            b"pbo",
+        )
+        .expect("frozen payload");
+        std::fs::write(
+            space_dir.join("extra_files/entry-a/payload.bin"),
+            b"payload",
+        )
+        .expect("extra payload");
+        let destination_root = dir.path().join("preserved");
+
+        remove_game_space_at_with_policy(
+            dir.path(),
+            &created.id,
+            GameSpaceRemovalPolicy {
+                preserve_private_payloads_to: Some(destination_root.clone()),
+            },
+        )
+        .expect("remove after preserving");
+
+        assert!(!space_dir.exists());
+        assert_eq!(
+            std::fs::read(
+                destination_root
+                    .join(&created.id)
+                    .join("workshop/frozen/123/hash_mod/file.pbo")
+            )
+            .unwrap(),
+            b"pbo"
+        );
+        assert_eq!(
+            std::fs::read(
+                destination_root
+                    .join(&created.id)
+                    .join("extra_files/entry-a/payload.bin")
+            )
+            .unwrap(),
+            b"payload"
+        );
+    }
+
+    #[test]
+    fn failed_private_payload_preservation_keeps_game_space_intact() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        ensure_layout_at(dir.path()).expect("layout");
+        let created = create_game_space_at(dir.path(), "arma3", "Second").expect("create");
+        let space_dir = game_space_dir_at(dir.path(), &created.id);
+        std::fs::write(space_dir.join("game_settings.json"), "{}").expect("seed");
+        let destination_root = dir.path().join("preserved");
+        std::fs::create_dir_all(destination_root.join(&created.id)).expect("existing export");
+
+        assert!(
+            remove_game_space_at_with_policy(
+                dir.path(),
+                &created.id,
+                GameSpaceRemovalPolicy {
+                    preserve_private_payloads_to: Some(destination_root),
+                },
+            )
+            .is_err()
+        );
+        assert!(space_dir.exists());
+        assert!(
+            load_games_registry(&dir.path().join(GAMES_REGISTRY_FILE))
+                .unwrap()
+                .entry(&created.id)
+                .is_some()
+        );
     }
 
     #[test]

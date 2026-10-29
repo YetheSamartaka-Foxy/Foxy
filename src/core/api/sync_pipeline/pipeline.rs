@@ -3140,6 +3140,11 @@ async fn run_repository_pipeline(
                 &mods,
                 &progress_tx,
                 &operation_id,
+                Some(&crate::core::utils::addon_backup::AddonBackupOrigin {
+                    game_space_id: crate::core::game::spaces::active_game_space().space_id,
+                    repository_url: normalized_repo_url.clone(),
+                    local_path: local_path.clone(),
+                }),
             )
         {
             let message = format!("Automatic addon backup failed: {}", err);
@@ -3189,6 +3194,7 @@ async fn run_repository_pipeline(
     }
     let write_targets = match super::super::check_contracts::bind_write_targets(
         &local_path,
+        repository_space_shared_path.as_deref(),
         &enrolled_link_targets,
     )
     .await

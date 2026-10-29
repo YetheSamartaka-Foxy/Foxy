@@ -139,7 +139,7 @@ fn cmd_config_import(
     let mut state = AppState::load()?;
     let module = crate::core::game::registry().active();
     let space_dir = spaces::active_game_space_dir();
-    let summary = foxypack::import_pack(
+    let summary = foxypack::import_pack_transactional(
         &space_dir,
         &args.input,
         module,
@@ -147,8 +147,20 @@ fn cmd_config_import(
         &mut state.spaces,
     )
     .map_err(|err| CommandError::operation("config.import", err))?;
-    state.save_repositories()?;
-    state.save_spaces()?;
+    if let Err(save_error) = state.save_repositories().and_then(|()| state.save_spaces()) {
+        if let Err(recovery_error) = foxypack::rollback_pending_import(&space_dir) {
+            return Err(CommandError::operation(
+                "config.import",
+                format!(
+                    "{}; import recovery failed: {}",
+                    save_error.message, recovery_error
+                ),
+            ));
+        }
+        return Err(save_error);
+    }
+    foxypack::commit_pending_import(&space_dir)
+        .map_err(|err| CommandError::operation("config.import", err))?;
 
     Ok(CommandSuccess {
         action: "config.import".to_string(),

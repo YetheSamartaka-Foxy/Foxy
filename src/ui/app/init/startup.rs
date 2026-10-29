@@ -7,9 +7,10 @@ use log::info;
 use crate::core::api::{self, QuickScanProgressEvent, QuickScanResult};
 use crate::ui::app::{
     AddonBackupTaskResult, AddonDeleteResult, AddonForceRedownloadProbeResult,
-    AddonHashRecalcResult, AddonInventoryViewCache, CachedUpdateLoadResult, Foxy, ImageLoadResult,
-    JoinPreflightQueryResult, LinkedTargetPreviewResult, ListGalleyCache, MissionRowGalleyCache,
-    PersistenceRequest, PersistenceResult, RepoMetadataFetchResult, RepositoryAddonListCache,
+    AddonHashRecalcResult, AddonInventoryViewCache, BackupCleanupTaskResult,
+    CachedUpdateLoadResult, Foxy, ImageLoadResult, JoinPreflightQueryResult,
+    LinkedTargetPreviewResult, ListGalleyCache, MissionRowGalleyCache, PersistenceRequest,
+    PersistenceResult, RepoMetadataFetchResult, RepositoryAddonListCache,
     RepositoryAddonSizeLoadResult, RepositoryDbWipeResult, RepositoryExternalAddonsListCache,
     RepositoryListCache, RepositorySettingsAddonPreloadResult, RepositorySpaceImportResult,
     RetainedFilePreviewResult, RetainedFileRemovalResult, agent_driver::AgentGuiLaunchConfig,
@@ -184,6 +185,8 @@ impl Foxy {
         let (database_wipe_tx, database_wipe_rx) = std::sync::mpsc::channel::<Result<(), String>>();
         let (addon_backup_task_tx, addon_backup_task_rx) =
             std::sync::mpsc::channel::<AddonBackupTaskResult>();
+        let (backup_cleanup_task_tx, backup_cleanup_task_rx) =
+            std::sync::mpsc::channel::<BackupCleanupTaskResult>();
         let (repository_settings_addon_preload_tx, repository_settings_addon_preload_rx) =
             std::sync::mpsc::channel::<RepositorySettingsAddonPreloadResult>();
         let (repository_addon_size_load_tx, repository_addon_size_load_rx) =
@@ -425,6 +428,10 @@ impl Foxy {
             backup_manager_view_cache: None,
             backup_manager_notice: None,
             backup_manager_confirm_action: None,
+            backup_cleanup_task_rx,
+            backup_cleanup_task_tx,
+            backup_cleanup_worker: None,
+            backup_cleanup_in_flight: false,
             cached_icons: HashMap::new(),
             cached_repo_images: HashMap::new(),
             new_profile_name: String::new(),
@@ -435,6 +442,7 @@ impl Foxy {
             show_direct_download_screen: false,
             direct_download_url_input: String::new(),
             direct_download_destination_input: String::new(),
+            pending_direct_download_collisions: None,
             direct_download_use_global_speed_limit: true,
             direct_download_override_speed_unlimited: true,
             direct_download_override_speed_limit_mbps: 1,
@@ -451,6 +459,11 @@ impl Foxy {
             ts3_plugin_scan_prompt_on_update: false,
             ts3_plugin_scan_requeued: false,
             prelaunch_process_checks: Default::default(),
+            launch_action: Default::default(),
+            pending_installer_path: None,
+            pending_installer_error: None,
+            shutdown_after_close: false,
+            configuration_recovery_error: None,
             backend_progress_rx: None,
             backend_worker: None,
             startup_pending_restore_rx: None,
@@ -641,6 +654,17 @@ impl Foxy {
         };
         app.db_lock_conflict = app.claim_active_space_database();
         if app.db_lock_conflict.is_some() {
+            return app;
+        }
+        if let Err(error) = crate::core::game::launch_preparation::recover(
+            &crate::core::game::spaces::active_game_space_dir(),
+        )
+        .and_then(|()| {
+            crate::core::game::foxypack::recover_pending_import(
+                &crate::core::game::spaces::active_game_space_dir(),
+            )
+        }) {
+            app.configuration_recovery_error = Some(error);
             return app;
         }
         crate::core::tasks::init_database::check_and_wipe_database();

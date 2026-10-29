@@ -15,7 +15,8 @@ use crate::ui::i18n::tr;
 use crate::ui::types::{
     Repository, RepositoryServer, RepositorySpace, RepositorySpaceEntry,
     apply_repo_client_parameters, apply_repo_dlc_content_from_repo_json, apply_repo_game_build,
-    merge_remote_addon_list, repo_json_dlc_content_value, repo_json_game_build, sanitize_user_path,
+    merge_remote_addon_categories, repo_json_dlc_content_value, repo_json_game_build,
+    sanitize_user_path,
 };
 
 /// Shared HTTP client for repository-metadata fetches. A bounded timeout keeps
@@ -1072,21 +1073,37 @@ impl Foxy {
 
         {
             let mut remote_client_side_addons = Vec::new();
-            if let Some(required_mods) = addon_manifest["requiredMods"].as_array() {
-                let (addons, client_side_addons) =
-                    parse_remote_addon_list(Some(required_mods.as_slice()), true);
-                remote_client_side_addons.extend(client_side_addons);
-                let repo = &mut self.repository_view_state.repositories[repo_index];
-                repo.addons = merge_remote_addon_list(addons, &repo.addons);
-            }
-
-            if let Some(optional_mods) = addon_manifest["optionalMods"].as_array() {
-                let (optional_addons, client_side_addons) =
-                    parse_remote_addon_list(Some(optional_mods.as_slice()), false);
-                remote_client_side_addons.extend(client_side_addons);
-                let repo = &mut self.repository_view_state.repositories[repo_index];
-                repo.optional_addons =
-                    merge_remote_addon_list(optional_addons, &repo.optional_addons);
+            let required = addon_manifest["requiredMods"]
+                .as_array()
+                .map(|required_mods| {
+                    let (addons, client_side_addons) =
+                        parse_remote_addon_list(Some(required_mods.as_slice()), true);
+                    remote_client_side_addons.extend(client_side_addons);
+                    addons
+                });
+            let optional = addon_manifest["optionalMods"]
+                .as_array()
+                .map(|optional_mods| {
+                    let (optional_addons, client_side_addons) =
+                        parse_remote_addon_list(Some(optional_mods.as_slice()), false);
+                    remote_client_side_addons.extend(client_side_addons);
+                    optional_addons
+                });
+            let changed_selections = if required.is_some() || optional.is_some() {
+                merge_remote_addon_categories(
+                    &mut self.repository_view_state.repositories[repo_index],
+                    required,
+                    optional,
+                )
+            } else {
+                Vec::new()
+            };
+            if !changed_selections.is_empty() {
+                let message = self.t_fmt(
+                    "Repository category changes altered the effective selection for {addons} in Default or a saved profile.",
+                    &[("addons", changed_selections.join(", "))],
+                );
+                self.show_success_toast(message);
             }
             // A repository can mark an addon client-side, but the marking only
             // means something for a game whose servers tolerate addons they do

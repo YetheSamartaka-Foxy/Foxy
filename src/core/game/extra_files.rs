@@ -250,7 +250,7 @@ pub fn activate_for_launch(space_dir: &Path, game_dir: &str) -> Result<Activatio
     Ok(summary)
 }
 
-fn activate_entry(
+pub(crate) fn activate_entry(
     space_dir: &Path,
     entry: &ExtraFileEntry,
     game_dir: &str,

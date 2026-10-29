@@ -33,6 +33,12 @@ impl Foxy {
             );
         }
         let busy = self.repository_sync_active()
+            || self.pending_link_target_sync.is_some()
+            || self.launch_action.is_pending()
+            || self.game_space_removal_in_flight()
+            || self.backup_manager_work_in_flight()
+            || self.pending_installer_path.is_some()
+            || self.scheduler_pending_post_action.is_some()
             || self.update_modal_open
             || !self.active_quick_scan_instance_keys.is_empty()
             || self.is_direct_download_running()
@@ -270,6 +276,17 @@ impl Foxy {
         if self.db_lock_conflict.is_some() {
             return;
         }
+        if let Err(error) =
+            crate::core::game::launch_preparation::recover(&spaces::active_game_space_dir())
+                .and_then(|()| {
+                    crate::core::game::foxypack::recover_pending_import(
+                        &spaces::active_game_space_dir(),
+                    )
+                })
+        {
+            self.configuration_recovery_error = Some(error);
+            return;
+        }
         crate::core::tasks::init_database::check_and_wipe_database();
         self.load_settings();
         // Debug mode stays a launch-flag-only feature across reloads;
@@ -502,6 +519,7 @@ impl Foxy {
         // Direct-download inputs point at the previous space's game folders.
         self.direct_download_url_input.clear();
         self.direct_download_destination_input.clear();
+        self.pending_direct_download_collisions = None;
         self.direct_download_error = None;
         self.direct_download_update_view = false;
 
@@ -566,6 +584,8 @@ impl Foxy {
         self.startup_sync = None;
         self.startup_quick_scan_requested = 0;
         self.prelaunch_process_checks = Default::default();
+        self.launch_action = Default::default();
+        self.configuration_recovery_error = None;
 
         // Sync/download progress and results.
         self.backend_progress_rx = None;
@@ -699,6 +719,9 @@ impl Foxy {
 /// prevent, so forgetting one has to fail loudly somewhere.
 #[cfg(test)]
 const APP_GLOBAL_FOXY_FIELDS: &[&str] = &[
+    "pending_installer_path",
+    "pending_installer_error",
+    "shutdown_after_close",
     // Window, rendering, and view chrome.
     "app_icon",
     "app_icon_texture_bytes",
@@ -786,6 +809,10 @@ const APP_GLOBAL_FOXY_FIELDS: &[&str] = &[
     "backup_manager_view_cache",
     "backup_manager_notice",
     "backup_manager_confirm_action",
+    "backup_cleanup_task_rx",
+    "backup_cleanup_task_tx",
+    "backup_cleanup_worker",
+    "backup_cleanup_in_flight",
     "backup_inventory_refresh_requested",
     "backup_inventory_refresh_in_progress",
     "backup_inventory_request_id",

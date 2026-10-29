@@ -34,6 +34,12 @@ impl Foxy {
 
         let mut set_download_paused: Option<bool> = None;
         let mut cancel_requested = false;
+        let mut approve_replacements = false;
+        let mut reject_replacements = false;
+        let collision_paths = self
+            .pending_direct_download_collisions
+            .as_ref()
+            .map(|(paths, _)| paths.clone());
 
         let outer_margin = Margin {
             left: 15,
@@ -64,8 +70,7 @@ impl Foxy {
                                 .output_mut(Foxy::set_pointing_cursor_output);
                         }
                         if close_button.clicked() {
-                            self.update_modal_open = false;
-                            self.direct_download_update_view = false;
+                            cancel_requested = true;
                         }
                     });
                 });
@@ -78,6 +83,22 @@ impl Foxy {
                 ui.label(
                     self.t_fmt("Target: {name}", &[("name", session.target_label.clone())]),
                 );
+                if let Some(paths) = &collision_paths {
+                    ui.add_space(6.0);
+                    ui.colored_label(self.color_text_error(), self.t_fmt(
+                        "These {count} existing file(s) will be replaced only after each new copy is complete:",
+                        &[("count", paths.len().to_string())],
+                    ));
+                    egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
+                        for path in paths {
+                            ui.label(path.display().to_string());
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.button(self.t("Replace existing files")).clicked() { approve_replacements = true; }
+                        if ui.button(self.t("Cancel replacement")).clicked() { reject_replacements = true; }
+                    });
+                }
                 ui.label(self.t_fmt(
                     "Files: {done}/{total}",
                     &[
@@ -234,6 +255,10 @@ impl Foxy {
 
         if cancel_requested {
             self.cancel_direct_download();
+        } else if (approve_replacements || reject_replacements)
+            && let Some((_, reply_tx)) = self.pending_direct_download_collisions.take()
+        {
+            let _ = reply_tx.send(approve_replacements);
         }
         if let Some(paused) = set_download_paused {
             self.set_download_paused(paused);

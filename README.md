@@ -14,7 +14,7 @@ It ships as a single binary with both a full desktop UI and a scriptable CLI, ru
 ## Why Foxy
 
 - **Fast, reliable synchronization** - Foxy keeps mod repositories up to date with remote refresh, quick checks, rechecks, filesystem drift detection, and tree-hash verification. FoxyMode uses BLAKE3 for fast local hashing while preserving MD5 compatibility for legacy Swifty repositories. Hashing adapts to SSDs and HDDs, and after a database rebuild, files Foxy already verified and that have not changed are restored from a verified-hash record instead of being read again.
-- **Safe storage handling** - Foxy checks the drives behind its paths (FAT32/exFAT limits, network shares, RAM disks, read-only volumes, Windows path length) and free space before writing, probes a repository before a force redownload deletes anything, and lets only one process own a game space's database at a time.
+- **Safe storage handling** - Foxy checks the drives behind its paths (FAT32/exFAT limits, network shares, RAM disks, read-only volumes, Windows path length) and free space before writing, probes a repository before a force redownload deletes anything, scopes repository deletion to its address and local folder, and lets only one process own a game space's database at a time.
 - **Bandwidth-saving updates** - Delta patching downloads only changed file parts, validates the result, and automatically falls back to a full-file download if patching cannot be completed safely.
 - **Repository and profile management** - Manage multiple repositories, repository spaces, visual folders for grouping/coloring/collapsing repositories, launch profiles, optional addons, external addons, backups, drag-and-drop ordering, and bulk sync operations with selective include/exclude filtering.
 - **Arma 3 integrations** - Detect Steam and the Arma 3 installation automatically, manage Arma 3 profiles (detect, rename, clone, delete), recognize Steam Workshop addons, validate TeamSpeak 3 and Steam before launch, and support server quick-join flows with repo-provided launch parameters, DLC metadata, and an offer to match the Creator DLCs the server runs.
@@ -22,6 +22,8 @@ It ships as a single binary with both a full desktop UI and a scriptable CLI, ru
 - **Clear update visibility** - Download screens show per-addon progress, update summaries, toast notifications, transfer history graphs, adaptive speed limits, and grouped download/disk/hash performance metrics. Work in progress stays visible and alive: checks draw a sparkling map of triangles for the data being hashed, progress bars fill the same blinking triangles with flowing, bubbling mana, and the sidebar shows a round cluster of triangles per repository. **Reduce motion** turns the animations off.
 - **Game spaces** - Each supported game gets its own workspace with separate settings, repositories, stores, benchmarks, and database, switchable at runtime and remembered across launches. Arma 3 is the reference module; Total War: WARHAMMER III (`.pack` repositories and the `used_mods.txt` manifest) and Arma Reforger (`-addons`/`-addonsDir` launch and server join) ship alongside it, and a Generic game module covers other games with a user-supplied executable, arguments, and mods manifest, and can download and delta-update the game build itself from a repository.
 - **Steam Workshop management** - Import Workshop items by id, URL, collection, or share code, set the load order, freeze mods against Steam updates, compare setups with a state checksum, and exchange `.foxyshare` bundles, from the game space settings or the CLI.
+- **Safer launches and setup changes** - Launch and Join wait for active updates to settle, report a successful command handoff without claiming the game connected, and restore prepared files after a failed handoff. Config-pack imports recover as a complete setup, and removing a game space lets you preserve its private frozen mods and extra files.
+- **Reviewed file and backup operations** - Direct downloads preview existing-file collisions and require `--overwrite --yes` to replace them. Backup restore prefers matching repository origins, while cleanup previews its deletion set and asks separately before deleting the final recovery copy.
 - **Addon Workshop pages** - Right-click required, optional, or external addons to open their Steam Workshop or Arma Reforger Workshop page in your browser.
 - **Benchmarks** - Save a recheck, update, or redownload as a benchmark with stage timings, transfer and disk charts, CPU and memory use, power source, and speed-of-light ratios, then compare two runs side by side or export one as a ZIP for support.
 - **Migration and direct-download workflows** - Guided Swifty migration preserves repositories and spaces, while direct-download mode can fetch repository, addon, or file URLs without a full database sync.
@@ -180,12 +182,12 @@ Behavior:
 | `addon list\|set\|recalc-hashes\|force-redownload` | Addon operations |
 | `profile list\|select\|add\|delete` | Profile operations |
 | `space list\|sync` | Repository space operations |
-| `game list\|use\|create\|remove\|launch` | Game space operations; `game reforger ...` manages Arma Reforger addons by GUID |
-| `workshop list\|add\|import\|remove\|set\|order\|freeze\|unfreeze\|pins\|export\|share\|checksum\|bundle\|resolve` | Steam Workshop items of the active game space |
+| `game list\|use\|create\|remove\|launch` | Game space operations; removing a space with private payloads requires `--preserve-payloads` or `--discard-payloads`; `game reforger ...` manages Arma Reforger addons by GUID |
+| `workshop list\|add\|import\|remove\|unsubscribe\|set\|order\|freeze\|unfreeze\|pins\|export\|share\|checksum\|bundle\|resolve` | Steam Workshop items of the active game space; remove unregisters locally, unsubscribe is a separate Steam action |
 | `config export\|import` | Export or import a `.foxypack` config pack |
 | `config extra-file list\|add\|remove\|set\|activate` | Managed extra files |
 | `server inspect-addons` | Inspect the addons an Arma 3 server reports |
-| `direct-download` | Download by URL without full sync |
+| `direct-download` | Download by URL without full sync; replacing existing files requires `--overwrite --yes` |
 | `launch` | Build or execute the game launch command for a repository and profile |
 | `agent-gui ...` | Drive a running UI started with `ui --agent-gui` (developer tooling) |
 

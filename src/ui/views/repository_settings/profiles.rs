@@ -94,7 +94,7 @@ impl Foxy {
         }
 
         let payload = clipboard_text[PROFILE_CLIPBOARD_HEADER.len()..].trim_start();
-        let mut profile: RepositoryProfile = match serde_json::from_str(payload) {
+        let profile: RepositoryProfile = match serde_json::from_str(payload) {
             Ok(profile) => profile,
             Err(err) => {
                 warn!("Failed to parse profile data: {}", err);
@@ -116,14 +116,14 @@ impl Foxy {
         }
 
         let repo = &mut self.repository_view_state.repositories[repo_index];
-        let unique_name = Self::unique_profile_name(repo, &base_name, "_copy");
-        profile.name = unique_name.clone();
-        repo.profiles.push(profile);
-        repo.selected_profile = Some(unique_name);
+        let unique_name = Self::append_imported_profile(repo, profile, &base_name);
 
         self.save_repositories();
         info!("Profile imported from clipboard.");
-        self.show_success_toast(self.t("Profile imported from clipboard."));
+        self.show_success_toast(self.t_fmt(
+            "Profile {name} was added from clipboard. The active profile was not changed.",
+            &[("name", unique_name)],
+        ));
     }
 
     pub(super) fn profile_from_repository(repo: &Repository, name: String) -> RepositoryProfile {
@@ -168,5 +168,49 @@ impl Foxy {
             }
             count += 1;
         }
+    }
+
+    fn append_imported_profile(
+        repo: &mut Repository,
+        mut profile: RepositoryProfile,
+        base_name: &str,
+    ) -> String {
+        let unique_name = Self::unique_profile_name(repo, base_name, "_copy");
+        profile.name = unique_name.clone();
+        repo.profiles.push(profile);
+        unique_name
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clipboard_profile_is_added_without_changing_active_profile() {
+        let mut repo = Repository {
+            selected_profile: Some("Current".to_string()),
+            profiles: vec![RepositoryProfile {
+                name: "Current".to_string(),
+                ..RepositoryProfile::default()
+            }],
+            ..Repository::default()
+        };
+
+        let name = Foxy::append_imported_profile(
+            &mut repo,
+            RepositoryProfile {
+                name: "Shared".to_string(),
+                ..RepositoryProfile::default()
+            },
+            "Shared",
+        );
+
+        assert_eq!(name, "Shared");
+        assert_eq!(repo.selected_profile.as_deref(), Some("Current"));
+        assert_eq!(
+            repo.profiles.last().map(|profile| profile.name.as_str()),
+            Some("Shared")
+        );
     }
 }

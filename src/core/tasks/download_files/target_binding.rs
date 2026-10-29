@@ -4,29 +4,46 @@ use crate::core::utils::content_hash::normalize_path;
 
 #[derive(Clone, Debug)]
 pub(crate) struct PinnedDownloadTargets {
-    root: PathBuf,
-    canonical_root: PathBuf,
+    roots: Vec<(PathBuf, PathBuf)>,
     links: Vec<(PathBuf, PathBuf)>,
 }
 
 impl PinnedDownloadTargets {
+    #[cfg(test)]
     pub(crate) fn from_links(
         root: PathBuf,
         links: Vec<(PathBuf, PathBuf)>,
     ) -> Result<Self, String> {
-        let canonical_root = canonicalize_existing_ancestor(&root)?;
-        Ok(Self {
-            root,
-            canonical_root,
-            links,
-        })
+        Self::from_roots(vec![root], links)
+    }
+
+    pub(crate) fn from_roots(
+        roots: Vec<PathBuf>,
+        mut links: Vec<(PathBuf, PathBuf)>,
+    ) -> Result<Self, String> {
+        if roots.is_empty() {
+            return Err("No repository write root was supplied".to_string());
+        }
+        let roots = roots
+            .into_iter()
+            .map(|root| canonicalize_existing_ancestor(&root).map(|canonical| (root, canonical)))
+            .collect::<Result<Vec<_>, _>>()?;
+        links.sort();
+        links.dedup();
+        Ok(Self { roots, links })
     }
 
     pub(crate) fn validate_current(&self) -> Result<(), String> {
-        let current =
-            crate::core::api::check_contracts::linked_targets(&self.root).map_err(|_| {
-                "Linked write targets changed. Review the destinations and retry.".to_owned()
-            })?;
+        let mut current = Vec::new();
+        for (root, _) in &self.roots {
+            current.extend(
+                crate::core::api::check_contracts::linked_targets(root).map_err(|_| {
+                    "Linked write targets changed. Review the destinations and retry.".to_owned()
+                })?,
+            );
+        }
+        current.sort();
+        current.dedup();
         if current.len() != self.links.len()
             || current.iter().zip(&self.links).any(
                 |((link, target), (approved_link, approved_target))| {
@@ -75,18 +92,23 @@ impl PinnedDownloadTargets {
                 return Ok(resolved);
             }
 
-            let relative = path
-                .strip_prefix(&self.root)
-                .ok()
-                .or_else(|| path.strip_prefix(&self.canonical_root).ok())
-                .map(Path::to_path_buf)
-                .or_else(|| {
-                    normalized_relative_path(path, &self.root)
-                        .or_else(|| normalized_relative_path(path, &self.canonical_root))
+            let (relative, canonical_root) = self
+                .roots
+                .iter()
+                .find_map(|(root, canonical)| {
+                    path.strip_prefix(root)
+                        .ok()
+                        .or_else(|| path.strip_prefix(canonical).ok())
+                        .map(Path::to_path_buf)
+                        .or_else(|| {
+                            normalized_relative_path(path, root)
+                                .or_else(|| normalized_relative_path(path, canonical))
+                        })
+                        .map(|relative| (relative, canonical))
                 })
                 .ok_or_else(|| "Download target is outside the repository write root".to_owned())?;
-            let pinned = canonicalize_existing_ancestor(&self.canonical_root.join(relative))?;
-            if !path_starts_with(&pinned, &self.canonical_root) {
+            let pinned = canonicalize_existing_ancestor(&canonical_root.join(relative))?;
+            if !path_starts_with(&pinned, canonical_root) {
                 return Err("Download target resolves outside the repository write root".to_owned());
             }
             let current = canonicalize_existing_ancestor(path)?;
@@ -177,6 +199,65 @@ mod tests {
             pinned.resolve(&root.path().join(&relative)).unwrap(),
             root.path().canonicalize().unwrap().join(relative)
         );
+    }
+
+    #[test]
+    fn captured_shared_root_is_owned_but_unrelated_and_later_roots_are_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let standalone = temp.path().join("standalone");
+        let shared = temp.path().join("shared");
+        let later = temp.path().join("shared-moved");
+        let pinned =
+            PinnedDownloadTargets::from_roots(vec![standalone.clone(), shared.clone()], Vec::new())
+                .unwrap();
+        for root in [&standalone, &shared] {
+            assert!(
+                pinned
+                    .resolve(&root.join("@mod_01/addons/file.bin"))
+                    .is_ok()
+            );
+        }
+        assert!(pinned.resolve(&later.join("@mod_01/file.bin")).is_err());
+        assert!(
+            pinned
+                .resolve(&temp.path().join("unrelated/file.bin"))
+                .is_err()
+        );
+        assert!(pinned.validate_current().is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_root_links_need_enrollment_and_cannot_be_retargeted() {
+        let temp = tempfile::tempdir().unwrap();
+        let primary = temp.path().join("primary");
+        let shared = temp.path().join("shared");
+        let outside = temp.path().join("outside");
+        let replaced = temp.path().join("replaced");
+        for root in [&primary, &shared, &outside, &replaced] {
+            std::fs::create_dir_all(root).unwrap();
+        }
+        let link = shared.join("@mod_01");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        let unenrolled =
+            PinnedDownloadTargets::from_roots(vec![primary.clone(), shared.clone()], Vec::new())
+                .unwrap();
+        assert!(unenrolled.validate_current().is_err());
+        assert!(unenrolled.resolve(&link.join("file.bin")).is_err());
+        let enrolled = PinnedDownloadTargets::from_roots(
+            vec![primary, shared],
+            vec![(link.clone(), outside.canonicalize().unwrap())],
+        )
+        .unwrap();
+        assert!(enrolled.validate_current().is_ok());
+        assert_eq!(
+            enrolled.resolve(&link.join("file.bin")).unwrap(),
+            outside.join("file.bin")
+        );
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&replaced, &link).unwrap();
+        assert!(enrolled.validate_current().is_err());
+        assert!(enrolled.resolve(&link.join("file.bin")).is_err());
     }
 
     #[cfg(unix)]

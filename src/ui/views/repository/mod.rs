@@ -16,8 +16,6 @@ mod view;
 
 use crate::ui::app::{ActivityBar, ActivityGlyph, Foxy};
 use eframe::egui::Color32;
-use std::ffi::OsString;
-use std::path::Path;
 use std::time::Duration;
 
 pub(super) const BANNER_CORNER_RADIUS: u8 = 10;
@@ -121,19 +119,6 @@ pub(super) enum RepositoryMissionContextAction {
     RemoveDependencies,
     Duplicate,
     Delete,
-}
-
-pub(super) fn spawn_launch_process(
-    executable: &OsString,
-    args: &[OsString],
-    cwd: Option<&Path>,
-    steam_required: bool,
-    steam_directory: &str,
-) -> std::io::Result<u32> {
-    if steam_required && !crate::core::steam::is_steam_running(steam_directory) {
-        return Err(std::io::Error::other("Steam is not running"));
-    }
-    crate::core::utils::deelevate::spawn_unelevated(executable, args, cwd)
 }
 
 pub(super) fn arma3_editor_display_name(raw: &str) -> String {

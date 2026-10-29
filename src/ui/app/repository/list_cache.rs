@@ -206,7 +206,7 @@ impl Foxy {
         let filtered: Vec<ModDiffSummary> = mods.into_iter().filter(|m| m.needs_update).collect();
         if filtered.is_empty() {
             self.pending_update_cache.remove(&instance_key);
-            self.clear_active_update_session_for_url(&normalized_url);
+            self.clear_active_update_session_for_url(&normalized_url, local_path);
         } else {
             self.pending_update_cache.insert(instance_key, filtered);
         }
@@ -224,18 +224,27 @@ impl Foxy {
     pub(crate) fn active_update_session_mods_for_url(
         &self,
         repository_url: &str,
+        local_path: &str,
     ) -> Option<Vec<ModDiffSummary>> {
         let normalized_url = Self::normalize_repo_url(repository_url);
         self.settings_view_state
             .active_update_sessions
             .iter()
-            .find(|session| session.repository_url == normalized_url)
+            .find(|session| {
+                self.repository_record_matches_instance(
+                    &session.repository_url,
+                    &session.local_path,
+                    &normalized_url,
+                    local_path,
+                )
+            })
             .map(|session| session.mods.clone())
     }
 
     pub(crate) fn ensure_active_update_session_for_url(
         &mut self,
         repository_url: &str,
+        local_path: &str,
         mods: &[ModDiffSummary],
     ) {
         if mods.is_empty() {
@@ -247,7 +256,14 @@ impl Foxy {
             .settings_view_state
             .active_update_sessions
             .iter()
-            .any(|session| session.repository_url == normalized_url)
+            .any(|session| {
+                self.repository_record_matches_instance(
+                    &session.repository_url,
+                    &session.local_path,
+                    &normalized_url,
+                    local_path,
+                )
+            })
         {
             return;
         }
@@ -256,6 +272,7 @@ impl Foxy {
         self.settings_view_state.active_update_sessions.push(
             crate::ui::types::ActiveUpdateSession {
                 repository_url: normalized_url.clone(),
+                local_path: local_path.to_string(),
                 session_id: session_id.clone(),
                 mods: mods.to_vec(),
             },
@@ -269,15 +286,74 @@ impl Foxy {
         );
     }
 
-    pub(crate) fn clear_active_update_session_for_url(&mut self, repository_url: &str) {
+    pub(crate) fn clear_active_update_session_for_url(
+        &mut self,
+        repository_url: &str,
+        local_path: &str,
+    ) {
         let normalized_url = Self::normalize_repo_url(repository_url);
+        let url_is_unique = self
+            .repository_view_state
+            .repositories
+            .iter()
+            .filter(|repo| Self::normalize_repo_url(&repo.address) == normalized_url)
+            .count()
+            == 1;
         let previous_len = self.settings_view_state.active_update_sessions.len();
         self.settings_view_state
             .active_update_sessions
-            .retain(|session| session.repository_url != normalized_url);
+            .retain(|session| {
+                !Self::update_record_matches_instance(
+                    &session.repository_url,
+                    &session.local_path,
+                    &normalized_url,
+                    local_path,
+                    url_is_unique,
+                )
+            });
         if self.settings_view_state.active_update_sessions.len() != previous_len {
             self.save_settings();
         }
+    }
+
+    pub(crate) fn repository_record_matches_instance(
+        &self,
+        record_url: &str,
+        record_path: &str,
+        repository_url: &str,
+        local_path: &str,
+    ) -> bool {
+        let normalized_url = Self::normalize_repo_url(repository_url);
+        let url_is_unique = self
+            .repository_view_state
+            .repositories
+            .iter()
+            .filter(|repo| Self::normalize_repo_url(&repo.address) == normalized_url)
+            .count()
+            == 1;
+        Self::update_record_matches_instance(
+            record_url,
+            record_path,
+            &normalized_url,
+            local_path,
+            url_is_unique,
+        )
+    }
+
+    pub(crate) fn update_record_matches_instance(
+        record_url: &str,
+        record_path: &str,
+        normalized_url: &str,
+        local_path: &str,
+        url_is_unique: bool,
+    ) -> bool {
+        if Self::normalize_repo_url(record_url) != normalized_url {
+            return false;
+        }
+        if record_path.trim().is_empty() {
+            return url_is_unique;
+        }
+        Self::repo_instance_path_key(record_path) == Self::repo_instance_path_key(local_path)
     }
 
     pub fn pending_update_count_for_address(
@@ -308,7 +384,9 @@ impl Foxy {
         }
 
         self.update_ready_repo = Some(repo_index);
-        if let Some(session_mods) = self.active_update_session_mods_for_url(&normalized_url) {
+        if let Some(session_mods) =
+            self.active_update_session_mods_for_url(&normalized_url, &repo.path)
+        {
             self.mod_diff_cache = merge_download_mod_diffs_preserving_finished(
                 session_mods,
                 mods,
@@ -994,6 +1072,28 @@ mod tests {
         assert_eq!(unique_position(urls.iter(), |url| **url == "b/"), Some(1));
         assert_eq!(unique_position(urls.iter(), |url| **url == "a/"), None);
         assert_eq!(unique_position(urls.iter(), |url| **url == "c/"), None);
+    }
+
+    #[test]
+    fn update_records_are_scoped_to_repository_instances() {
+        let url = "https://repo.example.invalid/main/";
+        let path_a = "R:/Mods/RepoAlpha";
+        let path_b = "R:/Mods/RepoBeta";
+        let copies = [path_a, path_b];
+        let unique_url = copies.len() == 1;
+        let mut records = vec![(url, path_a), (url, path_b), (url, "")];
+
+        records.retain(|(record_url, record_path)| {
+            !Foxy::update_record_matches_instance(record_url, record_path, url, path_a, unique_url)
+        });
+
+        assert_eq!(records, vec![(url, path_b), (url, "")]);
+        assert!(Foxy::update_record_matches_instance(
+            url, "", url, path_b, true,
+        ));
+        assert!(!Foxy::update_record_matches_instance(
+            url, "", url, path_b, false,
+        ));
     }
 
     fn mod_summary(name: &str, needs_update: bool, files: usize) -> ModDiffSummary {

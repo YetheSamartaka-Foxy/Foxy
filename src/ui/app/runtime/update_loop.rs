@@ -256,6 +256,7 @@ impl Foxy {
             || self.repositories_save_in_flight_revision.is_some()
             || self.backup_inventory_refresh_requested
             || self.backup_inventory_refresh_in_progress
+            || self.backup_cleanup_in_flight
         {
             Self::merge_repaint_interval(&mut interval, PERSISTENCE_REPAINT_INTERVAL);
         }
@@ -290,6 +291,10 @@ impl Foxy {
         }
 
         super::keyboard_focus::repair_lost_keyboard_focus();
+        if self.render_configuration_recovery_error(&ctx) {
+            polls.stop(&mut self.frame_cost);
+            return;
+        }
         self.apply_runtime_ui_scale(&ctx);
         self.apply_runtime_motion_preference(&ctx);
         self.invalidate_galley_caches_on_font_atlas_change(&ctx);
@@ -310,6 +315,11 @@ impl Foxy {
             self.close_requested_at = Some(Instant::now());
             info!("Close requested by viewport event");
         }
+        self.poll_launch_action(&ctx);
+        self.poll_game_space_removal(&ctx);
+        self.poll_scheduled_gameplay(&ctx);
+        self.render_pending_addon_backup_origin_confirmation(&ctx);
+        self.poll_installer_request(&ctx);
 
         // Killing a sync mid-promotion leaves a mix of old and new files its
         // rollback can no longer revert, so a close cancels it and keeps the
@@ -321,7 +331,21 @@ impl Foxy {
                 .is_some_and(|handle| !handle.is_finished())
                 || self.is_direct_download_running()
                 || self.retained_files_cleanup_in_flight
-                || self.hash_evidence_retry_in_flight);
+                || self.hash_evidence_retry_in_flight
+                || self.launch_action.is_busy()
+                || self.game_space_removal_in_flight()
+                || self
+                    .workshop_task_worker
+                    .as_ref()
+                    .is_some_and(|worker| !worker.is_finished())
+                || self
+                    .addon_backup_worker
+                    .as_ref()
+                    .is_some_and(|worker| !worker.is_finished())
+                || self
+                    .backup_cleanup_worker
+                    .as_ref()
+                    .is_some_and(|worker| !worker.is_finished()));
         if close_waits_for_worker {
             self.close_worker_wait_started_at.get_or_insert_with(|| {
                 info!(
@@ -358,6 +382,17 @@ impl Foxy {
                 return;
             }
 
+            #[cfg(target_os = "windows")]
+            if self.shutdown_after_close {
+                self.shutdown_after_close = false;
+                if let Err(error) = crate::ui::app::scheduling::initiate_pc_shutdown() {
+                    self.close_requested_at = None;
+                    self.show_error_toast(
+                        self.t_fmt("Could not request shutdown: {error}", &[("error", error)]),
+                    );
+                    return;
+                }
+            }
             ctx.send_viewport_cmd(ViewportCommand::Close);
             ctx.request_repaint_after(Duration::from_millis(16));
             return;

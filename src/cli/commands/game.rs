@@ -6,8 +6,9 @@ use crate::cli::args::{
 };
 use crate::cli::exit_codes;
 use crate::core::game::{
-    GameLaunchCtx, GameModule, LaunchCommand, LaunchError, LaunchPlan, generic_game, reforger,
-    spaces, twwh3,
+    GameLaunchCtx, GameModule, LaunchCommand, LaunchError, LaunchPlan, generic_game,
+    launch_preparation::{LaunchApproval, LaunchFailure, LaunchHandoff},
+    reforger, spaces, twwh3,
 };
 use crate::core::steam::{SteamEnsureResult, ensure_steam_running};
 use serde_json::{Value, json};
@@ -160,6 +161,10 @@ fn cmd_game_remove(cli: &CliArgs, args: GameRemoveArgs) -> Result<CommandSuccess
             )
         })?
         .clone();
+    let payloads = spaces::private_payload_preview(&args.space_id)
+        .map_err(|error| CommandError::operation("game.remove", error))?;
+    let has_private_payloads =
+        !payloads.workshop_item_ids.is_empty() || !payloads.extra_file_ids.is_empty();
 
     if cli.dry_run {
         return Ok(CommandSuccess {
@@ -169,9 +174,26 @@ fn cmd_game_remove(cli: &CliArgs, args: GameRemoveArgs) -> Result<CommandSuccess
                 entry.id,
                 spaces::game_space_dir_for(&entry.id).display()
             ),
-            data: json!({"space": space_json(&registry, &entry), "dry_run": true}),
+            data: json!({
+                "space": space_json(&registry, &entry),
+                "private_payloads": payloads,
+                "payload_action_required": has_private_payloads && !args.preserve_payloads && !args.discard_payloads,
+                "preserve_payloads": args.preserve_payloads,
+                "discard_payloads": args.discard_payloads,
+                "dry_run": true
+            }),
             exit_code: exit_codes::SUCCESS,
         });
+    }
+    if has_private_payloads && !args.preserve_payloads && !args.discard_payloads {
+        return Err(CommandError::validation(
+            "game.remove",
+            format!(
+                "Game space has {} frozen Workshop item(s) and {} extra-file payload(s); choose --preserve-payloads or --discard-payloads",
+                payloads.workshop_item_ids.len(),
+                payloads.extra_file_ids.len()
+            ),
+        ));
     }
     if !cli.yes {
         return Err(CommandError::validation(
@@ -180,8 +202,15 @@ fn cmd_game_remove(cli: &CliArgs, args: GameRemoveArgs) -> Result<CommandSuccess
         ));
     }
 
-    let removed = spaces::remove_game_space(&args.space_id)
-        .map_err(|err| CommandError::operation("game.remove", err))?;
+    let preserve_to = (has_private_payloads && args.preserve_payloads)
+        .then(|| crate::core::utils::app_paths::foxy_data_dir().join("preserved_game_spaces"));
+    let removed = spaces::remove_game_space_with_policy(
+        &args.space_id,
+        spaces::GameSpaceRemovalPolicy {
+            preserve_private_payloads_to: preserve_to.clone(),
+        },
+    )
+    .map_err(|err| CommandError::operation("game.remove", err))?;
     Ok(CommandSuccess {
         action: "game.remove".to_string(),
         message: format!(
@@ -192,6 +221,8 @@ fn cmd_game_remove(cli: &CliArgs, args: GameRemoveArgs) -> Result<CommandSuccess
             "id": removed.id,
             "game_id": removed.game_id,
             "display_name": removed.display_name,
+            "preserved_payloads_to": preserve_to.map(|path| path.join(&removed.id).display().to_string()),
+            "discarded_private_payloads": has_private_payloads && args.discard_payloads,
         }),
         exit_code: exit_codes::SUCCESS,
     })
@@ -234,7 +265,6 @@ fn cmd_generic_game_launch(
     let module = crate::core::game::registry().active();
     let state = AppState::load()?;
     let config = generic_game::config_from_settings(&state.settings);
-    let install_dir = module.install_dir_from_settings(&state.settings);
     let space_dir = spaces::active_game_space_dir();
 
     let launch_plan = match config.steam_app_id {
@@ -267,27 +297,7 @@ fn cmd_generic_game_launch(
         ));
     }
 
-    let ctx = GameLaunchCtx {
-        install_dir,
-        steam_directory: &state.settings.steam_directory,
-        settings: Some(&state.settings),
-    };
-    let built = generic_game::build_generic_launch(
-        &launch_plan.plan,
-        &ctx,
-        &config,
-        args.execute && !cli.dry_run,
-    )
-    .map_err(|err| launch_error_to_command_error(module.display_name(), err))?;
-
-    let manifest_json = built.manifest.as_ref().map(|manifest| {
-        json!({
-            "file_name": manifest.file_name,
-            "path": manifest.path.display().to_string(),
-            "content": manifest.content,
-            "written": manifest.written,
-        })
-    });
+    let preview_command = build_launch_preview(module, &state.settings, &launch_plan.plan)?;
 
     if cli.dry_run || !args.execute {
         return Ok(CommandSuccess {
@@ -296,10 +306,10 @@ fn cmd_generic_game_launch(
             data: json!({
                 "game_id": module.id(),
                 "game_space_id": spaces::active_game_space().space_id,
-                "executable": built.command.program.display().to_string(),
-                "args": built.command.args,
-                "cwd": built.command.cwd.as_ref().map(|path| path.display().to_string()),
-                "manifest": manifest_json,
+                "executable": preview_command.program.display().to_string(),
+                "args": preview_command.args,
+                "cwd": preview_command.cwd.as_ref().map(|path| path.display().to_string()),
+                "manifest": null,
                 "config": config,
                 "issues": launch_plan.issues,
                 "execute": false,
@@ -309,13 +319,16 @@ fn cmd_generic_game_launch(
         });
     }
 
-    let executed = execute_game_launch(
-        &built.command,
-        &space_dir,
-        install_dir,
-        &state.settings.steam_directory,
-        config.steam_app_id.is_some(),
+    let (executed, steam_status) = dispatch_standalone_launch(
+        module,
+        &state.settings,
+        &launch_plan.plan,
+        LaunchApproval {
+            incomplete_extra_files: args.allow_incomplete_preparation,
+            live_workshop_fallback: args.allow_live_fallback,
+        },
     )?;
+    let command = executed.command;
 
     Ok(CommandSuccess {
         action: "game.launch".to_string(),
@@ -323,10 +336,12 @@ fn cmd_generic_game_launch(
         data: json!({
             "game_id": module.id(),
             "game_space_id": spaces::active_game_space().space_id,
-            "executable": built.command.program.display().to_string(),
-            "args": built.command.args,
-            "cwd": built.command.cwd.as_ref().map(|path| path.display().to_string()),
-            "manifest": manifest_json,
+            "executable": command.program.display().to_string(),
+            "args": command.args,
+            "cwd": command.cwd.as_ref().map(|path| path.display().to_string()),
+            "manifest": null,
+            "steam_status": steam_status,
+            "extra_files": activation_json(&executed.extra_files),
             "issues": launch_plan.issues,
             "pid": executed.pid,
             "execute": true,
@@ -341,7 +356,6 @@ fn cmd_twwh3_game_launch(
 ) -> Result<CommandSuccess, CommandError> {
     let module = crate::core::game::registry().active();
     let state = AppState::load()?;
-    let install_dir = module.install_dir_from_settings(&state.settings);
     let space_dir = spaces::active_game_space_dir();
     let launch_plan = twwh3::build_workshop_launch_plan(
         &space_dir,
@@ -361,14 +375,7 @@ fn cmd_twwh3_game_launch(
         ));
     }
 
-    let ctx = GameLaunchCtx {
-        install_dir,
-        steam_directory: &state.settings.steam_directory,
-        settings: Some(&state.settings),
-    };
-    let built = twwh3::TotalWarWarhammer3Module
-        .build_launch_with_manifest_mode(&launch_plan.plan, &ctx, args.execute && !cli.dry_run)
-        .map_err(|err| launch_error_to_command_error(module.display_name(), err))?;
+    let preview_command = build_launch_preview(module, &state.settings, &launch_plan.plan)?;
 
     if cli.dry_run || !args.execute {
         return Ok(CommandSuccess {
@@ -377,15 +384,10 @@ fn cmd_twwh3_game_launch(
             data: json!({
                 "game_id": module.id(),
                 "game_space_id": spaces::active_game_space().space_id,
-                "executable": built.command.program.display().to_string(),
-                "args": built.command.args,
-                "cwd": built.command.cwd.as_ref().map(|path| path.display().to_string()),
-                "manifest": built.manifest.as_ref().map(|manifest| json!({
-                    "file_name": manifest.file_name,
-                    "path": manifest.path.display().to_string(),
-                    "content": manifest.content,
-                    "written": manifest.written,
-                })),
+                "executable": preview_command.program.display().to_string(),
+                "args": preview_command.args,
+                "cwd": preview_command.cwd.as_ref().map(|path| path.display().to_string()),
+                "manifest": null,
                 "packs": launch_plan.packs,
                 "issues": launch_plan.issues,
                 "execute": false,
@@ -395,13 +397,16 @@ fn cmd_twwh3_game_launch(
         });
     }
 
-    let executed = execute_game_launch(
-        &built.command,
-        &space_dir,
-        install_dir,
-        &state.settings.steam_directory,
-        module.steam_app_id_from_settings(&state.settings).is_some(),
+    let (executed, steam_status) = dispatch_standalone_launch(
+        module,
+        &state.settings,
+        &launch_plan.plan,
+        LaunchApproval {
+            incomplete_extra_files: args.allow_incomplete_preparation,
+            live_workshop_fallback: args.allow_live_fallback,
+        },
     )?;
+    let command = executed.command;
 
     Ok(CommandSuccess {
         action: "game.launch".to_string(),
@@ -409,21 +414,13 @@ fn cmd_twwh3_game_launch(
         data: json!({
             "game_id": module.id(),
             "game_space_id": spaces::active_game_space().space_id,
-            "executable": built.command.program.display().to_string(),
-            "args": built.command.args,
-            "cwd": built.command.cwd.as_ref().map(|path| path.display().to_string()),
-            "manifest": built.manifest.as_ref().map(|manifest| json!({
-                "file_name": manifest.file_name,
-                "path": manifest.path.display().to_string(),
-                "written": manifest.written,
-            })),
+            "executable": command.program.display().to_string(),
+            "args": command.args,
+            "cwd": command.cwd.as_ref().map(|path| path.display().to_string()),
+            "manifest": null,
             "packs": launch_plan.packs,
-            "steam_status": executed.steam_status,
-            "extra_files": {
-                "activated": executed.extra_files.activated.len(),
-                "failed": executed.extra_files.failed.len(),
-                "skipped_disabled": executed.extra_files.skipped_disabled
-            },
+            "steam_status": steam_status,
+            "extra_files": activation_json(&executed.extra_files),
             "execute": true,
             "pid": executed.pid,
         }),
@@ -437,7 +434,6 @@ fn cmd_reforger_game_launch(
 ) -> Result<CommandSuccess, CommandError> {
     let module = crate::core::game::registry().active();
     let state = AppState::load()?;
-    let install_dir = module.install_dir_from_settings(&state.settings);
     let space_dir = spaces::active_game_space_dir();
     let launch_plan = reforger::build_workshop_launch_plan(&space_dir, args.include_disabled)
         .map_err(|err| CommandError::operation("game.launch", err))?;
@@ -452,14 +448,7 @@ fn cmd_reforger_game_launch(
         ));
     }
 
-    let ctx = GameLaunchCtx {
-        install_dir,
-        steam_directory: &state.settings.steam_directory,
-        settings: Some(&state.settings),
-    };
-    let built = reforger::ReforgerModule
-        .build_launch(&launch_plan.plan, &ctx)
-        .map_err(|err| launch_error_to_command_error(module.display_name(), err))?;
+    let preview_command = build_launch_preview(module, &state.settings, &launch_plan.plan)?;
 
     if cli.dry_run || !args.execute {
         return Ok(CommandSuccess {
@@ -468,9 +457,9 @@ fn cmd_reforger_game_launch(
             data: json!({
                 "game_id": module.id(),
                 "game_space_id": spaces::active_game_space().space_id,
-                "executable": built.program.display().to_string(),
-                "args": built.args,
-                "cwd": built.cwd.as_ref().map(|path| path.display().to_string()),
+                "executable": preview_command.program.display().to_string(),
+                "args": preview_command.args,
+                "cwd": preview_command.cwd.as_ref().map(|path| path.display().to_string()),
                 "addons": launch_plan.addons,
                 "issues": launch_plan.issues,
                 "execute": false,
@@ -480,13 +469,16 @@ fn cmd_reforger_game_launch(
         });
     }
 
-    let executed = execute_game_launch(
-        &built,
-        &space_dir,
-        install_dir,
-        &state.settings.steam_directory,
-        module.steam_app_id_from_settings(&state.settings).is_some(),
+    let (executed, steam_status) = dispatch_standalone_launch(
+        module,
+        &state.settings,
+        &launch_plan.plan,
+        LaunchApproval {
+            incomplete_extra_files: args.allow_incomplete_preparation,
+            live_workshop_fallback: args.allow_live_fallback,
+        },
     )?;
+    let command = executed.command;
 
     Ok(CommandSuccess {
         action: "game.launch".to_string(),
@@ -494,16 +486,12 @@ fn cmd_reforger_game_launch(
         data: json!({
             "game_id": module.id(),
             "game_space_id": spaces::active_game_space().space_id,
-            "executable": built.program.display().to_string(),
-            "args": built.args,
-            "cwd": built.cwd.as_ref().map(|path| path.display().to_string()),
+            "executable": command.program.display().to_string(),
+            "args": command.args,
+            "cwd": command.cwd.as_ref().map(|path| path.display().to_string()),
             "addons": launch_plan.addons,
-            "steam_status": executed.steam_status,
-            "extra_files": {
-                "activated": executed.extra_files.activated.len(),
-                "failed": executed.extra_files.failed.len(),
-                "skipped_disabled": executed.extra_files.skipped_disabled
-            },
+            "steam_status": steam_status,
+            "extra_files": activation_json(&executed.extra_files),
             "execute": true,
             "pid": executed.pid,
         }),
@@ -511,59 +499,99 @@ fn cmd_reforger_game_launch(
     })
 }
 
-struct ExecutedGameLaunch {
-    pid: u32,
-    steam_status: &'static str,
-    extra_files: crate::core::game::extra_files::ActivationSummary,
+fn build_launch_preview(
+    module: &dyn GameModule,
+    settings: &crate::ui::types::SettingsViewState,
+    plan: &LaunchPlan,
+) -> Result<LaunchCommand, CommandError> {
+    let install_dir = module.install_dir_from_settings(settings);
+    let ctx = GameLaunchCtx {
+        install_dir,
+        steam_directory: &settings.steam_directory,
+        settings: Some(settings),
+    };
+    module
+        .build_launch_preview(plan, &ctx)
+        .map_err(|error| launch_error_to_command_error(module.display_name(), error))
 }
 
-fn execute_game_launch(
-    command: &LaunchCommand,
-    space_dir: &std::path::Path,
-    install_dir: &str,
-    steam_directory: &str,
-    steam_required: bool,
-) -> Result<ExecutedGameLaunch, CommandError> {
-    let extra_files = crate::core::game::extra_files::activate_for_launch(space_dir, install_dir)
-        .map_err(|err| {
-        CommandError::operation(
-            "game.launch",
-            format!("Failed to apply extra files before launch: {}", err),
-        )
-    })?;
-    let steam_status = if !steam_required {
-        "not_required"
+fn dispatch_standalone_launch(
+    module: &dyn GameModule,
+    settings: &crate::ui::types::SettingsViewState,
+    plan: &LaunchPlan,
+    approval: LaunchApproval,
+) -> Result<(LaunchHandoff, &'static str), CommandError> {
+    let steam_required =
+        plan.game_build.is_none() && module.steam_app_id_from_settings(settings).is_some();
+    let steam_directory = &settings.steam_directory;
+    let mut steam_status = if steam_required {
+        "ready"
     } else {
-        match ensure_steam_running(steam_directory) {
-            Ok(SteamEnsureResult::AlreadyRunning) => "already_running",
-            Ok(SteamEnsureResult::Started) => "started",
-            Ok(SteamEnsureResult::SkippedMissingDirectory) => "not_configured_fallback",
-            Err(err) => {
-                return Err(CommandError::operation(
-                    "game.launch",
-                    format!("Failed to prepare Steam before launch: {}", err),
-                ));
-            }
-        }
+        "not_required"
     };
-
-    let args: Vec<std::ffi::OsString> = command.args.iter().map(std::ffi::OsString::from).collect();
-    if steam_required && !crate::core::steam::is_steam_running(steam_directory) {
-        return Err(CommandError::operation(
-            "game.launch",
-            "Steam is not running",
-        ));
-    }
-    let pid = crate::core::utils::deelevate::spawn_unelevated(
-        command.program.as_os_str(),
-        &args,
-        command.cwd.as_deref(),
+    let handoff = crate::core::game::launch_preparation::dispatch_plan(
+        module,
+        settings,
+        plan,
+        approval,
+        |command| {
+            if steam_required {
+                steam_status = match ensure_steam_running(steam_directory)
+                    .map_err(|error| error.to_string())?
+                {
+                    SteamEnsureResult::AlreadyRunning => "already_running",
+                    SteamEnsureResult::Started => "started",
+                    SteamEnsureResult::SkippedMissingDirectory => "not_configured_fallback",
+                };
+                if !crate::core::steam::is_steam_running(steam_directory) {
+                    return Err("Steam is not running".to_string());
+                }
+            }
+            let args = command
+                .args
+                .iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>();
+            crate::core::utils::deelevate::spawn_unelevated(
+                command.program.as_os_str(),
+                &args,
+                command.cwd.as_deref(),
+            )
+            .map_err(|error| error.to_string())
+        },
     )
-    .map_err(|err| CommandError::operation("game.launch", format!("Failed to launch: {}", err)))?;
-    Ok(ExecutedGameLaunch {
-        pid,
-        steam_status,
-        extra_files,
+    .map_err(|failure| launch_failure_to_command_error("game.launch", failure))?;
+    Ok((handoff, steam_status))
+}
+
+fn launch_failure_to_command_error(action: &str, failure: LaunchFailure) -> CommandError {
+    match failure {
+        LaunchFailure::ExtraFiles(failures) => CommandError::validation(
+            action,
+            format!(
+                "Extra-file preparation failed ({} issue(s)); pass --allow-incomplete-preparation to continue: {}",
+                failures.len(),
+                failures.join("; ")
+            ),
+        ),
+        LaunchFailure::FrozenCopies(missing) => CommandError::validation(
+            action,
+            format!(
+                "Frozen Workshop copies are missing for: {}; pass --allow-live-fallback to use live Workshop content",
+                missing.join(", ")
+            ),
+        ),
+        LaunchFailure::Failed(error) | LaunchFailure::Recovery(error) => {
+            CommandError::operation(action, error)
+        }
+    }
+}
+
+fn activation_json(summary: &crate::core::game::extra_files::ActivationSummary) -> Value {
+    json!({
+        "activated": summary.activated.len(),
+        "failed": summary.failed.len(),
+        "skipped_disabled": summary.skipped_disabled
     })
 }
 

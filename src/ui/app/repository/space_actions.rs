@@ -25,7 +25,7 @@ pub(crate) struct QueuedRepositoryVisualFolderSync {
 
 fn repo_key(repo: &Repository) -> RepoInstanceKey {
     RepoInstanceKey {
-        remote_url: repo.address.clone(),
+        remote_url: Foxy::normalize_repo_url(&repo.address),
         local_path: repo.path.clone(),
     }
 }
@@ -305,21 +305,19 @@ impl Foxy {
             return 0;
         }
 
-        let target_repo_urls: HashSet<String> = self
+        let target_instances: Vec<RepoInstanceKey> = self
             .repository_space_sync_queue
             .iter()
             .filter(|queued| {
                 queued.space_id == space_id && queued.mode == Self::sync_mode_for_bulk_mode(mode)
             })
-            .filter_map(|queued| {
-                self.repository_view_state
-                    .repositories
-                    .iter()
-                    .find(|repo| queued_target_matches(repo, &queued.target))
-            })
-            .map(|repo| Self::normalize_repo_url(&repo.address))
+            .map(|queued| queued.target.clone())
             .collect();
-        let total_count = target_repo_urls.len();
+        let target_repo_urls = target_instances
+            .iter()
+            .map(|target| target.remote_url.clone())
+            .collect();
+        let total_count = target_instances.len();
         self.repository_space_bulk_progress = Some(crate::ui::types::RepositorySpaceBulkProgress {
             space_id: space_id.to_string(),
             mode,
@@ -332,6 +330,10 @@ impl Foxy {
             current_repo_name: None,
             target_repo_urls,
             completed_repo_urls: HashSet::new(),
+            pending_target: None,
+            active_target: None,
+            target_instances,
+            completed_instances: Vec::new(),
         });
         self.process_repository_space_sync_queue();
         queued
@@ -354,29 +356,33 @@ impl Foxy {
         finished_successfully: bool,
         had_updates: bool,
     ) {
-        let Some(repo_idx) = repo_idx else {
+        let active_target = self
+            .repository_space_bulk_progress
+            .as_ref()
+            .and_then(|progress| progress.active_target.clone());
+        let repo = repo_idx.and_then(|index| self.repository_view_state.repositories.get(index));
+        let Some(target) = active_target.clone().or_else(|| repo.map(repo_key)) else {
             return;
         };
-        let Some(repo) = self.repository_view_state.repositories.get(repo_idx) else {
-            return;
-        };
-        let repo_url = Self::normalize_repo_url(&repo.address);
-        let repo_space_id = repo.repository_space_id.clone();
-
         let completion_summary: Option<(RepositorySpaceBulkMode, usize, usize, usize, usize)> = {
             let Some(progress) = self.repository_space_bulk_progress.as_mut() else {
                 return;
             };
             // A same-URL copy outside the space is a different instance.
-            if repo_space_id.as_deref() != Some(progress.space_id.as_str()) {
+            if active_target.is_none()
+                && !repo.is_some_and(|repo| {
+                    repo.repository_space_id.as_deref() == Some(progress.space_id.as_str())
+                })
+            {
                 return;
             }
             if mode != Some(Self::sync_mode_for_bulk_mode(progress.mode)) {
                 return;
             }
-            if !progress.record(&repo_url, finished_successfully, had_updates) {
+            if !progress.record_target(&target, finished_successfully, had_updates) {
                 return;
             }
+            progress.active_target = None;
 
             if progress.is_finished() {
                 progress.current_repo_name = None;
@@ -426,6 +432,7 @@ impl Foxy {
 
     pub(in crate::ui::app) fn process_repository_space_sync_queue(&mut self) {
         if self.pending_download_retry.is_some()
+            || self.pending_link_target_sync.is_some()
             || self.database_updates_blocked()
             || self.repository_sync_active()
             || self.is_direct_download_running()
@@ -448,7 +455,6 @@ impl Foxy {
                 continue;
             };
             let repo = &self.repository_view_state.repositories[repo_idx];
-            let repo_url = Self::normalize_repo_url(&repo.address);
             if repo.repository_space_id.as_deref() != Some(space_id.as_str()) {
                 // Detached since it was queued: no longer part of the run.
                 if let Some(progress) = self
@@ -456,7 +462,7 @@ impl Foxy {
                     .as_mut()
                     .filter(|progress| progress.space_id == space_id)
                 {
-                    progress.remove_target(&repo_url);
+                    progress.remove_target_instance(&queued.target);
                 }
                 self.finish_repository_space_bulk_if_done();
                 continue;
@@ -476,14 +482,41 @@ impl Foxy {
             }
 
             let repo_name = repo.name.clone();
+            if let Some(progress) = self
+                .repository_space_bulk_progress
+                .as_mut()
+                .filter(|progress| progress.space_id == space_id)
+            {
+                progress.pending_target = Some(queued.target.clone());
+            }
             self.start_core_sync(repo_idx, mode);
             if self.syncing_repository == Some(repo_idx) {
                 self.sync_is_bulk = true;
+                if let Some(progress) = self.repository_space_bulk_progress.as_mut() {
+                    progress.pending_target = None;
+                    progress.active_target = Some(queued.target);
+                }
                 self.refresh_repository_space_bulk_current_repo();
                 info!(
                     "Started queued repository-space sync: {} mode={:?}",
                     repo_name, mode
                 );
+                break;
+            }
+            if self
+                .pending_link_target_sync
+                .as_ref()
+                .is_some_and(|pending| {
+                    queued_identity_matches(
+                        &pending.repo_address,
+                        &pending.repo_path,
+                        &queued.target,
+                    )
+                })
+            {
+                if let Some(progress) = self.repository_space_bulk_progress.as_mut() {
+                    progress.current_repo_name = Some(repo_name);
+                }
                 break;
             }
             // Refused to start (unwritable folder, pending purge): count it, or
@@ -496,13 +529,25 @@ impl Foxy {
         }
     }
 
+    pub(in crate::ui::app) fn settle_pending_repository_space_target(&mut self) {
+        let Some(progress) = self.repository_space_bulk_progress.as_mut() else {
+            return;
+        };
+        let Some(target) = progress.pending_target.take() else {
+            return;
+        };
+        let _ = progress.record_target(&target, false, false);
+        progress.current_repo_name = None;
+        self.finish_repository_space_bulk_if_done();
+    }
+
     fn skip_changed_repository_space_target(&mut self, space_id: &str, target: &RepoInstanceKey) {
         if let Some(progress) = self
             .repository_space_bulk_progress
             .as_mut()
             .filter(|progress| progress.space_id == space_id)
         {
-            progress.remove_target(&Self::normalize_repo_url(&target.remote_url));
+            progress.remove_target_instance(target);
         }
         self.show_error_toast(
             self.t("Queued repository skipped because its address or folder changed."),
@@ -529,13 +574,12 @@ impl Foxy {
         self.repository_visual_folder_sync_queue.clear();
         let dropped_space: Vec<_> = self.repository_space_sync_queue.drain(..).collect();
         for queued in &dropped_space {
-            let repo_url = Self::normalize_repo_url(&queued.target.remote_url);
             if let Some(progress) = self
                 .repository_space_bulk_progress
                 .as_mut()
                 .filter(|progress| progress.space_id == queued.space_id)
             {
-                progress.remove_target(&repo_url);
+                progress.remove_target_instance(&queued.target);
             }
         }
         self.finish_repository_space_bulk_if_done();

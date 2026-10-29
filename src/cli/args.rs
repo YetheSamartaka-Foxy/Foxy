@@ -1573,6 +1573,17 @@ pub struct GameCreateArgs {
 pub struct GameRemoveArgs {
     /// Game space id (see `foxy game list`).
     pub space_id: String,
+    #[arg(
+        long,
+        help = "Preserve private frozen mods and extra-file payloads before removal"
+    )]
+    pub preserve_payloads: bool,
+    #[arg(
+        long,
+        conflicts_with = "preserve_payloads",
+        help = "Explicitly discard private frozen mods and extra-file payloads"
+    )]
+    pub discard_payloads: bool,
 }
 
 #[derive(Args, Debug)]
@@ -1586,6 +1597,16 @@ pub struct GameLaunchArgs {
     pub include_disabled: bool,
     #[arg(long, help = "Optional TW:WH3 save name for continue-campaign launch")]
     pub save_name: Option<String>,
+    #[arg(
+        long,
+        help = "Allow this launch to continue if extra files cannot be applied"
+    )]
+    pub allow_incomplete_preparation: bool,
+    #[arg(
+        long,
+        help = "Allow this launch to use live Workshop files when a frozen copy is missing"
+    )]
+    pub allow_live_fallback: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1752,6 +1773,8 @@ pub enum WorkshopCommand {
     Import(WorkshopImportArgs),
     /// Remove one managed Steam Workshop item.
     Remove(WorkshopRemoveArgs),
+    /// Unsubscribe through Steam, optionally deleting its shared live copy.
+    Unsubscribe(WorkshopRemoveArgs),
     /// Enable or disable one managed Steam Workshop item.
     Set(WorkshopSetArgs),
     /// Freeze installed Workshop items into Foxy's managed snapshot store.
@@ -1867,13 +1890,16 @@ pub struct WorkshopDownloadArgs {
 pub struct WorkshopRemoveArgs {
     /// Steam Workshop item id or URL.
     pub item: String,
-    #[arg(long, help = "Delete Steam's content folder and Foxy's frozen copies")]
+    #[arg(
+        long,
+        help = "Delete private frozen copies on remove, or shared Steam content on unsubscribe"
+    )]
     pub delete_data: bool,
     #[arg(
         long,
         value_enum,
         default_value_t = WorkshopDownloadBackend::SteamHelper,
-        help = "Unsubscribe backend: steam-helper or none"
+        help = "Steam backend used only by unsubscribe: steam-helper or none"
     )]
     pub backend: WorkshopDownloadBackend,
     #[arg(long, default_value_t = 300, help = "Steam helper timeout in seconds")]
@@ -1884,7 +1910,7 @@ pub struct WorkshopRemoveArgs {
 pub struct WorkshopSetArgs {
     /// Steam Workshop item id or URL.
     pub item: String,
-    #[arg(long, help = "Target enabled state (true/false)")]
+    #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true", default_value_t = false, help = "Target enabled state (true/false)")]
     pub enabled: bool,
 }
 
@@ -1975,6 +2001,12 @@ pub struct WorkshopBundleInspectArgs {
 pub struct WorkshopBundleImportArgs {
     /// Bundle to import.
     pub input: PathBuf,
+    #[arg(
+        long,
+        value_enum,
+        help = "Merge incoming items or match the bundle's enabled selection"
+    )]
+    pub mode: Option<WorkshopBundleMode>,
     #[arg(long, help = "Record entries without restoring frozen payloads")]
     pub skip_payloads: bool,
     #[arg(
@@ -1990,6 +2022,12 @@ pub struct WorkshopBundleImportArgs {
 pub struct WorkshopResolveArgs {
     /// Steam Workshop item id or URL.
     pub item: String,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkshopBundleMode {
+    Merge,
+    Match,
 }
 
 #[derive(Subcommand, Debug)]
@@ -2094,6 +2132,11 @@ pub struct DirectDownloadArgs {
     pub unlimited: bool,
     #[arg(long, help = "Set speed limit in Mbps for this command")]
     pub limit_mbps: Option<u32>,
+    #[arg(
+        long,
+        help = "Approve replacing existing targets (also requires --yes)"
+    )]
+    pub overwrite: bool,
 }
 
 #[derive(Args, Debug)]
@@ -2107,4 +2150,58 @@ pub struct LaunchArgs {
         help = "Execute launch immediately (without this flag, command prints launch spec)"
     )]
     pub execute: bool,
+    #[arg(
+        long,
+        help = "Allow this launch to continue if extra files cannot be applied"
+    )]
+    pub allow_incomplete_preparation: bool,
+    #[arg(
+        long,
+        help = "Allow this launch to use live Workshop files when a frozen copy is missing"
+    )]
+    pub allow_live_fallback: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workshop_selection_accepts_explicit_boolean_and_legacy_flag_forms() {
+        for (arguments, expected) in [
+            (
+                vec!["foxy", "workshop", "set", "123456789", "--enabled", "false"],
+                false,
+            ),
+            (
+                vec!["foxy", "workshop", "set", "123456789", "--enabled", "true"],
+                true,
+            ),
+            (
+                vec!["foxy", "workshop", "set", "123456789", "--enabled"],
+                true,
+            ),
+            (vec!["foxy", "workshop", "set", "123456789"], false),
+        ] {
+            let parsed = CliArgs::try_parse_from(arguments).unwrap();
+            let Some(CliCommand::Workshop {
+                command: WorkshopCommand::Set(args),
+            }) = parsed.command
+            else {
+                panic!("unexpected command");
+            };
+            assert_eq!(args.enabled, expected);
+        }
+        assert!(
+            CliArgs::try_parse_from([
+                "foxy",
+                "workshop",
+                "set",
+                "123456789",
+                "--enabled",
+                "invalid"
+            ])
+            .is_err()
+        );
+    }
 }

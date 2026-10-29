@@ -274,6 +274,9 @@ impl GameModule for Arma3Module {
     fn steam_app_id(&self) -> Option<u32> {
         Some(107410)
     }
+    fn running_game_status(&self, _settings: &SettingsViewState) -> Option<bool> {
+        Some(crate::core::arma3_profiles::is_arma3_running())
+    }
 }
 
 pub fn build_launch_plan(

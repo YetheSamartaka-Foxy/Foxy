@@ -2,6 +2,7 @@ use super::{AppState, CommandError, CommandSuccess, progress_output_muted};
 use crate::cli::args::{CliArgs, DirectDownloadArgs};
 use crate::cli::exit_codes;
 use crate::core::utils::app_paths;
+use crate::core::utils::direct_replace::{DirectReplace, has_pending_recovery};
 use crate::ui::types::SettingsViewState;
 use reqwest::blocking::Client;
 use serde_json::{Value, json};
@@ -27,14 +28,6 @@ pub fn cmd_direct_download(
     let speed_limit_mbps = resolve_direct_download_speed_limit(&args, &state.settings)?;
     let destination = resolve_direct_download_destination(args.dest, &state.settings)?;
 
-    if !destination.exists() && !cli.dry_run {
-        fs::create_dir_all(&destination).map_err(|e| {
-            CommandError::operation(
-                "direct-download",
-                format!("Failed to create destination folder: {}", e),
-            )
-        })?;
-    }
     if destination.exists() && !destination.is_dir() {
         return Err(CommandError::validation(
             "direct-download",
@@ -53,7 +46,21 @@ pub fn cmd_direct_download(
     let plan = build_direct_download_plan(&client, &source_url, &destination).map_err(|e| {
         CommandError::operation("direct-download", format!("Failed to build plan: {}", e))
     })?;
+    let target_paths = plan
+        .files
+        .iter()
+        .map(|target| target.local_path.clone())
+        .collect::<Vec<_>>();
+    if let Some(message) = crate::ui::app::direct_download_managed_paths_problem(&target_paths) {
+        return Err(CommandError::validation("direct-download", message));
+    }
 
+    let mut collisions = Vec::new();
+    for target in &plan.files {
+        if target.local_path.exists() || has_pending_recovery(&target.local_path) {
+            collisions.push(target.local_path.clone());
+        }
+    }
     if cli.dry_run {
         return Ok(CommandSuccess {
             action: "direct-download".to_string(),
@@ -62,6 +69,7 @@ pub fn cmd_direct_download(
                 "source_url": source_url,
                 "destination": destination.display().to_string(),
                 "speed_limit_mbps": speed_limit_mbps,
+                "collisions": collisions,
                 "target_label": plan.target_label,
                 "files_total": plan.files.len(),
                 "total_bytes": plan.total_bytes,
@@ -71,9 +79,37 @@ pub fn cmd_direct_download(
         });
     }
 
+    if !collisions.is_empty() && (!args.overwrite || !cli.yes) {
+        return Err(CommandError::validation(
+            "direct-download",
+            format!(
+                "{} destination file(s) already exist; pass --overwrite and --yes to replace them",
+                collisions.len()
+            ),
+        ));
+    }
+    if let Some(message) = crate::ui::app::direct_download_managed_paths_problem(&target_paths) {
+        return Err(CommandError::validation("direct-download", message));
+    }
+
+    if !destination.exists() {
+        fs::create_dir_all(&destination).map_err(|e| {
+            CommandError::operation(
+                "direct-download",
+                format!("Failed to create destination folder: {e}"),
+            )
+        })?;
+    }
+
+    let approved_collisions: HashSet<_> = collisions.into_iter().collect();
     let started_at = Instant::now();
-    let summary =
-        run_direct_download(&client, &plan, speed_limit_mbps, progress_output_muted(cli))?;
+    let summary = run_direct_download(
+        &client,
+        &plan,
+        speed_limit_mbps,
+        progress_output_muted(cli),
+        &approved_collisions,
+    )?;
 
     Ok(CommandSuccess {
         action: "direct-download".to_string(),
@@ -152,6 +188,7 @@ fn run_direct_download(
     plan: &DirectDownloadPlan,
     speed_limit_mbps: Option<u32>,
     quiet: bool,
+    approved_collisions: &HashSet<PathBuf>,
 ) -> Result<Value, CommandError> {
     let started_at = Instant::now();
     let files_total = plan.files.len();
@@ -190,7 +227,18 @@ fn run_direct_download(
                 )
             })?;
 
-        let mut out = fs::File::create(&target.local_path).map_err(|e| {
+        let mut replacement = DirectReplace::acquire(&target.local_path)
+            .and_then(|mut replacement| {
+                replacement.recover()?;
+                Ok(replacement)
+            })
+            .map_err(|e| {
+                CommandError::operation(
+                    "direct-download",
+                    format!("Failed to recover destination: {}", e),
+                )
+            })?;
+        let (_staging_path, mut out) = replacement.create_staging_file().map_err(|e| {
             CommandError::operation(
                 "direct-download",
                 format!(
@@ -266,6 +314,35 @@ fn run_direct_download(
                 last_print = Instant::now();
             }
         }
+
+        out.flush().and_then(|()| out.sync_all()).map_err(|e| {
+            CommandError::operation(
+                "direct-download",
+                format!("Failed to sync staged file: {}", e),
+            )
+        })?;
+        drop(out);
+
+        if target.local_path.exists() && !approved_collisions.contains(&target.local_path) {
+            return Err(CommandError::validation(
+                "direct-download",
+                format!(
+                    "Destination file {} appeared during the download; existing files were kept",
+                    target.local_path.display()
+                ),
+            ));
+        }
+
+        replacement.promote().map_err(|e| {
+            CommandError::operation(
+                "direct-download",
+                format!(
+                    "Failed to promote downloaded file {}: {}",
+                    target.local_path.display(),
+                    e
+                ),
+            )
+        })?;
 
         files_done = files_done.saturating_add(1);
         if !quiet {

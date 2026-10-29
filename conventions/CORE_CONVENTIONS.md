@@ -69,7 +69,7 @@ younger than 30 days; replacing the database file loses it.
 
 \- A repository row is identified by the composite `(remote_url, local_path)`, not by URL alone (migration 21, `upsert_repository_entry` `on_conflict`). The same URL downloaded to two folders is two independent rows. `addons`/`files` are per-instance too: conflict-keyed on `(Name, RemotePath, LocalPath)`; `remote_files.rs` separates "matching remote paths but different local paths".
 
-\- Any DELETE/purge/wipe must be scoped by `local_path` unless it is intentionally URL-wide. `purge_repository_internal` takes `scope_local_path: Option<&str>`; `purge_repository_db_only_by_url_and_path` and `Foxy::wipe_repository_database_entries_by_url_and_path` exist for the scoped path. A `WHERE remote_url = ?` wipe will destroy a same-URL sibling in another folder (this caused real data loss). Only delete-repo uses URL-wide, and only when no other UI repo uses the URL; when another folder's copy keeps the URL, deleting a repository wipes only its own `(url, path)` rows, and when a clone still uses the same folder, nothing. Changing a folder in Repository Settings follows the same rule for the old folder's rows.
+\- DELETE, purge and wipe operations target `(remote_url, local_path)`. Use `purge_repository_by_url_and_path`, `purge_repository_db_only_by_url_and_path` and `Foxy::wipe_repository_database_entries_by_url_and_path`. A `WHERE remote_url = ?` wipe destroys independent same-URL installations. Deleting an entry keeps shared or physically overlapping files and removes only its own database rows; an independent folder may have its managed files removed after confirmation. Changing a folder in Repository Settings scopes the old folder's rows the same way.
 
 \- `pending_updates` is composite-keyed `(repository_url, local_path)`; read/write through `context.target_local_path`. Quick-scan expands each input URL to its DB instances (`load_repository_instance_paths`) and scans each with a path-scoped `FoxyContext`.
 
@@ -119,6 +119,10 @@ younger than 30 days; replacing the database file loses it.
 - Launching while an update owns files needed by that installation queues a cancellable launch for that exact instance. Recheck readiness after the update completes. An update failure never launches automatically. Work in unrelated folders does not block the launch.
 
 #### Accepted product contracts
+
+The [accepted lifecycle, ownership and launch contracts](BEHAVIOR_CONTRACTS.md)
+settle N01-N18. Use them as acceptance criteria in future gap reviews and target
+different tradeoffs instead of repeating their questions.
 
 The [accepted hash-check contracts](HASH_CHECK_CONTRACTS.md) add settled H1-H18
 for local/remote verification, failure evidence, managed files and periodic

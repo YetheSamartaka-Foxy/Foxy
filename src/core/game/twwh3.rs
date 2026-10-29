@@ -9,7 +9,7 @@ use crate::core::utils::fs_safety::resolve_child_dir_case_insensitive;
 use crate::ui::types::{Repository, RepositoryServer, SettingsViewState};
 
 use super::generic::{
-    GenericLaunchBuild, GenericRunScriptConfig, GenericRunScriptModule, ManifestEncoding,
+    GenericRunScriptConfig, GenericRunScriptModule, ManifestEncoding,
     ModsManifestConfig,
 };
 use super::{
@@ -68,12 +68,13 @@ impl TotalWarWarhammer3Module {
         GenericRunScriptModule::new(&TWWH3_CONFIG)
     }
 
+    #[cfg(test)]
     pub fn build_launch_with_manifest_mode(
         &self,
         plan: &LaunchPlan,
         ctx: &GameLaunchCtx,
         write_manifest: bool,
-    ) -> Result<GenericLaunchBuild, LaunchError> {
+    ) -> Result<super::generic::GenericLaunchBuild, LaunchError> {
         self.generic()
             .build_launch_with_manifest_mode(plan, ctx, write_manifest)
     }
@@ -110,6 +111,18 @@ impl GameModule for TotalWarWarhammer3Module {
 
     fn settings_schema(&self) -> GameSettingsSchema {
         self.generic().settings_schema()
+    }
+
+    fn build_launch_preview(
+        &self,
+        plan: &LaunchPlan,
+        ctx: &GameLaunchCtx,
+    ) -> Result<LaunchCommand, LaunchError> {
+        self.generic().build_launch_preview(plan, ctx)
+    }
+
+    fn launch_write_targets(&self, plan: &LaunchPlan, ctx: &GameLaunchCtx) -> Vec<PathBuf> {
+        self.generic().launch_write_targets(plan, ctx)
     }
 
     fn build_repository_launch_plan(

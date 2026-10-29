@@ -779,7 +779,7 @@ impl Foxy {
             steam_directory: &self.settings_view_state.steam_directory,
             settings: Some(&self.settings_view_state),
         };
-        let command = module.build_launch(&plan, &ctx).ok()?;
+        let command = module.build_launch_preview(&plan, &ctx).ok()?;
         Some(command.into_process_command())
     }
 
@@ -791,14 +791,26 @@ impl Foxy {
     }
 
     pub(crate) fn open_update_summary_for_repo(&mut self, repo_index: usize) -> bool {
-        let Some(normalized_url) = self.normalized_repo_url_for_index(repo_index) else {
+        let Some((normalized_url, repo_path)) = self
+            .repository_view_state
+            .repositories
+            .get(repo_index)
+            .map(|repo| (Self::normalize_repo_url(&repo.address), repo.path.clone()))
+        else {
             return false;
         };
         let Some(notice) = self
             .settings_view_state
             .update_summary_notices
             .iter()
-            .find(|notice| notice.repository_url == normalized_url)
+            .find(|notice| {
+                self.repository_record_matches_instance(
+                    &notice.repository_url,
+                    &notice.local_path,
+                    &normalized_url,
+                    &repo_path,
+                )
+            })
             .cloned()
         else {
             return false;
@@ -834,10 +846,25 @@ impl Foxy {
             .get(repo_index)
             .map(|repo| repo.path.clone())
             .unwrap_or_default();
+        let url_is_unique = self
+            .repository_view_state
+            .repositories
+            .iter()
+            .filter(|repo| Self::normalize_repo_url(&repo.address) == normalized_url)
+            .count()
+            == 1;
         let previous_len = self.settings_view_state.update_summary_notices.len();
         self.settings_view_state
             .update_summary_notices
-            .retain(|notice| notice.repository_url != normalized_url);
+            .retain(|notice| {
+                !Self::update_record_matches_instance(
+                    &notice.repository_url,
+                    &notice.local_path,
+                    &normalized_url,
+                    &repo_path,
+                    url_is_unique,
+                )
+            });
         if self.settings_view_state.update_summary_notices.len() != previous_len {
             self.save_settings();
         }
@@ -880,6 +907,21 @@ impl Foxy {
         let Some(summary) = self.download_summary.clone() else {
             return;
         };
+        let Some(repo_path) = self
+            .repository_view_state
+            .repositories
+            .get(repo_index)
+            .map(|repo| repo.path.clone())
+        else {
+            return;
+        };
+        let url_is_unique = self
+            .repository_view_state
+            .repositories
+            .iter()
+            .filter(|repo| Self::normalize_repo_url(&repo.address) == normalized_url)
+            .count()
+            == 1;
 
         // Do not persist a notice when the download completed with nothing
         // actually updated (e.g. after a DB wipe + recheck cycle).
@@ -911,8 +953,17 @@ impl Foxy {
             .settings_view_state
             .update_summary_notices
             .iter_mut()
-            .find(|notice| notice.repository_url == normalized_url)
+            .find(|notice| {
+                Self::update_record_matches_instance(
+                    &notice.repository_url,
+                    &notice.local_path,
+                    &normalized_url,
+                    &repo_path,
+                    url_is_unique,
+                )
+            })
         {
+            existing.local_path = repo_path.clone();
             existing.pending_ack_count = existing.pending_ack_count.saturating_add(1).max(1);
             existing.summary = summary;
             existing.mods = mods_snapshot;
@@ -921,6 +972,7 @@ impl Foxy {
                 .update_summary_notices
                 .push(UpdateSummaryNotice {
                     repository_url: normalized_url,
+                    local_path: repo_path,
                     pending_ack_count: 1,
                     summary,
                     mods: mods_snapshot,

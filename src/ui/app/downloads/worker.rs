@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -6,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::watch;
 
+use crate::core::utils::direct_replace::{DirectReplace, has_pending_recovery};
 use crate::core::utils::format::{sanitize_log_path, sanitize_log_url};
 use crate::ui::app::{DirectDownloadProgressEvent, Foxy};
 use crate::ui::i18n::{tr, tr_fmt};
@@ -82,6 +84,17 @@ impl Foxy {
 
         let files_total = plan.files.len();
         let total_bytes = plan.total_bytes;
+        if let Some(message) = super::planner::direct_download_managed_root_problem(&plan) {
+            let _ = send_progress(DirectDownloadProgressEvent::Finished {
+                error_message: Some(message),
+                files_done: 0,
+                files_total,
+                downloaded_bytes: 0,
+                total_bytes,
+                elapsed: started_at.elapsed(),
+            });
+            return;
+        }
         log::info!(
             "Direct download plan resolved: op={} target={} files={} bytes={}",
             operation_id,
@@ -130,12 +143,85 @@ impl Foxy {
             return;
         }
 
+        let mut collisions = Vec::new();
+        for target in &plan.files {
+            if target.local_path.exists() || has_pending_recovery(&target.local_path) {
+                collisions.push(target.local_path.clone());
+            }
+        }
+        let mut approved_collisions = HashSet::new();
+        let mut pause_rx = download_pause_rx;
+        if !collisions.is_empty() {
+            let approved_paths: HashSet<_> = collisions.iter().cloned().collect();
+            let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+            if !send_progress(DirectDownloadProgressEvent::CollisionApprovalRequested {
+                paths: collisions,
+                reply_tx,
+            }) {
+                return;
+            }
+            loop {
+                match reply_rx.recv_timeout(Duration::from_millis(200)) {
+                    Ok(true) => {
+                        approved_collisions = approved_paths;
+                        for target in &plan.files {
+                            if target.local_path.exists()
+                                && !approved_collisions.contains(&target.local_path)
+                            {
+                                let _ = send_progress(DirectDownloadProgressEvent::Finished {
+                                    error_message: Some(tr(
+                                        "A destination file appeared after approval. Review the plan and start again.",
+                                    )),
+                                    files_done: 0,
+                                    files_total,
+                                    downloaded_bytes: 0,
+                                    total_bytes,
+                                    elapsed: started_at.elapsed(),
+                                });
+                                return;
+                            }
+                        }
+                        break;
+                    }
+                    Ok(false) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        let _ = send_progress(DirectDownloadProgressEvent::Finished {
+                            error_message: Some(tr(
+                                "Replacement cancelled; existing files were kept",
+                            )),
+                            files_done: 0,
+                            files_total,
+                            downloaded_bytes: 0,
+                            total_bytes,
+                            elapsed: started_at.elapsed(),
+                        });
+                        return;
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        let _ = pause_rx.borrow_and_update();
+                        if pause_rx.has_changed().is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(message) = super::planner::direct_download_managed_root_problem(&plan) {
+            let _ = send_progress(DirectDownloadProgressEvent::Finished {
+                error_message: Some(message),
+                files_done: 0,
+                files_total,
+                downloaded_bytes: 0,
+                total_bytes,
+                elapsed: started_at.elapsed(),
+            });
+            return;
+        }
+
         let speed_limit_bps = speed_limit_mbps.map(|limit| (limit as f64 * 1_000_000.0) / 8.0);
         let mut downloaded_total = 0u64;
         let mut files_done = 0usize;
         let mut throttle_window_started_at = Instant::now();
         let mut throttle_window_bytes = 0u64;
-        let pause_rx = download_pause_rx;
 
         for target in &plan.files {
             if let Some(parent) = target.local_path.parent()
@@ -195,8 +281,29 @@ impl Foxy {
                 }
             };
 
-            let mut local_file = match fs::File::create(&target.local_path) {
-                Ok(file) => file,
+            let mut replacement =
+                match DirectReplace::acquire(&target.local_path).and_then(|mut replacement| {
+                    replacement.recover()?;
+                    Ok(replacement)
+                }) {
+                    Ok(replacement) => replacement,
+                    Err(err) => {
+                        let _ = send_progress(DirectDownloadProgressEvent::Finished {
+                            error_message: Some(tr_fmt(
+                                "Failed to recover destination: {error}",
+                                &[("error", err.to_string())],
+                            )),
+                            files_done,
+                            files_total,
+                            downloaded_bytes: downloaded_total,
+                            total_bytes,
+                            elapsed: started_at.elapsed(),
+                        });
+                        return;
+                    }
+                };
+            let (_staging_path, mut local_file) = match replacement.create_staging_file() {
+                Ok(staged) => staged,
                 Err(err) => {
                     let _ = send_progress(DirectDownloadProgressEvent::Finished {
                         error_message: Some(tr_fmt(
@@ -219,7 +326,14 @@ impl Foxy {
             let mut file_bytes_done = 0u64;
             let mut buffer = [0u8; 64 * 1024];
             loop {
-                while *pause_rx.borrow() {
+                loop {
+                    let paused = *pause_rx.borrow_and_update();
+                    if pause_rx.has_changed().is_err() {
+                        return;
+                    }
+                    if !paused {
+                        break;
+                    }
                     std::thread::sleep(Duration::from_millis(100));
                 }
 
@@ -296,14 +410,16 @@ impl Foxy {
                 } else {
                     (((files_done as f32) + file_percent) / files_total as f32).clamp(0.0, 1.0)
                 };
-                let _ = send_progress(DirectDownloadProgressEvent::Progress {
+                if !send_progress(DirectDownloadProgressEvent::Progress {
                     label: target.label.clone(),
                     percent: overall_percent,
                     files_done,
                     files_total,
                     downloaded_bytes: downloaded_total,
                     total_bytes,
-                });
+                }) {
+                    return;
+                }
             }
 
             // Flush and sync the file to disk to prevent data loss on power failure
@@ -341,6 +457,44 @@ impl Foxy {
                 });
                 return;
             }
+            drop(local_file);
+            let _ = pause_rx.borrow_and_update();
+            if pause_rx.has_changed().is_err() {
+                return;
+            }
+            if target.local_path.exists() {
+                let approved = approved_collisions.contains(&target.local_path);
+                if !approved {
+                    let _ = send_progress(DirectDownloadProgressEvent::Finished {
+                        error_message: Some(tr(
+                            "A destination file appeared during the download. The existing file was kept.",
+                        )),
+                        files_done,
+                        files_total,
+                        downloaded_bytes: downloaded_total,
+                        total_bytes,
+                        elapsed: started_at.elapsed(),
+                    });
+                    return;
+                }
+            }
+            if let Err(err) = replacement.promote() {
+                let _ = send_progress(DirectDownloadProgressEvent::Finished {
+                    error_message: Some(tr_fmt(
+                        "Failed to promote downloaded file {path}: {error}",
+                        &[
+                            ("path", target.local_path.display().to_string()),
+                            ("error", err.to_string()),
+                        ],
+                    )),
+                    files_done,
+                    files_total,
+                    downloaded_bytes: downloaded_total,
+                    total_bytes,
+                    elapsed: started_at.elapsed(),
+                });
+                return;
+            }
 
             files_done = files_done.saturating_add(1);
             let overall_percent = if total_bytes > 0 {
@@ -348,14 +502,16 @@ impl Foxy {
             } else {
                 (files_done as f32 / files_total as f32).clamp(0.0, 1.0)
             };
-            let _ = send_progress(DirectDownloadProgressEvent::Progress {
+            if !send_progress(DirectDownloadProgressEvent::Progress {
                 label: target.label.clone(),
                 percent: overall_percent,
                 files_done,
                 files_total,
                 downloaded_bytes: downloaded_total,
                 total_bytes,
-            });
+            }) {
+                return;
+            }
         }
 
         let _ = send_progress(DirectDownloadProgressEvent::Finished {

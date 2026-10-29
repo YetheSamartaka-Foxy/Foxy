@@ -128,6 +128,28 @@ pub fn run_from_env() -> CliExecution {
 
     crate::core::api::ensure_logger();
 
+    if command_uses_database(Some(&command), false) {
+        let preview = cli.dry_run
+            || matches!(&command, CliCommand::Launch(args) if !args.execute)
+            || matches!(&command, CliCommand::Game { command: args::GameCommand::Launch(args) } if !args.execute);
+        let space = crate::core::game::spaces::active_game_space_dir();
+        let result = if preview {
+            let has_import = space.join(".foxypack-import-recovery").join("pending.json").exists();
+            let has_launch = std::fs::read_dir(space.join("launch_preparation"))
+                .is_ok_and(|mut entries| entries.next().is_some());
+            if has_import || has_launch {
+                Err("Recovery is pending. Open Foxy or run a non-preview operation before previewing this setup.".to_string())
+            } else { Ok(()) }
+        } else {
+            crate::core::game::launch_preparation::recover(&space)
+                .and_then(|()| crate::core::game::foxypack::recover_pending_import(&space))
+        };
+        if let Err(message) = result {
+            emit_error(&output, CommandError { action: "configuration-recovery".to_string(), message, code: exit_codes::OPERATION_FAILED });
+            return CliExecution::Exit(exit_codes::OPERATION_FAILED);
+        }
+    }
+
     if !cli.dry_run
         && let Some(action) = update_action(&command)
     {

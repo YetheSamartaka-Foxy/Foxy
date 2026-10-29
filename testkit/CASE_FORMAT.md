@@ -129,7 +129,8 @@ Supported operations are `startup`, `ui-walk`, `switch-game-space`,
 `remote-refresh`, `quick-check`, `recheck`, `recheck-integrity`,
 `force-redownload`, `download`, `download-full-files`, `wipe-db`, `mutate`, `restore`,
 `evict-cache`, `origin-switch`, `seed-startup-state`,
-`acquire-test-file-lock`, `release-test-file-lock`, `write-file`,
+`acquire-test-file-lock`, `release-test-file-lock`, `write-file`, `cli-command`,
+`replace-test-file-with-directory`, `move-origin-addon-category`,
 `capture-origin-requests`, `assert-origin-requests-unchanged`,
 `assert-file-exists`, `assert-file-absent`, and
 `assert-pending-update-count`.
@@ -449,7 +450,9 @@ or for it to clear when `cleared:true`. `assert-space-bulk-target-count`,
 `wait-for-space-bulk-target-count`
 inspect the active bulk run's counts.
 `write-file` creates a new file with UTF-8 content under the run directory and
-fails if the path already exists. `capture-origin-requests` and
+fails if the path already exists. `overwrite_existing: true` explicitly replaces
+an existing regular run-local file for fault injection; it cannot create a missing
+target or replace a link. `capture-origin-requests` and
 `assert-origin-requests-unchanged` snapshot and compare the in-process origin's
 HTTP request count, which lets a local-check case prove it made no server
 request. These controls require a case origin and are not ledgered.
@@ -460,14 +463,60 @@ requested number of pending addon updates in the GUI driver's current view; an
 optional `maximum` makes the assertion an exact or bounded count, and optional
 `addons` requires named addons to appear in the pending update set.
 `acquire-test-file-lock` and `release-test-file-lock` are Windows-only state
-operations for deterministic unreadable-file cases. They hold an existing
-regular file under the run's synthetic repository open with sharing disabled,
-without writing bytes. The handle remains open across operations and closes on
-release or when the run exits. Both operations require the exact same path.
+operations for deterministic file-operation failures. By default they hold an
+existing regular file under the run's synthetic repository open with sharing
+disabled, without writing bytes. With `allow_read: true`, they permit read
+sharing while still blocking replacement and deletion; this mode is available
+only to CLI cases and only for files under that run's config directory or
+repository. GUI cases keep the exclusive default. The handle remains open
+across operations and closes on release or when the run exits. Both operations
+require the exact same path and `allow_read` value.
 The testkit-only shared-path intent refuses to run without
 `FOXY_TESTKIT_RUN_DIR`, when Foxy's config is outside that run, or when the new
 path resolves outside it. These operations are intended for synthetic recovery
 and queue cases, never for a live profile.
+
+`cli-command` runs one allowlisted config-pack/extra-file, profile, addon-query or offline Workshop CLI
+command as a separate Foxy process. The runner always supplies its run-local
+`--config-dir` and `--json`; case arguments cannot override either setting.
+Every file argument must be listed in `path_arguments`, whose indexes are
+validated against the command shape and must resolve under the current run
+directory. `expected_exit_code` checks the process result and `expect` checks
+dot-separated paths in Foxy's JSON envelope with exact `equals` values. The
+runner also writes `cli-scenario-<label>.json` under the run directory. Each
+invocation is a separate Foxy process, so later operations verify persisted
+state from a fresh process. `replace-test-file-with-directory` can replace
+only an existing regular file under the run directory with a directory, for
+synthetic late-write failures. Both are state operations and do not create
+ledger rows.
+
+The offline Workshop allowlist includes local removal and selection plus bundle
+export/import with `--backend none --skip-metadata`. Bundle paths remain run-local;
+Steam unsubscribe and online backends are rejected. The N03/N14 example checks
+selection after a fresh CLI process and verifies private and shared payload bytes.
+
+`move-origin-addon-category` changes one addon between the required and
+optional arrays in a synthetic Foxy-mode `foxy_addons.json`, recomputes the
+published BLAKE3 repository checksum, and updates the matching `repo.json`
+checksum. Its root must resolve under the run directory; pair it with
+`origin-switch` to refresh manifest timestamps before a remote refresh.
+
+For an N01 rollback case, a GUI download may combine
+`cancel_after_promoted_file: true` with
+`external_edit_after_promoted_file: "..."`. The runner waits for a managed
+file's promotion, overwrites that same file inside the run-local repository,
+then cancels the update. The operation summary records the relative path as
+`external_edit_after_promotion`; a following `assert-file-state` should verify
+the pre-update snapshot was restored.
+
+`state-n05-foxypack-atomic-import.example.json` combines these operations to
+export a run-local pack containing an extra-file payload and a Workshop item,
+then holds the existing Workshop store file open for reads while denying
+replacement and deletion. The import reaches the late Workshop write and
+leaves its recovery journal when rollback is blocked by the same handle. After
+release, a fresh CLI process recovers the journal; the case compares the exact
+old payload and Workshop store bytes, verifies the journal is gone, and checks
+the extra-file entry remains available.
 
 The ledger row also retains `delta_patch_stages`, the typed per-file planning,
 fetch, apply, promote, verify and finalize spans emitted during the operation.

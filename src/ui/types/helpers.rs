@@ -321,6 +321,156 @@ pub fn merge_remote_addon_list(
         .collect()
 }
 
+pub fn merge_remote_addon_categories(
+    repo: &mut Repository,
+    remote_required: Option<Vec<(String, bool)>>,
+    remote_optional: Option<Vec<(String, bool)>>,
+) -> Vec<String> {
+    let old_required = repo.addons.clone();
+    let old_optional = repo.optional_addons.clone();
+    let update_both_categories = remote_required.is_some() && remote_optional.is_some();
+    let required = remote_required.unwrap_or_else(|| old_required.clone());
+    let optional = remote_optional.unwrap_or_else(|| old_optional.clone());
+    let required_keys: HashSet<String> = required
+        .iter()
+        .map(|(name, _)| name.to_ascii_lowercase())
+        .collect();
+    let optional_keys: HashSet<String> = optional
+        .iter()
+        .map(|(name, _)| name.to_ascii_lowercase())
+        .collect();
+    let old_required_keys: HashSet<String> = old_required
+        .iter()
+        .map(|(name, _)| name.to_ascii_lowercase())
+        .collect();
+    let old_optional_keys: HashSet<String> = old_optional
+        .iter()
+        .map(|(name, _)| name.to_ascii_lowercase())
+        .collect();
+
+    let moved_to_required: HashSet<String> = if update_both_categories {
+        required_keys
+            .intersection(&old_optional_keys)
+            .cloned()
+            .collect()
+    } else {
+        HashSet::new()
+    };
+    let moved_to_optional: HashSet<String> = if update_both_categories {
+        optional_keys
+            .intersection(&old_required_keys)
+            .cloned()
+            .collect()
+    } else {
+        HashSet::new()
+    };
+
+    let previous_profile_values: Vec<(String, HashMap<String, bool>)> = repo
+        .profiles
+        .iter()
+        .map(|profile| {
+            let values = profile
+                .addons
+                .iter()
+                .chain(&profile.optional_addons)
+                .map(|(name, enabled)| (name.to_ascii_lowercase(), *enabled))
+                .collect();
+            (profile.name.clone(), values)
+        })
+        .collect();
+
+    repo.addons = merge_remote_addon_list(required.clone(), &old_required);
+    repo.optional_addons = merge_remote_addon_list(optional.clone(), &old_optional);
+
+    let required_profile_defaults: Vec<_> = required
+        .iter()
+        .map(|(name, published_default)| {
+            let key = name.to_ascii_lowercase();
+            let enabled = if moved_to_required.contains(&key) || old_required_keys.contains(&key) {
+                *published_default
+            } else {
+                true
+            };
+            (name.clone(), enabled)
+        })
+        .collect();
+    let optional_profile_defaults: Vec<_> = optional
+        .iter()
+        .map(|(name, published_default)| {
+            let key = name.to_ascii_lowercase();
+            let enabled = if moved_to_optional.contains(&key) || old_optional_keys.contains(&key) {
+                *published_default
+            } else {
+                false
+            };
+            (name.clone(), enabled)
+        })
+        .collect();
+
+    for profile in &mut repo.profiles {
+        let same_category_required: Vec<_> = profile
+            .addons
+            .iter()
+            .filter(|(name, _)| old_required_keys.contains(&name.to_ascii_lowercase()))
+            .cloned()
+            .collect();
+        let same_category_optional: Vec<_> = profile
+            .optional_addons
+            .iter()
+            .filter(|(name, _)| old_optional_keys.contains(&name.to_ascii_lowercase()))
+            .cloned()
+            .collect();
+        profile.addons =
+            merge_remote_addon_list(required_profile_defaults.clone(), &same_category_required);
+        profile.optional_addons =
+            merge_remote_addon_list(optional_profile_defaults.clone(), &same_category_optional);
+    }
+
+    let mut changed = Vec::new();
+    for (name, _) in required.iter().chain(&optional) {
+        let key = name.to_ascii_lowercase();
+        let moved = moved_to_required.contains(&key) || moved_to_optional.contains(&key);
+        if !moved {
+            continue;
+        }
+        let old_default = old_required
+            .iter()
+            .chain(&old_optional)
+            .find(|(old_name, _)| old_name.eq_ignore_ascii_case(name))
+            .map(|(_, enabled)| *enabled);
+        let new_default = repo
+            .addons
+            .iter()
+            .chain(&repo.optional_addons)
+            .find(|(new_name, _)| new_name.eq_ignore_ascii_case(name))
+            .map(|(_, enabled)| *enabled);
+        let profile_changed = previous_profile_values
+            .iter()
+            .any(|(profile_name, old_values)| {
+                let old_value = old_values.get(&key).copied();
+                let new_value = repo
+                    .profiles
+                    .iter()
+                    .find(|profile| &profile.name == profile_name)
+                    .and_then(|profile| {
+                        profile
+                            .addons
+                            .iter()
+                            .chain(&profile.optional_addons)
+                            .find(|(new_name, _)| new_name.eq_ignore_ascii_case(name))
+                            .map(|(_, enabled)| *enabled)
+                    });
+                old_value != new_value
+            });
+        if old_default != new_default || profile_changed {
+            changed.push(name.clone());
+        }
+    }
+    changed.sort_by_key(|name| name.to_ascii_lowercase());
+    changed.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    changed
+}
+
 pub fn sanitize_external_addons(addons: &mut Vec<(String, bool, String)>) {
     let mut merged: Vec<(String, bool, String)> = Vec::with_capacity(addons.len());
     let mut index_by_key: HashMap<(String, String), usize> = HashMap::new();

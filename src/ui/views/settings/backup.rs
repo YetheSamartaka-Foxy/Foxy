@@ -147,6 +147,14 @@ impl Foxy {
                         );
                     });
                 }
+                if self.backup_cleanup_in_flight
+                    && self.backup_manager_confirm_action.is_none()
+                {
+                    ui.horizontal(|ui| {
+                        ui.add_space(horizontal_padding);
+                        ui.add(crate::ui::app::PacedSpinner::new());
+                    });
+                }
                 ui.separator();
 
                 ui.horizontal(|ui| {
@@ -172,15 +180,14 @@ impl Foxy {
                         open_folder_path = Some(backup_root.clone());
                     }
 
-                    let cleanup_button = ui.button(tr("Run cleanup now"))
+                    let cleanup_button = ui.add_enabled(!self.backup_cleanup_in_flight, egui::Button::new(tr("Run cleanup now")))
                         .on_hover_text(tr("Apply the configured retention rules and delete old backups now."));
                     if cleanup_button.hovered() {
                         ui.ctx()
                             .output_mut(Foxy::set_pointing_cursor_output);
                     }
                     if cleanup_button.clicked() {
-                        self.backup_manager_confirm_action =
-                            Some(BackupManagerConfirmAction::RunCleanup);
+                        self.prepare_backup_manager_cleanup();
                     }
                 });
                 ui.separator();
@@ -319,7 +326,10 @@ impl Foxy {
                             );
 
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                let delete_all_button = ui.button(tr("Delete all backups"))
+                                let delete_all_button = ui.add_enabled(
+                                    !self.backup_cleanup_in_flight,
+                                    egui::Button::new(tr("Delete all backups")),
+                                )
                                     .on_hover_text(tr("Delete all stored backups for this addon."));
                                 if delete_all_button.hovered() {
                                     ui.ctx()
@@ -373,7 +383,10 @@ impl Foxy {
                                         });
 
                                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                            let delete_button = ui.button(tr("Delete backup"))
+                                            let delete_button = ui.add_enabled(
+                                                !self.backup_cleanup_in_flight,
+                                                egui::Button::new(tr("Delete backup")),
+                                            )
                                                 .on_hover_text(tr("Delete this specific backup."));
                                             if delete_button.hovered() {
                                                 ui.ctx().output_mut(|o| {
@@ -451,10 +464,37 @@ impl Foxy {
                 ),
                 tr("Delete all backups"),
             ),
-            BackupManagerConfirmAction::RunCleanup => (
+            BackupManagerConfirmAction::RunCleanup {
+                preview,
+                include_final_recovery_copies,
+            } => (
                 tr("Confirm backup cleanup"),
-                tr("Run backup cleanup using the configured retention rules?"),
-                tr("Run cleanup now"),
+                if *include_final_recovery_copies {
+                    self.i18n.tr_plural_fmt(
+                        "This will also delete {count} final recovery copies. This action removes the last backup copy for those origins.",
+                        preview.final_recovery_copies.len() as u64,
+                        &[],
+                    )
+                } else if preview.deletions.is_empty() && !preview.final_recovery_copies.is_empty()
+                {
+                    self.i18n.tr_plural_fmt(
+                        "Cleanup has no ordinary deletions. {count} final recovery copies require separate confirmation.",
+                        preview.final_recovery_copies.len() as u64,
+                        &[],
+                    )
+                } else if preview.deletions.is_empty() {
+                    tr("No backups match the configured cleanup rules.")
+                } else {
+                    self.t_fmt(
+                        "Cleanup will remove {count} backups using the configured retention rules.",
+                        &[("count", preview.deletions.len().to_string())],
+                    )
+                },
+                if *include_final_recovery_copies {
+                    tr("Delete final recovery copies")
+                } else {
+                    tr("Continue")
+                },
             ),
         };
 
@@ -469,30 +509,77 @@ impl Foxy {
             .show(ui.ctx(), |ui| {
                 ui.vertical_centered(|ui| {
                     ui.label(message);
+                    if self.backup_cleanup_in_flight {
+                        ui.add_space(8.0);
+                        ui.add(crate::ui::app::PacedSpinner::new());
+                    }
+                    if let BackupManagerConfirmAction::RunCleanup { preview, .. } = &action {
+                        ui.add_space(8.0);
+                        ui.label(tr("Backup folders in this cleanup preview:"));
+                        egui::ScrollArea::vertical()
+                            .max_height(160.0)
+                            .show(ui, |ui| {
+                                for record in &preview.deletions {
+                                    ui.label(record.folder_name.clone());
+                                }
+                                for record in &preview.final_recovery_copies {
+                                    ui.label(self.t_fmt(
+                                        "Final recovery copy: {name}",
+                                        &[("name", record.folder_name.clone())],
+                                    ));
+                                }
+                            });
+                    }
                     ui.add_space(20.0);
                     ui.horizontal(|ui| {
-                        let yes_btn = ui.button(yes_label);
+                        let yes_btn = ui.add_enabled(
+                            !self.backup_cleanup_in_flight,
+                            egui::Button::new(yes_label),
+                        );
                         if yes_btn.hovered() {
                             ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                         }
                         if yes_btn.clicked() {
-                            self.backup_manager_confirm_action = None;
+                            if let BackupManagerConfirmAction::RunCleanup {
+                                preview,
+                                include_final_recovery_copies: false,
+                            } = &action
+                                && !preview.final_recovery_copies.is_empty()
+                            {
+                                self.backup_manager_confirm_action =
+                                    Some(BackupManagerConfirmAction::RunCleanup {
+                                        preview: preview.clone(),
+                                        include_final_recovery_copies: true,
+                                    });
+                                return;
+                            }
                             match action {
                                 BackupManagerConfirmAction::DeleteBackup(record) => {
+                                    self.backup_manager_confirm_action = None;
                                     self.delete_backup_manager_record(&record);
                                 }
                                 BackupManagerConfirmAction::DeleteAddonGroup {
                                     addon_name, ..
                                 } => {
+                                    self.backup_manager_confirm_action = None;
                                     self.delete_backup_manager_addon_group(&addon_name);
                                 }
-                                BackupManagerConfirmAction::RunCleanup => {
-                                    self.run_backup_manager_cleanup();
+                                BackupManagerConfirmAction::RunCleanup {
+                                    preview,
+                                    include_final_recovery_copies,
+                                } => {
+                                    self.run_backup_manager_cleanup_with_final_copy(
+                                        &preview,
+                                        include_final_recovery_copies,
+                                    );
                                 }
                             }
                         }
 
-                        let cancel_btn = ui.button(tr("Cancel"));
+                        let cancel_btn = ui.add_enabled(
+                            !self.backup_cleanup_in_flight,
+                            egui::Button::new(tr("Cancel")),
+                        );
                         if cancel_btn.hovered() {
                             ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                         }

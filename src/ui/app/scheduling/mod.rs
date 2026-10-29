@@ -88,6 +88,9 @@ pub struct PendingPostAction {
     /// The countdown ended while other work was running; it restarts once the
     /// work finishes so closing or shutting down never interrupts a download.
     pub deferred_for_work: bool,
+    pub handoff_generation: u64,
+    pub gameplay_generation: u64,
+    pub requires_confirmation: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -142,14 +145,12 @@ fn now_unix_ms() -> u64 {
 /// warning and can be aborted with `shutdown /a`, giving a second independent
 /// cancel path on top of the in-app countdown.
 #[cfg(target_os = "windows")]
-fn initiate_pc_shutdown() {
-    match std::process::Command::new("shutdown")
+pub(crate) fn initiate_pc_shutdown() -> Result<(), String> {
+    std::process::Command::new("shutdown")
         .args(["/s", "/t", "30", "/c", "Foxy scheduled shutdown"])
         .spawn()
-    {
-        Ok(_) => info!("Issued Windows shutdown (30s grace); run 'shutdown /a' to abort"),
-        Err(err) => warn!("Failed to issue Windows shutdown: {}", err),
-    }
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 /// Local decision returned by a short-lived borrow of the active run, so the
@@ -835,6 +836,9 @@ impl Foxy {
             job_name: run.job_name,
             deadline: Instant::now() + Duration::from_secs(POST_ACTION_COUNTDOWN_SECS),
             deferred_for_work: false,
+            handoff_generation: self.launch_action.handoff_generation,
+            gameplay_generation: self.launch_action.gameplay_generation,
+            requires_confirmation: false,
         });
     }
 
@@ -866,12 +870,21 @@ impl Foxy {
     }
 
     fn process_scheduled_post_action(&mut self, ctx: &egui::Context) {
-        let work_running = self.pending_download_retry.is_some()
-            || self.repository_sync_active()
-            || self.is_direct_download_running();
+        let work_running = self.accepted_work_in_flight();
         let Some(pending) = self.scheduler_pending_post_action.as_mut() else {
             return;
         };
+        if pending.action == PostAction::ShutdownPc
+            && (pending.handoff_generation != self.launch_action.handoff_generation
+                || pending.gameplay_generation != self.launch_action.gameplay_generation)
+        {
+            pending.requires_confirmation = true;
+            pending.handoff_generation = self.launch_action.handoff_generation;
+            pending.gameplay_generation = self.launch_action.gameplay_generation;
+        }
+        if pending.requires_confirmation {
+            return;
+        }
         if work_running {
             if Instant::now() >= pending.deadline {
                 if !pending.deferred_for_work {
@@ -906,7 +919,7 @@ impl Foxy {
                 #[cfg(target_os = "windows")]
                 {
                     info!("Scheduled post-action: shutting down the PC");
-                    initiate_pc_shutdown();
+                    self.shutdown_after_close = true;
                     self.request_app_close(ctx, "scheduled job shutdown");
                 }
                 #[cfg(not(target_os = "windows"))]
@@ -932,9 +945,11 @@ impl Foxy {
 
     /// Run a pending post-action immediately, skipping the remaining countdown.
     pub fn proceed_scheduled_post_action_now(&mut self, ctx: &egui::Context) {
-        if let Some(pending) = self.scheduler_pending_post_action.take() {
-            self.execute_scheduled_post_action(pending.action, ctx);
+        if let Some(pending) = self.scheduler_pending_post_action.as_mut() {
+            pending.requires_confirmation = false;
+            pending.deadline = Instant::now();
         }
+        self.process_scheduled_post_action(ctx);
     }
 
     /// Centered modal countdown shown before a post-action runs. The main safety
@@ -946,6 +961,7 @@ impl Foxy {
             return;
         };
         let action = pending.action;
+        let requires_confirmation = pending.requires_confirmation;
         let job_name = pending.job_name.clone();
         let remaining = pending
             .deadline
@@ -985,7 +1001,12 @@ impl Foxy {
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .default_width(480.0)
             .show(ctx, |ui| {
-                ui.label(message);
+                if requires_confirmation {
+                    ui.label(self.t("A game started after shutdown was scheduled. Confirm again to shut down the PC."));
+                } else { ui.label(message); }
+                if action == PostAction::ShutdownPc && self.launch_action.game_running.is_none() {
+                    ui.label(self.t("Automatic game detection is unavailable here. Cancel shutdown if you start playing outside Foxy."));
+                }
                 ui.add_space(16.0);
                 ui.horizontal(|ui| {
                     let cancel_btn = ui.add(egui::Button::new(cancel_label));

@@ -860,6 +860,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancellation_restores_original_even_after_an_external_edit_of_promoted_bytes() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("addon.pbo");
+        let staged = dir.path().join("addon.pbo.foxy.part");
+        fs::write(&target, b"original").await.unwrap();
+        fs::write(&staged, b"updated").await.unwrap();
+        let mut session = UpdateRollbackSession::new(&dir.path().join("tmp"), "https://repo.example.invalid/")
+            .await.unwrap();
+        session.promote_file(7, &staged, &target).await.unwrap();
+        fs::write(&target, b"external edit during update").await.unwrap();
+        session.restore_all(None).await.unwrap();
+        assert_eq!(fs::read(target).await.unwrap(), b"original");
+        assert!(session.touched_file_ids().contains(&7));
+    }
+
+    #[tokio::test]
     async fn stale_cleanup_leaves_a_session_another_owner_still_holds() {
         let dir = tempdir().unwrap();
         let rollback_root = dir.path().join("tmp");

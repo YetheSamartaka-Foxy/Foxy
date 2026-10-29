@@ -5,6 +5,7 @@ pub mod foxypack;
 pub mod generic;
 pub mod generic_game;
 mod launch;
+pub(crate) mod launch_preparation;
 pub mod profile;
 pub mod reforger;
 mod registry;
@@ -160,6 +161,19 @@ pub trait GameModule: Send + Sync {
         plan: &LaunchPlan,
         ctx: &GameLaunchCtx,
     ) -> Result<LaunchCommand, LaunchError>;
+    fn build_launch_preview(
+        &self,
+        plan: &LaunchPlan,
+        ctx: &GameLaunchCtx,
+    ) -> Result<LaunchCommand, LaunchError> {
+        self.build_launch(plan, ctx)
+    }
+    fn launch_write_targets(&self, _plan: &LaunchPlan, _ctx: &GameLaunchCtx) -> Vec<PathBuf> {
+        Vec::new()
+    }
+    fn running_game_status(&self, _settings: &SettingsViewState) -> Option<bool> {
+        None
+    }
     fn settings_schema(&self) -> GameSettingsSchema;
 
     /// Container formats this game's repositories ship, as `foxy_formats`

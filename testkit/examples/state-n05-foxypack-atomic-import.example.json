@@ -1,0 +1,171 @@
+{
+  "id": "state-n05-foxypack-atomic-import-ssd",
+  "kind": "perf",
+  "description": "Force a late workshop-store write failure during config-pack import, then prove the prior game-space files survive and a fresh CLI process can continue.",
+  "build": "release",
+  "harness": "cli",
+  "timeout_s": 180,
+  "origin": {
+    "root": "${RUN_DIR}/origin",
+    "port": 18152,
+    "synthetic": [
+      {
+        "root": "${RUN_DIR}/origin",
+        "seed": 20261091,
+        "mods": 1,
+        "files_per_mod": 1,
+        "file_bytes": 4096,
+        "entry_bytes": 4096,
+        "repo_name": "RepoAlpha"
+      }
+    ]
+  },
+  "repository": {
+    "name": "RepoAlpha",
+    "address": "http://127.0.0.1:18152/",
+    "path": "${RUN_DIR}/repo-alpha",
+    "space_id": null
+  },
+  "operations": [
+    {
+      "op": "write-file",
+      "setup_once": true,
+      "path": "${RUN_DIR}/extra-source/payload.bin",
+      "content": "pack-payload"
+    },
+    {
+      "op": "cli-command",
+      "setup_once": true,
+      "label": "add-extra-file",
+      "args": [
+        "config", "extra-file", "add", "--name", "Config payload",
+        "--source", "${RUN_DIR}/extra-source/payload.bin",
+        "--destination", "${RUN_DIR}/game/payload.bin"
+      ],
+      "path_arguments": [6, 8],
+      "expected_exit_code": 0,
+      "expect": [
+        { "path": "ok", "equals": true },
+        { "path": "action", "equals": "config.extra-file.add" }
+      ]
+    },
+    {
+      "op": "cli-command",
+      "setup_once": true,
+      "label": "add-workshop-item",
+      "args": ["workshop", "add", "123456789", "--backend", "none", "--skip-metadata"],
+      "path_arguments": [],
+      "expected_exit_code": 0,
+      "expect": [
+        { "path": "ok", "equals": true },
+        { "path": "action", "equals": "workshop.add" }
+      ]
+    },
+    {
+      "op": "cli-command",
+      "setup_once": true,
+      "label": "export-pack",
+      "args": ["config", "export", "${RUN_DIR}/roundtrip.foxypack"],
+      "path_arguments": [2],
+      "expected_exit_code": 0,
+      "expect": [
+        { "path": "ok", "equals": true },
+        { "path": "data.extra_file_count", "equals": 1 },
+        { "path": "data.workshop_count", "equals": 1 }
+      ]
+    },
+    {
+      "op": "write-file",
+      "setup_once": true,
+      "path": "${RUN_DIR}/config/games/arma3/extra_files/config-payload/payload.bin",
+      "content": "previous-local-payload-different-from-pack",
+      "overwrite_existing": true
+    },
+    {
+      "op": "capture-file-state",
+      "setup_once": true,
+      "label": "payload-before-failed-import",
+      "path": "${RUN_DIR}/config/games/arma3/extra_files"
+    },
+    {
+      "op": "capture-file-state",
+      "setup_once": true,
+      "label": "workshop-target-before-failed-import",
+      "path": "${RUN_DIR}/config/games/arma3/workshop.json"
+    },
+    {
+      "op": "acquire-test-file-lock",
+      "setup_once": true,
+      "path": "${RUN_DIR}/config/games/arma3/workshop.json",
+      "allow_read": true
+    },
+    {
+      "op": "cli-command",
+      "setup_once": true,
+      "label": "late-import-failure",
+      "args": ["config", "import", "${RUN_DIR}/roundtrip.foxypack", "--yes"],
+      "path_arguments": [2],
+      "expected_exit_code": 4,
+      "expect": [
+        { "path": "ok", "equals": false },
+        { "path": "action", "equals": "config.import" },
+        { "path": "data", "equals": null }
+      ]
+    },
+    {
+      "op": "assert-file-exists",
+      "setup_once": true,
+      "path": "${RUN_DIR}/config/games/arma3/.foxypack-import-recovery/pending.json"
+    },
+    {
+      "op": "release-test-file-lock",
+      "setup_once": true,
+      "path": "${RUN_DIR}/config/games/arma3/workshop.json",
+      "allow_read": true
+    },
+    {
+      "op": "cli-command",
+      "setup_once": true,
+      "label": "recover-pending-import",
+      "args": ["config", "extra-file", "list"],
+      "path_arguments": [],
+      "expected_exit_code": 0,
+      "expect": [
+        { "path": "ok", "equals": true },
+        { "path": "data.entries.0.name", "equals": "Config payload" }
+      ]
+    },
+    {
+      "op": "assert-file-state",
+      "setup_once": true,
+      "label": "payload-before-failed-import",
+      "path": "${RUN_DIR}/config/games/arma3/extra_files",
+      "comparison": "equal"
+    },
+    {
+      "op": "assert-file-state",
+      "setup_once": true,
+      "label": "workshop-target-before-failed-import",
+      "path": "${RUN_DIR}/config/games/arma3/workshop.json",
+      "comparison": "equal"
+    },
+    {
+      "op": "assert-file-absent",
+      "setup_once": true,
+      "path": "${RUN_DIR}/config/games/arma3/.foxypack-import-recovery/pending.json"
+    },
+    {
+      "op": "remote-refresh",
+      "wait_timeout_s": 120
+    }
+  ],
+  "repetitions": 1,
+  "warmup": false,
+  "guards": {
+    "require_storage_class": "ssd",
+    "require_no_other_foxy": true,
+    "require_clean_worktree": false,
+    "fail_on_db_wipe": true,
+    "max_run_gb": 1
+  }
+}

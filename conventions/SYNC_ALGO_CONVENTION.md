@@ -19,6 +19,13 @@ The goal is simple:
 
 ## Source of Truth
 
+Bulk updates retain their exact pending repository instance through asynchronous
+linked-folder review; a deferred preview is not a failed start. Completion belongs
+to the captured active instance even if rows move. Write binding captures both the
+installation root and its repository-space shared root and still requires explicit
+approval for links below either root. Moving a queued member cannot retarget work
+already running under the previous roots.
+
 This convention owns the intended behavior for these current code areas:
 
 - `src/core/api/quick_scan/`
@@ -879,6 +886,10 @@ Failure exits:
   session records its state as a header manifest plus an append-only
   `journal.jsonl` (one line per registered, promoted, restored or committed
   entry); crash recovery replays the journal and ignores a torn last line.
+  Once a managed update claims its targets, it owns them until rollback or
+  commit settles. If another process edits a promoted target before rollback,
+  restore the pre-update version anyway; a restore error remains unresolved
+  recovery and cannot be reported as successful cancellation or readiness.
   Completed mods are also rolled back. A force-redownload retry may refetch
   their full payload so cancellation does not leave a partly updated repository.
 - Integrity recheck: the hash pass takes the cancel receiver and exits with

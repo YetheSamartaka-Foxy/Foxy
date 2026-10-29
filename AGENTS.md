@@ -44,6 +44,7 @@ Keep this file as the compact root router. Put detailed conventions in `conventi
 ---
 
 ## Load when needed
+- Product-intent gap reviews or questionnaires: `conventions/BEHAVIOR_CONTRACTS.md`, the Q contracts in `conventions/CORE_CONVENTIONS.md`, and `conventions/HASH_CHECK_CONTRACTS.md`. Treat settled choices as requirements; target new areas and failure boundaries instead of repeating their questions.
 - Rust implementation and compiler feedback: `skills/foxy-rust-change/SKILL.md`, then the domain conventions below.
 - Agent instructions, skill discovery, subagent roles, or their structural checker: `skills/foxy-agent-maintenance/SKILL.md` and `conventions/AGENT_WORKFLOWS.md`.
 - Specialized workflows are indexed by category in `skills/README.md`: diagnosis/reproduction, sync/database integrity, performance, desktop interaction, and platform/release work. Select the matching skill for its evidence and verification contract; keep the shared driver and testkit mechanics in their existing skills.

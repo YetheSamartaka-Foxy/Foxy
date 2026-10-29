@@ -304,15 +304,6 @@ pub fn upsert_imported_item(
     upsert_stored_item(space_dir, item, false)
 }
 
-/// Import an entry from a share bundle, which may legitimately arrive frozen
-/// because the bundle restored its snapshot into this space first.
-pub fn upsert_bundle_item(
-    space_dir: &Path,
-    item: SteamWorkshopItem,
-) -> Result<UpsertResult, String> {
-    upsert_stored_item(space_dir, item, true)
-}
-
 fn upsert_stored_item(
     space_dir: &Path,
     item: SteamWorkshopItem,
@@ -398,7 +389,7 @@ pub fn remove_item(
     space_dir: &Path,
     app_id: u32,
     item_id: &str,
-    steam_directory: &str,
+    _steam_directory: &str,
     delete_data: bool,
 ) -> Result<RemoveSummary, String> {
     let item_id = normalize_workshop_id(item_id)
@@ -409,32 +400,8 @@ pub fn remove_item(
         .cloned()
         .ok_or_else(|| format!("Steam Workshop item {} is not managed", item_id))?;
 
-    let mut deleted_content_path = None;
     let mut deleted_frozen_path = None;
     if delete_data {
-        if let Some(content_path) = resolve_installed_path(&item, steam_directory)
-            && content_path.exists()
-        {
-            // The stored installed_path can come from imports or stale data;
-            // only delete a folder that is provably this item's Steam Workshop
-            // content directory.
-            if !is_steam_workshop_item_dir(&content_path, app_id, &item_id) {
-                return Err(format!(
-                    "Refusing to delete {}: it is not a steamapps/workshop/content/{}/{} directory. Remove the folder manually if intended.",
-                    sanitize_log_path(&content_path),
-                    app_id,
-                    item_id
-                ));
-            }
-            fs::remove_dir_all(&content_path).map_err(|err| {
-                format!(
-                    "Failed to delete {}: {}",
-                    sanitize_log_path(&content_path),
-                    err
-                )
-            })?;
-            deleted_content_path = Some(content_path.display().to_string());
-        }
         let frozen_root = frozen_item_root(space_dir, &item_id);
         if frozen_root.exists() {
             fs::remove_dir_all(&frozen_root).map_err(|err| {
@@ -454,9 +421,48 @@ pub fn remove_item(
     save_store(space_dir, &store)?;
     Ok(RemoveSummary {
         item,
-        deleted_content_path,
+        deleted_content_path: None,
         deleted_frozen_path,
     })
+}
+
+pub fn delete_steam_content(
+    space_dir: &Path,
+    app_id: u32,
+    item_id: &str,
+    steam_directory: &str,
+) -> Result<Option<PathBuf>, String> {
+    let item_id = normalize_workshop_id(item_id)
+        .ok_or_else(|| format!("Invalid Steam Workshop item id {}", item_id))?;
+    let store = load_store(space_dir)?;
+    let item = store.entry(app_id, &item_id).ok_or_else(|| {
+        format!(
+            "Steam Workshop item {} is not managed in this game space",
+            item_id
+        )
+    })?;
+    let Some(content_path) = resolve_installed_path(item, steam_directory) else {
+        return Ok(None);
+    };
+    if !content_path.exists() {
+        return Ok(None);
+    }
+    if !is_steam_workshop_item_dir(&content_path, app_id, &item_id) {
+        return Err(format!(
+            "Refusing to delete {}: it is not a steamapps/workshop/content/{}/{} directory",
+            sanitize_log_path(&content_path),
+            app_id,
+            item_id
+        ));
+    }
+    fs::remove_dir_all(&content_path).map_err(|err| {
+        format!(
+            "Failed to delete {}: {}",
+            sanitize_log_path(&content_path),
+            err
+        )
+    })?;
+    Ok(Some(content_path))
 }
 
 pub fn freeze_item(
@@ -1373,7 +1379,7 @@ mod tests {
     }
 
     #[test]
-    fn remove_item_with_delete_data_refuses_non_workshop_installed_paths() {
+    fn remove_item_with_delete_data_preserves_steam_content() {
         let space = tempfile::tempdir().expect("space");
         let victim = tempfile::tempdir().expect("victim");
         fs::write(victim.path().join("keep.txt"), "data").expect("file");
@@ -1400,13 +1406,10 @@ mod tests {
         )
         .expect("upsert");
 
-        let err = remove_item(space.path(), 107410, "463939057", "", true)
-            .expect_err("deletion of a non-workshop path must be refused");
-
-        assert!(err.contains("Refusing to delete"));
+        remove_item(space.path(), 107410, "463939057", "", true).expect("remove registration");
         assert!(victim.path().join("keep.txt").is_file());
         let store = load_store(space.path()).expect("store");
-        assert_eq!(store.entries.len(), 1, "entry must remain managed");
+        assert!(store.entries.is_empty(), "registration is removed locally");
     }
 
     #[test]

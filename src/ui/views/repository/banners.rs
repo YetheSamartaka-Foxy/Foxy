@@ -543,7 +543,12 @@ impl Foxy {
                 .update_summary_notices
                 .iter()
                 .find(|notice| {
-                    notice.repository_url == normalized_repo_url
+                    self.repository_record_matches_instance(
+                        &notice.repository_url,
+                        &notice.local_path,
+                        &normalized_repo_url,
+                        &repo.path,
+                    )
                         && notice.summary.has_meaningful_content()
                 })
         {

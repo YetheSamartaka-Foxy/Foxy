@@ -46,8 +46,10 @@ use super::types::*;
 use agent_driver::AgentGuiRuntime;
 
 pub use downloads::UpdateModalDiskSpaceProbe;
+pub(crate) use downloads::direct_download_managed_paths_problem;
 pub use repository::game_space_overview::{RepositoryGroupSummary, TeamSpeakSummary};
 pub(crate) use runtime::DatabaseLaunchContinuation;
+pub(crate) use runtime::LaunchRequest;
 pub use scheduling::{HeldScheduledJob, PendingPostAction, ScheduledJobRun};
 pub use state::*;
 
@@ -387,6 +389,10 @@ pub struct Foxy {
     pub backup_manager_view_cache: Option<BackupManagerViewCache>,
     pub backup_manager_notice: Option<BackupManagerNotice>,
     pub backup_manager_confirm_action: Option<BackupManagerConfirmAction>,
+    backup_cleanup_task_rx: StdReceiver<BackupCleanupTaskResult>,
+    backup_cleanup_task_tx: StdSender<BackupCleanupTaskResult>,
+    pub backup_cleanup_worker: Option<std::thread::JoinHandle<()>>,
+    pub backup_cleanup_in_flight: bool,
     pub sync_started_at: Option<Instant>,
     pub frame_cost: crate::ui::app::runtime::frame_cost::FrameCostTotals,
     pub frame_cost_at_sync_start: Option<crate::ui::app::runtime::frame_cost::FrameCostTotals>,
@@ -398,6 +404,8 @@ pub struct Foxy {
     pub show_direct_download_screen: bool,
     pub direct_download_url_input: String,
     pub direct_download_destination_input: String,
+    pub(crate) pending_direct_download_collisions:
+        Option<(Vec<std::path::PathBuf>, std::sync::mpsc::Sender<bool>)>,
     pub direct_download_use_global_speed_limit: bool,
     pub direct_download_override_speed_unlimited: bool,
     pub direct_download_override_speed_limit_mbps: u32,
@@ -418,6 +426,11 @@ pub struct Foxy {
     /// A scan requested while one was already running; starts once that lands.
     pub ts3_plugin_scan_requeued: bool,
     pub(crate) prelaunch_process_checks: repository::prelaunch_checks::PrelaunchProcessChecks,
+    pub(crate) launch_action: runtime::LaunchActionState,
+    pub(crate) pending_installer_path: Option<std::path::PathBuf>,
+    pub(crate) pending_installer_error: Option<String>,
+    pub(crate) shutdown_after_close: bool,
+    pub(crate) configuration_recovery_error: Option<String>,
     // Core sync
     pub backend_progress_rx: Option<BroadcastReceiver<ProgressEvent>>,
     pub backend_worker: Option<std::thread::JoinHandle<()>>,

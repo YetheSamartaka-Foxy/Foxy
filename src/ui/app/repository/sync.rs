@@ -289,11 +289,12 @@ impl Foxy {
                     })
                     .unwrap_or_default();
                 let summary_source = self
-                    .active_update_session_mods_for_url(&normalized_repo_url)
+                    .active_update_session_mods_for_url(&normalized_repo_url, &repo.path)
                     .unwrap_or_else(|| current_pending_source.clone());
                 if !summary_source.is_empty() {
                     self.ensure_active_update_session_for_url(
                         &normalized_repo_url,
+                        &repo.path,
                         &summary_source,
                     );
                 }

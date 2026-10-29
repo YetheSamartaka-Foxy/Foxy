@@ -41,6 +41,10 @@ pub struct DirectDownloadPlan {
 
 #[derive(Debug)]
 pub enum DirectDownloadProgressEvent {
+    CollisionApprovalRequested {
+        paths: Vec<PathBuf>,
+        reply_tx: std::sync::mpsc::Sender<bool>,
+    },
     PlanResolved {
         target_label: String,
         files_total: usize,

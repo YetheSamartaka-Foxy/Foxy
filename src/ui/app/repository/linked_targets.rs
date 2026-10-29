@@ -13,12 +13,25 @@ impl Foxy {
     ) {
         let address = repo.address.clone();
         let path = sanitize_user_path(&repo.path);
+        let shared_root = repo.repository_space_id.as_deref().and_then(|space_id| {
+            self.repository_spaces
+                .iter()
+                .find(|space| space.id == space_id)
+                .map(|space| sanitize_user_path(&space.shared_path))
+                .filter(|shared| {
+                    !shared.trim().is_empty()
+                        && crate::core::utils::content_hash::normalize_path(shared)
+                            != crate::core::utils::content_hash::normalize_path(&path)
+                })
+        });
         self.pending_link_target_sync = Some(intent);
         self.pending_link_target_previews = None;
         let tx = self.link_target_preview_tx.clone();
         std::thread::spawn(move || {
             let result = crate::core::api::background_runtime()
-                .map(|runtime| runtime.block_on(api::preview_linked_targets(&path)))
+                .map(|runtime| {
+                    runtime.block_on(api::preview_linked_targets(&path, shared_root.as_deref()))
+                })
                 .unwrap_or_else(|| Err("Background runtime is unavailable".to_owned()));
             let _ = tx.send(LinkedTargetPreviewResult {
                 repo_address: address,
@@ -34,7 +47,9 @@ impl Foxy {
                 Ok(result) => result,
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    self.pending_link_target_sync = None;
+                    if let Some(intent) = self.pending_link_target_sync.take() {
+                        self.settle_linked_target_bulk(&intent, None);
+                    }
                     self.show_error_toast(
                         self.t("Linked-folder inspection stopped. Retry the update."),
                     );
@@ -66,7 +81,9 @@ impl Foxy {
                 }
                 Err(error) => {
                     warn!("Linked-folder inspection failed: {error}");
-                    self.pending_link_target_sync = None;
+                    if let Some(intent) = self.pending_link_target_sync.take() {
+                        self.settle_linked_target_bulk(&intent, None);
+                    }
                     self.pending_link_target_previews = None;
                     self.show_error_toast(error);
                 }
@@ -121,12 +138,14 @@ impl Foxy {
                 self.resume_linked_target_sync(intent);
             }
         } else if cancel || !open {
-            self.pending_link_target_sync = None;
+            if let Some(intent) = self.pending_link_target_sync.take() {
+                self.settle_linked_target_bulk(&intent, None);
+            }
             self.pending_link_target_previews = None;
         }
     }
 
-    fn resume_linked_target_sync(&mut self, intent: PendingLinkedTargetSync) {
+    fn resume_linked_target_sync(&mut self, mut intent: PendingLinkedTargetSync) {
         let Some(repo_index) = self
             .repository_view_state
             .repositories
@@ -140,19 +159,75 @@ impl Foxy {
         else {
             self.enrolled_link_targets.clear();
             self.link_target_preview_bypass_once = false;
+            self.settle_linked_target_bulk(&intent, None);
             self.show_error_toast(self.t("The repository changed before the update could start."));
             return;
         };
+        let bulk_target_matches = self
+            .repository_space_bulk_progress
+            .as_ref()
+            .and_then(|progress| progress.pending_target.as_ref())
+            .is_some_and(|target| {
+                Self::normalize_repo_url(&target.remote_url)
+                    == Self::normalize_repo_url(&intent.repo_address)
+                    && Self::repo_instance_path_key(&target.local_path)
+                        == Self::repo_instance_path_key(&intent.repo_path)
+            });
+        if bulk_target_matches
+            && self
+                .repository_space_bulk_progress
+                .as_ref()
+                .is_some_and(|progress| {
+                    self.repository_view_state.repositories[repo_index]
+                        .repository_space_id
+                        .as_deref()
+                        != Some(progress.space_id.as_str())
+                })
+        {
+            self.settle_linked_target_bulk(&intent, None);
+            self.show_error_toast(self.t("The repository changed before the update could start."));
+            return;
+        }
         self.start_core_sync_internal(
             repo_index,
             intent.mode,
-            intent.selected_mod_states,
+            intent.selected_mod_states.take(),
             intent.force_redownload,
             intent.prepare_download_plan,
             intent.force_full_downloads,
         );
+        self.settle_linked_target_bulk(&intent, Some(repo_index));
         self.link_target_preview_bypass_once = false;
         self.enrolled_link_targets.clear();
+    }
+
+    fn settle_linked_target_bulk(
+        &mut self,
+        intent: &PendingLinkedTargetSync,
+        started_repo_index: Option<usize>,
+    ) {
+        let target_matches = self
+            .repository_space_bulk_progress
+            .as_ref()
+            .and_then(|progress| progress.pending_target.as_ref())
+            .is_some_and(|target| {
+                Self::normalize_repo_url(&target.remote_url)
+                    == Self::normalize_repo_url(&intent.repo_address)
+                    && Self::repo_instance_path_key(&target.local_path)
+                        == Self::repo_instance_path_key(&intent.repo_path)
+            });
+        if !target_matches {
+            return;
+        }
+        if started_repo_index.is_some_and(|index| self.syncing_repository == Some(index)) {
+            if let Some(progress) = self.repository_space_bulk_progress.as_mut() {
+                progress.active_target = progress.pending_target.take();
+            }
+            self.sync_is_bulk = true;
+            self.refresh_repository_space_bulk_current_repo();
+        } else {
+            self.settle_pending_repository_space_target();
+        }
     }
 
     pub(crate) fn maybe_start_linked_target_preview(

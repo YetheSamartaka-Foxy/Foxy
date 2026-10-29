@@ -310,9 +310,33 @@ pub(crate) fn linked_targets(root: &Path) -> std::io::Result<Vec<(PathBuf, PathB
     Ok(links)
 }
 
-pub async fn preview_linked_targets(root: &str) -> Result<Vec<LinkedTargetPreview>, String> {
-    let root = PathBuf::from(root);
-    let links = tokio::task::spawn_blocking(move || linked_targets(&root))
+fn owned_write_roots(root: &str, shared_root: Option<&str>) -> Vec<PathBuf> {
+    let mut roots = vec![PathBuf::from(root)];
+    if let Some(shared) = shared_root.filter(|shared| !shared.trim().is_empty())
+        && crate::core::utils::content_hash::normalize_path(shared)
+            != crate::core::utils::content_hash::normalize_path(root)
+    {
+        roots.push(PathBuf::from(shared));
+    }
+    roots
+}
+
+fn linked_targets_for_roots(roots: &[PathBuf]) -> std::io::Result<Vec<(PathBuf, PathBuf)>> {
+    let mut links = Vec::new();
+    for root in roots {
+        links.extend(linked_targets(root)?);
+    }
+    links.sort();
+    links.dedup();
+    Ok(links)
+}
+
+pub async fn preview_linked_targets(
+    root: &str,
+    shared_root: Option<&str>,
+) -> Result<Vec<LinkedTargetPreview>, String> {
+    let roots = owned_write_roots(root, shared_root);
+    let links = tokio::task::spawn_blocking(move || linked_targets_for_roots(&roots))
         .await
         .map_err(|_| "Linked-folder inspection stopped".to_owned())?
         .map_err(|_| {
@@ -370,10 +394,12 @@ pub async fn preview_linked_targets(root: &str) -> Result<Vec<LinkedTargetPrevie
 
 pub(crate) async fn bind_write_targets(
     root: &str,
+    shared_root: Option<&str>,
     enrolled: &[LinkedTargetPreview],
 ) -> Result<Arc<crate::core::tasks::download_files::PinnedDownloadTargets>, String> {
-    let root_path = PathBuf::from(root);
-    let links = tokio::task::spawn_blocking(move || linked_targets(&root_path))
+    let roots = owned_write_roots(root, shared_root);
+    let inspect_roots = roots.clone();
+    let links = tokio::task::spawn_blocking(move || linked_targets_for_roots(&inspect_roots))
         .await
         .map_err(|_| "Linked-folder inspection stopped".to_owned())?
         .map_err(|_| {
@@ -394,10 +420,7 @@ pub(crate) async fn bind_write_targets(
         return Err("Linked folders require explicit target approval before updating. Review the linked destinations and retry.".into());
     }
     Ok(Arc::new(
-        crate::core::tasks::download_files::PinnedDownloadTargets::from_links(
-            PathBuf::from(root),
-            links,
-        )?,
+        crate::core::tasks::download_files::PinnedDownloadTargets::from_roots(roots, links)?,
     ))
 }
 
@@ -449,6 +472,70 @@ pub(super) async fn claim_addon_writes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn binds_both_captured_roots_without_authorizing_other_destinations() {
+        let temp = tempfile::tempdir().unwrap();
+        let primary = temp.path().join("primary");
+        let shared = temp.path().join("shared");
+        let primary = primary.to_string_lossy().into_owned();
+        let shared = shared.to_string_lossy().into_owned();
+        let bound = bind_write_targets(&primary, Some(&shared), &[])
+            .await
+            .unwrap();
+        assert!(
+            bound
+                .resolve(&PathBuf::from(&primary).join("@mod_01/file.bin"))
+                .is_ok()
+        );
+        assert!(
+            bound
+                .resolve(&PathBuf::from(&shared).join("@mod_01/file.bin"))
+                .is_ok()
+        );
+        assert!(
+            bound
+                .resolve(&temp.path().join("another/file.bin"))
+                .is_err()
+        );
+        assert_eq!(owned_write_roots(&primary, Some(&primary)).len(), 1);
+        assert_eq!(owned_write_roots(&primary, Some(" ")).len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shared_root_links_are_included_in_explicit_enrollment() {
+        let primary = tempfile::tempdir().unwrap();
+        let shared = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let link = shared.path().join("@mod_01");
+        std::os::unix::fs::symlink(target.path(), &link).unwrap();
+        let primary = primary.path().to_string_lossy().into_owned();
+        let shared = shared.path().to_string_lossy().into_owned();
+        assert!(
+            bind_write_targets(&primary, Some(&shared), &[])
+                .await
+                .is_err()
+        );
+        let approved = vec![LinkedTargetPreview {
+            link_path: link.to_string_lossy().into_owned(),
+            target_path: target
+                .path()
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            affected_repositories: Vec::new(),
+        }];
+        let bound = bind_write_targets(&primary, Some(&shared), &approved)
+            .await
+            .unwrap();
+        assert!(bound.validate_current().is_ok());
+        assert_eq!(
+            bound.resolve(&link.join("file.bin")).unwrap(),
+            target.path().join("file.bin")
+        );
+    }
 
     #[test]
     fn ordinary_install_has_no_link_enrollment() {

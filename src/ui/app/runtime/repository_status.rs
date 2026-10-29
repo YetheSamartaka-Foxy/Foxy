@@ -219,7 +219,7 @@ impl Foxy {
                     runtime.block_on(async {
                         let files =
                             api::preview_retained_empty_files(&repo_url, &local_path).await?;
-                        let linked_targets = api::preview_linked_targets(&local_path).await?;
+                        let linked_targets = api::preview_linked_targets(&local_path, None).await?;
                         Ok((files, linked_targets))
                     })
                 })

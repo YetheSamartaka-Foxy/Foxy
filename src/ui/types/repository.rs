@@ -387,6 +387,8 @@ impl DownloadSummary {
 pub struct UpdateSummaryNotice {
     pub repository_url: String,
     #[serde(default)]
+    pub local_path: String,
+    #[serde(default)]
     pub pending_ack_count: u32,
     pub summary: DownloadSummary,
     // Snapshot of the per-mod diff at the time the download completed, so the
@@ -400,6 +402,8 @@ pub struct UpdateSummaryNotice {
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct ActiveUpdateSession {
     pub repository_url: String,
+    #[serde(default)]
+    pub local_path: String,
     pub session_id: String,
     pub mods: Vec<ModDiffSummary>,
 }

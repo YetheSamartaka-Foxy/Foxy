@@ -178,6 +178,10 @@ launch-only fallback IDs. Pending UI lookups are cleared on a game-space switch.
 
 ## Runtime space switching
 
+The [accepted behavior contracts](BEHAVIOR_CONTRACTS.md) define backup provenance,
+private-payload preservation, Workshop removal/bundle selection and launch
+preparation ownership. These choices are settled for future gap reviews.
+
 Switching happens in-process (`src/ui/app/runtime/game_space_switch.rs`):
 
 1. Refuse while mutating background work runs or debug mode shadows state;

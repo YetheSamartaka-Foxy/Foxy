@@ -4,6 +4,7 @@ pub mod content_hash;
 pub mod cpu_governor;
 pub mod cpu_threads;
 pub mod deelevate;
+pub mod direct_replace;
 pub mod disk_space;
 pub mod fetch_json;
 pub mod file_io;

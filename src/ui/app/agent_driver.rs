@@ -3074,6 +3074,9 @@ impl Foxy {
         push(self.startup_sync_in_progress(), "startup-sync");
         push(self.quick_scan_worker.is_some(), "quick-scan");
         push(self.direct_download_worker.is_some(), "direct-download");
+        push(self.launch_action.is_busy(), "launch-preparation");
+        push(self.game_space_removal_in_flight(), "game-space-removal");
+        push(self.pending_installer_path.is_some(), "installer-queued");
         push(
             self.repository_space_import_in_flight,
             "repository-space-import",
@@ -3754,6 +3757,26 @@ impl Foxy {
             }
         };
         push(self.update_modal_open, "update");
+        push(self.launch_action.is_busy(), "launch-preparation");
+        push(
+            self.launch_action.awaits_consent(),
+            "launch-preparation-consent",
+        );
+        push(
+            self.configuration_recovery_error.is_some(),
+            "configuration-recovery",
+        );
+        push(
+            self.pending_direct_download_collisions.is_some(),
+            "direct-download-replacement",
+        );
+        push(self.pending_installer_path.is_some(), "installer-queued");
+        push(
+            self.addon_backup_restore_state
+                .as_ref()
+                .is_some_and(|dialog| dialog.pending_origin_confirmation.is_some()),
+            "backup-origin-confirmation",
+        );
         push(
             self.show_unreadable_config_replacement,
             "unreadable-config-replacement",

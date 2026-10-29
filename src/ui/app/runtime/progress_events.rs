@@ -88,6 +88,15 @@ impl Foxy {
                             );
                             let summary_notice_count =
                                 self.settings_view_state.update_summary_notices.len();
+                            let url_is_unique = self
+                                .repository_view_state
+                                .repositories
+                                .iter()
+                                .filter(|repo| {
+                                    Self::normalize_repo_url(&repo.address) == result.repository_url
+                                })
+                                .count()
+                                == 1;
                             self.repo_db_reset_pending_recheck
                                 .insert(result.repository_url.clone());
                             // The diff and progress history belong to whichever
@@ -102,6 +111,8 @@ impl Foxy {
                                     |repo| {
                                         Self::normalize_repo_url(&repo.address)
                                             == result.repository_url
+                                            && Self::repo_instance_path_key(&repo.path)
+                                                == Self::repo_instance_path_key(&result.local_path)
                                     },
                                 )
                             });
@@ -126,7 +137,19 @@ impl Foxy {
                             );
                             self.settings_view_state
                                 .update_summary_notices
-                                .retain(|notice| notice.repository_url != result.repository_url);
+                                .retain(|notice| {
+                                    !Self::update_record_matches_instance(
+                                        &notice.repository_url,
+                                        &notice.local_path,
+                                        &result.repository_url,
+                                        &result.local_path,
+                                        url_is_unique,
+                                    )
+                                });
+                            self.clear_active_update_session_for_url(
+                                &result.repository_url,
+                                &result.local_path,
+                            );
                             if self.settings_view_state.update_summary_notices.len()
                                 != summary_notice_count
                             {
@@ -1072,7 +1095,7 @@ impl Foxy {
                             {
                                 let normalized_url = Self::normalize_repo_url(&repo_address);
                                 self.repo_db_reset_pending_recheck.remove(&normalized_url);
-                                self.clear_active_update_session_for_url(&repo_address);
+                                self.clear_active_update_session_for_url(&repo_address, &repo_path);
                                 self.clear_pending_update_cache_for_url(&repo_address, &repo_path);
                                 // The download fully synced this repository, so a
                                 // queued startup recheck is redundant - and running

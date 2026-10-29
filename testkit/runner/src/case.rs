@@ -114,6 +114,16 @@ pub fn validate(case: &Value) -> Result<()> {
                     "Promotion waits and pause_after_s require GUI download operations"
                 );
             }
+            if !operation["external_edit_after_promoted_file"].is_null() {
+                ensure!(
+                    operation["external_edit_after_promoted_file"].is_string(),
+                    "external_edit_after_promoted_file must be a string"
+                );
+                ensure!(
+                    operation["cancel_after_promoted_file"].as_bool() == Some(true),
+                    "external_edit_after_promoted_file requires cancel_after_promoted_file"
+                );
+            }
             if !operation["cancel_after_hash_progress"].is_null() {
                 let threshold = operation["cancel_after_hash_progress"]
                     .as_f64()
@@ -130,22 +140,15 @@ pub fn validate(case: &Value) -> Result<()> {
             if matches!(
                 operation["op"].as_str(),
                 Some(
-                    "capture-file-state"
-                        | "assert-file-state"
-                        | "assert-download-paused"
+                    "assert-download-paused"
                         | "assert-repository-paused"
                         | "assert-space-bulk-target-count"
                         | "assert-space-bulk-completed-count"
                         | "assert-space-bulk-failed-count"
                         | "wait-for-space-bulk-target-count"
                         | "prepare-test-directory"
-                        | "acquire-test-file-lock"
-                        | "release-test-file-lock"
-                        | "write-file"
                         | "capture-origin-requests"
                         | "assert-origin-requests-unchanged"
-                        | "assert-file-exists"
-                        | "assert-file-absent"
                         | "assert-pending-update-count"
                         | "invoke-driver"
                         | "wait-for-busy"
@@ -155,17 +158,173 @@ pub fn validate(case: &Value) -> Result<()> {
             }
             if matches!(
                 operation["op"].as_str(),
+                Some("capture-file-state" | "assert-file-state")
+            ) {
+                ensure!(
+                    operation["label"].is_string(),
+                    "File-state operations require a label"
+                );
+            }
+            if operation["op"].as_str() == Some("cli-command") {
+                ensure!(harness == "cli", "cli-command requires the cli harness");
+                let args = operation["args"]
+                    .as_array()
+                    .context("cli-command requires an args array")?;
+                ensure!(!args.is_empty(), "cli-command args cannot be empty");
+                let args = args
+                    .iter()
+                    .map(|value| value.as_str().context("cli-command args must be strings"))
+                    .collect::<Result<Vec<_>>>()?;
+                ensure!(
+                    matches!(
+                        args.as_slice(),
+                        ["config", "export", _]
+                            | ["config", "import", _, "--yes"]
+                            | ["config", "extra-file", "list"]
+                            | [
+                                "config",
+                                "extra-file",
+                                "add",
+                                "--name",
+                                _,
+                                "--source",
+                                _,
+                                "--destination",
+                                _
+                            ]
+                            | ["workshop", "list"]
+                            | ["workshop", "add", _, "--backend", "none", "--skip-metadata"]
+                            | ["workshop", "set", _, "--enabled", "true" | "false"]
+                            | ["workshop", "remove", _, "--delete-data", "--yes"]
+                            | ["workshop", "bundle", "export", _, "--no-payloads"]
+                            | [
+                                "workshop",
+                                "bundle",
+                                "import",
+                                _,
+                                "--mode",
+                                "merge" | "match",
+                                "--skip-payloads",
+                                "--backend",
+                                "none",
+                                "--skip-metadata",
+                                "--yes"
+                            ]
+                            | ["profile", "add", "--repo-name", _, "--profile", _]
+                            | ["profile", "select", "--repo-name", _, "--profile", _]
+                            | ["addon", "list", "--repo-name", _]
+                    ),
+                    "cli-command supports only isolated config, profile, addon-query and offline Workshop commands"
+                );
+                ensure!(
+                    operation["expected_exit_code"]
+                        .as_u64()
+                        .is_some_and(|code| code <= 255),
+                    "cli-command requires expected_exit_code between 0 and 255"
+                );
+                ensure!(
+                    operation["path_arguments"].as_array().is_some(),
+                    "cli-command requires path_arguments"
+                );
+                let path_arguments = operation["path_arguments"].as_array().unwrap();
+                let expected_path_arguments: &[u64] = match args.as_slice() {
+                    ["config", "export", _] | ["config", "import", _, "--yes"] => &[2],
+                    ["workshop", "bundle", "export", _, "--no-payloads"]
+                    | [
+                        "workshop",
+                        "bundle",
+                        "import",
+                        _,
+                        "--mode",
+                        _,
+                        "--skip-payloads",
+                        "--backend",
+                        "none",
+                        "--skip-metadata",
+                        "--yes",
+                    ] => &[3],
+                    [
+                        "config",
+                        "extra-file",
+                        "add",
+                        "--name",
+                        _,
+                        "--source",
+                        _,
+                        "--destination",
+                        _,
+                    ] => &[6, 8],
+                    ["config", "extra-file", "list"] | ["workshop", "list"] => &[],
+                    ["workshop", "add", _, "--backend", "none", "--skip-metadata"]
+                    | ["workshop", "set", _, "--enabled", _]
+                    | ["workshop", "remove", _, "--delete-data", "--yes"]
+                    | ["profile", "add", "--repo-name", _, "--profile", _]
+                    | ["profile", "select", "--repo-name", _, "--profile", _]
+                    | ["addon", "list", "--repo-name", _] => &[],
+                    _ => unreachable!(),
+                };
+                ensure!(
+                    path_arguments
+                        .iter()
+                        .map(|value| value.as_u64())
+                        .collect::<Option<Vec<_>>>()
+                        .as_deref()
+                        == Some(expected_path_arguments),
+                    "cli-command path_arguments must identify each file argument exactly"
+                );
+                ensure!(
+                    operation["expect"].as_array().is_some(),
+                    "cli-command requires an expect array"
+                );
+            }
+            if matches!(
+                operation["op"].as_str(),
                 Some("acquire-test-file-lock" | "release-test-file-lock")
             ) {
                 ensure!(
                     operation["path"].is_string(),
                     "Test file lock operations require a run-local path"
                 );
+                ensure!(
+                    operation["allow_read"].is_null() || operation["allow_read"].is_boolean(),
+                    "Test file lock allow_read must be boolean"
+                );
+                ensure!(
+                    if harness == "cli" {
+                        operation["allow_read"].as_bool() == Some(true)
+                    } else {
+                        harness == "gui" && operation["allow_read"].as_bool() != Some(true)
+                    },
+                    "CLI test file locks require allow_read:true; GUI test file locks remain exclusive"
+                );
             }
             if operation["op"].as_str() == Some("write-file") {
                 ensure!(
                     operation["path"].is_string() && operation["content"].is_string(),
                     "write-file requires a run-local path and string content"
+                );
+                ensure!(
+                    operation["overwrite_existing"].is_null()
+                        || operation["overwrite_existing"].is_boolean(),
+                    "write-file overwrite_existing must be boolean"
+                );
+            }
+            if operation["op"].as_str() == Some("replace-test-file-with-directory") {
+                ensure!(
+                    harness == "cli" && operation["path"].is_string(),
+                    "replace-test-file-with-directory requires the cli harness and a run-local path"
+                );
+            }
+            if operation["op"].as_str() == Some("move-origin-addon-category") {
+                ensure!(
+                    harness == "cli"
+                        && case["origin"].is_object()
+                        && operation["root"].is_string()
+                        && operation["addon"].is_string()
+                        && matches!(operation["from"].as_str(), Some("required" | "optional"))
+                        && matches!(operation["to"].as_str(), Some("required" | "optional"))
+                        && operation["from"] != operation["to"],
+                    "move-origin-addon-category requires a CLI origin, run-local root, addon, and distinct required/optional categories"
                 );
             }
             if matches!(
@@ -387,7 +546,7 @@ mod tests {
     }
 
     #[test]
-    fn test_file_locks_require_a_gui_run_local_path() {
+    fn test_file_lock_harness_requires_explicit_read_permission_for_cli() {
         let case = |harness, operation| {
             json!({
                 "id":"file-lock",
@@ -412,6 +571,22 @@ mod tests {
             ))
             .is_err()
         );
+        assert!(validate(&case(
+            "gui",
+            json!({"op":"acquire-test-file-lock","path":"${RUN_DIR}/repo/file.bin","allow_read":true})
+        )).is_err());
+        assert!(validate(&case(
+            "cli",
+            json!({"op":"acquire-test-file-lock","path":"${RUN_DIR}/config/games/arma3/workshop.json","allow_read":false})
+        )).is_err());
+        assert!(validate(&case(
+            "cli",
+            json!({"op":"acquire-test-file-lock","path":"${RUN_DIR}/config/games/arma3/workshop.json","allow_read":true})
+        )).is_ok());
+        assert!(validate(&case(
+            "cli",
+            json!({"op":"release-test-file-lock","path":"${RUN_DIR}/config/games/arma3/workshop.json","allow_read":true})
+        )).is_ok());
     }
 
     #[test]
@@ -436,5 +611,130 @@ mod tests {
                 .to_string()
                 .contains("argv array")
         );
+    }
+
+    #[test]
+    fn accepts_isolated_config_pack_cli_scenarios() {
+        let case = json!({
+            "id":"state-n05-pack",
+            "kind":"perf",
+            "harness":"cli",
+            "repository":{"name":"RepoAlpha","address":"http://127.0.0.1:8154/","path":"R:/run/repo"},
+            "operations":[{
+                "op":"cli-command",
+                "args":["config","import","R:/run/pack.foxypack","--yes"],
+                "path_arguments":[2],
+                "expected_exit_code":4,
+                "expect":[
+                    {"path":"ok","equals":false},
+                    {"path":"action","equals":"config.import"},
+                    {"path":"data","equals":null}
+                ]
+            }]
+        });
+        assert!(validate(&case).is_ok());
+    }
+
+    #[test]
+    fn offline_workshop_scenarios_cannot_enable_a_network_backend_or_hide_bundle_paths() {
+        let case = |args: Value, paths: Value| {
+            json!({
+                "id":"state-workshop", "kind":"perf", "harness":"cli", "repository":{},
+                "operations":[{"op":"cli-command", "args":args, "path_arguments":paths,
+                    "expected_exit_code":0, "expect":[]}]
+            })
+        };
+        let args = json!([
+            "workshop",
+            "bundle",
+            "import",
+            "R:/run/setup.foxyshare",
+            "--mode",
+            "match",
+            "--skip-payloads",
+            "--backend",
+            "none",
+            "--skip-metadata",
+            "--yes"
+        ]);
+        assert!(validate(&case(args.clone(), json!([3]))).is_ok());
+        assert!(validate(&case(args.clone(), json!([]))).is_err());
+        let mut network = args;
+        network[8] = json!("steam-helper");
+        assert!(validate(&case(network, json!([3]))).is_err());
+        assert!(
+            validate(&case(
+                json!(["workshop", "unsubscribe", "123456789", "--yes"]),
+                json!([])
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_cli_scenario_paths_not_declared_as_run_local_arguments() {
+        let case = json!({
+            "id":"state-n05-pack",
+            "kind":"perf",
+            "harness":"cli",
+            "repository":{"name":"RepoAlpha","address":"http://127.0.0.1:8154/","path":"R:/run/repo"},
+            "operations":[{
+                "op":"cli-command",
+                "args":["config","export","C:/outside.foxypack"],
+                "path_arguments":[],
+                "expected_exit_code":0,
+                "expect":[]
+            }]
+        });
+        assert!(validate(&case).is_err());
+    }
+
+    #[test]
+    fn validates_category_reclassification_scenarios_and_cli_profile_queries() {
+        let case = json!({
+            "id":"state-n16-category-reclassification",
+            "kind":"perf",
+            "harness":"cli",
+            "origin":{"root":"R:/run/origin"},
+            "repository":{"name":"RepoAlpha","address":"http://127.0.0.1:8154/","path":"R:/run/repo"},
+            "operations":[
+                {"op":"move-origin-addon-category","root":"R:/run/origin","addon":"@synthetic_000","from":"required","to":"optional"},
+                {"op":"cli-command","args":["addon","list","--repo-name","RepoAlpha"],"path_arguments":[],"expected_exit_code":0,"expect":[]}
+            ]
+        });
+        assert!(validate(&case).is_ok());
+        let invalid = json!({
+            "id":"state-n16-category-reclassification",
+            "kind":"perf",
+            "harness":"cli",
+            "origin":{"root":"R:/run/origin"},
+            "repository":{"name":"RepoAlpha","address":"http://127.0.0.1:8154/","path":"R:/run/repo"},
+            "operations":[{"op":"move-origin-addon-category","root":"C:/outside","addon":"@synthetic_000","from":"required","to":"required"}]
+        });
+        assert!(validate(&invalid).is_err());
+    }
+
+    #[test]
+    fn external_edit_injection_requires_promoted_file_cancellation() {
+        let case = json!({
+            "id":"state-n01-external-edit-rollback",
+            "kind":"perf",
+            "harness":"gui",
+            "repository":{"name":"RepoAlpha","address":"http://127.0.0.1:8154/","path":"R:/run/repo"},
+            "operations":[{
+                "op":"download",
+                "cancel_after_promoted_file":true,
+                "external_edit_after_promoted_file":"external edit"
+            }]
+        });
+        assert!(validate(&case).is_ok());
+
+        let mut invalid = case.clone();
+        invalid["operations"][0]["cancel_after_promoted_file"] = json!(false);
+        assert!(validate(&invalid).is_err());
+
+        let mut invalid = case;
+        invalid["operations"][0]["external_edit_after_promoted_file"] = json!(true);
+        assert!(validate(&invalid).is_err());
     }
 }

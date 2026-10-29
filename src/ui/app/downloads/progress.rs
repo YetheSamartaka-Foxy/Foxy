@@ -16,6 +16,10 @@ impl Foxy {
             .as_ref()
             .map(|session| session.is_running())
             .unwrap_or(false)
+            || self
+                .direct_download_worker
+                .as_ref()
+                .is_some_and(|worker| !worker.is_finished())
     }
 
     pub fn effective_direct_download_speed_limit_mbps(&self) -> Option<u32> {
@@ -191,6 +195,15 @@ impl Foxy {
     }
 
     pub fn poll_direct_download_progress(&mut self) {
+        if self.direct_download_progress_rx.is_none()
+            && self
+                .direct_download_worker
+                .as_ref()
+                .is_some_and(|worker| worker.is_finished())
+            && let Some(worker) = self.direct_download_worker.take()
+        {
+            let _ = worker.join();
+        }
         loop {
             let evt = {
                 let Some(rx) = self.direct_download_progress_rx.as_mut() else {
@@ -208,6 +221,13 @@ impl Foxy {
 
             let Some(evt) = evt else { continue };
             match evt {
+                DirectDownloadProgressEvent::CollisionApprovalRequested { paths, reply_tx } => {
+                    self.pending_direct_download_collisions = Some((paths.clone(), reply_tx));
+                    self.direct_download_error = Some(
+                        self.t("Existing destination files need approval before replacement."),
+                    );
+                    self.needs_repaint = true;
+                }
                 DirectDownloadProgressEvent::PlanResolved {
                     target_label,
                     files_total,
@@ -351,16 +371,14 @@ impl Foxy {
     }
 
     pub fn cancel_direct_download(&mut self) {
-        if !self.is_direct_download_running() {
+        if !self.is_direct_download_running() || self.direct_download_progress_rx.is_none() {
             return;
         }
         info!("Cancelling direct download");
-        // Drop the progress receiver and worker to signal cancellation
-        self.direct_download_progress_rx = None;
-        if let Some(handle) = self.direct_download_worker.take() {
-            // The worker will naturally stop when its progress_tx send fails
-            drop(handle);
+        if let Some((_, reply_tx)) = self.pending_direct_download_collisions.take() {
+            let _ = reply_tx.send(false);
         }
+        self.direct_download_progress_rx = None;
         // Clean up UI state
         let cancelled_message = self.t("Cancelled by user");
         if let Some(session) = self.direct_download_session.as_mut() {
@@ -384,8 +402,16 @@ impl Foxy {
     /// run the sync belongs to, so the next queued repository does not start.
     pub fn cancel_sync_and_queued_runs(&mut self) {
         let had_pending_retry = self.pending_download_retry.is_some();
+        let had_pending_preview = self.pending_link_target_sync.take().is_some();
+        if had_pending_preview {
+            self.pending_link_target_previews = None;
+            self.link_target_preview_bypass_once = false;
+            self.enrolled_link_targets.clear();
+            self.settle_pending_repository_space_target();
+        }
         self.cancel_pending_download_retry();
         if had_pending_retry
+            || had_pending_preview
             || self.syncing_repository.is_some()
             || self.current_sync_mode.is_some()
             || self.is_direct_download_running()
@@ -399,6 +425,10 @@ impl Foxy {
         let is_syncing = self.syncing_repository.is_some() || self.current_sync_mode.is_some();
         let direct_running = self.is_direct_download_running();
         if !is_syncing && !direct_running {
+            return;
+        }
+        if direct_running && !is_syncing {
+            self.cancel_direct_download();
             return;
         }
 

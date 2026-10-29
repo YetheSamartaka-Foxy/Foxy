@@ -1,22 +1,21 @@
+use super::LaunchDispatchResult;
 use super::launch_policy::{
     join_preflight_fact_keys, merge_join_preflight_choices, paths_overlap, repository_launch_paths,
 };
-use super::{LaunchDispatchResult, spawn_launch_process};
 use crate::core::addon_metadata::load_addon_display_name_snapshot;
 use crate::core::arma3_missions::EditorMission;
 use crate::core::arma3_server_query::{
     ServerAddonQueryResult, creator_dlc_by_app_id, query_server_addon_requirements,
 };
-use crate::core::steam::{self, SteamEnsureResult};
+use crate::core::steam;
 use crate::ui::app::{
-    Foxy, JoinPreflightQueryResult, PendingJoinPreflightQuery, PendingJoinStatusQuery,
-    PendingMissionEditorLaunchWarningState, PendingUpdateLaunch,
+    Foxy, JoinPreflightQueryResult, LaunchRequest, PendingJoinPreflightQuery,
+    PendingJoinStatusQuery, PendingMissionEditorLaunchWarningState, PendingUpdateLaunch,
 };
 use crate::ui::types::{Repository, RepositoryServer, ServerOnlineStatus};
 use eframe::egui;
 use log::{info, warn};
-use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -61,11 +60,17 @@ impl Foxy {
         launch_label: &str,
     ) -> bool {
         let target_instance_key = Self::repo_instance_key(&effective.address, &effective.path);
-        if self
-            .pending_update_launch
-            .as_ref()
-            .is_some_and(|pending| pending.target_instance_key == target_instance_key)
+        if let Some(pending) = self.pending_update_launch.as_mut()
+            && pending.target_instance_key == target_instance_key
         {
+            if pending.server.as_ref() != server || pending.repository != *effective {
+                pending.replacement = Some(Box::new(PendingUpdateLaunch {
+                    repository: effective.clone(), server: server.cloned(), repo_name: repo_name.to_string(),
+                    blocking_instance_key: pending.blocking_instance_key.clone(), target_instance_key,
+                    update_finished: pending.update_finished, update_succeeded: pending.update_succeeded,
+                    replacement: None,
+                }));
+            }
             return true;
         }
         let Some(blocking_instance_key) = self.conflicting_download_instance(effective) else {
@@ -87,6 +92,7 @@ impl Foxy {
             target_instance_key,
             update_finished: false,
             update_succeeded: false,
+            replacement: None,
         });
         true
     }
@@ -110,6 +116,31 @@ impl Foxy {
         let Some(pending) = self.pending_update_launch.clone() else {
             return;
         };
+        if let Some(replacement) = pending.replacement.as_ref() {
+            let mut replace = false;
+            let mut keep = false;
+            let old = pending.server.as_ref().map(|server| server.name.as_str()).unwrap_or("Launch");
+            let new = replacement.server.as_ref().map(|server| server.name.as_str()).unwrap_or("Launch");
+            egui::Modal::new(egui::Id::unique("replace_queued_launch")).show(ctx, |ui| {
+                ui.heading(self.t("Replace queued launch?"));
+                ui.label(self.t_fmt("Current request: {target}", &[("target", format!("{} / {}", old, pending.repository.selected_profile.as_deref().unwrap_or("Default")))]));
+                ui.label(self.t_fmt("New request: {target}", &[("target", format!("{} / {}", new, replacement.repository.selected_profile.as_deref().unwrap_or("Default")))]));
+                ui.horizontal(|ui| {
+                    keep = ui.button(self.t("Keep current request")).clicked();
+                    replace = ui.button(self.t("Replace queued launch")).clicked();
+                });
+            });
+            if replace {
+                let mut chosen = *replacement.clone();
+                chosen.update_finished = pending.update_finished;
+                chosen.update_succeeded = pending.update_succeeded;
+                chosen.blocking_instance_key = pending.blocking_instance_key;
+                self.pending_update_launch = Some(chosen);
+            } else if keep && let Some(current) = self.pending_update_launch.as_mut() {
+                current.replacement = None;
+            }
+            return;
+        }
         let mut cancel = false;
         egui::Window::new(self.t("Launch queued for update"))
             .frame(self.modal_window_chrome(ctx))
@@ -170,37 +201,6 @@ impl Foxy {
             self.try_join_repository_server(ctx, &pending.repository, server, &pending.repo_name);
         } else {
             self.present_launch_preflight(ctx, &pending.repository, &pending.repo_name);
-        }
-    }
-
-    fn activate_extra_files_before_launch(&mut self) {
-        let space_dir = crate::core::game::spaces::active_game_space_dir();
-        let game_dir = crate::core::game::registry()
-            .active()
-            .install_dir_from_settings(&self.settings_view_state)
-            .to_string();
-        match crate::core::game::extra_files::activate_for_launch(&space_dir, &game_dir) {
-            Ok(summary) => {
-                if let Some((name, reason)) = summary.failed.first() {
-                    warn!(
-                        "Extra-file activation had {} failure(s) before launch",
-                        summary.failed.len()
-                    );
-                    let message = self.t_fmt(
-                        "Could not apply extra file {name}: {error}",
-                        &[("name", name.clone()), ("error", reason.clone())],
-                    );
-                    self.show_error_toast(message);
-                }
-            }
-            Err(err) => {
-                warn!("Extra-file activation failed before launch: {}", err);
-                let message = self.t_fmt(
-                    "Could not apply extra files before launch: {error}",
-                    &[("error", err.clone())],
-                );
-                self.show_error_toast(message);
-            }
         }
     }
 
@@ -366,109 +366,13 @@ impl Foxy {
             return LaunchDispatchResult::Failed;
         };
 
-        let executable = command.get_program().to_os_string();
-        let args: Vec<OsString> = command.get_args().map(|arg| arg.to_os_string()).collect();
-        let cwd: Option<PathBuf> = command.get_current_dir().map(Path::to_path_buf);
-        let game_name = if effective.game_build.is_some() {
-            repo_name.to_string()
-        } else {
-            crate::core::game::registry()
-                .active()
-                .display_name()
-                .to_string()
-        };
-        let steam_required = self.repository_launch_uses_steam(effective);
-        self.activate_extra_files_before_launch();
-
-        if !steam_required || steam::is_steam_running(&self.settings_view_state.steam_directory) {
-            return match spawn_launch_process(
-                &executable,
-                &args,
-                cwd.as_deref(),
-                steam_required,
-                &self.settings_view_state.steam_directory,
-            ) {
-                Ok(pid) => {
-                    info!(
-                        "Launched {} for repository {} (pid={})",
-                        game_name, repo_name, pid
-                    );
-                    self.mark_repository_launched(&effective.address, &effective.path);
-                    LaunchDispatchResult::Launched
-                }
-                Err(err) => {
-                    warn!(
-                        "Failed to launch {} for repository {}: {}",
-                        game_name, repo_name, err
-                    );
-                    self.show_error_toast(
-                        self.t_fmt("Failed to launch {game}.", &[("game", game_name.clone())]),
-                    );
-                    LaunchDispatchResult::Failed
-                }
-            };
-        }
-
-        info!(
-            "Steam is not running; preparing Steam before {} launch for repository {}",
-            launch_label, repo_name
-        );
-
-        self.mark_repository_launched(&effective.address, &effective.path);
-        let steam_directory = self.settings_view_state.steam_directory.clone();
-        let repo_name_owned = repo_name.to_string();
-        let launch_label_owned = launch_label.to_string();
-        let executable_for_thread = executable;
-        let args_for_thread = args;
-        let cwd_for_thread = cwd;
-        std::thread::spawn(move || {
-            match steam::ensure_steam_running(&steam_directory) {
-                Ok(SteamEnsureResult::AlreadyRunning) => {}
-                Ok(SteamEnsureResult::Started) => {
-                    info!(
-                        "Steam started successfully before {} launch for repository {}",
-                        launch_label_owned, repo_name_owned
-                    );
-                }
-                Ok(SteamEnsureResult::SkippedMissingDirectory) => {
-                    warn!(
-                        "Steam directory is not configured and auto-detection failed; cancelling \
-                         {} launch for repository {}",
-                        launch_label_owned, repo_name_owned
-                    );
-                    return;
-                }
-                Err(err) => {
-                    warn!(
-                        "Failed to prepare Steam before {} launch for repository {}: {}",
-                        launch_label_owned, repo_name_owned, err
-                    );
-                    return;
-                }
-            }
-
-            match spawn_launch_process(
-                &executable_for_thread,
-                &args_for_thread,
-                cwd_for_thread.as_deref(),
-                steam_required,
-                &steam_directory,
-            ) {
-                Ok(pid) => {
-                    info!(
-                        "Launched {} for repository {} (pid={})",
-                        game_name, repo_name_owned, pid
-                    );
-                }
-                Err(err) => {
-                    warn!(
-                        "Failed to launch {} for repository {} after Steam preparation: {}",
-                        game_name, repo_name_owned, err
-                    );
-                }
-            }
+        let _ = (command, launch_label);
+        self.start_launch_action(crate::ui::app::LaunchRequest {
+            repository: effective.clone(),
+            server: server.cloned(),
+            name: repo_name.to_string(),
+            mission_path: None,
         });
-
         LaunchDispatchResult::Deferred
     }
 
@@ -1296,7 +1200,7 @@ impl Foxy {
     /// as a positional argument to open it in the editor.
     pub(super) fn launch_editor_with_mission(
         &mut self,
-        ctx: &egui::Context,
+        _ctx: &egui::Context,
         effective: &Repository,
         mission: &EditorMission,
         repo_name: &str,
@@ -1313,14 +1217,6 @@ impl Foxy {
             return;
         }
 
-        let Some(mut command) = self.create_launch_command(effective, None) else {
-            self.show_error_toast(self.t("Failed to launch Arma 3 Editor."));
-            return;
-        };
-
-        let mission_arg = steam::arma3_mission_argument(&command, Path::new(&mission.sqm_path));
-        command.arg(mission_arg);
-
         info!(
             "Launching Eden Editor with mission {} ({}) for repository {}",
             mission.display_name, mission.folder_name, repo_name
@@ -1328,52 +1224,11 @@ impl Foxy {
 
         self.editor_launch_cooldown_until = Some(now + EDITOR_LAUNCH_COOLDOWN);
         self.show_success_toast(self.t("Starting Arma 3 Editor..."));
-
-        let executable = command.get_program().to_os_string();
-        let args: Vec<OsString> = command.get_args().map(|a| a.to_os_string()).collect();
-        let cwd: Option<PathBuf> = command.get_current_dir().map(Path::to_path_buf);
-        self.activate_extra_files_before_launch();
-
-        if steam::is_steam_running(&self.settings_view_state.steam_directory) {
-            match spawn_launch_process(
-                &executable,
-                &args,
-                cwd.as_deref(),
-                true,
-                &self.settings_view_state.steam_directory,
-            ) {
-                Ok(pid) => {
-                    info!("Launched Eden Editor (pid={})", pid);
-                    self.handle_post_launch_window_behavior(ctx, "editor launch completed");
-                }
-                Err(err) => {
-                    warn!("Failed to launch Eden Editor: {}", err);
-                    self.editor_launch_cooldown_until = None;
-                    self.show_error_toast(self.t("Failed to launch Arma 3 Editor."));
-                }
-            }
-            return;
-        }
-
-        let steam_directory = self.settings_view_state.steam_directory.clone();
-        let repo_name_owned = repo_name.to_string();
-        std::thread::spawn(
-            move || match steam::ensure_steam_running(&steam_directory) {
-                Ok(_) => match spawn_launch_process(
-                    &executable,
-                    &args,
-                    cwd.as_deref(),
-                    true,
-                    &steam_directory,
-                ) {
-                    Ok(pid) => info!(
-                        "Launched Eden Editor after Steam startup (pid={}) for repository {}",
-                        pid, repo_name_owned
-                    ),
-                    Err(err) => warn!("Failed to launch Eden Editor: {}", err),
-                },
-                Err(err) => warn!("Failed to start Steam: {}", err),
-            },
-        );
+        self.start_launch_action(LaunchRequest {
+            repository: effective.clone(),
+            server: None,
+            name: repo_name.to_string(),
+            mission_path: Some(Path::new(&mission.sqm_path).to_path_buf()),
+        });
     }
 }

@@ -9,6 +9,7 @@ pub(super) fn backup_pending_addons_for_download(
     mods: &[ModDiffSummary],
     progress_tx: &Sender<ProgressEvent>,
     operation_id: &str,
+    origin: Option<&addon_backup::AddonBackupOrigin>,
 ) -> Result<()> {
     let repo_root = repo_root.trim();
     if repo_root.is_empty() {
@@ -66,13 +67,14 @@ pub(super) fn backup_pending_addons_for_download(
             );
         }
 
-        let record = addon_backup::backup_addon(&backup_root, &addon_path).with_context(|| {
-            format!(
-                "failed to create backup for addon {} from {}",
-                addon_name,
-                addon_path.display()
-            )
-        })?;
+        let record = addon_backup::backup_addon_with_origin(&backup_root, &addon_path, origin)
+            .with_context(|| {
+                format!(
+                    "failed to create backup for addon {} from {}",
+                    addon_name,
+                    addon_path.display()
+                )
+            })?;
         backed_up += 1;
         info!(
             "Addon backup saved for {} at {}",

@@ -15,6 +15,8 @@
 - Progress frame rate in Application settings lets you keep the default 30 fps or choose 20, 10, or 5 fps to use less processor time while showing progress.
 - Proxy settings let Foxy use the system proxy, connect directly, or use a manual HTTP or HTTPS proxy with an optional user name, password, and list of hosts to reach directly. The choice covers repositories, app updates, Steam Workshop details, images, and direct downloads, and is also available through `foxy settings set --proxy-mode` and the related proxy options. Passwords are masked in the interface and hidden from settings output, but stored as plain text in Foxy's settings file.
 - Failed repository checks, failed database wipes, bulk rechecks or updates with failures, and dialogs that show an error now offer Export logs to ZIP next to the message, so you can share the logs with support without opening Settings.
+- Launch now asks before using live Workshop files when a frozen snapshot is missing, and reports whether the command was handed off without claiming the game or server connection succeeded. Failed preparation offers Retry, continue for this launch, or Cancel.
+- Direct downloads preview destination collisions and support replacement only with `--overwrite --yes`. Workshop bundle import offers Merge and Match modes, and removing a game space can preserve its private mod and extra-file payloads.
 
 ## Changed
 - Quick local checks stay offline and report incomplete metadata explicitly. Refresh also checks local drift, and updates revalidate selected files outside their prepared queue, including same-size edits.
@@ -28,6 +30,9 @@
 - Progress bars show triangles only while work is running. Idle and paused bars use solid fills, and completed downloads turn solid green.
 - Saved benchmarks now record work priority, low disk priority, and any forced memory pressure, with the settings shown in benchmark details and text exports.
 - While Foxy's window is in the background it redraws at most 10 times per second, and once per second when minimized or in the tray, so showing progress uses less processor time while you play. The FPS counter no longer keeps a background window redrawing.
+- A different Launch or Join request for an installation already waiting on an update asks whether to replace the queued action. Install and Restart waits for accepted work and saves to finish before handing off to the installer; a failed handoff keeps the verified installer available to retry.
+- Workshop Remove now unregisters an item from the active space without silently unsubscribing from Steam or deleting shared Workshop files. Bundle Match disables unlisted selections while retaining their payloads, and importing a clipboard profile no longer switches the active profile.
+- Scheduled shutdown asks for confirmation again if Foxy detects new gameplay during its countdown. When an addon changes between required and optional, profiles adopt the new published default selection while preserving overrides within an unchanged category.
 
 ## Fixed
 - Checking a repository or previewing an update no longer removes extra local files. Approved cleanup protects files owned by other repositories and restores removed files if the update is cancelled or fails.
@@ -47,6 +52,12 @@
 - Updating a repository no longer deletes the saved patch plans of repositories in other game spaces, which made their next update download whole files.
 - Updating while the game is running now stops before downloading anything and names a file the game keeps open, instead of downloading everything and then rolling back with a generic error. If the game starts during an update, the update stops and restores the previous files.
 - An update whose patch failed and fell back to a full download now restores the original file when it is later cancelled or fails, instead of deleting it.
+- Managed update rollback restores the pre-update files even if another process edits a promoted target before cancellation settles; failed restoration remains unresolved recovery. `.foxypack` imports recover as a complete configuration and payload change, and failed preservation prevents removal of a game space.
+- Backup restore now prefers the matching game-space and repository origin; cross-origin or unknown legacy restores require review. Cleanup previews the deletion set and requires separate confirmation before deleting a final recovery copy.
+- Deleting a repository removes files only for that repository installation (its address and local path); a same-address installation in another folder keeps its files and records. Direct-download replacements are staged so a failed or cancelled transfer keeps the previous complete file.
+- Workshop selection on the command line now accepts explicit `--enabled true` and `--enabled false` values while keeping the existing bare `--enabled` form.
+- Launch previews no longer write game preparation files. Failed launch handoffs restore generated manifests and managed extra files before reporting failure.
+- Repository-space bulk updates now wait for linked-folder review and keep the original installation and shared-folder destinations while queued members move or detach.
 - Closing Foxy during an update now waits for previous files to be restored and changes saved. A slow cleanup offers explicit force quit instead of silently exiting; interrupted restoration is retried on reopening. Unexpected crashes preserve completed update files and identify the installation as interrupted until checked.
 - Starting Foxy in another game space no longer discards the restore data of an update that is still running.
 - Cancel now stops the whole folder, repository space, or scheduled run instead of only the repository in progress.

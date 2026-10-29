@@ -312,9 +312,9 @@ async fn query_exclusive_paths(
     ))
 }
 
-pub async fn purge_repository_by_url(repository_url: &str, repo_path: Option<&str>) -> Result<()> {
+pub async fn purge_repository_by_url_and_path(repository_url: &str, local_path: &str) -> Result<()> {
     let context = create_context().await;
-    purge_repository(context, repository_url, repo_path).await
+    purge_repository_instance(context, repository_url, local_path).await
 }
 
 pub async fn purge_addon_by_local_path(addon_path: &str) -> Result<usize> {
@@ -589,11 +589,6 @@ pub async fn purge_addon_by_local_path_with_context(
     Ok(deleted_count)
 }
 
-pub async fn purge_repository_db_only_by_url(repository_url: &str) -> Result<()> {
-    let context = create_context().await;
-    purge_repository_internal(context, repository_url, None, false, None).await
-}
-
 /// Wipe cached database rows for a SINGLE repository instance, identified by its
 /// remote URL *and* local download folder. Sibling repositories that share the
 /// same remote URL but live in a different folder (an independent install, or a
@@ -606,6 +601,7 @@ pub async fn purge_repository_db_only_by_url_and_path(
     purge_repository_internal(context, repository_url, None, false, Some(local_path)).await
 }
 
+#[cfg(test)]
 pub async fn purge_repository(
     context: Arc<FoxyContext>,
     repository_url: &str,

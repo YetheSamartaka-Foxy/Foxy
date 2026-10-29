@@ -5,6 +5,65 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+const ORIGIN_INDEX_FILE: &str = ".foxy_backup_origins.json";
+static ORIGIN_INDEX_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub(super) fn read_origins(
+    backup_root: &Path,
+    folder_name: &str,
+) -> Vec<super::types::AddonBackupOrigin> {
+    let path = backup_root.join(ORIGIN_INDEX_FILE);
+    let Ok(bytes) = fs::read(path) else {
+        return Vec::new();
+    };
+    let Ok(index) = serde_json::from_slice::<
+        std::collections::HashMap<String, Vec<super::types::AddonBackupOrigin>>,
+    >(&bytes) else {
+        return Vec::new();
+    };
+    index.get(folder_name).cloned().unwrap_or_default()
+}
+
+pub(super) fn add_origin(
+    backup_root: &Path,
+    folder_name: &str,
+    origin: &super::types::AddonBackupOrigin,
+) -> Result<()> {
+    let _guard = ORIGIN_INDEX_LOCK
+        .lock()
+        .map_err(|_| anyhow!("addon backup origin index lock was poisoned"))?;
+    let path = backup_root.join(ORIGIN_INDEX_FILE);
+    let mut index = if path.exists() {
+        serde_json::from_slice::<
+            std::collections::HashMap<String, Vec<super::types::AddonBackupOrigin>>,
+        >(&fs::read(&path)?)?
+    } else {
+        std::collections::HashMap::new()
+    };
+    let origins = index.entry(folder_name.to_string()).or_default();
+    if !origins.contains(origin) {
+        origins.push(origin.clone());
+    }
+    crate::core::utils::fs_safety::atomic_write(&path, &serde_json::to_vec(&index)?)?;
+    Ok(())
+}
+
+pub(super) fn remove_origins(backup_root: &Path, folder_name: &str) -> Result<()> {
+    let _guard = ORIGIN_INDEX_LOCK
+        .lock()
+        .map_err(|_| anyhow!("addon backup origin index lock was poisoned"))?;
+    let path = backup_root.join(ORIGIN_INDEX_FILE);
+    if !path.exists() {
+        return Ok(());
+    }
+    let mut index = serde_json::from_slice::<
+        std::collections::HashMap<String, Vec<super::types::AddonBackupOrigin>>,
+    >(&fs::read(&path)?)?;
+    index.remove(folder_name);
+    crate::core::utils::fs_safety::atomic_write(&path, &serde_json::to_vec(&index)?)?;
+    Ok(())
+}
+
 pub(super) fn addon_directory_name(addon_path: &Path) -> Result<String> {
     let addon_name = addon_path
         .file_name()
@@ -41,21 +100,23 @@ pub(super) fn build_backup_record(
 ) -> Result<AddonBackupRecord> {
     let metadata = fs::metadata(&path)
         .with_context(|| format!("failed to read backup metadata {}", path.display()))?;
-    let created_at_unix_secs = metadata
+    let created_at = metadata
         .modified()
         .ok()
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0);
+        .unwrap_or_default();
     let size_bytes = directory_total_size(&path)?;
 
+    let origins = read_origins(path.parent().unwrap_or(Path::new("")), &folder_name);
     Ok(AddonBackupRecord {
         addon_name,
         content_hash,
         folder_name,
         path,
-        created_at_unix_secs,
+        created_at_unix_secs: created_at.as_secs(),
+        created_at_unix_nanos: created_at.as_nanos(),
         size_bytes,
+        origins,
     })
 }
 

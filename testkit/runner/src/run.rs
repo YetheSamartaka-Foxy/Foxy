@@ -66,6 +66,52 @@ fn is_download_sidecar(path: &Path) -> bool {
             .any(|suffix| name.ends_with(suffix))
 }
 
+fn move_origin_addon_category(root: &Path, addon_name: &str, from: &str, to: &str) -> Result<()> {
+    let repo_path = root.join("repo.json");
+    let index_path = root.join("foxy_addons.json");
+    let mut repo: Value = serde_json::from_slice(&fs::read(&repo_path)?)?;
+    let mut index: Value = serde_json::from_slice(&fs::read(&index_path)?)?;
+    let from_key = format!("{from}Mods");
+    let to_key = format!("{to}Mods");
+    let source = index[&from_key]
+        .as_array_mut()
+        .with_context(|| format!("{} must be an array", from_key))?;
+    let position = source
+        .iter()
+        .position(|entry| entry["modName"].as_str() == Some(addon_name))
+        .with_context(|| format!("Addon {addon_name:?} was not found in {from_key}"))?;
+    let entry = source.remove(position);
+    let target = index[&to_key]
+        .as_array_mut()
+        .with_context(|| format!("{} must be an array", to_key))?;
+    ensure!(
+        !target
+            .iter()
+            .any(|entry| entry["modName"].as_str() == Some(addon_name)),
+        "Addon {addon_name:?} already exists in {to_key}"
+    );
+    target.push(entry);
+
+    let mut checksum = blake3::Hasher::new();
+    for category in ["requiredMods", "optionalMods"] {
+        for entry in index[category]
+            .as_array()
+            .context("repository category is not an array")?
+        {
+            let value = entry["checkSum"]
+                .as_str()
+                .context("published addon has no checkSum")?;
+            checksum.update(value.as_bytes());
+        }
+    }
+    let checksum = checksum.finalize().to_hex().to_uppercase();
+    repo["checksum"] = json!(checksum);
+    index["checksum"] = json!(checksum);
+    write_json(&repo_path, &repo)?;
+    write_json(&index_path, &index)?;
+    Ok(())
+}
+
 fn file_state_contains(current: &Value, expected: &Value) -> bool {
     match (current.as_object(), expected.as_object()) {
         (Some(current), Some(expected)) => expected
@@ -352,9 +398,11 @@ impl ContextRun<'_> {
         );
         let path = parent.join(file_name);
         let repository = fs::canonicalize(self.repository_path()?)?;
+        let config = fs::canonicalize(self.config)?;
+        let allow_read = operation["allow_read"].as_bool() == Some(true);
         ensure!(
-            path.starts_with(repository),
-            "Test file locks are restricted to existing files in the run's repository"
+            path.starts_with(&repository) || (allow_read && path.starts_with(&config)),
+            "Test file locks are restricted to the run's repository, or its config when allow_read is enabled"
         );
         if require_file {
             let metadata =
@@ -371,9 +419,11 @@ impl ContextRun<'_> {
         let path = self.test_file_lock_path(operation, true)?;
         let target = fs::canonicalize(&path)?;
         let repository = fs::canonicalize(self.repository_path()?)?;
+        let config = fs::canonicalize(self.config)?;
+        let allow_read = operation["allow_read"].as_bool() == Some(true);
         ensure!(
-            target.starts_with(repository),
-            "Test file locks cannot follow links outside the run's repository"
+            target.starts_with(&repository) || (allow_read && target.starts_with(&config)),
+            "Test file locks cannot follow links outside the run's repository or allowed config"
         );
         ensure!(
             !self.test_file_locks.borrow().contains_key(&path),
@@ -384,15 +434,15 @@ impl ContextRun<'_> {
             use std::os::windows::fs::OpenOptionsExt;
             let file = OpenOptions::new()
                 .read(true)
-                .share_mode(0)
+                .share_mode(if allow_read { 1 } else { 0 })
                 .open(&target)
-                .context("Acquiring exclusive test file lock")?;
+                .context("Acquiring test file lock")?;
             self.test_file_locks.borrow_mut().insert(path, file);
             Ok(())
         }
         #[cfg(not(windows))]
         {
-            let _ = path;
+            let _ = (path, allow_read);
             bail!("Test file locks are available only on Windows")
         }
     }
@@ -411,6 +461,43 @@ impl ContextRun<'_> {
             return Ok(false);
         };
         match name {
+            "cli-command" => {
+                self.run_cli_scenario(operation)?;
+                Ok(true)
+            }
+            "replace-test-file-with-directory" => {
+                let path = operation["path"]
+                    .as_str()
+                    .context("replace-test-file-with-directory requires path")?;
+                let path = ensure_run_path(self.run, &PathBuf::from(path))?;
+                ensure!(
+                    path.is_file(),
+                    "replace-test-file-with-directory requires an existing regular file"
+                );
+                fs::remove_file(&path)?;
+                fs::create_dir(&path)?;
+                Ok(true)
+            }
+            "move-origin-addon-category" => {
+                let root = operation["root"]
+                    .as_str()
+                    .context("move-origin-addon-category requires root")?;
+                let root = ensure_run_path(self.run, &PathBuf::from(root))?;
+                ensure!(root.is_dir(), "Origin category root must be a directory");
+                move_origin_addon_category(
+                    &root,
+                    operation["addon"]
+                        .as_str()
+                        .context("move-origin-addon-category requires addon")?,
+                    operation["from"]
+                        .as_str()
+                        .context("move-origin-addon-category requires from")?,
+                    operation["to"]
+                        .as_str()
+                        .context("move-origin-addon-category requires to")?,
+                )?;
+                Ok(true)
+            }
             "acquire-test-file-lock" => {
                 self.acquire_test_file_lock(operation)?;
                 Ok(true)
@@ -580,9 +667,17 @@ impl ContextRun<'_> {
                 }
                 use std::fs::OpenOptions;
                 use std::io::Write;
+                let overwrite = operation["overwrite_existing"].as_bool().unwrap_or(false);
+                if overwrite {
+                    ensure!(
+                        fs::symlink_metadata(&path)?.file_type().is_file(),
+                        "write-file overwrite requires an existing regular file"
+                    );
+                }
                 let mut file = OpenOptions::new()
                     .write(true)
-                    .create_new(true)
+                    .create_new(!overwrite)
+                    .truncate(overwrite)
                     .open(&path)?;
                 file.write_all(content.as_bytes())?;
                 Ok(true)
@@ -709,11 +804,123 @@ impl ContextRun<'_> {
             _ => Ok(false),
         }
     }
+    fn run_cli_scenario(&self, operation: &Value) -> Result<()> {
+        let args = operation["args"]
+            .as_array()
+            .context("cli-command requires args")?
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .context("cli-command args must be strings")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let path_arguments = operation["path_arguments"]
+            .as_array()
+            .context("cli-command requires path_arguments")?;
+        for index in path_arguments {
+            let index = index
+                .as_u64()
+                .context("path argument indexes must be integers")?
+                as usize;
+            let path = args
+                .get(index)
+                .context("path argument index is out of bounds")?;
+            let path = PathBuf::from(path);
+            ensure_run_path(self.run, &path)?;
+        }
+        let mut command = Command::new(self.exe);
+        command
+            .arg("--config-dir")
+            .arg(self.config)
+            .arg("--json")
+            .args(&args);
+        launch::environment(&mut command, self.env);
+        let result = launch::tracked_process(
+            &mut command,
+            Duration::from_secs(
+                operation["wait_timeout_s"]
+                    .as_u64()
+                    .unwrap_or(self.timeout.as_secs()),
+            ),
+            Some(self.pid),
+        )?;
+        memory::set(self.pid, None);
+        let expected_exit = operation["expected_exit_code"]
+            .as_u64()
+            .context("cli-command requires expected_exit_code")? as i32;
+        ensure!(
+            result.status.code() == Some(expected_exit),
+            "cli-command exited {:?}, expected {}: {} {}",
+            result.status.code(),
+            expected_exit,
+            String::from_utf8_lossy(&result.stderr),
+            String::from_utf8_lossy(&result.stdout)
+        );
+        let response: Value =
+            serde_json::from_slice(&result.stdout).context("cli-command returned invalid JSON")?;
+        ensure!(
+            response.is_object(),
+            "cli-command JSON response must be an object"
+        );
+        for assertion in operation["expect"].as_array().into_iter().flatten() {
+            let path = assertion["path"]
+                .as_str()
+                .context("cli-command expect requires path")?;
+            let expected = assertion
+                .get("equals")
+                .context("cli-command expect requires equals")?;
+            let actual = path
+                .split('.')
+                .try_fold(&response, |value, part| match value {
+                    Value::Object(object) => object.get(part),
+                    Value::Array(array) => part
+                        .parse::<usize>()
+                        .ok()
+                        .and_then(|index| array.get(index)),
+                    _ => None,
+                })
+                .with_context(|| format!("cli-command JSON path {path:?} was not present"))?;
+            ensure!(
+                actual == expected,
+                "cli-command JSON assertion failed at {path}: expected {expected}, got {actual}"
+            );
+        }
+        let label = operation["label"].as_str().unwrap_or("cli-command");
+        ensure!(
+            label
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'),
+            "cli-command labels must be ASCII letters, digits, or hyphens"
+        );
+        write_json(
+            &self.run.join(format!("cli-scenario-{label}.json")),
+            &json!({"exit_code": expected_exit, "response": response}),
+        )?;
+        Ok(())
+    }
 
     fn wait_for_promoted_file(&self, before: &Value, timeout: Duration) -> Result<String> {
         let deadline = Instant::now() + timeout;
         loop {
-            let current = self.repository_file_state()?;
+            let current = match self.repository_file_state() {
+                Ok(current) => current,
+                Err(error)
+                    if error
+                        .root_cause()
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+                {
+                    ensure!(
+                        Instant::now() < deadline,
+                        "No previously published file was promoted before the timeout"
+                    );
+                    thread::sleep(Duration::from_millis(50));
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             if let Some(files) = before.as_object() {
                 for (path, previous) in files {
                     if current.get(path).is_some_and(|now| now != previous) {
@@ -1219,6 +1426,7 @@ impl ContextRun<'_> {
         let mut cancel_quiescent_ms = Value::Null;
         let mut cancel_trigger_hash_progress = Value::Null;
         let mut promoted_file = None;
+        let mut external_edit_after_promotion = None;
         let mut close_wait_ms = Value::Null;
         let mut paused = false;
         if operation["close_after_promoted_file"].as_bool() == Some(true) && !finished_between_polls
@@ -1240,6 +1448,15 @@ impl ContextRun<'_> {
                 before_promotion.as_ref().expect("promotion watch snapshot"),
                 Duration::from_secs(wait),
             )?);
+            if let Some(content) = operation["external_edit_after_promoted_file"].as_str() {
+                let relative = Path::new(promoted_file.as_deref().expect("promoted file"));
+                let repository = self.repository_path()?;
+                let target = ensure_run_path(self.run, &repository.join(relative))?;
+                ensure!(target.is_file(), "Promoted file is not a regular file");
+                fs::write(&target, content.as_bytes())
+                    .with_context(|| format!("Writing test edit to {}", target.display()))?;
+                external_edit_after_promotion = Some(promoted_file.clone().unwrap());
+            }
             let cancel_started = Instant::now();
             self.data(&["invoke", "cancel-download"])?;
             self.driver(
@@ -1408,6 +1625,9 @@ impl ContextRun<'_> {
         }
         if let Some(path) = promoted_file {
             summary["promoted_file"] = json!(path);
+        }
+        if let Some(path) = external_edit_after_promotion {
+            summary["external_edit_after_promotion"] = json!(path);
         }
         if paused {
             summary["paused"] = json!(true);
@@ -2317,10 +2537,12 @@ fn sync_ended_without_download(progress: &Value, busy_reason: &str) -> bool {
 #[cfg(test)]
 mod cache_state_tests {
     use super::{
-        cache_state, ensure_run_path, file_state_contains, is_download_sidecar, outcome_matches,
-        residual_download_artifacts, sync_ended_without_download,
+        cache_state, ensure_run_path, file_state_contains, is_download_sidecar,
+        move_origin_addon_category, outcome_matches, residual_download_artifacts,
+        sync_ended_without_download,
     };
-    use serde_json::json;
+    use serde_json::{Value, json};
+    use std::fs;
     use std::path::PathBuf;
 
     #[test]
@@ -2336,6 +2558,46 @@ mod cache_state_tests {
             "R:/Mods/RepoBeta"
         );
         assert!(super::oracle_repository(&case, &json!({"repository":"Unknown"})).is_err());
+    }
+
+    #[test]
+    fn category_mutation_keeps_published_indexes_and_recomputes_checksum() {
+        let directory = tempfile::tempdir().unwrap();
+        let published = json!({
+            "checksum":"old",
+            "requiredMods":[],
+            "optionalMods":[]
+        });
+        let index = json!({
+            "checksum":"old",
+            "requiredMods":[{"modName":"@synthetic_000","checkSum":"A1","enabled":true}],
+            "optionalMods":[]
+        });
+        fs::write(
+            directory.path().join("repo.json"),
+            serde_json::to_vec(&published).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("foxy_addons.json"),
+            serde_json::to_vec(&index).unwrap(),
+        )
+        .unwrap();
+
+        move_origin_addon_category(directory.path(), "@synthetic_000", "required", "optional")
+            .unwrap();
+
+        let expected = blake3::hash(b"A1").to_hex().to_uppercase();
+        let repo: Value =
+            serde_json::from_slice(&fs::read(directory.path().join("repo.json")).unwrap()).unwrap();
+        let index: Value =
+            serde_json::from_slice(&fs::read(directory.path().join("foxy_addons.json")).unwrap())
+                .unwrap();
+        assert_eq!(repo["requiredMods"], json!([]));
+        assert_eq!(repo["checksum"], expected);
+        assert_eq!(index["requiredMods"], json!([]));
+        assert_eq!(index["optionalMods"][0]["modName"], "@synthetic_000");
+        assert_eq!(index["checksum"], expected);
     }
 
     #[test]

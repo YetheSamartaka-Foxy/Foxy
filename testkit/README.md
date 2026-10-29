@@ -46,6 +46,9 @@ foxy-testkit run --case .\testkit\examples\state-recovery-ssd.example.json --no-
 foxy-testkit run --case .\testkit\examples\state-paused-restart-ssd.example.json --no-build
 foxy-testkit run --case .\testkit\examples\state-bulk-queue-identity-ssd.example.json --no-build
 foxy-testkit run --case .\testkit\examples\state-delta-clean-check-ssd.example.json --no-build
+foxy-testkit run --case .\testkit\examples\state-n01-external-edit-rollback.example.json --no-build
+foxy-testkit run --case .\testkit\examples\state-n05-foxypack-atomic-import.example.json --no-build
+foxy-testkit run --case .\testkit\examples\state-n03-n14-workshop-selection.example.json --no-build
 ```
 
 The hash-check recovery examples use generated origins and repository paths

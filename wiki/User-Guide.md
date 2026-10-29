@@ -107,7 +107,7 @@ The panel at the top of the sidebar shows the open game space:
 
 - In the Game spaces list, click **Create game space**, choose the game, and enter a name. You can create several game spaces for the same game to keep separate setups apart.
 - **Open game space** switches without restarting Foxy. Pending changes are saved to the current space first. While saving, Foxy shows **Switching** and freezes edits; you can cancel navigation. If a save fails, Foxy stays in the current space and offers **Retry**, **Discard changes and switch**, or **Cancel switching**. Discard waits for in-flight writes to finish and never saves those changes into the destination space. Downloads and scans must finish before switching.
-- **Remove game space** deletes only the Foxy workspace: its repository list, game settings, and local database. Game installs and downloaded mods stay on disk.
+- **Remove game space** deletes only the Foxy workspace, not game installs or repository downloads. Before removal, Foxy lists that space's private frozen Workshop copies and extra-file payloads; choose whether to preserve/export them or discard them. Removal stops if preservation fails. Steam's shared Workshop content and other game spaces are not removed.
 - **Rename** in Game space settings changes only the name shown in Foxy. The game space folder and its data stay where they are.
 
 ### What is shared and what is per game
@@ -355,7 +355,7 @@ Launch profiles are presets for how the game starts with a specific repository. 
 - **Switching**: a profile dropdown appears next to the repository name when profiles exist. **Default** uses the repository's base settings.
 - **Creating**: in Repository Settings > Configuration, create a new profile. It starts from the current repository settings.
 - **Copy Profile** duplicates an existing profile.
-- **Export** copies the selected profile to the clipboard as JSON; **Import** adds a profile from the clipboard. A name clash gets a suffix.
+- **Export** copies the selected profile to the clipboard as JSON; **Import** adds a profile from the clipboard without switching to it. A name clash gets a suffix, and the currently selected profile stays active.
 
 Each profile controls:
 - **Creator DLC toggles** (Arma 3) - CSLA, Expeditionary Forces, Global Mobilization, Reaction Forces, Spearhead 1944, S.O.G. Prairie Fire, Western Sahara.
@@ -429,6 +429,8 @@ When a repository defines servers, the detail view shows **server cards** with e
 
 If an update is replacing files needed by that installation, Launch or Join waits in a cancellable queue for that exact repository and folder. Foxy checks readiness again when the update ends. A failed update does not launch the game, and work in another folder does not block it.
 
+If you choose a different Launch or Join action while one is waiting for that same installation, Foxy asks whether to replace the saved action. Only the confirmed action continues, after readiness is checked again. For launch preparation failures, retry, explicitly continue this launch, or cancel. A launch counts as handed off when the start command succeeds; that does not prove the game opened or a server connection completed.
+
 When you join an Arma 3 server, Foxy reads what the server reports and can:
 - warn when the server needs addons that you have locally but disabled for this launch, and
 - offer to **match the server's Creator DLCs**: enable the Creator DLCs the server requires and disable enabled ones it does not use, for that launch only.
@@ -496,8 +498,10 @@ For Steam games, Foxy manages Steam Workshop mods next to repository content. Op
 - Enable or disable each mod, and use **Load earlier** / **Load later** to change the load order.
 - **Freeze** keeps a private copy of a mod at its current version so a Workshop update cannot change your setup. **Unfreeze** follows Steam updates again, and **Freeze all** freezes every mod at once.
 - **Export bundle** writes a `.foxyshare` file with the mod list and every frozen copy. **Import bundle** reads one a friend sent you.
+- **Remove** unregisters an item from this game space and can delete its private frozen copy. It does not unsubscribe from Steam or delete Steam's shared live copy. Use the separate **Unsubscribe** action when you intend to change the Steam subscription; deleting the shared files is a separate choice.
+- Bundle import previews selection changes. **Merge** applies incoming items and keeps unlisted selections. **Match** adopts the bundle's enabled selection and order, disabling unlisted items while keeping their downloaded payloads. You can inspect a bundle before importing it.
 - **Refresh** fetches titles, sizes, and update times from Steam; **Open** shows a mod's Workshop page.
-- **Remove** takes a mod out of this game space. Turn on **Also delete the downloaded files and frozen copies** to free the disk space too.
+- **Remove** unregisters a mod from this game space. Turn on **Also delete Foxy's frozen copy** to remove that space's private snapshot. **Unsubscribe in Steam** is a separate action and keeps the local entry; removing the entry does not delete Steam's shared live files.
 
 Arma Reforger Workshop addons are managed by GUID on the command line with `foxy game reforger`, including addon freezing.
 
@@ -506,7 +510,7 @@ Arma Reforger Workshop addons are managed by GUID on the command line with `foxy
 ## Extra Files and Config Packs
 
 - **Managed extra files** store config folders and other files that are not mods inside Foxy, and copy the enabled ones into the game directory before each launch. Manage them with `foxy config extra-file list|add|remove|set|activate`.
-- A **`.foxypack` config pack** exports a game space's repositories, Workshop ids, profiles, and extra files so you can import them on another machine. Packs reference mods by id and never carry mod files. Use `foxy config export <file>` and `foxy config import <file>`.
+- A **`.foxypack` config pack** exports a game space's repositories, Workshop ids, profiles, and extra files so you can import them on another machine. Packs reference mods by id and never carry mod files. Import applies the configuration as one recoverable change, including replacing existing configuration and payloads. Use `foxy config export <file>` and `foxy config import <file>`.
 
 Both are command-line features for now.
 
@@ -619,6 +623,7 @@ If you edit, disable, or delete a job while its run is active, Foxy asks whether
 - Jobs can run once or on recurring weekdays, for a single repository, a repository space, or a custom selection of repositories.
 - Each job can be enabled, disabled, edited, deleted, or started right away with **Run now**.
 - A job can close Foxy or shut down the PC when it finishes, optionally only if everything succeeded. Shutdown starts a 60-second countdown that you can cancel. A repository the job could not start, for example one that was removed or moved to another folder, counts as not succeeded, and the countdown waits while another check or download is still running.
+- If Foxy detects new gameplay during the countdown, it asks for confirmation again. It never closes a game automatically; if game detection is unavailable, Foxy says so rather than treating that as proof no game is running.
 - Jobs only run while Foxy is open, and they belong to the game space they were created in.
 - A job that falls due while a check, update, direct download, database wipe, or another job is running waits, and the Scheduling tab shows it as due. It starts as soon as that work finishes, however long it takes.
 - A job is recorded as **missed** when its time passed more than 10 minutes before Foxy could start it because Foxy was closed or the computer was asleep. A missed job does not run late, so a "download then shut down" job never fires hours afterwards. The log names the reason.
@@ -666,6 +671,8 @@ The Backup Manager shows the total number of backups, unique addons tracked, tot
 - **Run cleanup now** applies the retention rules.
 - **Delete backup** removes one backup; **Delete all backups** removes all backups for one addon.
 
+Cleanup previews the exact backups it will remove. If the selected rules would delete the final recovery copy for an origin, Foxy asks for a separate confirmation before removing those copies. Restores prefer backups recorded for the selected repository installation; backups from another or unknown origin require you to review the source and destination first.
+
 ### Retention rules
 
 - **Keep latest backups per addon** - how many recent backups to keep per addon (0 = unlimited).
@@ -689,13 +696,13 @@ The **Direct download** tab downloads repositories, addons, or individual files 
 4. Keep **Use global speed limit**, or uncheck it to set a custom limit or **Unlimited**.
 5. Start the download.
 
-The tab then shows the status, source URL, destination, and file progress. **Display update view** opens the full per-file progress view. Direct downloads get the same free-space and drive checks as repository updates.
+The tab then shows the status, source URL, destination, and file progress. **Display update view** opens the full per-file progress view. Direct downloads get the same free-space and drive checks as repository updates. Existing destination files are previewed before replacement; approve replacement explicitly. Replacements are staged so a failed or cancelled transfer keeps the previous complete file. Direct downloads cannot replace files owned by a managed repository.
 
 ---
 
 ## Cleanup
 
-The **Cleanup** tab lists addons that no repository uses any more, such as leftovers from removed repositories. Filter the list and click **X** next to an addon to remove it.
+The **Cleanup** tab lists addons that no repository uses any more, such as leftovers from removed repositories. Filter the list and click **X** next to an addon to remove it. Foxy previews the exact deletion set and asks separately before removing the final backup copy.
 
 ---
 
@@ -855,17 +862,19 @@ Foxy includes a full command-line interface in the same binary (`Foxy.exe` on Wi
 | `foxy profile select --repo-name "Name" --profile "Profile"` | Switch the active profile |
 | `foxy space list` | List repository spaces |
 | `foxy space sync --space-id <id> --recheck-all` | Recheck every repository in a repository space |
-| `foxy game list` / `use <id>` / `create <name> --game <game>` / `remove <id>` | Manage game spaces |
+| `foxy game list` / `use <id>` / `create <name> --game <game>` / `remove <id>` | Manage game spaces; removal with private payloads requires `--preserve-payloads` or `--discard-payloads` |
 | `foxy game launch --execute` | Launch Total War: WARHAMMER III or a Generic game with its Steam Workshop mods, without a repository |
 | `foxy game reforger ...` | Manage Arma Reforger Workshop addons by GUID |
-| `foxy workshop ...` | Add, import, enable, order, freeze, share, and remove Steam Workshop items |
+| `foxy workshop ...` | Add, import, enable, order, freeze, share, remove locally, or explicitly unsubscribe from Steam |
 | `foxy config export <file>` / `import <file>` | Export or import a `.foxypack` config pack |
 | `foxy config extra-file ...` | Manage extra files |
-| `foxy direct-download --address <url>` | Download content by URL without a database sync |
+| `foxy direct-download --address <url>` | Download content by URL without a database sync; replacement requires `--overwrite --yes` |
 | `foxy launch --repo-name "Name" --execute` | Launch the game with a repository and profile |
 | `foxy ui` | Start the desktop app from a terminal |
 
 Run `foxy --help` to list every command, and add `--help` after any command to see its options.
+
+`foxy workshop bundle import` previews selection differences and accepts `--mode merge` or `--mode match`. `foxy repo remove` and repository file deletion are scoped to the selected address and local folder, so another installation of the same address remains independent.
 
 ### Global flags
 

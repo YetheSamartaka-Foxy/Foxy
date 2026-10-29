@@ -1,0 +1,101 @@
+{
+  "id": "state-n03-n14-workshop-selection-ssd",
+  "kind": "perf",
+  "description": "Use fresh offline CLI processes to compare Workshop Merge and Match selection, then prove space-local removal preserves shared live bytes and another space's private copy.",
+  "build": "release",
+  "harness": "cli",
+  "timeout_s": 180,
+  "origin": {
+    "root": "${RUN_DIR}/origin",
+    "port": 18154,
+    "synthetic": [{ "root": "${RUN_DIR}/origin", "seed": 20261093, "mods": 1, "files_per_mod": 1, "file_bytes": 4096, "entry_bytes": 4096, "repo_name": "RepoAlpha" }]
+  },
+  "repository": { "name": "RepoAlpha", "address": "http://127.0.0.1:18154/", "path": "${RUN_DIR}/repo-alpha", "space_id": null },
+  "settings": { "steam_directory": "${RUN_DIR}/steam" },
+  "operations": [
+    {
+      "op": "cli-command", "label": "register-incoming", "setup_once": true,
+      "args": ["workshop", "add", "123456789", "--backend", "none", "--skip-metadata"],
+      "path_arguments": [], "expected_exit_code": 0,
+      "expect": [{ "path": "ok", "equals": true }]
+    },
+    {
+      "op": "cli-command", "label": "export-enabled-selection", "setup_once": true,
+      "args": ["workshop", "bundle", "export", "${RUN_DIR}/selection.foxyshare", "--no-payloads"],
+      "path_arguments": [3], "expected_exit_code": 0,
+      "expect": [{ "path": "data.item_count", "equals": 1 }]
+    },
+    {
+      "op": "cli-command", "label": "disable-incoming-locally", "setup_once": true,
+      "args": ["workshop", "set", "123456789", "--enabled", "false"],
+      "path_arguments": [], "expected_exit_code": 0,
+      "expect": [{ "path": "data.entry.enabled", "equals": false }]
+    },
+    {
+      "op": "cli-command", "label": "register-unlisted", "setup_once": true,
+      "args": ["workshop", "add", "987654321", "--backend", "none", "--skip-metadata"],
+      "path_arguments": [], "expected_exit_code": 0,
+      "expect": [{ "path": "ok", "equals": true }]
+    },
+    {
+      "op": "write-file", "setup_once": true,
+      "path": "${RUN_DIR}/config/games/arma3/workshop/frozen/987654321/snapshot/data.bin", "content": "unlisted private payload"
+    },
+    {
+      "op": "cli-command", "label": "merge-applies-listed-and-keeps-unlisted", "setup_once": true,
+      "args": ["workshop", "bundle", "import", "${RUN_DIR}/selection.foxyshare", "--mode", "merge", "--skip-payloads", "--backend", "none", "--skip-metadata", "--yes"],
+      "path_arguments": [3], "expected_exit_code": 0,
+      "expect": [{ "path": "ok", "equals": true }]
+    },
+    {
+      "op": "cli-command", "label": "read-merged-selection", "setup_once": true,
+      "args": ["workshop", "list"], "path_arguments": [], "expected_exit_code": 0,
+      "expect": [
+        { "path": "data.entries.0.item_id", "equals": "123456789" },
+        { "path": "data.entries.0.enabled", "equals": true },
+        { "path": "data.entries.1.item_id", "equals": "987654321" },
+        { "path": "data.entries.1.enabled", "equals": true }
+      ]
+    },
+    {
+      "op": "cli-command", "label": "match-adopts-selection", "setup_once": true,
+      "args": ["workshop", "bundle", "import", "${RUN_DIR}/selection.foxyshare", "--mode", "match", "--skip-payloads", "--backend", "none", "--skip-metadata", "--yes"],
+      "path_arguments": [3], "expected_exit_code": 0,
+      "expect": [{ "path": "ok", "equals": true }]
+    },
+    {
+      "op": "cli-command", "label": "read-matched-selection", "setup_once": true,
+      "args": ["workshop", "list"], "path_arguments": [], "expected_exit_code": 0,
+      "expect": [
+        { "path": "data.entries.0.item_id", "equals": "123456789" },
+        { "path": "data.entries.0.enabled", "equals": true },
+        { "path": "data.entries.1.item_id", "equals": "987654321" },
+        { "path": "data.entries.1.enabled", "equals": false }
+      ]
+    },
+    { "op": "assert-file-exists", "setup_once": true, "path": "${RUN_DIR}/config/games/arma3/workshop/frozen/987654321/snapshot/data.bin" },
+    { "op": "write-file", "setup_once": true, "path": "${RUN_DIR}/steam/steamapps/workshop/content/107410/123456789/data.bin", "content": "shared live bytes" },
+    { "op": "write-file", "setup_once": true, "path": "${RUN_DIR}/config/games/arma3/workshop/frozen/123456789/snapshot/data.bin", "content": "space-local frozen bytes" },
+    { "op": "write-file", "setup_once": true, "path": "${RUN_DIR}/config/games/space-b/workshop/frozen/123456789/snapshot/data.bin", "content": "other space frozen bytes" },
+    { "op": "capture-file-state", "setup_once": true, "label": "shared-live", "path": "${RUN_DIR}/steam" },
+    { "op": "capture-file-state", "setup_once": true, "label": "other-space", "path": "${RUN_DIR}/config/games/space-b" },
+    {
+      "op": "cli-command", "label": "remove-local-entry", "setup_once": true,
+      "args": ["workshop", "remove", "123456789", "--delete-data", "--yes"],
+      "path_arguments": [], "expected_exit_code": 0,
+      "expect": [{ "path": "ok", "equals": true }, { "path": "data.deleted_content_path", "equals": null }]
+    },
+    { "op": "assert-file-absent", "setup_once": true, "path": "${RUN_DIR}/config/games/arma3/workshop/frozen/123456789/snapshot/data.bin" },
+    { "op": "assert-file-state", "setup_once": true, "label": "shared-live", "path": "${RUN_DIR}/steam", "comparison": "equal" },
+    { "op": "assert-file-state", "setup_once": true, "label": "other-space", "path": "${RUN_DIR}/config/games/space-b", "comparison": "equal" },
+    {
+      "op": "cli-command", "label": "read-after-local-removal", "setup_once": true,
+      "args": ["workshop", "list"], "path_arguments": [], "expected_exit_code": 0,
+      "expect": [{ "path": "data.entries.0.item_id", "equals": "987654321" }, { "path": "data.entries.0.enabled", "equals": false }]
+    },
+    { "op": "remote-refresh", "wait_timeout_s": 120 }
+  ],
+  "repetitions": 1,
+  "warmup": false,
+  "guards": { "require_storage_class": "ssd", "require_no_other_foxy": true, "require_clean_worktree": false, "fail_on_db_wipe": true, "max_run_gb": 1 }
+}

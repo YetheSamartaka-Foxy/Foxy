@@ -14,6 +14,10 @@ use crate::ui::types::{Repository, RepositorySpace};
 
 use super::{GameModule, Profile, extra_files, reforger, workshop};
 
+mod recovery;
+use recovery::{ImportClaim, begin_import_recovery};
+pub use recovery::{commit_pending_import, recover_pending_import, rollback_pending_import};
+
 pub const FOXY_PACK_SCHEMA_VERSION: u32 = 1;
 
 /// Ceiling on the total uncompressed payload an import will unpack. Packs carry
@@ -282,6 +286,7 @@ fn archive_uncompressed_bytes(archive: &mut ZipArchive<fs::File>) -> u64 {
         .sum()
 }
 
+#[cfg(test)]
 pub fn import_pack(
     space_dir: &Path,
     input_path: &Path,
@@ -289,6 +294,63 @@ pub fn import_pack(
     repositories: &mut Vec<Repository>,
     repository_spaces: &mut Vec<RepositorySpace>,
 ) -> Result<ImportSummary, String> {
+    let summary = import_pack_transactional(
+        space_dir,
+        input_path,
+        module,
+        repositories,
+        repository_spaces,
+    )?;
+    commit_pending_import(space_dir)?;
+    Ok(summary)
+}
+
+/// Imports a pack while retaining a per-space recovery claim until the caller
+/// commits or rolls back after saving repository configuration.
+pub fn import_pack_transactional(
+    space_dir: &Path,
+    input_path: &Path,
+    module: &dyn GameModule,
+    repositories: &mut Vec<Repository>,
+    repository_spaces: &mut Vec<RepositorySpace>,
+) -> Result<ImportSummary, String> {
+    let old_repositories = repositories.clone();
+    let old_spaces = repository_spaces.clone();
+    let claim = ImportClaim::acquire(space_dir, true)?;
+    let space_dir = claim.space_dir.clone();
+    let result = begin_import_recovery(&space_dir).and_then(|()| {
+        import_pack_inner(
+            &space_dir,
+            input_path,
+            module,
+            repositories,
+            repository_spaces,
+        )
+    });
+    if let Err(import_error) = &result {
+        *repositories = old_repositories;
+        *repository_spaces = old_spaces;
+        if let Err(recovery_error) = recovery::recover_pending_import_inner(&space_dir) {
+            drop(claim);
+            return Err(format!(
+                "{}; import recovery failed: {}",
+                import_error, recovery_error
+            ));
+        }
+    } else {
+        claim.retain();
+    }
+    result
+}
+
+fn import_pack_inner(
+    space_dir: &Path,
+    input_path: &Path,
+    module: &dyn GameModule,
+    repositories: &mut Vec<Repository>,
+    repository_spaces: &mut Vec<RepositorySpace>,
+) -> Result<ImportSummary, String> {
+    recovery::validate_managed_paths(space_dir)?;
     let mut archive = open_archive(input_path)?;
     let manifest: FoxyPackManifest = read_required_json(&mut archive, "manifest.json")?;
     validate_schema(manifest.schema_version)?;
@@ -671,11 +733,13 @@ fn import_extra_files(
     archive: &mut ZipArchive<fs::File>,
     incoming: extra_files::ExtraFilesFile,
 ) -> Result<usize, String> {
+    recovery::validate_managed_paths(space_dir)?;
     for entry in &incoming.entries {
         validate_extra_file_entry(entry)?;
     }
 
     let temp_root = space_dir.join("extra_files.import.tmp");
+    recovery::validate_no_symlinks(&temp_root)?;
     if temp_root.exists() {
         fs::remove_dir_all(&temp_root)
             .map_err(|err| format!("Failed to clear {}: {}", sanitize_log_path(&temp_root), err))?;
@@ -700,6 +764,7 @@ fn import_extra_files(
                 ));
             }
             let target_dir = extra_files::payload_dir(space_dir, &entry.id);
+            recovery::validate_no_symlinks(&target_dir)?;
             if target_dir.exists() {
                 fs::remove_dir_all(&target_dir).map_err(|err| {
                     format!(
@@ -932,6 +997,74 @@ mod tests {
     use crate::core::game::reforger::{self, ReforgerModule};
     use crate::ui::types::RepositoryProfile;
 
+    fn write_pack_for_import_failure(path: &Path) {
+        let file = fs::File::create(path).expect("pack file");
+        let mut zip = ZipWriter::new(file);
+        let options = zip_options();
+        write_json_entry(
+            &mut zip,
+            options,
+            "manifest.json",
+            &serde_json::json!({
+                "schema_version": 1,
+                "created_at": 0,
+                "foxy_version": "test",
+                "game_id": "arma3",
+                "game_space_id": "test-space",
+                "game_space_display_name": "Test"
+            }),
+        )
+        .expect("manifest");
+        let repository = Repository {
+            name: "Imported".to_string(),
+            address: "https://repo.example.invalid/imported/".to_string(),
+            path: "R:/Mods/Imported".to_string(),
+            ..Default::default()
+        };
+        write_json_entry(
+            &mut zip,
+            options,
+            "repositories.json",
+            &PackRepositoriesFile {
+                schema_version: 1,
+                repositories: vec![PackRepositoryEntry {
+                    repository,
+                    profiles: Vec::new(),
+                }],
+                repository_spaces: vec![
+                    serde_json::from_value(serde_json::json!({
+                        "id": "imported-space",
+                        "name": "Imported space"
+                    }))
+                    .expect("repository space"),
+                ],
+            },
+        )
+        .expect("repositories");
+        let entry = |id: &str, source_name: &str| extra_files::ExtraFileEntry {
+            id: id.to_string(),
+            name: id.to_string(),
+            source_name: source_name.to_string(),
+            destination: "{game_dir}/config".to_string(),
+            kind: extra_files::ExtraFileKind::File,
+            enabled: true,
+            created_at: 0,
+        };
+        write_json_entry(
+            &mut zip,
+            options,
+            "extra_files.json",
+            &extra_files::ExtraFilesFile {
+                entries: vec![entry("first", "first.cfg"), entry("missing", "missing.cfg")],
+            },
+        )
+        .expect("extra files");
+        zip.start_file("extra_files/first/first.cfg", options)
+            .expect("payload entry");
+        zip.write_all(b"replacement").expect("payload bytes");
+        zip.finish().expect("finish pack");
+    }
+
     #[test]
     fn export_import_round_trips_repositories_profiles_and_extra_files() {
         let source_space = tempfile::tempdir().expect("source space");
@@ -1036,6 +1169,194 @@ mod tests {
                 .join("server.cfg")
                 .is_file()
         );
+    }
+
+    #[test]
+    fn failed_later_extra_file_keeps_prior_config_and_payload() {
+        let space = tempfile::tempdir().expect("space");
+        let work = tempfile::tempdir().expect("work");
+        let pack = work.path().join("partial.foxypack");
+        write_pack_for_import_failure(&pack);
+
+        let old_entry = extra_files::ExtraFileEntry {
+            id: "first".to_string(),
+            name: "Old config".to_string(),
+            source_name: "first.cfg".to_string(),
+            destination: "{game_dir}/old.cfg".to_string(),
+            kind: extra_files::ExtraFileKind::File,
+            enabled: true,
+            created_at: 1,
+        };
+        extra_files::save_store(
+            space.path(),
+            &extra_files::ExtraFilesFile {
+                entries: vec![old_entry],
+            },
+        )
+        .expect("old store");
+        let old_payload = extra_files::payload_dir(space.path(), "first").join("first.cfg");
+        fs::create_dir_all(old_payload.parent().expect("payload parent")).expect("payload dir");
+        fs::write(&old_payload, b"old payload").expect("old payload");
+        let old_repositories = serde_json::to_vec(&vec![Repository::default()]).expect("repos");
+        fs::write(space.path().join("repositories.json"), &old_repositories).expect("repos file");
+        fs::write(space.path().join("repository_spaces.json"), b"[]").expect("spaces file");
+        let mut repositories = vec![Repository::default()];
+        let mut spaces = Vec::new();
+
+        let error = import_pack_transactional(
+            space.path(),
+            &pack,
+            &Arma3Module,
+            &mut repositories,
+            &mut spaces,
+        )
+        .expect_err("the second payload is missing");
+
+        assert!(error.contains("missing payload"));
+        assert_eq!(repositories, vec![Repository::default()]);
+        assert!(spaces.is_empty());
+        assert_eq!(
+            fs::read(&old_payload).expect("restored payload"),
+            b"old payload"
+        );
+        assert_eq!(
+            extra_files::load_store(space.path())
+                .expect("restored store")
+                .entries[0]
+                .destination,
+            "{game_dir}/old.cfg"
+        );
+        assert_eq!(
+            fs::read(space.path().join("repositories.json")).expect("repos"),
+            old_repositories
+        );
+        assert_eq!(
+            fs::read(space.path().join("repository_spaces.json")).expect("spaces"),
+            b"[]"
+        );
+        assert!(!space.path().join(recovery::IMPORT_RECOVERY_DIR).exists());
+        recover_pending_import(space.path()).expect("failed import released ownership");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn import_rejects_aliased_extra_files_root_without_touching_external_payloads() {
+        use std::os::unix::fs::symlink;
+
+        let space = tempfile::tempdir().expect("space");
+        let work = tempfile::tempdir().expect("work");
+        let pack = work.path().join("aliased.foxypack");
+        write_pack_for_import_failure(&pack);
+        let external = work.path().join("external");
+        fs::create_dir_all(external.join("first")).expect("external payload");
+        fs::write(external.join("first/first.cfg"), b"game-owned content").expect("payload");
+        symlink(&external, space.path().join(extra_files::EXTRA_FILES_DIR)).expect("alias root");
+        let mut repositories = Vec::new();
+        let mut repository_spaces = Vec::new();
+
+        let error = import_pack_transactional(
+            space.path(),
+            &pack,
+            &Arma3Module,
+            &mut repositories,
+            &mut repository_spaces,
+        )
+        .expect_err("symlinked managed root is rejected");
+
+        assert!(error.contains("symbolic links"));
+        assert_eq!(
+            fs::read(external.join("first/first.cfg")).unwrap(),
+            b"game-owned content"
+        );
+        assert!(
+            fs::symlink_metadata(space.path().join(extra_files::EXTRA_FILES_DIR))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[test]
+    fn active_import_refuses_second_import_and_public_recovery_until_commit() {
+        let space = tempfile::tempdir().expect("space");
+        let work = tempfile::tempdir().expect("work");
+        let pack = work.path().join("valid.foxypack");
+        let active = ActiveGameSpace {
+            space_id: "test-space".to_string(),
+            game_id: "arma3".to_string(),
+            display_name: "Test space".to_string(),
+        };
+        export_pack(space.path(), &pack, &Arma3Module, &active, &[], &[])
+            .expect("export valid pack");
+        let mut repositories = Vec::new();
+        let mut repository_spaces = Vec::new();
+
+        import_pack_transactional(
+            space.path(),
+            &pack,
+            &Arma3Module,
+            &mut repositories,
+            &mut repository_spaces,
+        )
+        .expect("first import");
+
+        assert!(recover_pending_import(space.path()).is_err());
+        assert!(
+            import_pack_transactional(
+                space.path(),
+                &pack,
+                &Arma3Module,
+                &mut repositories,
+                &mut repository_spaces,
+            )
+            .is_err()
+        );
+        commit_pending_import(space.path()).expect("commit first import");
+        assert!(!space.path().join(recovery::IMPORT_RECOVERY_DIR).exists());
+    }
+
+    #[test]
+    fn restart_recovery_restores_saved_files_and_removes_new_payloads() {
+        let space = tempfile::tempdir().expect("space");
+        fs::write(space.path().join("repositories.json"), b"old repositories").expect("repos");
+        fs::write(space.path().join("repository_spaces.json"), b"old spaces").expect("spaces");
+        fs::write(space.path().join("workshop.json"), b"old workshop").expect("workshop");
+        let old_payload = extra_files::payload_dir(space.path(), "existing").join("old.cfg");
+        fs::create_dir_all(old_payload.parent().expect("payload parent")).expect("payload dir");
+        fs::write(&old_payload, b"old payload").expect("payload");
+        begin_import_recovery(space.path()).expect("journal");
+
+        fs::write(space.path().join("repositories.json"), b"new repositories").expect("repos");
+        fs::write(space.path().join("repository_spaces.json"), b"new spaces").expect("spaces");
+        fs::write(space.path().join("workshop.json"), b"new workshop").expect("workshop");
+        fs::remove_dir_all(old_payload.parent().expect("payload parent")).expect("replace payload");
+        let new_payload = extra_files::payload_dir(space.path(), "existing").join("new.cfg");
+        fs::create_dir_all(new_payload.parent().expect("new payload parent"))
+            .expect("new payload dir");
+        fs::write(&new_payload, b"new payload").expect("new payload");
+        fs::create_dir_all(extra_files::payload_dir(space.path(), "created"))
+            .expect("new entry payload");
+
+        recover_pending_import(space.path()).expect("recover after process loss");
+
+        assert_eq!(
+            fs::read(space.path().join("repositories.json")).expect("repos"),
+            b"old repositories"
+        );
+        assert_eq!(
+            fs::read(space.path().join("repository_spaces.json")).expect("spaces"),
+            b"old spaces"
+        );
+        assert_eq!(
+            fs::read(space.path().join("workshop.json")).expect("workshop"),
+            b"old workshop"
+        );
+        assert_eq!(
+            fs::read(old_payload).expect("old payload restored"),
+            b"old payload"
+        );
+        assert!(!extra_files::payload_dir(space.path(), "created").exists());
+        assert!(!space.path().join(recovery::IMPORT_RECOVERY_DIR).exists());
     }
 
     #[test]

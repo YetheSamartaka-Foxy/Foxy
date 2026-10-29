@@ -75,12 +75,14 @@ impl Foxy {
                 normalize_settings_launch_behavior(&mut self.settings_view_state);
                 for notice in &mut self.settings_view_state.update_summary_notices {
                     notice.repository_url = Self::normalize_repo_url(&notice.repository_url);
+                    notice.local_path = notice.local_path.trim().to_string();
                     if notice.pending_ack_count == 0 {
                         notice.pending_ack_count = 1;
                     }
                 }
                 for session in &mut self.settings_view_state.active_update_sessions {
                     session.repository_url = Self::normalize_repo_url(&session.repository_url);
+                    session.local_path = session.local_path.trim().to_string();
                 }
                 self.settings_view_state
                     .active_update_sessions

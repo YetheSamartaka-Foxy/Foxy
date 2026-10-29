@@ -46,12 +46,9 @@ impl Foxy {
                     ui.ctx()
                         .output_mut(|o| o.cursor_icon = CursorIcon::PointingHand);
                 }
-                if install_btn.clicked()
-                    && let Err(e) = app_update::launch_installer(&path, true)
-                {
-                    log::error!("Failed to launch installer: {}", e);
-                    self.app_update_status =
-                        UpdateCheckStatus::Failed(format!("Failed to launch installer: {}", e));
+                if install_btn.clicked() {
+                    self.pending_installer_path = Some(path);
+                    self.pending_installer_error = None;
                 }
             }
             UpdateCheckStatus::Failed(msg) => {

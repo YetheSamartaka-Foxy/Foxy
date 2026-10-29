@@ -5,7 +5,8 @@ use log::warn;
 use crate::core::utils::fs_safety::resolve_child_dir_case_insensitive;
 use crate::core::utils::{addon_backup, app_paths};
 use crate::ui::app::{
-    AddonBackupTaskAction, AddonBackupTaskResult, AddonBackupTaskStatus, BackupManagerNotice, Foxy,
+    AddonBackupTaskAction, AddonBackupTaskResult, AddonBackupTaskStatus, BackupCleanupTaskResult,
+    BackupManagerConfirmAction, BackupManagerNotice, Foxy,
 };
 use crate::ui::i18n::fmt_bytes;
 use crate::ui::types::Repository;
@@ -130,7 +131,35 @@ impl Foxy {
         }
     }
 
-    pub fn run_backup_manager_cleanup(&mut self) -> bool {
+    pub fn prepare_backup_manager_cleanup(&mut self) -> bool {
+        if self.backup_cleanup_in_flight {
+            return false;
+        }
+        let Some(backup_root) = self.configured_backup_directory() else {
+            return false;
+        };
+        let policy = self.backup_cleanup_policy();
+        if policy.keep_latest_per_addon.is_none() && policy.max_age_days.is_none() {
+            self.backup_manager_notice = Some(BackupManagerNotice {
+                success: false,
+                message: self.t("Configure at least one cleanup rule before running cleanup."),
+            });
+            return false;
+        }
+        self.spawn_backup_cleanup_worker(move || {
+            BackupCleanupTaskResult::Preview(
+                addon_backup::preview_addon_backup_cleanup(&backup_root, policy)
+                    .map_err(|err| err.to_string()),
+            )
+        });
+        true
+    }
+
+    pub fn run_backup_manager_cleanup_with_final_copy(
+        &mut self,
+        preview: &addon_backup::BackupCleanupPreview,
+        include_final_recovery_copies: bool,
+    ) -> bool {
         let Some(backup_root) = self.configured_backup_directory() else {
             let message = self.t("Addon backup directory is not configured.");
             self.backup_manager_notice = Some(BackupManagerNotice {
@@ -141,44 +170,112 @@ impl Foxy {
             return false;
         };
 
-        let policy = self.backup_cleanup_policy();
-        if policy.keep_latest_per_addon.is_none() && policy.max_age_days.is_none() {
-            let message = self.t("Configure at least one cleanup rule before running cleanup.");
-            self.backup_manager_notice = Some(BackupManagerNotice {
-                success: false,
-                message: message.clone(),
-            });
-            warn!("{}", message);
+        if self.backup_cleanup_in_flight {
             return false;
         }
 
-        match addon_backup::cleanup_addon_backups(&backup_root, policy) {
-            Ok(report) => {
-                let message = self.i18n.tr_plural_fmt(
-                    "Backup cleanup removed {count} backups and freed {size}.",
-                    report.deleted_backups as u64,
-                    &[("size", fmt_bytes(report.freed_bytes))],
-                );
-                self.backup_manager_notice = Some(BackupManagerNotice {
-                    success: true,
-                    message,
-                });
-                self.invalidate_backup_manager_inventory();
-                self.refresh_backup_manager_inventory();
-                true
+        let preview = preview.clone();
+        self.spawn_backup_cleanup_worker(move || {
+            BackupCleanupTaskResult::Cleanup(
+                addon_backup::cleanup_addon_backup_preview_confirmed(
+                    &backup_root,
+                    &preview,
+                    include_final_recovery_copies,
+                )
+                .map_err(|err| err.to_string()),
+            )
+        });
+        true
+    }
+
+    fn spawn_backup_cleanup_worker(
+        &mut self,
+        task: impl FnOnce() -> BackupCleanupTaskResult + Send + 'static,
+    ) {
+        let tx = self.backup_cleanup_task_tx.clone();
+        let repaint_ctx = self.repaint_ctx.clone();
+        self.backup_cleanup_in_flight = true;
+        self.backup_cleanup_worker = Some(std::thread::spawn(move || {
+            let _ = tx.send(task());
+            Self::request_background_repaint(repaint_ctx.as_ref());
+        }));
+        self.needs_repaint = true;
+    }
+
+    pub fn backup_manager_work_in_flight(&self) -> bool {
+        self.backup_cleanup_in_flight
+            || self.addon_backup_worker.is_some()
+            || self.backup_inventory_refresh_in_progress
+    }
+
+    fn poll_backup_cleanup_results(&mut self) {
+        while let Ok(result) = self.backup_cleanup_task_rx.try_recv() {
+            self.backup_cleanup_in_flight = false;
+            if let Some(worker) = self.backup_cleanup_worker.take() {
+                let _ = worker.join();
             }
-            Err(err) => {
-                let message = self.t_fmt(
+            match result {
+                BackupCleanupTaskResult::Preview(Ok(preview)) => {
+                    self.backup_manager_confirm_action =
+                        Some(BackupManagerConfirmAction::RunCleanup {
+                            preview,
+                            include_final_recovery_copies: false,
+                        });
+                }
+                BackupCleanupTaskResult::Preview(Err(err)) => {
+                    self.backup_manager_notice = Some(BackupManagerNotice {
+                        success: false,
+                        message: self
+                            .t_fmt("Backup cleanup preview failed: {error}", &[("error", err)]),
+                    });
+                }
+                BackupCleanupTaskResult::Cleanup(Ok(report)) => {
+                    let deleted = report.deleted_folders.join(", ");
+                    let failed = report.failed_folders.join(", ");
+                    let message = if report.failed_folders.is_empty() {
+                        self.t_fmt(
+                            "Backup cleanup removed {count} backups and freed {size}. Removed: {folders}",
+                            &[("count", report.deleted_backups.to_string()), ("size", fmt_bytes(report.freed_bytes)), ("folders", deleted)],
+                        )
+                    } else {
+                        self.t_fmt(
+                            "Backup cleanup partially removed {count} backups. Removed: {removed}. Failed: {failed}",
+                            &[("count", report.deleted_backups.to_string()), ("removed", deleted), ("failed", failed)],
+                        )
+                    };
+                    self.backup_manager_notice = Some(BackupManagerNotice {
+                        success: report.failed_folders.is_empty(),
+                        message,
+                    });
+                    self.backup_manager_confirm_action = None;
+                    self.invalidate_backup_manager_inventory();
+                    self.refresh_backup_manager_inventory();
+                }
+                BackupCleanupTaskResult::Cleanup(Err(err)) => {
+                    self.backup_manager_notice = Some(BackupManagerNotice {
+                        success: false,
+                        message: self.t_fmt("Backup cleanup failed: {error}", &[("error", err)]),
+                    });
+                }
+            }
+        }
+        if self.backup_cleanup_in_flight
+            && self
+                .backup_cleanup_worker
+                .as_ref()
+                .is_some_and(std::thread::JoinHandle::is_finished)
+        {
+            if let Some(worker) = self.backup_cleanup_worker.take() {
+                let _ = worker.join();
+            }
+            self.backup_cleanup_in_flight = false;
+            self.backup_manager_notice = Some(BackupManagerNotice {
+                success: false,
+                message: self.t_fmt(
                     "Backup cleanup failed: {error}",
-                    &[("error", err.to_string())],
-                );
-                self.backup_manager_notice = Some(BackupManagerNotice {
-                    success: false,
-                    message: message.clone(),
-                });
-                warn!("{}", message);
-                false
-            }
+                    &[("error", self.t("Unknown error"))],
+                ),
+            });
         }
     }
 
@@ -236,6 +333,7 @@ impl Foxy {
         if self.repository_sync_active()
             || self.is_direct_download_running()
             || self.has_addon_backup_task_running()
+            || self.backup_cleanup_in_flight
         {
             warn!("Manual addon backup ignored: background work is currently active");
             return false;
@@ -271,6 +369,11 @@ impl Foxy {
         };
 
         let addon_name_owned = addon_name.trim().to_string();
+        let origin = addon_backup::AddonBackupOrigin {
+            game_space_id: crate::core::game::spaces::active_game_space().space_id,
+            repository_url: repo.address.clone(),
+            local_path: repo.path.clone(),
+        };
         self.addon_backup_restore_state = None;
         self.addon_backup_notice = None;
         self.addon_backup_status = Some(AddonBackupTaskStatus {
@@ -283,25 +386,26 @@ impl Foxy {
         let task_tx = self.addon_backup_task_tx.clone();
         let repaint_ctx = self.repaint_ctx.clone();
         self.addon_backup_worker = Some(std::thread::spawn(move || {
-            let result = addon_backup::backup_addon(&backup_root, &addon_path)
-                .map(|record| AddonBackupTaskResult {
-                    repo_index,
-                    action: AddonBackupTaskAction::Backup,
-                    addon_name: record.addon_name,
-                    success: true,
-                    content_hash: Some(record.content_hash),
-                    error_message: None,
-                    trigger_recheck: false,
-                })
-                .unwrap_or_else(|err| AddonBackupTaskResult {
-                    repo_index,
-                    action: AddonBackupTaskAction::Backup,
-                    addon_name: addon_name_owned,
-                    success: false,
-                    content_hash: None,
-                    error_message: Some(err.to_string()),
-                    trigger_recheck: false,
-                });
+            let result =
+                addon_backup::backup_addon_with_origin(&backup_root, &addon_path, Some(&origin))
+                    .map(|record| AddonBackupTaskResult {
+                        repo_index,
+                        action: AddonBackupTaskAction::Backup,
+                        addon_name: record.addon_name,
+                        success: true,
+                        content_hash: Some(record.content_hash),
+                        error_message: None,
+                        trigger_recheck: false,
+                    })
+                    .unwrap_or_else(|err| AddonBackupTaskResult {
+                        repo_index,
+                        action: AddonBackupTaskAction::Backup,
+                        addon_name: addon_name_owned,
+                        success: false,
+                        content_hash: None,
+                        error_message: Some(err.to_string()),
+                        trigger_recheck: false,
+                    });
             if task_tx.send(result).is_ok() {
                 Self::request_background_repaint(repaint_ctx.as_ref());
             }
@@ -311,6 +415,7 @@ impl Foxy {
     }
 
     pub(in crate::ui::app) fn poll_addon_backup_results(&mut self) {
+        self.poll_backup_cleanup_results();
         while let Ok(result) = self.addon_backup_task_rx.try_recv() {
             self.addon_backup_status = None;
             if let Some(ref handle) = self.addon_backup_worker

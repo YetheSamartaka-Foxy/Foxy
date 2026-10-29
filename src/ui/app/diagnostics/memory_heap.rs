@@ -210,6 +210,7 @@ impl Foxy {
 
     pub(super) fn heap_bytes_of_update_summary_notice(notice: &UpdateSummaryNotice) -> usize {
         let mut total = Self::heap_bytes_of_string(&notice.repository_url)
+            + Self::heap_bytes_of_string(&notice.local_path)
             + Self::heap_bytes_of_download_summary(&notice.summary);
         total += notice.mods.capacity() * size_of::<ModDiffSummary>();
         total += notice
@@ -282,6 +283,7 @@ impl Foxy {
 
     pub(super) fn heap_bytes_of_active_update_session(session: &ActiveUpdateSession) -> usize {
         Self::heap_bytes_of_string(&session.repository_url)
+            + Self::heap_bytes_of_string(&session.local_path)
             + Self::heap_bytes_of_string(&session.session_id)
             + session.mods.capacity() * size_of::<ModDiffSummary>()
             + session

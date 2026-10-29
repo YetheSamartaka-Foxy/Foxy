@@ -32,9 +32,63 @@ pub struct RepositorySpaceBulkProgress {
     pub current_repo_name: Option<String>,
     pub target_repo_urls: HashSet<String>,
     pub completed_repo_urls: HashSet<String>,
+    pub pending_target: Option<crate::ui::types::scheduling::RepoInstanceKey>,
+    pub active_target: Option<crate::ui::types::scheduling::RepoInstanceKey>,
+    pub target_instances: Vec<crate::ui::types::scheduling::RepoInstanceKey>,
+    pub completed_instances: Vec<crate::ui::types::scheduling::RepoInstanceKey>,
 }
 
 impl RepositorySpaceBulkProgress {
+    pub fn record_target(
+        &mut self,
+        target: &crate::ui::types::scheduling::RepoInstanceKey,
+        succeeded: bool,
+        had_updates: bool,
+    ) -> bool {
+        if !self.target_instances.contains(target) || self.completed_instances.contains(target) {
+            return false;
+        }
+        self.completed_instances.push(target.clone());
+        let url = target.remote_url.clone();
+        if self.pending_target.as_ref() == Some(target) {
+            self.pending_target = None;
+        }
+        if self.active_target.as_ref() == Some(target) {
+            self.active_target = None;
+        }
+        self.completed_repo_urls.insert(url);
+        self.record_outcome(succeeded, had_updates);
+        true
+    }
+
+    pub fn remove_target_instance(
+        &mut self,
+        target: &crate::ui::types::scheduling::RepoInstanceKey,
+    ) {
+        let Some(index) = self.target_instances.iter().position(|item| item == target) else {
+            return;
+        };
+        self.target_instances.remove(index);
+        if self.pending_target.as_ref() == Some(target) {
+            self.pending_target = None;
+        }
+        if self.active_target.as_ref() == Some(target) {
+            self.active_target = None;
+        }
+        if !self.completed_instances.contains(target) {
+            self.total_count = self.total_count.saturating_sub(1);
+            self.failed_count += 1;
+        }
+        let url = &target.remote_url;
+        if !self
+            .target_instances
+            .iter()
+            .any(|item| &item.remote_url == url)
+        {
+            self.target_repo_urls.remove(url);
+        }
+    }
+
     /// Count one member's outcome. Returns false when the URL is not a pending
     /// target of this run, so a repeated or foreign completion changes nothing.
     pub fn record(&mut self, repo_url: &str, succeeded: bool, had_updates: bool) -> bool {
@@ -43,6 +97,11 @@ impl RepositorySpaceBulkProgress {
             return false;
         }
         self.completed_repo_urls.insert(repo_url.to_string());
+        self.record_outcome(succeeded, had_updates);
+        true
+    }
+
+    fn record_outcome(&mut self, succeeded: bool, had_updates: bool) {
         self.completed_count += 1;
         if succeeded {
             self.succeeded_count += 1;
@@ -56,7 +115,6 @@ impl RepositorySpaceBulkProgress {
         } else {
             self.failed_count += 1;
         }
-        true
     }
 
     /// Remove a pending member from this run and count it as a failed skip.
@@ -93,6 +151,10 @@ mod tests {
             current_repo_name: None,
             target_repo_urls: urls.iter().map(|url| url.to_string()).collect(),
             completed_repo_urls: HashSet::new(),
+            pending_target: None,
+            active_target: None,
+            target_instances: Vec::new(),
+            completed_instances: Vec::new(),
         }
     }
 
@@ -142,6 +204,27 @@ mod tests {
         assert!(!run.record("other/", true, false));
         assert_eq!((run.completed_count, run.failed_count), (1, 1));
         assert!(!run.is_finished());
+    }
+
+    #[test]
+    fn instance_completion_is_exactly_once_for_same_url_targets() {
+        let first = crate::ui::types::scheduling::RepoInstanceKey {
+            remote_url: "https://repo.example.invalid/".into(),
+            local_path: "R:/Mods/First".into(),
+        };
+        let second = crate::ui::types::scheduling::RepoInstanceKey {
+            remote_url: first.remote_url.clone(),
+            local_path: "R:/Mods/Second".into(),
+        };
+        let mut run = progress(&[&first.remote_url]);
+        run.target_instances = vec![first.clone(), second.clone()];
+        run.total_count = 2;
+        run.pending_target = Some(first.clone());
+
+        assert!(run.record_target(&first, false, false));
+        assert!(!run.record_target(&first, true, false));
+        assert_eq!((run.completed_count, run.failed_count), (1, 1));
+        assert!(!run.completed_instances.contains(&second));
     }
 }
 

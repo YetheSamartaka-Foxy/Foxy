@@ -513,6 +513,7 @@ pub struct PendingUpdateLaunch {
     pub target_instance_key: String,
     pub update_finished: bool,
     pub update_succeeded: bool,
+    pub replacement: Option<Box<PendingUpdateLaunch>>,
 }
 
 impl PendingJoinPreflightState {

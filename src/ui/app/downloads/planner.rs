@@ -304,3 +304,134 @@ impl Foxy {
         Self::build_single_file_direct_download_plan(client, source_url, destination_root)
     }
 }
+
+pub(crate) fn direct_download_managed_root_problem(plan: &DirectDownloadPlan) -> Option<String> {
+    direct_download_managed_paths_problem(
+        &plan
+            .files
+            .iter()
+            .map(|target| target.local_path.clone())
+            .collect::<Vec<_>>(),
+    )
+}
+
+pub(crate) fn direct_download_managed_paths_problem(targets: &[PathBuf]) -> Option<String> {
+    let registry = match crate::core::game::spaces::load_registry() {
+        Ok(registry) => registry,
+        Err(_) => {
+            return Some(
+                "Foxy could not verify game spaces; choose an unmanaged destination".to_string(),
+            );
+        }
+    };
+    let mut managed_roots = Vec::new();
+    for space in registry.game_spaces {
+        let repositories_path =
+            crate::core::game::spaces::game_space_dir_for(&space.id).join("repositories.json");
+        let raw = match std::fs::read_to_string(&repositories_path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                return Some(
+                    "Foxy could not verify repository folders; choose an unmanaged destination"
+                        .to_string(),
+                );
+            }
+        };
+        let repositories: Vec<Value> = match serde_json::from_str(&raw) {
+            Ok(repositories) => repositories,
+            Err(_) => {
+                return Some(
+                    "Foxy could not verify repository folders; choose an unmanaged destination"
+                        .to_string(),
+                );
+            }
+        };
+        for repository in repositories {
+            if let Some(path) = repository.get("path").and_then(Value::as_str)
+                && !path.trim().is_empty()
+                && let Some(path) = canonicalize_with_missing_tail(Path::new(path))
+            {
+                managed_roots.push(path);
+            }
+        }
+    }
+    for target in targets {
+        let Some(target_path) = canonicalize_with_missing_tail(target) else {
+            return Some(
+                "Foxy could not verify the download destination; choose an unmanaged destination"
+                    .to_string(),
+            );
+        };
+        if managed_roots
+            .iter()
+            .any(|root| paths_overlap(root, &target_path))
+        {
+            return Some("This download overlaps a managed repository. Choose an unmanaged destination or use the repository update.".to_string());
+        }
+    }
+    None
+}
+
+fn canonicalize_with_missing_tail(path: &Path) -> Option<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
+    let mut cursor = absolute.as_path();
+    let mut tail = Vec::new();
+    while !cursor.exists() {
+        tail.push(cursor.file_name()?.to_os_string());
+        cursor = cursor.parent()?;
+    }
+    let mut normalized = std::fs::canonicalize(cursor).ok()?;
+    for part in tail.iter().rev() {
+        normalized.push(part);
+    }
+    Some(normalized)
+}
+
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    let left = normalized_path_text(left);
+    let right = normalized_path_text(right);
+    path_text_contains(&left, &right) || path_text_contains(&right, &left)
+}
+
+fn normalized_path_text(path: &Path) -> String {
+    let path = path.to_string_lossy().replace('\\', "/");
+    let path = if cfg!(windows) {
+        path.to_lowercase()
+    } else {
+        path
+    };
+    if path == "/" || (cfg!(windows) && path.ends_with(":/")) {
+        path
+    } else {
+        path.trim_end_matches('/').to_string()
+    }
+}
+
+fn path_text_contains(parent: &str, child: &str) -> bool {
+    child == parent
+        || child
+            .strip_prefix(parent)
+            .is_some_and(|suffix| parent.ends_with('/') || suffix.starts_with('/'))
+}
+
+#[cfg(test)]
+mod managed_path_tests {
+    use super::*;
+
+    #[test]
+    fn managed_path_overlap_uses_component_boundaries() {
+        assert!(paths_overlap(
+            Path::new("/mods/main"),
+            Path::new("/mods/main/addons/a")
+        ));
+        assert!(!paths_overlap(
+            Path::new("/mods/main"),
+            Path::new("/mods/main-copy/addons/a")
+        ));
+    }
+}
