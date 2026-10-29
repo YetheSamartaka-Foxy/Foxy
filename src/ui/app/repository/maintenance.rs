@@ -55,7 +55,11 @@ impl Foxy {
     }
 
     pub fn delete_addon_from_storage_and_database(&mut self, addon_name: &str, addon_path: &str) {
-        if self.repository_sync_active() || self.is_direct_download_running() {
+        if self.repository_sync_active()
+            || self.is_direct_download_running()
+            || self.retained_files_cleanup_in_flight
+            || self.pending_retained_file_removal.is_some()
+        {
             warn!("Addon delete ignored: sync or download worker is currently active");
             self.show_error_toast(self.t("Operation cancelled"));
             return;

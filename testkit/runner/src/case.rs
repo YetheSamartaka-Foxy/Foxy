@@ -114,6 +114,19 @@ pub fn validate(case: &Value) -> Result<()> {
                     "Promotion waits and pause_after_s require GUI download operations"
                 );
             }
+            if !operation["cancel_after_hash_progress"].is_null() {
+                let threshold = operation["cancel_after_hash_progress"]
+                    .as_f64()
+                    .context("cancel_after_hash_progress must be a number between 0 and 1")?;
+                ensure!(
+                    threshold > 0.0 && threshold < 1.0,
+                    "cancel_after_hash_progress must be greater than 0 and less than 1"
+                );
+                ensure!(
+                    harness == "gui" && operation["op"].as_str() == Some("recheck-integrity"),
+                    "cancel_after_hash_progress requires a GUI recheck-integrity operation"
+                );
+            }
             if matches!(
                 operation["op"].as_str(),
                 Some(
@@ -126,11 +139,70 @@ pub fn validate(case: &Value) -> Result<()> {
                         | "assert-space-bulk-failed-count"
                         | "wait-for-space-bulk-target-count"
                         | "prepare-test-directory"
+                        | "acquire-test-file-lock"
+                        | "release-test-file-lock"
+                        | "write-file"
+                        | "capture-origin-requests"
+                        | "assert-origin-requests-unchanged"
+                        | "assert-file-exists"
+                        | "assert-file-absent"
+                        | "assert-pending-update-count"
                         | "invoke-driver"
                         | "wait-for-busy"
                 )
             ) {
                 ensure!(harness == "gui", "State operations require the GUI harness");
+            }
+            if matches!(
+                operation["op"].as_str(),
+                Some("acquire-test-file-lock" | "release-test-file-lock")
+            ) {
+                ensure!(
+                    operation["path"].is_string(),
+                    "Test file lock operations require a run-local path"
+                );
+            }
+            if operation["op"].as_str() == Some("write-file") {
+                ensure!(
+                    operation["path"].is_string() && operation["content"].is_string(),
+                    "write-file requires a run-local path and string content"
+                );
+            }
+            if matches!(
+                operation["op"].as_str(),
+                Some("assert-file-exists" | "assert-file-absent")
+            ) {
+                ensure!(
+                    operation["path"].is_string(),
+                    "File existence assertions require a run-local path"
+                );
+            }
+            if operation["op"].as_str() == Some("assert-pending-update-count") {
+                ensure!(
+                    operation["minimum"].as_u64().is_some(),
+                    "assert-pending-update-count requires a non-negative minimum"
+                );
+                ensure!(
+                    operation["maximum"].as_u64().is_none_or(|maximum| {
+                        maximum >= operation["minimum"].as_u64().unwrap_or(u64::MAX)
+                    }),
+                    "assert-pending-update-count maximum must be at least minimum"
+                );
+                ensure!(
+                    operation["addons"]
+                        .as_array()
+                        .is_none_or(|addons| addons.iter().all(Value::is_string)),
+                    "assert-pending-update-count addons must be an array of names"
+                );
+            }
+            if matches!(
+                operation["op"].as_str(),
+                Some("capture-origin-requests" | "assert-origin-requests-unchanged")
+            ) {
+                ensure!(
+                    case["origin"].is_object() && operation["label"].is_string(),
+                    "Origin request state operations require a case origin and label"
+                );
             }
             let recovery_modes = [
                 operation["cancel_after_promoted_file"].as_bool() == Some(true),
@@ -138,6 +210,7 @@ pub fn validate(case: &Value) -> Result<()> {
                 operation["close_after_promoted_file"].as_bool() == Some(true),
                 operation["pause_after_s"].as_f64().is_some(),
                 operation["cancel_after_s"].as_f64().is_some(),
+                operation["cancel_after_hash_progress"].is_number(),
                 operation["kill_after_s"].as_f64().is_some(),
             ];
             ensure!(
@@ -146,7 +219,7 @@ pub fn validate(case: &Value) -> Result<()> {
                     .filter(|enabled| *enabled)
                     .count()
                     <= 1,
-                "A download operation may select only one cancel, close, kill, or pause mode"
+                "An operation may select only one cancel, close, kill, or pause trigger"
             );
             if operation["op"].as_str() == Some("origin-switch") {
                 ensure!(
@@ -172,8 +245,20 @@ pub fn validate(case: &Value) -> Result<()> {
             );
             for field in ["mods", "files_per_mod", "file_bytes", "entry_bytes"] {
                 if let Some(value) = version[field].as_u64() {
-                    ensure!(value > 0, "origin.synthetic.{field} must be positive");
+                    ensure!(
+                        field == "mods" || value > 0,
+                        "origin.synthetic.{field} must be positive"
+                    );
                 }
+            }
+            if let Some(seeds) = version["mod_seeds"].as_array() {
+                ensure!(
+                    seeds.len() == version["mods"].as_u64().unwrap_or(1) as usize
+                        && seeds.iter().all(|seed| seed.as_i64().is_some_and(|seed| {
+                            (i64::from(i32::MIN)..=i64::from(i32::MAX)).contains(&seed)
+                        })),
+                    "origin.synthetic.mod_seeds must contain one 32-bit seed per mod"
+                );
             }
         }
     }
@@ -213,6 +298,134 @@ mod tests {
         assert!(validate(&case(json!({"root":"v1","port":8140}), switch.clone())).is_ok());
         assert!(validate(&case(Value::Null, switch)).is_err());
         assert!(validate(&case(json!({"root":"v1"}), json!({"op":"origin-switch"}))).is_err());
+    }
+
+    #[test]
+    fn per_mod_synthetic_seeds_match_mod_count_and_i32_range() {
+        let case = |seeds: Value| {
+            json!({
+                "id":"synthetic-seeds",
+                "kind":"perf",
+                "repository":{},
+                "origin":{"root":"v1","synthetic":[{"root":"v1","mods":2,"mod_seeds":seeds}]},
+                "operations":[]
+            })
+        };
+        assert!(validate(&case(json!([11, 22]))).is_ok());
+        assert!(validate(&case(json!([11]))).is_err());
+        assert!(validate(&case(json!([11, i64::from(i32::MAX) + 1]))).is_err());
+    }
+
+    #[test]
+    fn synthetic_origin_can_publish_zero_mods_but_not_zero_file_dimensions() {
+        let case = |mods, files_per_mod| {
+            json!({
+                "id":"empty-publication",
+                "kind":"perf",
+                "repository":{},
+                "origin":{"root":"v1","synthetic":[{
+                    "root":"v1",
+                    "mods":mods,
+                    "files_per_mod":files_per_mod,
+                    "file_bytes":1,
+                    "entry_bytes":1
+                }]},
+                "operations":[]
+            })
+        };
+        assert!(validate(&case(0, 1)).is_ok());
+        assert!(validate(&case(1, 0)).is_err());
+    }
+
+    #[test]
+    fn hash_progress_cancellation_requires_an_integrity_operation_and_fraction() {
+        let case = |operation| {
+            json!({
+                "id":"integrity-cancel",
+                "kind":"perf",
+                "harness":"gui",
+                "repository":{},
+                "operations":[operation]
+            })
+        };
+        assert!(
+            validate(&case(json!({
+                "op":"recheck-integrity",
+                "cancel_after_hash_progress":0.4
+            })))
+            .is_ok()
+        );
+        assert!(
+            validate(&case(json!({
+                "op":"recheck-integrity",
+                "cancel_after_hash_progress":0.0
+            })))
+            .is_err()
+        );
+        assert!(
+            validate(&case(json!({
+                "op":"recheck-integrity",
+                "cancel_after_hash_progress":1.0
+            })))
+            .is_err()
+        );
+        assert!(
+            validate(&case(json!({
+                "op":"download",
+                "cancel_after_hash_progress":0.4
+            })))
+            .is_err()
+        );
+        assert!(
+            validate(&case(json!({
+                "op":"recheck-integrity",
+                "cancel_after_hash_progress":0.4,
+                "cancel_after_s":0.1
+            })))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_file_locks_require_a_gui_run_local_path() {
+        let case = |harness, operation| {
+            json!({
+                "id":"file-lock",
+                "kind":"perf",
+                "harness":harness,
+                "repository":{},
+                "operations":[operation]
+            })
+        };
+        assert!(
+            validate(&case(
+                "gui",
+                json!({"op":"acquire-test-file-lock","path":"${RUN_DIR}/repo/file.bin"})
+            ))
+            .is_ok()
+        );
+        assert!(validate(&case("gui", json!({"op":"release-test-file-lock"}))).is_err());
+        assert!(
+            validate(&case(
+                "cli",
+                json!({"op":"acquire-test-file-lock","path":"${RUN_DIR}/repo/file.bin"})
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn pending_update_count_bounds_are_validated() {
+        let case = |maximum| {
+            json!({
+                "id":"pending-count",
+                "kind":"perf",
+                "repository":{},
+                "operations":[{"op":"assert-pending-update-count","minimum":1,"maximum":maximum}]
+            })
+        };
+        assert!(validate(&case(1)).is_ok());
+        assert!(validate(&case(0)).is_err());
     }
 
     #[test]

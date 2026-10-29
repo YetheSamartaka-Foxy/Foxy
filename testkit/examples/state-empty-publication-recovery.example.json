@@ -1,0 +1,69 @@
+{
+  "id": "state-empty-publication-recovery-ssd",
+  "kind": "perf",
+  "description": "Keep installed files while a repository temporarily publishes zero addons, preserve them across restart, then verify the original publication returns cleanly.",
+  "build": "release",
+  "harness": "gui",
+  "timeout_s": 600,
+  "origin": {
+    "root": "${RUN_DIR}/origin-full",
+    "port": 18146,
+    "synthetic": [
+      { "root": "${RUN_DIR}/origin-full", "seed": 20261070, "repo_name": "RepoAlpha", "mods": 1, "files_per_mod": 2, "file_bytes": 1048576 },
+      { "root": "${RUN_DIR}/origin-empty", "seed": 20261071, "repo_name": "RepoAlpha", "mods": 0, "files_per_mod": 1, "file_bytes": 1 }
+    ]
+  },
+  "repository": {
+    "name": "RepoAlpha",
+    "address": "http://127.0.0.1:18146/",
+    "path": "${RUN_DIR}/repo-alpha",
+    "space_id": null
+  },
+  "operations": [
+    { "op": "download", "setup_once": true, "wait_timeout_s": 180 },
+    { "op": "capture-file-state", "setup_once": true, "label": "published-files" },
+    { "op": "origin-switch", "root": "${RUN_DIR}/origin-empty" },
+    {
+      "op": "remote-refresh",
+      "label": "empty-publication-refresh",
+      "wait_timeout_s": 180,
+      "expect": [
+        { "path": "breakdown.run_metrics.failed_pipelines", "equals": 0 }
+      ]
+    },
+    { "op": "assert-file-state", "label": "published-files", "comparison": "equal" },
+    { "op": "startup", "label": "restart-with-empty-publication", "wait_timeout_s": 180 },
+    { "op": "assert-file-state", "label": "published-files", "comparison": "equal" },
+    { "op": "origin-switch", "root": "${RUN_DIR}/origin-full" },
+    {
+      "op": "remote-refresh",
+      "label": "publication-restored",
+      "wait_timeout_s": 180,
+      "expect": [
+        { "path": "breakdown.run_metrics.failed_pipelines", "equals": 0 }
+      ]
+    },
+    { "op": "assert-pending-update-count", "minimum": 0, "maximum": 0 },
+    { "op": "assert-file-state", "label": "published-files", "comparison": "equal" },
+    {
+      "op": "quick-check",
+      "label": "reappeared-publication-clean-check",
+      "keep_hash_record": true,
+      "wait_timeout_s": 120,
+      "expect": [
+        { "path": "breakdown.run_metrics.failed_pipelines", "equals": 0 },
+        { "path": "breakdown.run_metrics.hash_work_bytes", "equals": 0 }
+      ]
+    }
+  ],
+  "repetitions": 1,
+  "warmup": false,
+  "guards": {
+    "require_storage_class": "ssd",
+    "require_no_other_foxy": true,
+    "require_clean_worktree": false,
+    "fail_on_db_wipe": true,
+    "max_run_gb": 1,
+    "oracle_command": ["${REPO_ROOT}/target/release/foxy-testkit-oracle.exe", "--repository-path", "${REPOSITORY_PATH}"]
+  }
+}

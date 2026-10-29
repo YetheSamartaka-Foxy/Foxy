@@ -42,6 +42,9 @@ pub(super) fn collect_unexpected_local_files_for_mod(
             }
 
             let path_string = path.to_string_lossy().to_string();
+            if crate::core::utils::content_hash::is_foxy_temp_artifact_path(&path_string) {
+                continue;
+            }
             let normalized = normalize_path_for_match(&path_string);
             if !expected_local_paths.contains(&normalized) {
                 extras.push(path_string);
@@ -65,6 +68,19 @@ pub(crate) async fn collect_unexpected_files_for_repo_mods(
         return by_mod;
     }
 
+    let shared_expected: HashSet<String> = match context.db().query_all(
+        "SELECT DISTINCT f.local_path FROM files f JOIN addon_files af ON af.file_id = f.id JOIN repository_addons ra ON ra.addon_id = af.addon_id JOIN repositories r ON r.id = ra.repository_id WHERE r.remote_url != ? OR r.local_path != ?",
+        crate::core::db::params![repo_url, context.target_local_path.as_deref().unwrap_or_default()],
+    ).await {
+        Ok(rows) => rows.iter().filter_map(|row| row.get_string("local_path").ok()).map(|path| normalize_path_for_match(&path)).collect(),
+        Err(_) => {
+            context.hash_evidence.record_issue(crate::core::tasks::calculate_hashes::HashIssue {
+                file_path: String::new(), kind: crate::core::tasks::calculate_hashes::HashIssueKind::Skipped,
+                detail: Some("Could not verify shared-file ownership before cleanup".into()),
+            });
+            return by_mod;
+        }
+    };
     let tree = match Tree::load_for_mod_names(context, repo_url, mod_name_filter).await {
         Ok(tree) => tree,
         Err(err) => {
@@ -110,12 +126,13 @@ pub(crate) async fn collect_unexpected_files_for_repo_mods(
             continue;
         };
 
-        let expected_local_paths: HashSet<String> = mod_node
+        let mut expected_local_paths: HashSet<String> = mod_node
             .files
             .iter()
             .filter_map(|file_idx| tree.files.get(*file_idx))
             .map(|f| normalize_path_for_match(&f.local_path))
             .collect();
+        expected_local_paths.extend(shared_expected.iter().cloned());
         if expected_local_paths.is_empty() {
             continue;
         }
@@ -137,6 +154,7 @@ pub(crate) async fn collect_unexpected_files_for_repo_mods(
 /// Delete unexpected local files from addon directories. Runs the actual
 /// filesystem deletions inside `spawn_blocking` to avoid blocking the tokio
 /// async runtime with synchronous I/O syscalls.
+#[cfg(test)]
 pub(crate) async fn delete_unexpected_local_files(
     unexpected_by_mod: &HashMap<String, Vec<String>>,
 ) -> (usize, usize) {

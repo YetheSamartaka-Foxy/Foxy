@@ -11,6 +11,7 @@ use crate::core::tasks::calculate_hashes::{
 use crate::core::tasks::init_database::{DB_WRITE_PERMITS, DB_WRITE_SEMAPHORE};
 use crate::core::tasks::remote_mods::{
     RemoteRebuildWork, remote_mods_with_data, resolve_mod_local_path,
+    stage_manifests_for_publication,
 };
 use crate::core::utils::fetch_json::fetch_json_fresh;
 use crate::core::utils::speed_of_light::{SolLight, op_id_extra, sol_line};
@@ -53,6 +54,68 @@ pub(crate) struct RemoteRepositoryMetadata {
     pub remote_graph_complete: bool,
     /// `true` when remote addon/file/part manifests were fetched during this call.
     pub remote_graph_fetched: bool,
+    /// The server explicitly published no addons. Existing local ownership is
+    /// retained; this does not authorize deleting installed content.
+    pub accepted_empty: bool,
+}
+
+fn explicitly_publishes_no_addons(data: &Value) -> bool {
+    ["requiredMods", "optionalMods"].into_iter().all(|key| {
+        data.get(key)
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty)
+    })
+}
+
+pub(super) fn publishes_complete_addon_lists(data: &Value) -> bool {
+    let lists: Vec<_> = ["requiredMods", "optionalMods"]
+        .into_iter()
+        .filter_map(|key| data.get(key))
+        .collect();
+    lists.iter().all(|list| list.is_array())
+        && (lists.len() == 2
+            || lists
+                .iter()
+                .any(|list| list.as_array().is_some_and(|items| !items.is_empty())))
+}
+
+fn publication_identity(checksum: &str, addon_index: &Value) -> String {
+    let identity = serde_json::json!({
+        "checksum": checksum.trim(),
+        "requiredMods": addon_index.get("requiredMods"),
+        "optionalMods": addon_index.get("optionalMods"),
+    });
+    identity.to_string()
+}
+
+async fn fetch_publication_identity(
+    context: Arc<FoxyContext>,
+    normalized_url: &str,
+    foxy_mode: bool,
+) -> Option<String> {
+    let repo_data = fetch_json_fresh(context.clone(), &format!("{}repo.json", normalized_url))
+        .await
+        .ok()?;
+    let repo_manifest =
+        serde_json::from_value::<RemoteRepositoryManifest>(repo_data.clone()).ok()?;
+    if foxy_mode {
+        let addon_data = fetch_json_fresh(context, &format!("{}foxy_addons.json", normalized_url))
+            .await
+            .ok()?;
+        if !publishes_complete_addon_lists(&addon_data) {
+            return None;
+        }
+        let checksum = addon_data
+            .get("checksum")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(&repo_manifest.checksum);
+        Some(publication_identity(checksum, &addon_data))
+    } else if publishes_complete_addon_lists(&repo_data) {
+        Some(publication_identity(&repo_manifest.checksum, &repo_data))
+    } else {
+        None
+    }
 }
 
 fn default_repo_image_path() -> String {
@@ -406,7 +469,7 @@ async fn repository_has_remote_state(
         }
     };
 
-    let states = rows
+    let mut states = rows
         .into_iter()
         .map(|row| RepositoryAddonRemoteState {
             name: row.get_string("name").unwrap_or_default(),
@@ -421,6 +484,27 @@ async fn repository_has_remote_state(
             missing_part_remote_checksums: 0,
         })
         .collect::<Vec<_>>();
+
+    let mut empty_addons = context.empty_remote_addon_names();
+    if states.iter().any(|addon| addon.file_count == 0)
+        && let Ok(Some(row)) = context
+            .db()
+            .query_one(
+                "SELECT remote_url, local_path FROM repositories WHERE id = ?",
+                params![repository_id],
+            )
+            .await
+        && let (Ok(url), Ok(path)) = (row.get_string("remote_url"), row.get_string("local_path"))
+        && let Ok((_, accepted)) =
+            crate::core::api::check_contracts::accepted_empty_scope(&context, &url, &path)
+    {
+        empty_addons.extend(accepted);
+    }
+    for addon in &mut states {
+        if empty_addons.contains(&addon.name.to_lowercase()) {
+            addon.enabled = false;
+        }
+    }
 
     if !remote_state_complete_from_addons(&states, enabled_overrides) {
         return false;
@@ -532,6 +616,28 @@ pub(crate) async fn remote_repository(
     force_refresh: bool,
     hash_algorithm_preference: HashAlgorithmPreference,
 ) -> Option<RemoteRepositoryMetadata> {
+    remote_repository_attempt(
+        context,
+        repository_url,
+        local_path_override,
+        enabled_overrides,
+        force_refresh,
+        hash_algorithm_preference,
+        0,
+    )
+    .await
+}
+
+async fn remote_repository_attempt(
+    context: Arc<FoxyContext>,
+    repository_url: &str,
+    local_path_override: Option<&str>,
+    enabled_overrides: Option<&std::collections::HashMap<String, bool>>,
+    force_refresh: bool,
+    hash_algorithm_preference: HashAlgorithmPreference,
+    retry_count: u8,
+) -> Option<RemoteRepositoryMetadata> {
+    context.clear_staged_manifest_responses();
     // Normalize remote URL to always have trailing slash for consistent path joins
     let normalized_url = crate::core::models::repository::normalize_repository_url(repository_url);
     let refresh_started = std::time::Instant::now();
@@ -648,6 +754,21 @@ pub(crate) async fn remote_repository(
     } else {
         None
     };
+    let remote_mods_data = foxy_addons_data.as_ref().unwrap_or(&data);
+    if !publishes_complete_addon_lists(remote_mods_data) {
+        warn!(
+            "Repository {} addon index is incomplete: requiredMods and optionalMods must both be present arrays",
+            normalized_url
+        );
+        log_remote_refresh_sol(
+            &context,
+            refresh_started,
+            "incomplete_index",
+            index_requests,
+            None,
+        );
+        return None;
+    }
     if let Some(update_url) = &app_update_url {
         debug!(
             "Repository {} provides app update URL: {}",
@@ -713,7 +834,66 @@ pub(crate) async fn remote_repository(
         repository_has_linked_addons(context.clone(), repository.id as i64).await;
     let has_remote_state =
         repository_has_remote_state(context.clone(), repository.id as i64, enabled_overrides).await;
-    let remote_mods_data = foxy_addons_data.as_ref().unwrap_or(&data);
+    if explicitly_publishes_no_addons(remote_mods_data) {
+        let expected_publication = publication_identity(&remote_checksum, remote_mods_data);
+        let current_publication =
+            fetch_publication_identity(context.clone(), &normalized_url, foxy_mode.is_foxy()).await;
+        index_requests += if foxy_mode.is_foxy() { 2 } else { 1 };
+        if current_publication.as_deref() != Some(expected_publication.as_str()) {
+            if retry_count == 0 {
+                return Box::pin(remote_repository_attempt(
+                    context,
+                    repository_url,
+                    local_path_override,
+                    enabled_overrides,
+                    true,
+                    hash_algorithm_preference,
+                    1,
+                ))
+                .await;
+            }
+            log_remote_refresh_sol(
+                &context,
+                refresh_started,
+                "publication_changed",
+                index_requests,
+                None,
+            );
+            return None;
+        }
+        if crate::core::api::check_contracts::record_empty_scope(
+            &context,
+            &normalized_url,
+            &normalized_local_path,
+            true,
+            None,
+        )
+        .is_err()
+        {
+            return None;
+        }
+        info!(
+            "Repository {} explicitly publishes no addons; retaining its existing local ownership graph",
+            normalized_url
+        );
+        log_remote_refresh_sol(
+            &context,
+            refresh_started,
+            "accepted_empty",
+            index_requests,
+            None,
+        );
+        return Some(RemoteRepositoryMetadata {
+            foxy_mode,
+            app_update_url,
+            skipped: false,
+            repository_complete: false,
+            remote_graph_complete: false,
+            remote_graph_fetched: false,
+            accepted_empty: true,
+        });
+    }
+    let expected_publication = publication_identity(&remote_checksum, remote_mods_data);
     let remote_addon_checksums = collect_remote_addon_checksums(remote_mods_data);
     let linked_addon_checksums =
         repository_linked_addon_checksums(context.clone(), repository.id as i64).await;
@@ -812,6 +992,14 @@ pub(crate) async fn remote_repository(
             log_remote_refresh_sol(&context, refresh_started, "failed", index_requests, None);
             return None;
         }
+        crate::core::api::check_contracts::record_empty_scope(
+            &context,
+            &normalized_url,
+            &normalized_local_path,
+            false,
+            None,
+        )
+        .ok()?;
         info!("Up-to-date: Repository {}.", repository.remote_url.clone());
         log_remote_refresh_sol(
             &context,
@@ -827,6 +1015,7 @@ pub(crate) async fn remote_repository(
             repository_complete: true,
             remote_graph_complete: true,
             remote_graph_fetched: false,
+            accepted_empty: false,
         });
     }
     if should_skip_unchanged_remote_graph(
@@ -840,6 +1029,14 @@ pub(crate) async fn remote_repository(
         context.recheck_level,
         force_refresh || has_forced_mod_refreshes || !repository_space_paths_match,
     ) {
+        crate::core::api::check_contracts::record_empty_scope(
+            &context,
+            &normalized_url,
+            &normalized_local_path,
+            false,
+            None,
+        )
+        .ok()?;
         info!(
             "Repository {} remote graph unchanged (repo.json checksum matches stored remote checksum); using existing DB metadata for local verification",
             repository.remote_url
@@ -858,6 +1055,7 @@ pub(crate) async fn remote_repository(
             repository_complete,
             remote_graph_complete: true,
             remote_graph_fetched: false,
+            accepted_empty: false,
         });
     }
     if force_refresh && repository_complete {
@@ -903,6 +1101,74 @@ pub(crate) async fn remote_repository(
 
     let repository = Arc::new(repository);
 
+    if let Err(error) = stage_manifests_for_publication(
+        context.clone(),
+        repository.as_ref(),
+        &mods_data,
+        enabled_overrides,
+    )
+    .await
+    {
+        context.clear_staged_manifest_responses();
+        if error == crate::core::tasks::remote_files::ADDON_PUBLICATION_CHANGED && retry_count == 0
+        {
+            return Box::pin(remote_repository_attempt(
+                context,
+                repository_url,
+                local_path_override,
+                enabled_overrides,
+                true,
+                hash_algorithm_preference,
+                1,
+            ))
+            .await;
+        }
+        warn!(
+            "Could not stage repository {} manifests before applying metadata: {}",
+            normalized_url, error
+        );
+        log_remote_refresh_sol(
+            &context,
+            refresh_started,
+            "manifest_stage_failed",
+            index_requests,
+            None,
+        );
+        return None;
+    }
+    let current_publication =
+        fetch_publication_identity(context.clone(), &normalized_url, foxy_mode.is_foxy()).await;
+    index_requests += if foxy_mode.is_foxy() { 2 } else { 1 };
+    if current_publication.as_deref() != Some(expected_publication.as_str()) {
+        context.clear_staged_manifest_responses();
+        warn!(
+            "Repository {} publication changed while staging manifests; retrying before applying metadata ({}/{})",
+            normalized_url,
+            retry_count + 1,
+            2
+        );
+        if retry_count == 0 {
+            return Box::pin(remote_repository_attempt(
+                context,
+                repository_url,
+                local_path_override,
+                enabled_overrides,
+                true,
+                hash_algorithm_preference,
+                1,
+            ))
+            .await;
+        }
+        log_remote_refresh_sol(
+            &context,
+            refresh_started,
+            "publication_changed",
+            index_requests,
+            None,
+        );
+        return None;
+    }
+
     // Temporarily increase write concurrency for the rebuild. During first-run
     // metadata rebuild there are no competing writers (no downloads, no hash
     // persist, no UI writes), so extra permits are safe. We add permits before
@@ -920,8 +1186,10 @@ pub(crate) async fn remote_repository(
         repository.clone(),
         mods_data,
         enabled_overrides.cloned(),
+        true,
     )
     .await;
+    context.clear_staged_manifest_responses();
 
     // Reclaim extra permits: acquire them and forget (permanently removes).
     // All rebuild work is done, so all permits from within are already released.
@@ -961,6 +1229,30 @@ pub(crate) async fn remote_repository(
             Some(rebuild_work),
         );
         return None;
+    }
+    if crate::core::api::check_contracts::record_empty_scope(
+        &context,
+        &normalized_url,
+        &normalized_local_path,
+        false,
+        None,
+    )
+    .is_err()
+    {
+        return None;
+    }
+    for (name, empty) in context.remote_addon_empty_states() {
+        if crate::core::api::check_contracts::record_empty_scope(
+            &context,
+            &normalized_url,
+            &normalized_local_path,
+            false,
+            Some((&name, empty)),
+        )
+        .is_err()
+        {
+            return None;
+        }
     }
     let final_repository = load_repository_by_remote_url_and_local_path(
         context.clone(),
@@ -1004,6 +1296,7 @@ pub(crate) async fn remote_repository(
         repository_complete: final_repository_complete,
         remote_graph_complete: final_remote_graph_complete,
         remote_graph_fetched: true,
+        accepted_empty: false,
     })
 }
 
@@ -1546,6 +1839,189 @@ mod tests {
         let data = serde_json::json!({ "checksum": "abc" });
 
         assert!(collect_remote_addon_checksums(&data).is_none());
+    }
+
+    #[test]
+    fn explicitly_empty_addon_lists_are_distinct_from_omitted_lists() {
+        assert!(explicitly_publishes_no_addons(&json!({
+            "requiredMods": [],
+            "optionalMods": []
+        })));
+        assert!(!explicitly_publishes_no_addons(&json!({
+            "requiredMods": [],
+            "checksum": "abc"
+        })));
+        assert!(!explicitly_publishes_no_addons(&json!({
+            "requiredMods": [{"modName": "@mod_01"}],
+            "optionalMods": []
+        })));
+        assert!(!publishes_complete_addon_lists(
+            &json!({"requiredMods": []})
+        ));
+        assert!(publishes_complete_addon_lists(&json!({
+            "requiredMods": [{"modName": "@mod_01"}]
+        })));
+        assert!(publishes_complete_addon_lists(&json!({
+            "requiredMods": [],
+            "optionalMods": []
+        })));
+    }
+
+    #[test]
+    fn publication_identity_includes_names_even_when_checksum_matches() {
+        let first = json!({
+            "requiredMods": [{"modName": "@mod_01", "checkSum": "SAME"}],
+            "optionalMods": []
+        });
+        let second = json!({
+            "requiredMods": [{"modName": "@mod_02", "checkSum": "SAME"}],
+            "optionalMods": []
+        });
+
+        assert_ne!(
+            publication_identity("ROLLUP", &first),
+            publication_identity("ROLLUP", &second)
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_publication_probe_detects_membership_change_over_http() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for addon_name in ["@mod_01", "@mod_02"] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                let _ = stream.read(&mut request).await.unwrap();
+                let body = format!(
+                    r#"{{"repoName":"MainRepo","checksum":"ROLLUP","requiredMods":[{{"modName":"{addon_name}","checkSum":"SAME"}}],"optionalMods":[]}}"#
+                );
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let context = Arc::new(FoxyContext::new(
+            crate::core::tasks::db_turso::build_test_database().await,
+            reqwest::Client::new(),
+        ));
+
+        let first = fetch_publication_identity(context.clone(), &url, false)
+            .await
+            .unwrap();
+        let second = fetch_publication_identity(context, &url, false)
+            .await
+            .unwrap();
+
+        assert_ne!(first, second);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn repeated_publication_race_keeps_previous_child_graph() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let manifests = r#"{"files":[{"path":"new.bin","checksum":"FILE_NEW","length":4,"parts":[{"path":"new.bin","checksum":"PART_NEW","start":0,"length":4}]}]}"#;
+            let publications = ["PUB_A", "PUB_B", "PUB_B", "PUB_C"];
+            let mut repo_requests = 0usize;
+            let mut total_requests = 0usize;
+            while total_requests < 6 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                let length = stream.read(&mut request).await.unwrap();
+                let first_line = String::from_utf8_lossy(&request[..length]);
+                let body = if first_line.starts_with("GET /repo.json ") {
+                    let checksum = publications[repo_requests];
+                    repo_requests += 1;
+                    format!(
+                        r#"{{"repoName":"MainRepo","checksum":"{checksum}","requiredMods":[{{"modName":"@mod_new","checkSum":"NEW_ADDON"}}],"optionalMods":[]}}"#
+                    )
+                } else {
+                    manifests.to_owned()
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+                total_requests += 1;
+            }
+        });
+
+        let database = crate::core::tasks::db_turso::build_test_database().await;
+        let context = Arc::new(FoxyContext::new(database, reqwest::Client::new()));
+        let db = context.db();
+        db.execute(
+            "INSERT INTO repositories (id, name, remote_url, local_path, local_checksum, remote_checksum) VALUES (1, 'MainRepo', ?, 'R:/Mods/MainRepo/', 'LOCAL_OLD', 'PUB_OLD')",
+            params![url.clone()],
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO addons (id, name, remote_path, local_path, enabled, required, local_checksum, remote_checksum, local_content_hash) VALUES (10, '@mod_old', ?, 'R:/Mods/MainRepo/@mod_old', 1, 1, 'LOCAL_ADDON', 'OLD_ADDON', 'CONTENT')",
+            params![format!("{url}@mod_old")],
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO files (id, name, remote_path, local_path, local_checksum, remote_checksum, length) VALUES (20, 'old.bin', ?, 'R:/Mods/MainRepo/@mod_old/old.bin', 'LOCAL_FILE', 'OLD_FILE', 4)",
+            params![format!("{url}@mod_old/old.bin")],
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO repository_addons (repository_id, addon_id) VALUES (1, 10)",
+            params![],
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO addon_files (addon_id, file_id) VALUES (10, 20)",
+            params![],
+        )
+        .await
+        .unwrap();
+
+        let result = remote_repository(
+            context.clone(),
+            &url,
+            Some("R:/Mods/MainRepo/"),
+            None,
+            true,
+            HashAlgorithmPreference::default(),
+        )
+        .await;
+        assert!(result.is_none());
+        server.await.unwrap();
+
+        let addons = db
+            .query_all(
+                "SELECT name FROM repository_addons ra JOIN addons a ON a.id = ra.addon_id WHERE ra.repository_id = 1",
+                params![],
+            )
+            .await
+            .unwrap();
+        let names: HashSet<String> = addons
+            .iter()
+            .filter_map(|row| row.get_string("name").ok())
+            .collect();
+        assert_eq!(names, HashSet::from(["@mod_old".to_owned()]));
+        let files = db
+            .query_all(
+                "SELECT name FROM addon_files af JOIN files f ON f.id = af.file_id WHERE af.addon_id = 10",
+                params![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].get_string("name").unwrap(), "old.bin");
     }
 
     #[test]

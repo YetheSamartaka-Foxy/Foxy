@@ -138,6 +138,7 @@ async fn retry_remove_file_inner(path: &std::path::Path) -> std::io::Result<()> 
 ///
 /// Returns `Ok(())` if the file was removed or did not exist.
 /// After exhausting retries the last error is returned.
+#[cfg(test)]
 pub(crate) fn retry_remove_file_sync(path: &std::path::Path) -> std::io::Result<()> {
     let profiled = crate::core::utils::profiling::FsTimer::start();
     let result = retry_remove_file_sync_inner(path);
@@ -145,6 +146,7 @@ pub(crate) fn retry_remove_file_sync(path: &std::path::Path) -> std::io::Result<
     result
 }
 
+#[cfg(test)]
 fn retry_remove_file_sync_inner(path: &std::path::Path) -> std::io::Result<()> {
     for attempt in 0..REMOVE_RETRY_ATTEMPTS {
         match std::fs::remove_file(path) {

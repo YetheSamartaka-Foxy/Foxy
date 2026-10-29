@@ -1083,7 +1083,7 @@ async fn run_quick_scan_worker_repo(
     let new_addon_states = addon_states_after.saturating_sub(addon_states_before);
     let mut has_updates = mods.iter().any(|m| m.needs_update);
 
-    let skipped = !can_produce_result && mods.is_empty();
+    let skipped = (!can_produce_result && mods.is_empty()) || context.hash_evidence.is_incomplete();
     if has_updates
         && already_eligible
         && let Ok(tree) = Tree::load(context.clone(), &normalized_repo_url).await

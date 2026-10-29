@@ -651,7 +651,15 @@ impl Foxy {
                     banner.update_count as u64,
                 )
             } else {
-                self.t("No updates found")
+                match banner.mode {
+                    SyncMode::QuickCheckOnly => {
+                        self.t("No local changes detected; quick check may miss unsampled edits")
+                    }
+                    SyncMode::RecheckIntegrity => {
+                        self.t("Full integrity verification completed with no differences")
+                    }
+                    _ => self.t("No updates found"),
+                }
             }
         } else {
             banner

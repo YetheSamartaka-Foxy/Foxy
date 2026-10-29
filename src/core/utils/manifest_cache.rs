@@ -48,6 +48,10 @@ pub(crate) struct ManifestCache {
 }
 
 impl ManifestCache {
+    pub(crate) fn space_dir(&self) -> &Path {
+        self.dir.parent().unwrap_or(&self.dir)
+    }
+
     pub(crate) fn in_space(space_dir: &Path) -> Self {
         Self {
             dir: space_dir.join(CACHE_DIR),

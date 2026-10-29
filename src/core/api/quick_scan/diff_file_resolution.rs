@@ -55,8 +55,11 @@ fn inferred_patch_bytes_from_part_stats(
     }
 }
 
-fn addon_needs_update_from_file_diff(has_expected_file_diffs: bool) -> bool {
-    has_expected_file_diffs
+fn addon_needs_update_from_file_diff(
+    has_expected_file_diffs: bool,
+    has_unexpected_files: bool,
+) -> bool {
+    has_expected_file_diffs || has_unexpected_files
 }
 
 /// Whether a mismatched file must be tree-hashed again before it is reported.
@@ -294,6 +297,7 @@ pub(super) async fn compute_file_diffs(
     let mut missing_files = 0usize;
     let mut size_mismatch_files = 0usize;
     let mut content_mismatch_files = 0usize;
+    let mut local_drift_addons = HashSet::new();
     let mut unexpected_files = 0usize;
     let mut addons_with_unexpected_files = 0usize;
     let mut addons_content_mismatch = Vec::new();
@@ -319,6 +323,16 @@ pub(super) async fn compute_file_diffs(
             .cloned()
             .unwrap_or_default();
         let addon_current_content_hash = addon_state.content_hash.clone();
+        if let Some(detail) = addon_state.read_error.as_ref() {
+            context
+                .hash_evidence
+                .record_issue(crate::core::tasks::calculate_hashes::HashIssue {
+                    file_path: m.local_path.clone(),
+                    kind: crate::core::tasks::calculate_hashes::HashIssueKind::Unreadable,
+                    detail: Some(detail.clone()),
+                });
+            continue;
+        }
         let addon_content_mismatch =
             m.local_content_hash.is_empty() || m.local_content_hash != addon_current_content_hash;
         if addon_content_mismatch {
@@ -383,6 +397,16 @@ pub(super) async fn compute_file_diffs(
                     f.length,
                 )
                 .await;
+                if let Some(detail) = file_state.read_error.as_ref() {
+                    context.hash_evidence.record_issue(
+                        crate::core::tasks::calculate_hashes::HashIssue {
+                            file_path: f.local_path.clone(),
+                            kind: crate::core::tasks::calculate_hashes::HashIssueKind::Unreadable,
+                            detail: Some(detail.clone()),
+                        },
+                    );
+                    continue;
+                }
                 let exists = file_state.exists;
                 let size_ok = exists && file_state.length == f.length;
                 let content_hash = if size_ok {
@@ -412,6 +436,9 @@ pub(super) async fn compute_file_diffs(
                     f.local_content_hash.is_empty() || f.local_content_hash != content_hash;
                 if file_content_mismatch {
                     content_mismatch_files += 1;
+                    if exists && !f.local_content_hash.is_empty() && !content_hash.is_empty() {
+                        local_drift_addons.insert(m.name.clone());
+                    }
                 }
 
                 if !exists {
@@ -565,25 +592,33 @@ pub(super) async fn compute_file_diffs(
             }
         }
 
-        let unexpected_local_files =
-            if addon_content_mismatch && mod_files.is_empty() && !addon_tree_mismatch {
-                let expected_local_paths: HashSet<String> = files_by_mod
-                    .get(&mod_id)
-                    .map(|entries| {
-                        entries
-                            .iter()
-                            .map(|f| normalize_path_for_match(&f.local_path))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                if expected_local_paths.is_empty() {
-                    Vec::new()
-                } else {
-                    collect_unexpected_local_files_for_mod(mod_path, &expected_local_paths)
+        let unexpected_local_files = if addon_content_mismatch
+            && mod_files.is_empty()
+            && !addon_tree_mismatch
+        {
+            let mut expected_local_paths: HashSet<String> = files_by_mod
+                .get(&mod_id)
+                .map(|entries| {
+                    entries
+                        .iter()
+                        .map(|f| normalize_path_for_match(&f.local_path))
+                        .collect()
+                })
+                .unwrap_or_default();
+            match context.db().query_all("SELECT DISTINCT f.local_path FROM addon_files af JOIN files f ON f.id = af.file_id JOIN addons a ON a.id = af.addon_id WHERE a.local_path = ?", crate::core::db::params![m.local_path.clone()]).await {
+                    Ok(rows) => expected_local_paths.extend(rows.iter().filter_map(|row| row.get_string("local_path").ok()).map(|path| normalize_path_for_match(&path))),
+                    Err(error) => {
+                        context.hash_evidence.record_issue(crate::core::tasks::calculate_hashes::HashIssue { file_path: m.local_path.clone(), kind: crate::core::tasks::calculate_hashes::HashIssueKind::Unreadable, detail: Some(error.to_string()) });
+                    }
                 }
-            } else {
+            if expected_local_paths.is_empty() {
                 Vec::new()
-            };
+            } else {
+                collect_unexpected_local_files_for_mod(mod_path, &expected_local_paths)
+            }
+        } else {
+            Vec::new()
+        };
         if !unexpected_local_files.is_empty() {
             unexpected_files += unexpected_local_files.len();
             addons_with_unexpected_files += 1;
@@ -595,13 +630,16 @@ pub(super) async fn compute_file_diffs(
             );
         }
 
-        let addon_needs_update = addon_needs_update_from_file_diff(!mod_files.is_empty());
+        let addon_needs_update = addon_needs_update_from_file_diff(
+            !mod_files.is_empty(),
+            !unexpected_local_files.is_empty(),
+        );
         if addon_needs_update && total_bytes == 0 && addon_tree_mismatch {
             total_bytes = expected_bytes;
         }
 
         if addon_needs_update {
-            if addon_content_mismatch {
+            if addon_content_mismatch && unexpected_local_files.is_empty() {
                 addons_needing_tree_hash.push(m.name.clone());
             }
             debug!(
@@ -638,6 +676,13 @@ pub(super) async fn compute_file_diffs(
         }
     }
 
+    if !local_drift_addons.is_empty()
+        && let Some(tx) = progress_tx
+    {
+        let mut addons: Vec<_> = local_drift_addons.into_iter().collect();
+        addons.sort();
+        let _ = tx.send(ProgressEvent::LocalDrift { addons });
+    }
     Some(DiffComputeResult {
         diffs,
         files_needing_tree_verify,
@@ -839,13 +884,14 @@ mod tests {
     }
 
     #[test]
-    fn addon_update_decision_ignores_unexpected_files_without_expected_diffs() {
-        assert!(!addon_needs_update_from_file_diff(false));
+    fn addon_update_decision_includes_cleanup_only_work() {
+        assert!(addon_needs_update_from_file_diff(false, true));
+        assert!(!addon_needs_update_from_file_diff(false, false));
     }
 
     #[test]
     fn addon_update_decision_keeps_expected_file_diffs() {
-        assert!(addon_needs_update_from_file_diff(true));
+        assert!(addon_needs_update_from_file_diff(true, false));
     }
 
     #[test]
@@ -921,8 +967,10 @@ mod tests {
 
     #[test]
     fn addon_update_decision_full_truth_table() {
-        assert!(!addon_needs_update_from_file_diff(false));
-        assert!(addon_needs_update_from_file_diff(true));
+        assert!(!addon_needs_update_from_file_diff(false, false));
+        assert!(addon_needs_update_from_file_diff(true, false));
+        assert!(addon_needs_update_from_file_diff(false, true));
+        assert!(addon_needs_update_from_file_diff(true, true));
     }
 
     // ── is_stale_tree_only_file_diff: additional ────────────────────────

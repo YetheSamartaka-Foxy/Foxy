@@ -38,6 +38,11 @@ Current workspace status:
 
 ## Documentation
 
+Quick local checks stay offline and use lightweight drift detection. Refresh
+checks server metadata and local drift; full integrity checks read selected
+files and can diagnose them against cached metadata when offline. Periodic idle
+metadata checks default to 30 minutes and never start downloads.
+
 - [User Guide](wiki/User-Guide.md) - game spaces, repositories, syncing, launching, Steam Workshop, benchmarks, settings, troubleshooting, and the CLI.
 - [Server Admin Guide](wiki/Server-Admin-Guide.md) - generating and hosting Arma 3 and Arma Reforger repositories and repository spaces with `foxy-server-backend-cli`, server launch lines and keys, and self-hosted app updates.
 - The in-app Help page (**F1**) covers the same ground in every bundled language, with search across topic titles and text.
@@ -217,6 +222,7 @@ Foxy stores app-global data at the config root and everything that belongs to on
 | `games/<space_id>/workshop.json`, `extra_files.json`, `reforger_addons.json` | Steam Workshop, extra-file, and Reforger addon stores |
 | `games/<space_id>/database.db` | Turso (SQLite-compatible) database state |
 | `games/<space_id>/paused_repositories.json` | Download pauses remembered per repository installation |
+| `games/<space_id>/empty_publications.json` | Accepted empty publications and retained-file removal scope |
 | `games/<space_id>/interrupted_updates/` | Notices for updates that still need verification after interruption |
 | `games/<space_id>/images/` | Cached images |
 

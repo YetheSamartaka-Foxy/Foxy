@@ -33,6 +33,7 @@ use super::metrics::{
 };
 use super::progress::{ModProgressEntry, download_progress_percent, start_progress_ticker};
 use super::range_scheduler::{RangePartMeta, range_part_meta_path};
+use super::target_binding::PinnedDownloadTargets;
 use super::transfer::cancellation_requested;
 use crate::core::tasks::calculate_hashes::{HashStorageClass, detect_storage_class_for_path};
 use crate::core::utils::disk_space::{
@@ -926,6 +927,7 @@ pub(crate) async fn download_files(
     allowed_file_ids: Option<HashSet<u64>>,
     operation_id: String,
     telemetry_epoch: Arc<std::sync::OnceLock<std::time::Instant>>,
+    pinned_targets: Option<Arc<PinnedDownloadTargets>>,
 ) -> anyhow::Result<DownloadRunReport> {
     info!("Download worker started: op={}", operation_id);
     let rate_limiter = Arc::new(AdaptiveBandwidthLimiter::from_mbps(
@@ -980,6 +982,25 @@ pub(crate) async fn download_files(
                 pre_filter,
                 pre_filter - targets.len()
             );
+        }
+    }
+
+    if let Some(pinned_targets) = pinned_targets {
+        let paths = targets
+            .iter()
+            .map(|target| PathBuf::from(target.download.download_local_path.as_ref()))
+            .collect::<Vec<_>>();
+        let pinned_paths = tokio::task::spawn_blocking(move || {
+            paths
+                .iter()
+                .map(|path| pinned_targets.resolve(path))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .await
+        .map_err(|_| anyhow!("download target binding stopped"))?
+        .map_err(anyhow::Error::msg)?;
+        for (target, path) in targets.iter_mut().zip(pinned_paths) {
+            target.download.download_local_path = Arc::from(path.to_string_lossy().into_owned());
         }
     }
 

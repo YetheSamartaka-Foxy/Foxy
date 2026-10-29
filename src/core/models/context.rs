@@ -4,6 +4,13 @@ use reqwest::Client;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use tokio::sync::watch;
+
+#[derive(Clone)]
+pub(crate) struct StagedManifestResponse {
+    pub(crate) value: serde_json::Value,
+    pub(crate) timing: crate::core::utils::fetch_json::FetchJsonTiming,
+}
 
 /// A brand-new `subfiles` row staged for the deferred background insert on the
 /// force-redownload path (after_turso_regression_analysis7.md, "A++"). Mirrors the
@@ -78,6 +85,8 @@ pub(crate) struct FoxyContext {
     pending_addon_file_links: Arc<Mutex<Vec<(i64, i64)>>>,
     pending_download_targets: Arc<Mutex<Vec<PendingDownloadTarget>>>,
     pending_patch_clear_ids: Arc<Mutex<Vec<i64>>>,
+    remote_addon_empty_states: Arc<Mutex<HashMap<String, bool>>>,
+    staged_manifest_responses: Arc<Mutex<HashMap<String, StagedManifestResponse>>>,
     /// Content fingerprints the hash pass computed while each file was still
     /// in the page cache, keyed by file id, for the content-hash refresh that
     /// follows in the same operation to consume instead of re-sampling the
@@ -88,6 +97,10 @@ pub(crate) struct FoxyContext {
         Option<crate::core::tasks::calculate_hashes::VerifiedHashRecordUse>,
     /// Where mod manifests are kept for revalidation, when this operation keeps them.
     pub(crate) manifest_cache: Option<Arc<crate::core::utils::manifest_cache::ManifestCache>>,
+    pub(crate) hash_evidence: Arc<crate::core::tasks::calculate_hashes::HashEvidenceState>,
+    hash_cancel_rx: Option<watch::Receiver<bool>>,
+    pinned_hash_targets:
+        Arc<Mutex<Option<Arc<crate::core::tasks::download_files::PinnedDownloadTargets>>>>,
 }
 
 #[derive(Clone)]
@@ -101,6 +114,9 @@ pub(crate) struct PendingDownloadTarget {
 /// Constructor
 impl FoxyContext {
     pub(crate) fn new(database: DbHandle, client: Client) -> Self {
+        let hash_evidence =
+            Arc::new(crate::core::tasks::calculate_hashes::HashEvidenceState::default());
+        hash_evidence.set_retry_database(FoxyDb::from_handle(database.clone()));
         FoxyContext {
             database,
             client,
@@ -126,9 +142,37 @@ impl FoxyContext {
             pending_addon_file_links: Arc::new(Mutex::new(Vec::new())),
             pending_download_targets: Arc::new(Mutex::new(Vec::new())),
             pending_patch_clear_ids: Arc::new(Mutex::new(Vec::new())),
+            remote_addon_empty_states: Arc::new(Mutex::new(HashMap::new())),
+            staged_manifest_responses: Arc::new(Mutex::new(HashMap::new())),
             fresh_file_content_hashes: Arc::new(Mutex::new(HashMap::new())),
             verified_hash_record: None,
             manifest_cache: None,
+            hash_evidence,
+            hash_cancel_rx: None,
+            pinned_hash_targets: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    pub(crate) fn pin_hash_targets(
+        &self,
+        targets: Arc<crate::core::tasks::download_files::PinnedDownloadTargets>,
+    ) {
+        if let Ok(mut pinned) = self.pinned_hash_targets.lock() {
+            *pinned = Some(targets);
+        }
+    }
+
+    pub(crate) fn hash_target_path(&self, path: &str) -> Result<String, String> {
+        let targets = self
+            .pinned_hash_targets
+            .lock()
+            .map_err(|_| "Write target state is unavailable".to_owned())?
+            .clone();
+        match targets {
+            Some(targets) => targets
+                .resolve(std::path::Path::new(path))
+                .map(|path| path.to_string_lossy().into_owned()),
+            None => Ok(path.to_owned()),
         }
     }
 
@@ -327,6 +371,51 @@ impl FoxyContext {
             .unwrap_or_default()
     }
 
+    pub(crate) fn record_remote_addon_empty(&self, name: &str, empty: bool) {
+        if let Ok(mut states) = self.remote_addon_empty_states.lock() {
+            states.insert(name.to_owned(), empty);
+        }
+    }
+
+    pub(crate) fn remote_addon_empty_states(&self) -> HashMap<String, bool> {
+        self.remote_addon_empty_states
+            .lock()
+            .map(|states| states.clone())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn stage_manifest_response(&self, url: String, response: StagedManifestResponse) {
+        if let Ok(mut staged) = self.staged_manifest_responses.lock() {
+            staged.insert(url, response);
+        }
+    }
+
+    pub(crate) fn staged_manifest_response(&self, url: &str) -> Option<StagedManifestResponse> {
+        self.staged_manifest_responses
+            .lock()
+            .ok()
+            .and_then(|staged| staged.get(url).cloned())
+    }
+
+    pub(crate) fn clear_staged_manifest_responses(&self) {
+        if let Ok(mut staged) = self.staged_manifest_responses.lock() {
+            staged.clear();
+        }
+    }
+
+    pub(crate) fn empty_remote_addon_names(&self) -> HashSet<String> {
+        self.remote_addon_empty_states
+            .lock()
+            .map(|states| {
+                states
+                    .iter()
+                    .filter(|(_, empty)| **empty)
+                    .map(|(name, _)| name.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub(crate) fn with_forced_mod_refreshes(
         mut self,
         forced_mod_refreshes: HashSet<String>,
@@ -386,8 +475,34 @@ impl FoxyContext {
         self
     }
 
+    pub(crate) fn with_hash_cancel_rx(mut self, cancel_rx: watch::Receiver<bool>) -> Self {
+        self.hash_cancel_rx = Some(cancel_rx);
+        self
+    }
+
+    pub(crate) fn hash_cancel_rx(&self) -> Option<watch::Receiver<bool>> {
+        self.hash_cancel_rx.clone()
+    }
+
+    pub(crate) fn clone_for_hash_retry(&self) -> Self {
+        let mut retry_context = self.clone();
+        retry_context.hash_evidence =
+            Arc::new(crate::core::tasks::calculate_hashes::HashEvidenceState::default());
+        retry_context
+            .hash_evidence
+            .set_retry_database(retry_context.db());
+        retry_context
+    }
+
     pub(crate) fn with_operation_id(mut self, operation_id: impl Into<Arc<str>>) -> Self {
+        self.pinned_hash_targets = Arc::new(Mutex::new(None));
         self.transient_metadata_failure = Arc::new(AtomicBool::new(false));
+        self.hash_evidence =
+            Arc::new(crate::core::tasks::calculate_hashes::HashEvidenceState::default());
+        self.hash_evidence.set_retry_database(self.db());
+        self.remote_addon_empty_states = Arc::new(Mutex::new(HashMap::new()));
+        self.staged_manifest_responses = Arc::new(Mutex::new(HashMap::new()));
+        self.hash_cancel_rx = None;
         self.operation_id = Some(operation_id.into());
         self
     }
@@ -422,6 +537,7 @@ impl FoxyContext {
 #[cfg(test)]
 mod retry_scope_tests {
     use super::FoxyContext;
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn metadata_retry_evidence_is_shared_only_within_one_operation() {
@@ -430,11 +546,47 @@ mod retry_scope_tests {
         let first = base.clone().with_operation_id("first");
         let fetch = first.clone();
         fetch.mark_transient_metadata_failure();
+        first.record_remote_addon_empty("@mod_01", true);
+        first
+            .hash_evidence
+            .record_issue(crate::core::tasks::calculate_hashes::HashIssue {
+                file_path: "repo".to_owned(),
+                kind: crate::core::tasks::calculate_hashes::HashIssueKind::Unreadable,
+                detail: None,
+            });
         assert!(first.has_transient_metadata_failure());
+        assert_eq!(
+            first.remote_addon_empty_states().get("@mod_01"),
+            Some(&true)
+        );
         assert!(!base.has_transient_metadata_failure());
 
         let second = first.clone().with_operation_id("second");
         assert!(!second.has_transient_metadata_failure());
+        assert!(second.remote_addon_empty_states().is_empty());
+        assert!(!second.hash_evidence.is_incomplete());
         assert!(first.has_transient_metadata_failure());
+        assert!(first.hash_evidence.is_incomplete());
+    }
+
+    #[tokio::test]
+    async fn hash_retry_context_does_not_retain_owning_evidence() {
+        let database = crate::core::tasks::db_turso::build_test_database().await;
+        let context = FoxyContext::new(database, reqwest::Client::new());
+        let evidence = context.hash_evidence.clone();
+        let weak_evidence = Arc::downgrade(&evidence);
+        let retry_context = context.clone_for_hash_retry();
+
+        evidence.set_retry_save(move || {
+            let retry_context = retry_context.clone();
+            async move {
+                drop(retry_context);
+                Ok(())
+            }
+        });
+
+        drop(context);
+        drop(evidence);
+        assert!(weak_evidence.upgrade().is_none());
     }
 }

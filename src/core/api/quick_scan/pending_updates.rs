@@ -38,6 +38,9 @@ pub(crate) async fn persist_pending_updates(
     repo_url: &str,
     mods: &[ModDiffSummary],
 ) {
+    if context.hash_evidence.is_incomplete() {
+        return;
+    }
     let started = Instant::now();
     let has_updates = mods.iter().any(|m| m.needs_update);
 
@@ -59,7 +62,10 @@ pub(crate) async fn persist_pending_updates(
         );
         match serde_json::to_string(mods) {
             Ok(payload) => {
-                if let Err(e) = save_pending_update_for_context(context, repo_url, &payload).await {
+                if let Err(e) =
+                    save_pending_update_for_context(context.clone(), repo_url, &payload).await
+                {
+                    context.hash_evidence.record_issue(crate::core::tasks::calculate_hashes::HashIssue { file_path: String::new(), kind: crate::core::tasks::calculate_hashes::HashIssueKind::SaveFailed, detail: Some("Pending update state could not be saved. Retry the check after restoring database access.".into()) });
                     warn!("Failed to cache pending updates for {}: {}", repo_url, e);
                 } else {
                     info!(
@@ -77,7 +83,8 @@ pub(crate) async fn persist_pending_updates(
                 repo_url, e
             ),
         }
-    } else if let Err(e) = clear_pending_update_for_context(context, repo_url).await {
+    } else if let Err(e) = clear_pending_update_for_context(context.clone(), repo_url).await {
+        context.hash_evidence.record_issue(crate::core::tasks::calculate_hashes::HashIssue { file_path: String::new(), kind: crate::core::tasks::calculate_hashes::HashIssueKind::SaveFailed, detail: Some("Pending update state could not be saved. Retry the check after restoring database access.".into()) });
         warn!("Failed to clear pending updates for {}: {}", repo_url, e);
     } else {
         info!(

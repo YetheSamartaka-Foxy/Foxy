@@ -3,6 +3,7 @@ mod database_repair;
 pub(crate) mod download_retry;
 pub(crate) mod frame_cost;
 mod game_space_switch;
+mod hash_evidence;
 mod keyboard_focus;
 mod progress_events;
 pub(crate) mod repository_status;

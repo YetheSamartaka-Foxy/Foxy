@@ -1,0 +1,69 @@
+{
+  "id": "state-h4-same-size-after-plan-ssd",
+  "kind": "perf",
+  "description": "Prepare an update for one addon, edit a different selected clean addon with same-size bytes after planning, then require both repairs and a clean independent oracle.",
+  "build": "release",
+  "harness": "gui",
+  "timeout_s": 600,
+  "origin": {
+    "root": "${RUN_DIR}/origin-v1",
+    "port": 18143,
+    "synthetic": [
+      { "root": "${RUN_DIR}/origin-v1", "seed": 20261063, "mods": 2, "files_per_mod": 1, "file_bytes": 1048576, "pbo_entries": 64, "entry_bytes": 16384, "mod_seeds": [6401, 6403] },
+      { "root": "${RUN_DIR}/origin-v2", "seed": 20261063, "mods": 2, "files_per_mod": 1, "file_bytes": 1048576, "pbo_entries": 64, "entry_bytes": 16384, "mod_seeds": [6402, 6403] }
+    ]
+  },
+  "repository": {
+    "name": "RepoAlpha",
+    "address": "http://127.0.0.1:18143/",
+    "path": "${RUN_DIR}/repo-alpha",
+    "space_id": null
+  },
+  "operations": [
+    { "op": "download", "setup_once": true, "wait_timeout_s": 180 },
+    { "op": "capture-file-state", "setup_once": true, "label": "version-one" },
+    { "op": "origin-switch", "root": "${RUN_DIR}/origin-v2" },
+    {
+      "op": "remote-refresh",
+      "label": "prepare-version-two",
+      "wait_timeout_s": 180,
+      "expect": [
+        { "path": "breakdown.run_metrics.failed_pipelines", "equals": 0 }
+      ]
+    },
+    { "op": "assert-pending-update-count", "minimum": 1, "maximum": 1, "addons": ["@synthetic_000"] },
+    { "op": "mutate", "profile": "single-entry", "seed": 6404, "targets": ["@synthetic_001/addons/part_00000.pbo"] },
+    { "op": "assert-pending-update-count", "minimum": 1, "maximum": 1, "addons": ["@synthetic_000"] },
+    {
+      "op": "download",
+      "label": "update-after-same-size-change",
+      "wait_timeout_s": 180,
+      "expect": [
+        { "path": "breakdown.run_metrics.failed_pipelines", "equals": 0 },
+        { "path": "summary.files_updated", "min": 2 }
+      ]
+    },
+    { "op": "assert-file-state", "label": "version-one", "comparison": "different" },
+    {
+      "op": "quick-check",
+      "label": "clean-check-reuses-repaired-evidence",
+      "keep_hash_record": true,
+      "wait_timeout_s": 120,
+      "expect": [
+        { "path": "breakdown.run_metrics.failed_pipelines", "equals": 0 },
+        { "path": "breakdown.run_metrics.hash_work_bytes", "equals": 0 },
+        { "path": "breakdown.run_metrics.tree_verify_runs", "equals": 0 }
+      ]
+    }
+  ],
+  "repetitions": 1,
+  "warmup": false,
+  "guards": {
+    "require_storage_class": "ssd",
+    "require_no_other_foxy": true,
+    "require_clean_worktree": false,
+    "fail_on_db_wipe": true,
+    "max_run_gb": 1,
+    "oracle_command": ["${REPO_ROOT}/target/release/foxy-testkit-oracle.exe", "--repository-path", "${REPOSITORY_PATH}"]
+  }
+}

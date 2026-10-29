@@ -9,6 +9,20 @@ use log::{info, warn};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+pub(crate) async fn stage_manifests_for_publication(
+    context: Arc<FoxyContext>,
+    repository: &FoxyRepository,
+    data: &serde_json::Value,
+    enabled_overrides: Option<&HashMap<String, bool>>,
+) -> Result<(), String> {
+    super::upsert::stage_manifests_for_publication(context, repository, data, enabled_overrides)
+        .await
+}
+
+fn addon_lists_complete(data: &serde_json::Value) -> bool {
+    crate::core::tasks::remote_repository::publishes_complete_addon_lists(data)
+}
+
 /// Whether this repository instance has no linked subfile rows yet. This is the
 /// conflict-free case for plain/deferred part inserts even when a repository
 /// space has already populated `subfiles` for another repository in the same DB.
@@ -79,6 +93,7 @@ pub(crate) async fn remote_mods_with_data(
     repository: Arc<FoxyRepository>,
     data: serde_json::Value,
     enabled_overrides: Option<HashMap<String, bool>>,
+    verify_publication_snapshot: bool,
 ) -> RemoteRebuildWork {
     let rebuild_start = std::time::Instant::now();
 
@@ -112,8 +127,10 @@ pub(crate) async fn remote_mods_with_data(
     // fresh deferred load that the verified-hash record may restore without
     // hashing. Existing links would let a partly streamed graph pass the
     // completeness probe after a crash.
-    let stream_parts =
-        fresh_file_links && context.should_defer_part_inserts() && record_may_restore;
+    let stream_parts = !verify_publication_snapshot
+        && fresh_file_links
+        && context.should_defer_part_inserts()
+        && record_may_restore;
     if stream_parts {
         info!(
             "Metadata rebuild: streaming part rows as manifests arrive (repo {})",
@@ -126,6 +143,10 @@ pub(crate) async fn remote_mods_with_data(
     let enabled_overrides = enabled_overrides.map(Arc::new);
     let mut desired_mod_pairs: Vec<(String, String)> = Vec::new();
     let mut desired_mod_pairs_dedupe: HashSet<String> = HashSet::new();
+
+    // A missing list is an incomplete publication. In particular, do not let
+    // an omitted list turn into an empty desired set that prunes prior links.
+    let lists_complete = addon_lists_complete(&data);
 
     if let Some(required_mods_data) = data.get("requiredMods") {
         collect_desired_mod_pairs(
@@ -212,13 +233,15 @@ pub(crate) async fn remote_mods_with_data(
     context.set_fresh_addon_file_links(false);
     context.set_stream_part_inserts(false);
 
-    reconcile_repository_addon_links(
-        context.clone(),
-        repository.clone(),
-        all_resolved_ids,
-        desired_mod_pairs.len(),
-    )
-    .await;
+    if lists_complete {
+        reconcile_repository_addon_links(
+            context.clone(),
+            repository.clone(),
+            all_resolved_ids,
+            desired_mod_pairs.len(),
+        )
+        .await;
+    }
 
     let work = RemoteRebuildWork {
         mods: all_stats.len(),
@@ -423,8 +446,9 @@ mod tests {
         remote_mods_with_data(
             context.clone(),
             repository,
-            serde_json::json!({"requiredMods": [{"modName": "@mod_01", "checkSum": "ADDON"}]}),
+            serde_json::json!({"requiredMods": [{"modName": "@mod_01", "checkSum": "ADDON"}], "optionalMods": []}),
             None,
+            false,
         )
         .await;
         server.abort();
@@ -459,5 +483,53 @@ mod tests {
 
         assert!(repository_has_file_links(&db, 1).await);
         assert!(!repository_has_file_links(&db, 2).await);
+    }
+
+    #[tokio::test]
+    async fn omitted_addon_list_does_not_delete_existing_repository_links() {
+        let database = build_test_database().await;
+        let context = Arc::new(FoxyContext::new(database, reqwest::Client::new()));
+        let db = context.db();
+        db.execute(
+            "INSERT INTO repositories (id, name, remote_url, local_path) VALUES (1, 'MainRepo', 'https://repo.example.invalid/', 'R:/Mods/MainRepo/')",
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO addons (id, name, remote_path, local_path, required) VALUES (10, '@mod_01', 'https://repo.example.invalid/@mod_01', 'R:/Mods/MainRepo/@mod_01', 1)",
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO repository_addons (repository_id, addon_id) VALUES (1, 10)",
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let repository = Arc::new(FoxyRepository {
+            id: 1,
+            name: "MainRepo".to_string(),
+            remote_url: "https://repo.example.invalid/".to_string(),
+            local_path: "R:/Mods/MainRepo/".to_string(),
+            image: String::new(),
+            local_checksum: String::new(),
+            local_content_hash: String::new(),
+            remote_checksum: String::new(),
+            foxy_mode: crate::core::models::repository::FoxyMode::None,
+        });
+
+        remote_mods_with_data(context, repository, serde_json::json!({}), None, false).await;
+
+        let links = db
+            .query_all(
+                "SELECT addon_id FROM repository_addons WHERE repository_id = 1",
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].get_i64("addon_id").unwrap(), 10);
     }
 }

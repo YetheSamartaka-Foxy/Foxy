@@ -341,7 +341,18 @@ impl Foxy {
             ProgressEvent::SharedVersionWarning { repositories } => {
                 repositories.iter().map(Self::heap_bytes_of_string).sum()
             }
+            ProgressEvent::LocalDrift { addons } => {
+                addons.iter().map(Self::heap_bytes_of_string).sum()
+            }
+            ProgressEvent::CleanupPlan { files } => {
+                files.iter().map(Self::heap_bytes_of_string).sum()
+            }
+            ProgressEvent::EmptyPublication { addons, .. } => {
+                addons.iter().map(Self::heap_bytes_of_string).sum()
+            }
             ProgressEvent::RecheckHashProgress { .. }
+            | ProgressEvent::HashEvidence { .. }
+            | ProgressEvent::VerificationBasis { .. }
             | ProgressEvent::DownloadPlan { .. }
             | ProgressEvent::DownloadTelemetry { .. }
             | ProgressEvent::HashTelemetry { .. }

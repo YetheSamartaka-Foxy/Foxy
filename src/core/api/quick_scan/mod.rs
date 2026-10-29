@@ -44,8 +44,8 @@ pub(super) use pending_updates::{
 };
 pub(super) use readiness::{
     collect_hashable_files_with_missing_local_tree_hashes,
-    collect_targeted_init_content_baseline_files, tree_local_checksums_baseline_missing,
-    tree_local_checksums_missing,
+    collect_targeted_init_content_baseline_files, quick_scan_preflight_for_local_check,
+    tree_local_checksums_baseline_missing, tree_local_checksums_missing,
 };
 // Re-exported for integration tests (api/tests.rs) only; not referenced by the binary.
 #[cfg(test)]
@@ -57,6 +57,6 @@ pub(super) use readiness::{
     StartupQuickScanEligibility, batch_eligible_repos, launch_quick_scan_repo_eligible_joined,
     launch_quick_scan_repo_startup_eligibility,
 };
-pub(super) use unexpected_files::{
-    collect_unexpected_files_for_repo_mods, delete_unexpected_local_files,
-};
+pub(super) use unexpected_files::collect_unexpected_files_for_repo_mods;
+#[cfg(test)]
+pub(super) use unexpected_files::delete_unexpected_local_files;

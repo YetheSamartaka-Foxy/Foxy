@@ -1,0 +1,79 @@
+{
+  "id": "state-h10-approved-extra-cleanup-ssd",
+  "kind": "perf",
+  "description": "Keep an unmanifested file through plan preview and a cancelled update rollback, then remove it only after the user approves and completes the update.",
+  "build": "release",
+  "harness": "gui",
+  "timeout_s": 600,
+  "origin": {
+    "root": "${RUN_DIR}/origin-v1",
+    "port": 18145,
+    "delay_ms": 350,
+    "synthetic": [
+      { "root": "${RUN_DIR}/origin-v1", "seed": 20261066, "mods": 1, "files_per_mod": 64, "file_bytes": 65536 },
+      { "root": "${RUN_DIR}/origin-v2", "seed": 20261067, "mods": 1, "files_per_mod": 64, "file_bytes": 65536 }
+    ]
+  },
+  "repository": {
+    "name": "RepoAlpha",
+    "address": "http://127.0.0.1:18145/",
+    "path": "${RUN_DIR}/repo-alpha",
+    "space_id": null
+  },
+  "operations": [
+    { "op": "download", "setup_once": true, "wait_timeout_s": 180 },
+    {
+      "op": "write-file",
+      "setup_once": true,
+      "path": "${RUN_DIR}/repo-alpha/@synthetic_000/personal-experiment.cfg",
+      "content": "keep this local file until the update is approved\n"
+    },
+    { "op": "assert-file-exists", "setup_once": true, "path": "${RUN_DIR}/repo-alpha/@synthetic_000/personal-experiment.cfg" },
+    { "op": "origin-switch", "root": "${RUN_DIR}/origin-v2" },
+    {
+      "op": "remote-refresh",
+      "label": "preview-does-not-clean",
+      "wait_timeout_s": 180,
+      "expect": [
+        { "path": "breakdown.run_metrics.failed_pipelines", "equals": 0 }
+      ]
+    },
+    { "op": "assert-pending-update-count", "minimum": 1 },
+    { "op": "assert-file-exists", "path": "${RUN_DIR}/repo-alpha/@synthetic_000/personal-experiment.cfg" },
+    { "op": "capture-file-state", "label": "before-approved-update" },
+    {
+      "op": "download",
+      "label": "cancelled-approved-update",
+      "cancel_after_promoted_file": true,
+      "inspect_cleanup": true,
+      "wait_timeout_s": 180,
+      "expect_outcome": "cancelled",
+      "expect": [
+        { "path": "summary.cleanup.residual_files", "equals": 0 }
+      ]
+    },
+    { "op": "assert-file-exists", "path": "${RUN_DIR}/repo-alpha/@synthetic_000/personal-experiment.cfg" },
+    { "op": "assert-file-state", "label": "before-approved-update", "comparison": "equal" },
+    { "op": "assert-pending-update-count", "minimum": 1 },
+    {
+      "op": "download",
+      "label": "completed-approved-update",
+      "wait_timeout_s": 180,
+      "expect": [
+        { "path": "breakdown.run_metrics.failed_pipelines", "equals": 0 },
+        { "path": "summary.files_updated", "min": 1 }
+      ]
+    },
+    { "op": "assert-file-absent", "path": "${RUN_DIR}/repo-alpha/@synthetic_000/personal-experiment.cfg" }
+  ],
+  "repetitions": 1,
+  "warmup": false,
+  "guards": {
+    "require_storage_class": "ssd",
+    "require_no_other_foxy": true,
+    "require_clean_worktree": false,
+    "fail_on_db_wipe": true,
+    "max_run_gb": 1,
+    "oracle_command": ["${REPO_ROOT}/target/release/foxy-testkit-oracle.exe", "--repository-path", "${REPOSITORY_PATH}"]
+  }
+}

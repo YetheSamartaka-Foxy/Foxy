@@ -49,6 +49,16 @@ pub(crate) enum HashCalculationResult {
     Failed,
 }
 
+fn record_hash_save_failure(context: &FoxyContext, repository_url: &str, detail: &str) {
+    context
+        .hash_evidence
+        .record_issue(crate::core::tasks::calculate_hashes::HashIssue {
+            file_path: repository_url.to_owned(),
+            kind: crate::core::tasks::calculate_hashes::HashIssueKind::SaveFailed,
+            detail: Some(detail.to_owned()),
+        });
+}
+
 pub(super) fn derived_clean_part_indices(
     data_tree: &Tree,
     file_indices: &[usize],
@@ -179,13 +189,14 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile(
     progress_tx: Option<&Sender<ProgressEvent>>,
     hash_io_profile: HashIoProfilePreference,
 ) -> Option<Tree> {
+    let cancel_rx = context.hash_cancel_rx();
     match calculate_hashes_with_tree_and_profile_cancellable(
         context,
         repository_url,
         preloaded_tree,
         progress_tx,
         hash_io_profile,
-        None,
+        cancel_rx.as_ref(),
     )
     .await
     {
@@ -202,6 +213,8 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
     hash_io_profile: HashIoProfilePreference,
     cancel_rx: Option<&watch::Receiver<bool>>,
 ) -> HashCalculationResult {
+    let context_cancel_rx = context.hash_cancel_rx();
+    let cancel_rx = cancel_rx.or(context_cancel_rx.as_ref());
     let total_start = Instant::now();
     let db = context.db();
 
@@ -235,10 +248,25 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
         return HashCalculationResult::Cancelled;
     }
 
+    let mut empty_addons = context.empty_remote_addon_names();
+    if let Ok((_, accepted)) = crate::core::api::check_contracts::accepted_empty_scope(
+        &context,
+        repository_url,
+        context.target_local_path.as_deref().unwrap_or_default(),
+    ) {
+        empty_addons.extend(accepted);
+    }
     let all_file_indices: Vec<usize> = data_tree
-        .file_nodes
+        .mod_nodes
         .iter()
-        .map(|node| node.file_idx)
+        .filter(|node| {
+            data_tree.mods.get(node.mod_idx).is_some_and(|addon| {
+                addon.enabled && !empty_addons.contains(&addon.name.to_lowercase())
+            })
+        })
+        .flat_map(|node| node.files.iter().copied())
+        .collect::<HashSet<_>>()
+        .into_iter()
         .collect();
     if missing_local_hash_pass_is_noop(&data_tree, &all_file_indices) {
         info!(
@@ -312,7 +340,7 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
         });
     }
     let hash_started = Instant::now();
-    let (hash_results, profile_decision, cancelled) = recalculate_parts_for_jobs_with_profile(
+    let (mut hash_results, profile_decision, cancelled) = recalculate_parts_for_jobs_with_profile(
         hash_jobs,
         &context,
         hash_io_profile,
@@ -322,19 +350,53 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
         cancel_rx,
     )
     .await;
-    return_tree_parts(&mut data_tree, lent_parts);
-    if cancelled || cancel_rx.as_ref().is_some_and(|rx| *rx.borrow()) {
+    for result in &hash_results {
+        if let Some(kind) = result.issue.clone() {
+            context
+                .hash_evidence
+                .record_issue(crate::core::tasks::calculate_hashes::HashIssue {
+                    file_path: result.file_path.clone(),
+                    kind,
+                    detail: None,
+                });
+        }
+    }
+    hash_results.retain(|result| {
+        result.issue.as_ref().is_none_or(|issue| {
+            *issue == crate::core::tasks::calculate_hashes::HashIssueKind::Missing
+        })
+    });
+    let checkpoint_cancelled = cancelled || cancel_rx.as_ref().is_some_and(|rx| *rx.borrow());
+    if checkpoint_cancelled {
+        hash_results.retain(|result| {
+            result.completed
+                && !result.issue.as_ref().is_some_and(|issue| {
+                    matches!(
+                        issue,
+                        crate::core::tasks::calculate_hashes::HashIssueKind::Unreadable
+                            | crate::core::tasks::calculate_hashes::HashIssueKind::Unstable
+                            | crate::core::tasks::calculate_hashes::HashIssueKind::Skipped
+                    )
+                })
+        });
+        if hash_results.is_empty() {
+            return_tree_parts(&mut data_tree, lent_parts);
+            await_deferred_part_metadata_insert(
+                &mut deferred_part_metadata_insert_handle,
+                repository_url,
+            )
+            .await;
+            return HashCalculationResult::Cancelled;
+        }
         info!(
-            "Hash calculation cancelled during part hashing for repo {}",
+            "Saving {} completed file hash results from the cancelled pass for repo {}",
+            hash_results.len(),
             repository_url
         );
-        await_deferred_part_metadata_insert(
-            &mut deferred_part_metadata_insert_handle,
-            repository_url,
-        )
-        .await;
-        return HashCalculationResult::Cancelled;
     }
+    let completed_file_indices: HashSet<usize> =
+        hash_results.iter().map(|result| result.file_idx).collect();
+    return_tree_parts(&mut data_tree, lent_parts);
     info!(
         "Hash profile decision: requested={} selected={} reason={} benchmark_files={} benchmark_bytes={} benchmark_elapsed={:.2}s",
         profile_decision.requested,
@@ -358,6 +420,11 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
         .iter()
         .filter(|result| result.missing_file)
         .count();
+    let missing_file_indices: HashSet<usize> = hash_results
+        .iter()
+        .filter(|result| result.missing_file)
+        .map(|result| result.file_idx)
+        .collect();
     if missing_hash_files > 0 {
         let missing_percent = missing_hash_files.saturating_mul(100) / total_files.max(1);
         if missing_percent >= 50 {
@@ -420,18 +487,6 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
     }
 
     // --- Apply hash results to data_tree ---
-    if cancel_rx.as_ref().is_some_and(|rx| *rx.borrow()) {
-        info!(
-            "Hash calculation cancelled before applying part hashes for repo {}",
-            repository_url
-        );
-        await_deferred_part_metadata_insert(
-            &mut deferred_part_metadata_insert_handle,
-            repository_url,
-        )
-        .await;
-        return HashCalculationResult::Cancelled;
-    }
     let apply_parts_started = Instant::now();
     let mut updated_part_indices: HashSet<usize> = HashSet::new();
     let mut whole_file_checksums_by_file_idx: HashMap<usize, String> = HashMap::new();
@@ -460,18 +515,6 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
     );
 
     // --- Phase 2: Persist part hashes (batched transactions) ---
-    if cancel_rx.as_ref().is_some_and(|rx| *rx.borrow()) {
-        info!(
-            "Hash calculation cancelled before persisting part hashes for repo {}",
-            repository_url
-        );
-        await_deferred_part_metadata_insert(
-            &mut deferred_part_metadata_insert_handle,
-            repository_url,
-        )
-        .await;
-        return HashCalculationResult::Cancelled;
-    }
     let derived_clean_indices = if deferred_part_metadata_insert_handle.is_some() {
         derived_clean_part_indices(&data_tree, &all_file_indices)
     } else {
@@ -524,6 +567,37 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
         )
         .await
         {
+            let retry_context = context.clone_for_hash_retry();
+            let retry_parts = data_tree.parts.clone();
+            let retry_rows: Vec<_> = retry_parts
+                .iter()
+                .map(|part| crate::core::models::context::DeferredPartInsert {
+                    file_id: part.file_id as i64,
+                    path: part.path.clone(),
+                    remote_length: part.remote_length as i64,
+                    remote_start: part.remote_start as i64,
+                    remote_checksum: part.remote_checksum.clone(),
+                    data_order: part.data_order,
+                })
+                .collect();
+            context.hash_evidence.set_retry_save(move || {
+                let context = Arc::new(retry_context.clone());
+                let parts = retry_parts.clone();
+                let rows = retry_rows.clone();
+                async move {
+                    context.buffer_deferred_parts(rows);
+                    context.set_deferred_part_inserts_fresh_load(false);
+                    flush_deferred_part_inserts_with_local_state(context, &parts, |_| {})
+                        .await
+                        .then_some(())
+                        .ok_or_else(|| "Deferred part metadata persistence failed".to_owned())
+                }
+            });
+            record_hash_save_failure(
+                &context,
+                repository_url,
+                "Deferred part metadata could not be saved",
+            );
             return HashCalculationResult::Failed;
         }
         if !part_updates.is_empty()
@@ -586,7 +660,7 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
             return HashCalculationResult::Failed;
         }
     } else {
-        persist_part_checksums(&db, &part_updates, |persisted_chunk| {
+        let parts_saved = persist_part_checksums(&db, &part_updates, |persisted_chunk| {
             parts_persisted += persisted_chunk;
             if parts_persisted % PERSIST_LOG_INTERVAL == 0 || parts_persisted == part_count {
                 info!(
@@ -603,6 +677,26 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
             }
         })
         .await;
+        if !parts_saved {
+            let retry_db = db.clone();
+            let retry_rows = part_updates.clone();
+            context.hash_evidence.set_retry_save(move || {
+                let db = retry_db.clone();
+                let rows = retry_rows.clone();
+                async move {
+                    persist_part_checksums(&db, &rows, |_| {})
+                        .await
+                        .then_some(())
+                        .ok_or_else(|| "Part hash persistence failed".to_owned())
+                }
+            });
+            record_hash_save_failure(
+                &context,
+                repository_url,
+                "Part hash results could not be saved",
+            );
+            return HashCalculationResult::Failed;
+        }
     }
     info!(
         "Phase 2 (persist parts) completed in {:.2}s ({} parts)",
@@ -611,13 +705,6 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
     );
 
     // --- Phase 3: Update file hashes from parts (batched transactions) ---
-    if cancel_rx.as_ref().is_some_and(|rx| *rx.borrow()) {
-        info!(
-            "Hash calculation cancelled before file hash rollup for repo {}",
-            repository_url
-        );
-        return HashCalculationResult::Cancelled;
-    }
     if let Some(tx) = progress_tx {
         let _ = tx.send(ProgressEvent::Stage {
             label: format!("Updating files 0/{}", data_tree.files.len()),
@@ -627,7 +714,9 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
     let file_rollup_started = Instant::now();
     let mut updated_file_indices: Vec<usize> = Vec::new();
     for file_node in &data_tree.file_nodes {
-        if let Some(file) = data_tree.files.get_mut(file_node.file_idx) {
+        if completed_file_indices.contains(&file_node.file_idx)
+            && let Some(file) = data_tree.files.get_mut(file_node.file_idx)
+        {
             let old_checksum = file.local_checksum.clone();
 
             let mut file_parts: Vec<FoxyModFilePart> = file_node
@@ -651,7 +740,9 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
                 new_checksum = file.remote_checksum.clone();
             }
 
-            if !has_parts {
+            if missing_file_indices.contains(&file_node.file_idx) {
+                file.local_checksum.clear();
+            } else if !has_parts {
                 if let Some(checksum) = whole_file_checksums_by_file_idx.get(&file_node.file_idx) {
                     file.local_checksum = checksum.clone();
                 } else if !old_checksum.is_empty() && old_checksum == file.remote_checksum {
@@ -686,7 +777,7 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
         .collect();
     let file_count = file_updates.len();
     let mut files_persisted = 0;
-    persist_file_checksums(&db, &file_updates, |persisted_chunk| {
+    let files_saved = persist_file_checksums(&db, &file_updates, |persisted_chunk| {
         files_persisted += persisted_chunk;
         if files_persisted % PERSIST_LOG_INTERVAL == 0 || files_persisted == file_count {
             info!(
@@ -703,11 +794,35 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
         }
     })
     .await;
+    if !files_saved {
+        let retry_db = db.clone();
+        let retry_rows = file_updates.clone();
+        context.hash_evidence.set_retry_save(move || {
+            let db = retry_db.clone();
+            let rows = retry_rows.clone();
+            async move {
+                persist_file_checksums(&db, &rows, |_| {})
+                    .await
+                    .then_some(())
+                    .ok_or_else(|| "File hash persistence failed".to_owned())
+            }
+        });
+        record_hash_save_failure(
+            &context,
+            repository_url,
+            "File hash results could not be saved",
+        );
+        return HashCalculationResult::Failed;
+    }
     info!(
         "Phase 3 (persist files) completed in {:.2}s ({} files)",
         file_persist_started.elapsed().as_secs_f64(),
         file_count
     );
+
+    if context.hash_evidence.is_incomplete() {
+        return HashCalculationResult::Failed;
+    }
 
     // --- Phase 4: Update addon(mod) hashes from files (batched transactions) ---
     if cancel_rx.as_ref().is_some_and(|rx| *rx.borrow()) {
@@ -737,7 +852,7 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
     let mod_count = mod_updates.len();
     let mod_persist_started = Instant::now();
     let mut mods_persisted = 0;
-    persist_mod_checksums(&db, &mod_updates, |persisted_chunk| {
+    let mods_saved = persist_mod_checksums(&db, &mod_updates, |persisted_chunk| {
         mods_persisted += persisted_chunk;
         if mods_persisted % 500 == 0 || mods_persisted == mod_count {
             info!(
@@ -754,6 +869,26 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
         }
     })
     .await;
+    if !mods_saved {
+        let retry_db = db.clone();
+        let retry_rows = mod_updates.clone();
+        context.hash_evidence.set_retry_save(move || {
+            let db = retry_db.clone();
+            let rows = retry_rows.clone();
+            async move {
+                persist_mod_checksums(&db, &rows, |_| {})
+                    .await
+                    .then_some(())
+                    .ok_or_else(|| "Addon hash persistence failed".to_owned())
+            }
+        });
+        record_hash_save_failure(
+            &context,
+            repository_url,
+            "Addon hash results could not be saved",
+        );
+        return HashCalculationResult::Failed;
+    }
     info!(
         "Phase 4 (persist mods) completed in {:.2}s ({} mods)",
         mod_persist_started.elapsed().as_secs_f64(),
@@ -783,7 +918,26 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
     );
     let repo_persist_started = Instant::now();
     let repo_updates: Vec<_> = data_tree.repositories.clone();
-    persist_repository_checksums(&db, &repo_updates, |_| {}).await;
+    if !persist_repository_checksums(&db, &repo_updates, |_| {}).await {
+        let retry_db = db.clone();
+        let retry_rows = repo_updates.clone();
+        context.hash_evidence.set_retry_save(move || {
+            let db = retry_db.clone();
+            let rows = retry_rows.clone();
+            async move {
+                persist_repository_checksums(&db, &rows, |_| {})
+                    .await
+                    .then_some(())
+                    .ok_or_else(|| "Repository hash persistence failed".to_owned())
+            }
+        });
+        record_hash_save_failure(
+            &context,
+            repository_url,
+            "Repository hash results could not be saved",
+        );
+        return HashCalculationResult::Failed;
+    }
     info!(
         "Phase 5 (persist repos) completed in {:.2}s",
         repo_persist_started.elapsed().as_secs_f64()

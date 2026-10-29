@@ -59,7 +59,7 @@ impl Foxy {
         self.start_core_sync_internal(repo_idx, SyncMode::Download, None, false, false, true);
     }
 
-    fn start_core_sync_internal(
+    pub(super) fn start_core_sync_internal(
         &mut self,
         repo_idx: usize,
         mode: SyncMode,
@@ -83,6 +83,17 @@ impl Foxy {
             return;
         }
         if self.block_database_update_request() {
+            return;
+        }
+        if self.has_pending_hash_save() {
+            self.hash_evidence_notice_open = true;
+            return;
+        }
+        if self.hash_evidence_retry_in_flight
+            || self.retained_files_cleanup_in_flight
+            || self.pending_retained_file_removal.is_some()
+        {
+            self.show_error_toast(self.t("Finish reviewing retained files before starting another repository check or update."));
             return;
         }
         let benchmark_arm = self.benchmark_armed.take();
@@ -162,9 +173,33 @@ impl Foxy {
                     return;
                 }
             }
+            if self.maybe_start_linked_target_preview(
+                &repo,
+                mode,
+                selected_mod_states_override.clone(),
+                force_redownload,
+                prepare_download_plan,
+                force_full_downloads,
+            ) {
+                return;
+            }
             let recent_local_path_reset = self
                 .repo_db_reset_pending_recheck
                 .contains(&normalized_repo_url);
+            let repo_path_key = Self::repo_instance_path_key(&repo.path);
+            if self
+                .empty_publication_status
+                .as_ref()
+                .is_some_and(|(url, path, _, _)| {
+                    url == &normalized_repo_url && path == &repo_path_key
+                })
+            {
+                self.empty_publication_status = None;
+            }
+            // Only a run that rebuilds the queue consumes the watcher's "folder
+            // changed" mark; a plain recheck leaves it for the next Download.
+            let discard_prepared_queue = (mode == SyncMode::Download || prepare_download_plan)
+                && self.fs_changed_since_prepare.remove(&normalized_repo_url);
             let (tx, rx) = broadcast::channel(4096);
             let (download_pause_tx, download_pause_rx) = watch::channel(false);
             let (cancel_tx, cancel_rx) = watch::channel(false);
@@ -174,6 +209,13 @@ impl Foxy {
             self.backend_progress_rx = Some(rx);
             self.cancel_tx = Some(cancel_tx);
             self.clear_progress_event_history();
+            if mode != SyncMode::Download || discard_prepared_queue {
+                self.cleanup_plan_files.clear();
+            }
+            self.hash_evidence_state = None;
+            self.hash_evidence_notice_open = false;
+            self.hash_evidence_notice_seen = (0, 0, false);
+            self.hash_stall_acknowledged.clear();
             self.clear_quick_scan_instance_active(&repo.address, &repo.path);
             self.clear_queued_quick_scan_for_url(&repo.address);
             // A background sync (e.g. a startup recheck of a *different*
@@ -318,14 +360,15 @@ impl Foxy {
                 .settings_view_state
                 .download_speed_limit_mbps
                 .filter(|limit| *limit > 0);
-            let auto_backup_directory =
-                if mode == SyncMode::Download && self.repo_auto_backup_on_update(&repo) {
-                    Some(sanitize_user_path(
-                        &self.settings_view_state.backup_directory,
-                    ))
-                } else {
-                    None
-                };
+            let auto_backup_directory = if mode == SyncMode::Download
+                && (self.repo_auto_backup_on_update(&repo) || self.backup_local_drift_requested)
+            {
+                Some(sanitize_user_path(
+                    &self.settings_view_state.backup_directory,
+                ))
+            } else {
+                None
+            };
             let rollback_temp_directory = (mode == SyncMode::Download)
                 .then(|| sanitize_user_path(&self.effective_temp_directory()));
             // The stored selection always comes from the profile, never from a
@@ -344,10 +387,6 @@ impl Foxy {
                                 != crate::core::utils::content_hash::normalize_path(&repo.path)
                     })
             });
-            // Only a run that rebuilds the queue consumes the watcher's "folder
-            // changed" mark; a plain recheck leaves it for the next Download.
-            let discard_prepared_queue = (mode == SyncMode::Download || prepare_download_plan)
-                && self.fs_changed_since_prepare.remove(&normalized_repo_url);
             self.begin_benchmark_capture(benchmark_arm, repo_idx);
             self.backend_worker = Some(api::spawn_repository_sync(
                 repo.address.clone(),
@@ -358,6 +397,14 @@ impl Foxy {
                 api::RepositorySyncOptions {
                     operation_id: api::next_operation_id("repo-sync"),
                     prepare_download_plan,
+                    backup_local_drift: self.backup_local_drift_requested,
+                    enrolled_link_targets: if mode == SyncMode::Download {
+                        std::mem::take(&mut self.enrolled_link_targets)
+                    } else {
+                        Vec::new()
+                    },
+                    interactive_hash_checks: self.scheduler_active_run.is_none()
+                        && !self.dispatching_background_sync,
                     repository_space_shared_path,
                     repository_space_members: repo
                         .repository_space_id
@@ -399,18 +446,56 @@ impl Foxy {
     }
 
     pub fn start_core_sync(&mut self, repo_idx: usize, mode: SyncMode) {
+        if mode == SyncMode::RecheckIntegrity
+            && self.current_sync_mode == Some(SyncMode::QuickCheckOnly)
+            && self.syncing_repository == Some(repo_idx)
+        {
+            if let Some(repo) = self.repository_view_state.repositories.get(repo_idx) {
+                self.pending_integrity_recheck_prompt =
+                    Some((repo.address.clone(), sanitize_user_path(&repo.path)));
+            }
+            self.needs_repaint = true;
+            return;
+        }
         self.start_core_sync_with_selected_mod_states(repo_idx, mode, None, false);
     }
 
-    /// Whether a sync may write into the repository folder itself, so the
-    /// filesystem watcher must not read Foxy's own writes as user edits. A
-    /// download does; so does any run that builds the download plan (it cleans
-    /// unexpected files first), and a quick check may escalate into one.
+    pub(crate) fn process_pending_integrity_recheck(&mut self) {
+        let Some((address, path)) = self.integrity_recheck_after_settlement.clone() else {
+            return;
+        };
+        if self.repository_sync_active()
+            || self.quick_scan_worker.is_some()
+            || self.retained_files_cleanup_in_flight
+            || self.pending_retained_file_removal.is_some()
+        {
+            return;
+        }
+        self.integrity_recheck_after_settlement = None;
+        let Some(index) = self
+            .repository_view_state
+            .repositories
+            .iter()
+            .position(|repo| {
+                Self::normalize_repo_url(&repo.address) == Self::normalize_repo_url(&address)
+                    && Self::repo_instance_path_key(&repo.path)
+                        == Self::repo_instance_path_key(&path)
+            })
+        else {
+            self.show_error_toast(
+                self.t("The repository changed before the integrity recheck could start."),
+            );
+            return;
+        };
+        self.start_core_sync_internal(index, SyncMode::RecheckIntegrity, None, false, false, false);
+    }
+
+    /// Suppress the watcher only while approved updates can change payloads.
     pub(in crate::ui::app) fn sync_writes_repository_files(
         mode: SyncMode,
-        prepare_download_plan: bool,
+        _prepare_download_plan: bool,
     ) -> bool {
-        prepare_download_plan || matches!(mode, SyncMode::Download | SyncMode::QuickCheckOnly)
+        mode == SyncMode::Download
     }
 
     pub(crate) fn prepare_update_confirmation(&mut self, repo_idx: usize) {
@@ -1048,15 +1133,15 @@ mod tests {
             SyncMode::Download,
             false
         ));
-        assert!(Foxy::sync_writes_repository_files(
+        assert!(!Foxy::sync_writes_repository_files(
             SyncMode::QuickCheckOnly,
             false
         ));
-        assert!(Foxy::sync_writes_repository_files(
+        assert!(!Foxy::sync_writes_repository_files(
             SyncMode::RemoteRefreshOnly,
             true
         ));
-        assert!(Foxy::sync_writes_repository_files(
+        assert!(!Foxy::sync_writes_repository_files(
             SyncMode::RecheckOnly,
             true
         ));

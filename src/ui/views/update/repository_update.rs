@@ -165,6 +165,16 @@ impl Foxy {
                 });
                 ui.separator();
 
+                if !self.cleanup_plan_files.is_empty() && !download_finished_for_selected {
+                    ui.collapsing(self.t("Extra files scheduled for removal"), |ui| {
+                        ui.label(self.t("These files will be removed when this update starts."));
+                        for file in &self.cleanup_plan_files {
+                            ui.label(file);
+                        }
+                    });
+                    ui.separator();
+                }
+
                 if pending_mod_count == 0 {
                     ui.label(self.t("No updates needed."));
                 } else {
@@ -610,6 +620,17 @@ impl Foxy {
                 // TS3 plugin update banner (shown after download completes)
                 if download_finished_for_selected {
                     self.render_ts3_plugin_update_banner(ui);
+                }
+
+                if !downloading && !self.local_drift_addons.is_empty() {
+                    ui.separator();
+                    ui.label(self.t_fmt(
+                        "Known local differences in: {addons}",
+                        &[("addons", self.local_drift_addons.join(", "))],
+                    ));
+                    let backup_local_drift_label =
+                        self.t("Back up local differences before replacing these addons");
+                    ui.checkbox(&mut self.backup_local_drift_requested, backup_local_drift_label);
                 }
 
                 ui.separator();

@@ -49,7 +49,9 @@ additionally refuses to start when the repository's manifest publishes no
 mods.
 
 An origin may declare `synthetic` as an array of `{root, seed, repo_name?,
-mods, files_per_mod, file_bytes, pbo_entries?, entry_bytes?}` versions. A positive
+mods, files_per_mod, file_bytes, pbo_entries?, entry_bytes?, mod_seeds?}` versions.
+`mod_seeds` contains one 32-bit seed per mod, which lets versions change selected
+addons while keeping other synthetic addons byte-identical. A positive
 `pbo_entries` generates PBO files whose entries can be mutated for delta repair;
 `entry_bytes` defaults to 64. The runner generates each repository
 under its own `root` before starting the server; every root must stay under the
@@ -126,23 +128,33 @@ and `settings` fixture fields described below.
 Supported operations are `startup`, `ui-walk`, `switch-game-space`,
 `remote-refresh`, `quick-check`, `recheck`, `recheck-integrity`,
 `force-redownload`, `download`, `download-full-files`, `wipe-db`, `mutate`, `restore`,
-`evict-cache`, `origin-switch`, and `seed-startup-state`. `seed-startup-state` stops the
+`evict-cache`, `origin-switch`, `seed-startup-state`,
+`acquire-test-file-lock`, `release-test-file-lock`, `write-file`,
+`capture-origin-requests`, `assert-origin-requests-unchanged`,
+`assert-file-exists`, `assert-file-absent`, and
+`assert-pending-update-count`.
+`seed-startup-state` stops the
 app, then in the case repository's database ensures a saved pending update (an
 existing row is left as it is) and, when `stale_link` is true, an addon file
-link the published manifest does not list. It is not ledgered. `origin-switch` makes the running case origin serve the operation's `root`
+link the published manifest does not list. When `incomplete_parts` is true, it
+also removes part rows for the selected pending addon while preserving file
+rows and installed bytes. It is not ledgered. `origin-switch` makes the running case origin serve the operation's `root`
 from the next request on, on the same listener and port, which models a server
 republishing the repository in place. Every `.json` manifest under the new root gets a fresh
 modification time, as a regenerated repository has, because the origin answers
 conditional requests from `Last-Modified` alone; switching back to the first root restores the published
-state for the next iteration. It is not ledgered and cannot be `setup_once`. Each operation may contain `wait_timeout_s`,
+state for the next iteration. It is not ledgered and may be `setup_once`. Each operation may contain `wait_timeout_s`,
 `expect`, `label`, and `repository`. A GUI download operation waits for the download to complete, or until its sync
 ends without completing it (a failed preflight, say), checked once a minute, so a failure is recorded on the row
 instead of holding the run for the whole `wait_timeout_s`. `repository` names the fixture repository
 the operation acts on (the CLI `--repo-name`, or the GUI row with that name);
 it defaults to the case `repository`. `extra_repositories` is what puts a
 second repository into the fixture, so a case can download one repository and
-then check its sibling in the same folder. Mutation, the oracle, and the
-manifest probe always address the case `repository`. Setup operations are not ledgered. `label` names the
+then check its sibling in the same folder. Mutation and the manifest probe address
+the case `repository`; the oracle verifies the operation's selected repository.
+Setup operations are not ledgered. A GUI setup download without an explicit
+expected outcome must complete and pass the configured oracle before measured
+operations can start. `label` names the
 operation's artifacts and its ledger row (`label` field) when a case repeats
 one kind of operation inside an iteration, such as a quick check run twice to
 prove the second one reads nothing; without it the second operation's
@@ -333,8 +345,8 @@ other platforms it walks the tree and reports `supported: false`.
 | `expected_files` | unset | Required `files_updated` for full-download operations |
 | `oracle_command` | unset | Independent post-run argv array; nonzero exit invalidates the row |
 
-`oracle_command` runs after every measured `download` and `force-redownload`
-operation, not after checks: a check that sits between a mutation and its
+`oracle_command` runs after every completed measured download and ordinary GUI
+setup download, not after checks: a check that sits between a mutation and its
 repair sees the mutated payload on purpose.
 
 `oracle_command` is an **argv array**, never a command string. A bare string is
@@ -351,7 +363,7 @@ in its arguments:
 ]
 ```
 
-It runs only after a measured operation and receives
+It receives
 `FOXY_TESTKIT_REPOSITORY_PATH`, `FOXY_TESTKIT_REPOSITORY_URL`, and
 `FOXY_TESTKIT_RUN_DIR`. Do not use Foxy's own hash implementation as the oracle
 when the hash path is the subject under test.
@@ -396,6 +408,15 @@ copied from the local source, so an adjacent mutation and a scattered one are
 told apart by resource cost, not only elapsed. `cancel_after_s` works on every
 GUI sync operation (a `recheck-integrity` cancelled in its hash stage, a
 patching `download` cancelled while applying), not only on full downloads.
+For an integrity cancellation that must interrupt hashing itself, a GUI
+`recheck-integrity` operation may use `cancel_after_hash_progress` with a
+fraction strictly between 0 and 1. The runner polls the driver's
+`recheck_hash_progress` and cancels only after that threshold is observed while
+the pipeline remains active. If hashing or the pipeline finishes first, or the
+threshold is not reached before `wait_timeout_s`, the operation fails instead
+of recording a false hash-stage cancellation. The observed trigger fraction is
+saved as `summary.cancel_trigger_hash_progress` beside the usual
+`summary.cancel_quiescent_ms`.
 `kill_after_s` on a GUI sync operation stops the process that many seconds
 after it reports busy, without a cooperative cancel, and the next operation
 starts the app again. The killed row has no pipeline outcome.
@@ -427,6 +448,22 @@ or for it to clear when `cleared:true`. `assert-space-bulk-target-count`,
 `assert-space-bulk-completed-count`, `assert-space-bulk-failed-count`, and
 `wait-for-space-bulk-target-count`
 inspect the active bulk run's counts.
+`write-file` creates a new file with UTF-8 content under the run directory and
+fails if the path already exists. `capture-origin-requests` and
+`assert-origin-requests-unchanged` snapshot and compare the in-process origin's
+HTTP request count, which lets a local-check case prove it made no server
+request. These controls require a case origin and are not ledgered.
+`assert-file-exists` and `assert-file-absent` check a named regular file under
+the run directory and are not ledgered.
+`assert-pending-update-count` checks that the named repository has at least the
+requested number of pending addon updates in the GUI driver's current view; an
+optional `maximum` makes the assertion an exact or bounded count, and optional
+`addons` requires named addons to appear in the pending update set.
+`acquire-test-file-lock` and `release-test-file-lock` are Windows-only state
+operations for deterministic unreadable-file cases. They hold an existing
+regular file under the run's synthetic repository open with sharing disabled,
+without writing bytes. The handle remains open across operations and closes on
+release or when the run exits. Both operations require the exact same path.
 The testkit-only shared-path intent refuses to run without
 `FOXY_TESTKIT_RUN_DIR`, when Foxy's config is outside that run, or when the new
 path resolves outside it. These operations are intended for synthetic recovery

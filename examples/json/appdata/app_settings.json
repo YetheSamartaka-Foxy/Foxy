@@ -8,6 +8,8 @@
   "auto_recheck_on_launch": true,
   "auto_quick_scan_on_launch": true,
   "retry_failed_downloads": true,
+  "periodic_remote_check_enabled": true,
+  "periodic_remote_check_interval_minutes": 30,
   "auto_backup_on_update": false,
   "backup_keep_latest_per_addon": 5,
   "backup_max_age_days": null,

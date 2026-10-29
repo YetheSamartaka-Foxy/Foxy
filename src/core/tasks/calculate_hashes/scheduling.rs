@@ -3,9 +3,7 @@ use super::part_hashes::{
     HashRunCounters, PartHashProgress, PartReadOptions, PartSpanSource, calculate_part_hashes,
 };
 use super::*;
-use crate::core::utils::content_hash::{
-    Blake3ReadStrategy, blake3_mmap_file_hash_full, is_blake3_checksum, select_blake3_read_strategy,
-};
+use crate::core::utils::content_hash::is_blake3_checksum;
 use crate::core::utils::resource_profile::{ResourcePressure, ResourceProfile};
 use crate::core::utils::speed_of_light::{SolLight, op_id_extra, sol_line};
 use crate::ui::types::HashIoProfilePreference;
@@ -105,6 +103,10 @@ pub(super) struct FileHashResult {
     pub(super) elapsed: std::time::Duration,
     pub(super) parts_count: usize,
     pub(super) missing_file: bool,
+    pub(super) issue: Option<super::evidence::HashIssueKind>,
+    pub(super) completed: bool,
+    pub(super) read_identity: Option<super::verified_record::FileIdentity>,
+    pub(super) manifest_signature: String,
     pub(super) part_metrics: super::part_hashes::PartHashMetrics,
     /// Set when the file matched the remote and did not change while it was
     /// read, for the verified-hash record.
@@ -119,6 +121,25 @@ pub(super) struct HashRunProgress {
     initial_files_done: usize,
     initial_parts_done: usize,
     initial_bytes_done: u64,
+}
+
+fn common_hash_scope_root(jobs: &[FileHashJob]) -> Option<PathBuf> {
+    let mut root = jobs.first()?.file_path_path()?.to_path_buf();
+    for job in &jobs[1..] {
+        let parent = job.file_path_path()?;
+        while !parent.starts_with(&root) {
+            if !root.pop() {
+                return None;
+            }
+        }
+    }
+    Some(root)
+}
+
+impl FileHashJob {
+    fn file_path_path(&self) -> Option<&Path> {
+        Path::new(&self.file_path).parent()
+    }
 }
 
 impl HashRunProgress {
@@ -738,21 +759,22 @@ pub(super) fn build_file_hash_jobs(
 /// The storage inputs a file's hash reads depend on, resolved once per run and
 /// carried down to every file.
 #[derive(Clone, Copy)]
-pub(super) struct WholeFileHashIo {
-    profile: HashIoProfilePreference,
+pub(super) struct WholeFileHashIo<'a> {
     storage_class: HashStorageClass,
+    repository_root: Option<&'a Path>,
 }
 
-impl WholeFileHashIo {
-    fn new(profile: HashIoProfilePreference, storage_class: HashStorageClass) -> Self {
+impl<'a> WholeFileHashIo<'a> {
+    fn new(_profile: HashIoProfilePreference, storage_class: HashStorageClass) -> Self {
         Self {
-            profile,
             storage_class,
+            repository_root: None,
         }
     }
 
-    fn strategy_for(&self, path: &Path, len: u64) -> Blake3ReadStrategy {
-        select_blake3_read_strategy(self.profile, self.storage_class, len, path)
+    fn with_repository_root(mut self, root: Option<&'a str>) -> Self {
+        self.repository_root = root.filter(|root| !root.is_empty()).map(Path::new);
+        self
     }
 
     fn part_reader_capacity(&self) -> usize {
@@ -802,24 +824,40 @@ const SSD_DIRECT_DEPTH: usize = 2;
 /// answer it from memory.
 const SSD_DIRECT_MIN_LEN: u64 = 1024 * 1024;
 
-async fn calculate_whole_file_checksum(
+async fn calculate_whole_file_checksum_monitored(
     file_path: String,
     expected_checksum: String,
     expected_len: u64,
     semaphore: Arc<Semaphore>,
-    hash_io: WholeFileHashIo,
+    progress: Option<PartHashProgress>,
+    evidence: Arc<super::evidence::HashEvidenceState>,
+    mut cancel_rx: Option<watch::Receiver<bool>>,
 ) -> (
     Option<String>,
     Option<String>,
     super::part_hashes::PartHashMetrics,
+    Option<super::evidence::HashIssueKind>,
+    bool,
 ) {
     const WHOLE_FILE_HASH_BUF_SIZE: usize = 4 * 1024 * 1024;
+    let unattended = evidence.is_unattended();
 
     let started = Instant::now();
     let mut metrics = super::part_hashes::PartHashMetrics {
         estimated_bytes: expected_len,
         ..Default::default()
     };
+
+    if cancel_rx.as_ref().is_some_and(|rx| *rx.borrow()) {
+        metrics.total_elapsed = started.elapsed();
+        return (
+            None,
+            None,
+            metrics,
+            Some(super::evidence::HashIssueKind::Skipped),
+            true,
+        );
+    }
 
     let metadata_started = Instant::now();
     let metadata = match std::fs::metadata(&file_path) {
@@ -828,7 +866,17 @@ async fn calculate_whole_file_checksum(
             debug!("Whole-file hash skipped for {}: {}", file_path, err);
             metrics.metadata_elapsed = metadata_started.elapsed();
             metrics.total_elapsed = started.elapsed();
-            return (None, None, metrics);
+            return (
+                None,
+                None,
+                metrics,
+                Some(if err.kind() == std::io::ErrorKind::NotFound {
+                    super::evidence::HashIssueKind::Missing
+                } else {
+                    super::evidence::HashIssueKind::Unreadable
+                }),
+                false,
+            );
         }
     };
     metrics.metadata_elapsed = metadata_started.elapsed();
@@ -842,88 +890,249 @@ async fn calculate_whole_file_checksum(
             expected_len
         );
         metrics.total_elapsed = started.elapsed();
-        return (None, None, metrics);
+        return (
+            None,
+            None,
+            metrics,
+            Some(super::evidence::HashIssueKind::Unreadable),
+            false,
+        );
     }
 
     let wait_started = Instant::now();
     let permit = semaphore.acquire_owned().await.ok();
     metrics.semaphore_wait_elapsed = wait_started.elapsed();
+    if cancel_rx.as_ref().is_some_and(|rx| *rx.borrow()) {
+        drop(permit);
+        metrics.total_elapsed = started.elapsed();
+        return (
+            None,
+            None,
+            metrics,
+            Some(super::evidence::HashIssueKind::Skipped),
+            true,
+        );
+    }
 
     let blocking_started = Instant::now();
     let file_path_for_hash = file_path.clone();
-    let mmap_strategy = if is_blake3_checksum(&expected_checksum) {
-        hash_io.strategy_for(Path::new(&file_path), metadata.len())
-    } else {
-        Blake3ReadStrategy::Buffered
-    };
-    let result =
-        tokio::task::spawn_blocking(move || -> std::io::Result<(String, Option<String>)> {
-            let _permit = permit;
-            let profiled = crate::core::utils::profiling::FsTimer::start();
-            let fingerprint = |file: &mut std::fs::File| {
-                crate::core::utils::content_hash::fast_file_content_hash_from_reader(
-                    file, &metadata,
-                )
-                .ok()
-            };
-            if let Some(hex) =
-                blake3_mmap_file_hash_full(Path::new(&file_path_for_hash), mmap_strategy)
-            {
-                profiled.stop("hash_mmap", expected_len);
-                crate::core::utils::cpu_governor::checkpoint();
-                let content_hash = std::fs::File::open(&file_path_for_hash)
-                    .ok()
-                    .and_then(|mut file| fingerprint(&mut file));
-                return Ok((hex, content_hash));
+    let read_heartbeat = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let blocking_heartbeat = read_heartbeat.clone();
+    let stop_read = Arc::new(AtomicU8::new(0));
+    let blocking_stop = stop_read.clone();
+    let hashed_bytes = Arc::new(AtomicU64::new(0));
+    let blocking_hashed_bytes = hashed_bytes.clone();
+    let blocking_progress = progress.clone();
+    let task = tokio::task::spawn_blocking(move || -> std::io::Result<(String, Option<String>)> {
+        let _permit = permit;
+        let profiled = crate::core::utils::profiling::FsTimer::start();
+        let mut file = std::fs::File::open(&file_path_for_hash)?;
+        let mut hasher = FlexHasher::from_checksum(&expected_checksum);
+        let mut fingerprint = crate::core::utils::content_hash::FingerprintTap::new(&metadata);
+        let mut buffer = vec![0u8; WHOLE_FILE_HASH_BUF_SIZE];
+        let mut read_bytes = 0u64;
+        loop {
+            if blocking_stop.load(Ordering::Relaxed) != 0 {
+                return Err(std::io::Error::from(std::io::ErrorKind::Interrupted));
             }
-            let mut file = std::fs::File::open(&file_path_for_hash)?;
-            let mut hasher = FlexHasher::from_checksum(&expected_checksum);
-            let mut buffer = vec![0u8; WHOLE_FILE_HASH_BUF_SIZE];
-            let mut read_bytes = 0u64;
-            loop {
-                let read = file.read(&mut buffer)?;
-                if read == 0 {
-                    break;
-                }
-                read_bytes += read as u64;
-                hasher.update(&buffer[..read]);
-                crate::core::utils::cpu_governor::checkpoint();
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                break;
             }
-            profiled.stop("hash_read", read_bytes);
-            let content_hash = fingerprint(&mut file);
-            Ok((hasher.finalize_hex(), content_hash))
-        })
-        .await;
-    metrics.blocking_hash_elapsed = blocking_started.elapsed();
+            read_bytes += read as u64;
+            hasher.update(&buffer[..read]);
+            fingerprint.observe(read_bytes - read as u64, &buffer[..read]);
+            blocking_hashed_bytes.store(read_bytes, Ordering::Relaxed);
+            blocking_heartbeat.fetch_add(1, Ordering::Relaxed);
+            if let Some(progress) = &blocking_progress {
+                progress.mark_parts_done(0, read as u64);
+            }
+            crate::core::utils::cpu_governor::checkpoint();
+        }
+        profiled.stop("hash_read", read_bytes);
+        let content_hash = fingerprint.finish();
+        Ok((hasher.finalize_hex(), content_hash))
+    });
 
-    let (checksum, content_hash) = match result {
-        Ok(Ok((checksum, content_hash))) => {
-            metrics.hashed_bytes = expected_len;
-            (Some(checksum), content_hash)
+    let mut task = task;
+    let mut last_heartbeat = read_heartbeat.load(Ordering::Relaxed);
+    let mut last_progress = Instant::now();
+    let mut stalled_secs = 0u64;
+    let joined = 'worker: loop {
+        tokio::select! {
+            joined = &mut task => break joined,
+            changed = async {
+                match cancel_rx.as_mut() {
+                    Some(rx) => rx.changed().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if changed.is_ok() && cancel_rx.as_ref().is_some_and(|rx| *rx.borrow()) {
+                    stop_read.store(2, Ordering::Relaxed);
+                    break 'worker (&mut task).await;
+                }
+            }
+            _ = tokio::time::sleep(Duration::from_secs(5)) => {
+                let heartbeat = read_heartbeat.load(Ordering::Relaxed);
+                if heartbeat != last_heartbeat {
+                    last_heartbeat = heartbeat;
+                    last_progress = Instant::now();
+                    if stalled_secs > 0 {
+                        evidence.finish_stalled_read(&file_path);
+                        stalled_secs = 0;
+                    }
+                    continue;
+                }
+                let idle = last_progress.elapsed().as_secs();
+                if unattended {
+                    if idle >= 120 { stop_read.store(1, Ordering::Relaxed); }
+                    continue;
+                }
+                if idle >= 60 && stalled_secs == 0 { stalled_secs = idle; }
+                if stalled_secs > 0 {
+                    let mut decision = evidence.begin_stalled_read(super::evidence::StalledRead {
+                        file_path: file_path.clone(),
+                        no_progress_secs: idle,
+                    });
+                    loop {
+                        tokio::select! {
+                            joined = &mut task => break 'worker joined,
+                            changed = decision.changed() => {
+                                if changed.is_err() { break; }
+                                let response = *decision.borrow_and_update();
+                                match response {
+                                    super::evidence::StalledReadDecision::Continue => {
+                                        evidence.finish_stalled_read(&file_path);
+                                        last_progress = Instant::now();
+                                        stalled_secs = 0;
+                                        break;
+                                    }
+                                    super::evidence::StalledReadDecision::Skip => {
+                                        stop_read.store(1, Ordering::Relaxed);
+                                        evidence.finish_stalled_read(&file_path);
+                                        break 'worker (&mut task).await;
+                                    }
+                                    super::evidence::StalledReadDecision::Cancel => {
+                                        stop_read.store(2, Ordering::Relaxed);
+                                        evidence.finish_stalled_read(&file_path);
+                                        break 'worker (&mut task).await;
+                                    }
+                                    super::evidence::StalledReadDecision::Waiting => {}
+                                }
+                            }
+                            _ = tokio::time::sleep(Duration::from_secs(5)) => {
+                                let heartbeat = read_heartbeat.load(Ordering::Relaxed);
+                                if heartbeat != last_heartbeat {
+                                    last_heartbeat = heartbeat;
+                                    evidence.finish_stalled_read(&file_path);
+                                    last_progress = Instant::now();
+                                    stalled_secs = 0;
+                                    break;
+                                }
+                            }
+                            changed = async {
+                                match cancel_rx.as_mut() {
+                                    Some(rx) => rx.changed().await,
+                                    None => std::future::pending().await,
+                                }
+                            } => {
+                                if changed.is_ok() && cancel_rx.as_ref().is_some_and(|rx| *rx.borrow()) {
+                                    stop_read.store(2, Ordering::Relaxed);
+                                    evidence.finish_stalled_read(&file_path);
+                                    break 'worker (&mut task).await;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
+    evidence.finish_stalled_read(&file_path);
+    metrics.blocking_hash_elapsed = blocking_started.elapsed();
+    metrics.hashed_bytes = hashed_bytes.load(Ordering::Relaxed);
+
+    let (checksum, content_hash, issue, cancelled) = match joined {
+        Ok(Ok((checksum, content_hash))) => (Some(checksum), content_hash, None, false),
+        Ok(Err(err)) if err.kind() == std::io::ErrorKind::Interrupted => {
+            let stopped_by_cancel = stop_read.load(Ordering::Relaxed) == 2;
+            (
+                None,
+                None,
+                Some(super::evidence::HashIssueKind::Skipped),
+                stopped_by_cancel,
+            )
         }
         Ok(Err(err)) => {
             warn!("Whole-file hash failed for {}: {}", file_path, err);
-            (None, None)
+            (
+                None,
+                None,
+                Some(super::evidence::HashIssueKind::Unreadable),
+                false,
+            )
         }
         Err(err) => {
             error!("Whole-file hash task panicked for {}: {}", file_path, err);
-            (None, None)
+            (
+                None,
+                None,
+                Some(super::evidence::HashIssueKind::Unreadable),
+                false,
+            )
         }
     };
 
     metrics.total_elapsed = started.elapsed();
-    (checksum, content_hash, metrics)
+    (checksum, content_hash, metrics, issue, cancelled)
 }
 
 pub(super) async fn recalculate_parts_for_jobs(
     mut jobs: Vec<FileHashJob>,
-    file_concurrency: usize,
-    global_part_concurrency: usize,
+    concurrency: (usize, usize),
     progress_tx: Option<&Sender<ProgressEvent>>,
     progress: HashRunProgress,
     cancel_rx: Option<&watch::Receiver<bool>>,
-    hash_io: WholeFileHashIo,
+    hash_io: WholeFileHashIo<'_>,
+    evidence: Arc<super::evidence::HashEvidenceState>,
 ) -> (Vec<FileHashResult>, bool) {
+    let (file_concurrency, global_part_concurrency) = concurrency;
+    let unattended = evidence.is_unattended();
+    let scope_root = hash_io
+        .repository_root
+        .map(Path::to_path_buf)
+        .or_else(|| common_hash_scope_root(&jobs));
+    let root_missing = if let Some(root) = &scope_root {
+        tokio::fs::metadata(root)
+            .await
+            .is_err_and(|err| err.kind() == std::io::ErrorKind::NotFound)
+    } else {
+        false
+    };
+    if root_missing && jobs.iter().any(|job| job.has_local_baseline) {
+        let results = jobs
+            .into_iter()
+            .map(|job| FileHashResult {
+                file_idx: job.file_idx,
+                updated_parts: Vec::new(),
+                whole_file_checksum: None,
+                content_hash: None,
+                file_path: job.file_path,
+                elapsed: std::time::Duration::ZERO,
+                parts_count: job.indexed_parts.len(),
+                missing_file: false,
+                issue: Some(super::evidence::HashIssueKind::Unreadable),
+                completed: false,
+                read_identity: None,
+                manifest_signature: String::new(),
+                part_metrics: Default::default(),
+                verified: None,
+            })
+            .collect();
+        return (results, false);
+    }
+    let scope_root = scope_root.filter(|_| !root_missing);
+
     // Shared semaphore limits the total in-flight spawn_blocking hash tasks across all files.
     let semaphore = Arc::new(Semaphore::new(global_part_concurrency));
     let game_formats = crate::core::game::registry().active().content_formats();
@@ -965,6 +1174,8 @@ pub(super) async fn recalculate_parts_for_jobs(
         let cancel = cancel_receiver.clone();
         let direct_plan = direct_plan.clone();
         let cancelled_flag = cancelled.clone();
+        let hash_evidence = evidence.clone();
+        let scope_root = scope_root.clone();
         async move {
             let FileHashJob {
                 file_idx,
@@ -998,16 +1209,48 @@ pub(super) async fn recalculate_parts_for_jobs(
                     elapsed: std::time::Duration::ZERO,
                     parts_count,
                     missing_file: false,
+                    issue: None,
+                    completed: false,
+                    read_identity: None,
+                    manifest_signature: String::new(),
+                    part_metrics: Default::default(),
+                    verified: None,
+                };
+            }
+            if let Some(root) = &scope_root
+                && let Err(err) = tokio::fs::metadata(root).await
+                && err.kind() == std::io::ErrorKind::NotFound
+            {
+                return FileHashResult {
+                    file_idx,
+                    updated_parts: Vec::new(),
+                    whole_file_checksum: None,
+                    content_hash: None,
+                    file_path,
+                    elapsed: std::time::Duration::ZERO,
+                    parts_count,
+                    missing_file: false,
+                    issue: Some(super::evidence::HashIssueKind::Unreadable),
+                    completed: false,
+                    read_identity: None,
+                    manifest_signature: String::new(),
                     part_metrics: Default::default(),
                     verified: None,
                 };
             }
             let file_started = Instant::now();
-            let missing_file = !Path::new(&file_path).exists();
-            let record_check = if capture_identity {
-                super::verified_record::capture_identity_async(&file_path)
-                    .await
-                    .map(|identity| {
+            let metadata_issue = match tokio::fs::metadata(&file_path).await {
+                Ok(_) => None,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    Some(super::evidence::HashIssueKind::Missing)
+                }
+                Err(_) => Some(super::evidence::HashIssueKind::Unreadable),
+            };
+            let missing_file = metadata_issue == Some(super::evidence::HashIssueKind::Missing);
+            let identity_before = super::verified_record::capture_identity_async(&file_path).await;
+            let record_check = capture_identity
+                .then(|| {
+                    identity_before.clone().map(|identity| {
                         (
                             identity,
                             super::verified_record::parts_signature(
@@ -1017,33 +1260,44 @@ pub(super) async fn recalculate_parts_for_jobs(
                             file_remote_checksum.clone(),
                         )
                     })
-            } else {
-                None
-            };
+                })
+                .flatten();
+            let manifest_signature = super::verified_record::parts_signature(
+                &file_remote_checksum,
+                indexed_parts.parts(),
+            );
+            let part_progress = Some(PartHashProgress::new(
+                counters.clone(),
+                ptx.clone(),
+                hash_evidence.clone(),
+                unattended,
+            ));
             let (part_calculation, whole_file_checksum) =
                 if indexed_parts.is_empty() && !file_remote_checksum.is_empty() {
-                    let (checksum, content_hash, metrics) = calculate_whole_file_checksum(
-                        file_path.clone(),
-                        file_remote_checksum,
-                        file_length,
-                        sem,
-                        hash_io,
-                    )
-                    .await;
+                    let (checksum, content_hash, metrics, issue, cancelled) =
+                        calculate_whole_file_checksum_monitored(
+                            file_path.clone(),
+                            file_remote_checksum.clone(),
+                            file_length,
+                            sem,
+                            part_progress.clone(),
+                            hash_evidence.clone(),
+                            cancel.clone(),
+                        )
+                        .await;
                     (
                         super::part_hashes::PartHashCalculation {
                             parts: Vec::new(),
                             metrics,
                             content_hash,
+                            issue,
+                            cancelled,
                         },
                         checksum,
                     )
                 } else {
                     let parts_only: Vec<FoxyModFilePart> =
                         indexed_parts.iter().map(|(_, p)| p.clone()).collect();
-                    let part_progress = ptx
-                        .clone()
-                        .map(|tx| PartHashProgress::new(counters.clone(), tx));
                     (
                         calculate_part_hashes(
                             parts_only,
@@ -1067,7 +1321,20 @@ pub(super) async fn recalculate_parts_for_jobs(
                 };
             let file_elapsed = file_started.elapsed();
             let content_hash = part_calculation.content_hash.clone();
-            let updated_parts = if cancel.as_ref().is_some_and(|rx| *rx.borrow()) {
+            if part_calculation.cancelled {
+                cancelled_flag.store(true, Ordering::Relaxed);
+            }
+            let issue = part_calculation.issue.or_else(|| {
+                if indexed_parts.is_empty()
+                    && whole_file_checksum.is_none()
+                    && !file_remote_checksum.is_empty()
+                {
+                    metadata_issue.or(Some(super::evidence::HashIssueKind::Unreadable))
+                } else {
+                    metadata_issue
+                }
+            });
+            let mut updated_parts = if cancel.as_ref().is_some_and(|rx| *rx.borrow()) {
                 cancelled_flag.store(true, Ordering::Relaxed);
                 Vec::new()
             } else {
@@ -1078,28 +1345,64 @@ pub(super) async fn recalculate_parts_for_jobs(
                     .zip(part_calculation.parts)
                     .collect()
             };
+            let identity_after = super::verified_record::capture_identity_async(&file_path).await;
+            let root_disappeared = if let Some(root) = &scope_root {
+                tokio::fs::metadata(root)
+                    .await
+                    .is_err_and(|err| err.kind() == std::io::ErrorKind::NotFound)
+            } else {
+                false
+            };
+            let stable = identity_before.is_some() && identity_before == identity_after;
+            let changed_during_read =
+                identity_before.is_some() && identity_after.is_some() && !stable;
+            let issue = if root_disappeared {
+                updated_parts.iter_mut().for_each(|(_, part)| {
+                    part.local_checksum.clear();
+                    part.local_length = 0;
+                    part.local_start = 0;
+                });
+                Some(super::evidence::HashIssueKind::Unreadable)
+            } else if changed_during_read || (!stable && issue.is_none()) {
+                updated_parts.iter_mut().for_each(|(_, part)| {
+                    part.local_checksum.clear();
+                    part.local_length = 0;
+                    part.local_start = 0;
+                });
+                Some(if changed_during_read {
+                    super::evidence::HashIssueKind::Unstable
+                } else {
+                    super::evidence::HashIssueKind::Unreadable
+                })
+            } else {
+                issue
+            };
             let verified = match record_check {
                 Some((before, signature, remote_checksum))
-                    if super::verified_record::result_is_clean(
-                        &remote_checksum,
-                        &updated_parts,
-                        whole_file_checksum.as_deref(),
-                    ) =>
+                    if stable
+                        && super::verified_record::result_is_clean(
+                            &remote_checksum,
+                            &updated_parts,
+                            whole_file_checksum.as_deref(),
+                        ) =>
                 {
-                    let after = super::verified_record::capture_identity_async(&file_path).await;
-                    (after.as_ref() == Some(&before)).then_some(
-                        super::verified_record::VerifiedFile {
-                            identity: before,
-                            signature,
-                        },
-                    )
+                    Some(super::verified_record::VerifiedFile {
+                        identity: before,
+                        signature,
+                    })
                 }
                 _ => None,
             };
 
             // Parts report their own bytes; whole-file jobs and part lists
             // without lengths are counted here, once the file is done.
-            let part_reported = if ptx.is_some() { part_bytes } else { 0 };
+            let part_reported = if indexed_parts.is_empty() {
+                part_calculation.metrics.hashed_bytes
+            } else if ptx.is_some() {
+                part_bytes
+            } else {
+                0
+            };
             counters
                 .bytes_done
                 .fetch_add(job_bytes.saturating_sub(part_reported), Ordering::Relaxed);
@@ -1114,15 +1417,29 @@ pub(super) async fn recalculate_parts_for_jobs(
                 );
             }
 
+            let read_identity = stable.then_some(identity_before).flatten();
+            if let Some(identity) = &read_identity {
+                hash_evidence.record_retry_file(
+                    &file_path,
+                    Some(identity.clone()),
+                    manifest_signature.clone(),
+                );
+            } else if issue == Some(super::evidence::HashIssueKind::Missing) {
+                hash_evidence.record_retry_file(&file_path, None, manifest_signature.clone());
+            }
             FileHashResult {
                 file_idx,
                 updated_parts,
-                whole_file_checksum,
-                content_hash,
+                whole_file_checksum: if stable { whole_file_checksum } else { None },
+                content_hash: if stable { content_hash } else { None },
                 file_path,
                 elapsed: file_elapsed,
                 parts_count,
                 missing_file,
+                issue,
+                completed: true,
+                read_identity,
+                manifest_signature,
                 part_metrics: part_calculation.metrics,
                 verified,
             }
@@ -1648,8 +1965,58 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
     total_files: usize,
     cancel_rx: Option<&watch::Receiver<bool>>,
 ) -> (Vec<FileHashResult>, HashProfileDecision, bool) {
-    let Some(record) = context.verified_hash_record.clone() else {
-        return hash_jobs_with_profile(
+    for job in &mut jobs {
+        match context.hash_target_path(&job.file_path) {
+            Ok(path) => job.file_path = path,
+            Err(detail) => {
+                context
+                    .hash_evidence
+                    .record_issue(super::evidence::HashIssue {
+                        file_path: job.file_path.clone(),
+                        kind: super::evidence::HashIssueKind::Unstable,
+                        detail: Some(detail),
+                    });
+                return (
+                    Vec::new(),
+                    HashProfileDecision::manual(requested_profile),
+                    false,
+                );
+            }
+        }
+    }
+    let retry_jobs = jobs.clone();
+    let record = context.verified_hash_record.clone();
+    let mut restored = Vec::new();
+    let (mut results, decision, cancelled) = if let Some(record) = &record {
+        for job in &mut jobs {
+            job.capture_identity = true;
+        }
+        let (restored_files, remaining) = super::verified_record::restore(record, jobs).await;
+        restored = restored_files;
+        if remaining.is_empty() && !restored.is_empty() {
+            (
+                Vec::new(),
+                HashProfileDecision {
+                    reason: "every file restored from the verified-hash record".to_string(),
+                    sticky: false,
+                    ..HashProfileDecision::manual(requested_profile)
+                },
+                false,
+            )
+        } else {
+            hash_jobs_with_profile(
+                remaining,
+                context,
+                requested_profile,
+                sticky_auto_profile,
+                progress_tx,
+                total_files.saturating_sub(restored.len()),
+                cancel_rx,
+            )
+            .await
+        }
+    } else {
+        hash_jobs_with_profile(
             jobs,
             context,
             requested_profile,
@@ -1658,36 +2025,57 @@ pub(super) async fn recalculate_parts_for_jobs_with_profile(
             total_files,
             cancel_rx,
         )
-        .await;
-    };
-    for job in &mut jobs {
-        job.capture_identity = true;
-    }
-    let (mut restored, jobs) = super::verified_record::restore(&record, jobs).await;
-    let (mut results, decision, cancelled) = if jobs.is_empty() && !restored.is_empty() {
-        (
-            Vec::new(),
-            HashProfileDecision {
-                reason: "every file restored from the verified-hash record".to_string(),
-                sticky: false,
-                ..HashProfileDecision::manual(requested_profile)
-            },
-            false,
-        )
-    } else {
-        hash_jobs_with_profile(
-            jobs,
-            context,
-            requested_profile,
-            sticky_auto_profile,
-            progress_tx,
-            total_files.saturating_sub(restored.len()),
-            cancel_rx,
-        )
         .await
     };
+    if !cancelled && !cancel_rx.is_some_and(|rx| *rx.borrow()) {
+        let unstable: HashSet<usize> = results
+            .iter()
+            .filter(|result| result.issue == Some(super::evidence::HashIssueKind::Unstable))
+            .map(|result| result.file_idx)
+            .collect();
+        if !unstable.is_empty() {
+            let retry: Vec<_> = retry_jobs
+                .into_iter()
+                .filter(|job| unstable.contains(&job.file_idx))
+                .collect();
+            let (retried, _, retry_cancelled) = hash_jobs_with_profile(
+                retry,
+                context,
+                requested_profile,
+                sticky_auto_profile,
+                progress_tx,
+                unstable.len(),
+                cancel_rx,
+            )
+            .await;
+            if !retry_cancelled {
+                let mut retried: HashMap<usize, FileHashResult> = retried
+                    .into_iter()
+                    .map(|result| (result.file_idx, result))
+                    .collect();
+                for result in &mut results {
+                    if let Some(retried_result) = retried.remove(&result.file_idx) {
+                        *result = retried_result;
+                    }
+                }
+            }
+        }
+    }
     if !cancelled {
-        super::verified_record::update(&record, restored.iter().chain(&results)).await;
+        if let Some(record) = &record {
+            super::verified_record::update(record, restored.iter().chain(&results)).await;
+        }
+    } else if let Some(record) = &record {
+        super::verified_record::retain_completed(record, results.iter()).await;
+    }
+    for result in &restored {
+        if let Some(identity) = &result.read_identity {
+            context.hash_evidence.record_retry_file(
+                &result.file_path,
+                Some(identity.clone()),
+                result.manifest_signature.clone(),
+            );
+        }
     }
     results.append(&mut restored);
     (results, decision, cancelled)
@@ -1760,12 +2148,13 @@ async fn hash_jobs_with_profile(
         let run_started = Instant::now();
         let results = recalculate_parts_for_jobs(
             jobs,
-            limits.file_concurrency,
-            limits.global_part_concurrency,
+            (limits.file_concurrency, limits.global_part_concurrency),
             progress_tx,
             HashRunProgress::new(total_files, total_parts, total_bytes),
             cancel_rx,
-            WholeFileHashIo::new(profile, storage_class),
+            WholeFileHashIo::new(profile, storage_class)
+                .with_repository_root(context.target_local_path.as_deref()),
+            context.hash_evidence.clone(),
         )
         .await;
         let (results, cancelled) = results;
@@ -1813,12 +2202,13 @@ async fn hash_jobs_with_profile(
         let run_started = Instant::now();
         let results = recalculate_parts_for_jobs(
             jobs,
-            limits.file_concurrency,
-            limits.global_part_concurrency,
+            (limits.file_concurrency, limits.global_part_concurrency),
             progress_tx,
             HashRunProgress::new(total_files, total_parts, total_bytes),
             cancel_rx,
-            WholeFileHashIo::new(effective_profile, storage_class),
+            WholeFileHashIo::new(effective_profile, storage_class)
+                .with_repository_root(context.target_local_path.as_deref()),
+            context.hash_evidence.clone(),
         )
         .await;
         let (results, cancelled) = results;
@@ -1880,12 +2270,16 @@ async fn hash_jobs_with_profile(
         let run_started = Instant::now();
         let results = recalculate_parts_for_jobs(
             jobs,
-            initial_limits.file_concurrency,
-            initial_limits.global_part_concurrency,
+            (
+                initial_limits.file_concurrency,
+                initial_limits.global_part_concurrency,
+            ),
             progress_tx,
             HashRunProgress::new(total_files, total_parts, total_bytes),
             cancel_rx,
-            WholeFileHashIo::new(initial_profile, storage_class),
+            WholeFileHashIo::new(initial_profile, storage_class)
+                .with_repository_root(context.target_local_path.as_deref()),
+            context.hash_evidence.clone(),
         )
         .await;
         let (results, cancelled) = results;
@@ -1988,12 +2382,13 @@ async fn hash_jobs_with_profile(
         let profile_started = Instant::now();
         let (results, cancelled) = recalculate_parts_for_jobs(
             group_jobs,
-            limits.file_concurrency,
-            limits.global_part_concurrency,
+            (limits.file_concurrency, limits.global_part_concurrency),
             progress_tx,
             trial_progress,
             cancel_rx,
-            WholeFileHashIo::new(profile, storage_class),
+            WholeFileHashIo::new(profile, storage_class)
+                .with_repository_root(context.target_local_path.as_deref()),
+            context.hash_evidence.clone(),
         )
         .await;
         let elapsed = profile_started.elapsed();
@@ -2081,8 +2476,10 @@ async fn hash_jobs_with_profile(
         let run_started = Instant::now();
         let (mut results, cancelled) = recalculate_parts_for_jobs(
             jobs,
-            initial_limits.file_concurrency,
-            initial_limits.global_part_concurrency,
+            (
+                initial_limits.file_concurrency,
+                initial_limits.global_part_concurrency,
+            ),
             progress_tx,
             HashRunProgress {
                 total_files,
@@ -2093,7 +2490,9 @@ async fn hash_jobs_with_profile(
                 initial_bytes_done: benchmark_bytes,
             },
             cancel_rx,
-            WholeFileHashIo::new(initial_profile, storage_class),
+            WholeFileHashIo::new(initial_profile, storage_class)
+                .with_repository_root(context.target_local_path.as_deref()),
+            context.hash_evidence.clone(),
         )
         .await;
         log_hash_run_metrics(
@@ -2193,8 +2592,10 @@ async fn hash_jobs_with_profile(
     let remaining_started = Instant::now();
     let remaining_results = recalculate_parts_for_jobs(
         jobs,
-        remaining_limits.file_concurrency,
-        remaining_limits.global_part_concurrency,
+        (
+            remaining_limits.file_concurrency,
+            remaining_limits.global_part_concurrency,
+        ),
         progress_tx,
         HashRunProgress {
             total_files,
@@ -2205,7 +2606,9 @@ async fn hash_jobs_with_profile(
             initial_bytes_done: benchmark_bytes,
         },
         cancel_rx,
-        WholeFileHashIo::new(best_profile, storage_class),
+        WholeFileHashIo::new(best_profile, storage_class)
+            .with_repository_root(context.target_local_path.as_deref()),
+        context.hash_evidence.clone(),
     )
     .await;
     let (mut remaining_results, cancelled) = remaining_results;
@@ -2363,12 +2766,12 @@ mod tests {
         ];
         let (results, cancelled) = recalculate_parts_for_jobs(
             jobs,
-            2,
-            2,
+            (2, 2),
             None,
             HashRunProgress::new(2, 2, 20),
             None,
             WholeFileHashIo::new(HashIoProfilePreference::Auto, HashStorageClass::Ssd),
+            Arc::new(super::evidence::HashEvidenceState::default()),
         )
         .await;
         assert!(!cancelled);
@@ -2382,6 +2785,7 @@ mod tests {
         };
         assert!(verified("clean.pbo"));
         assert!(!verified("stale.pbo"));
+        assert!(results.iter().all(|result| result.issue.is_none()));
     }
 
     #[test]
@@ -2460,6 +2864,94 @@ mod tests {
             has_local_baseline: false,
             capture_identity: false,
         }
+    }
+
+    #[test]
+    fn missing_common_file_root_is_the_repository_scope_not_each_file_parent() {
+        let first = FileHashJob {
+            file_path: r"R:\Mods\RepoAlpha\@mod_01\addons\a.pbo".into(),
+            ..test_job(0, 0)
+        };
+        let second = FileHashJob {
+            file_path: r"R:\Mods\RepoAlpha\@mod_02\addons\b.pbo".into(),
+            ..test_job(0, 0)
+        };
+        assert_eq!(
+            common_hash_scope_root(&[first, second]).as_deref(),
+            Some(Path::new(r"R:\Mods\RepoAlpha"))
+        );
+    }
+
+    #[tokio::test]
+    async fn absent_new_install_folder_is_missing_but_an_installed_scope_is_unreadable() {
+        let directory = tempfile::tempdir().unwrap();
+        for installed in [false, true] {
+            let job = FileHashJob {
+                file_path: directory
+                    .path()
+                    .join("absent/@mod_01/file.bin")
+                    .to_string_lossy()
+                    .into_owned(),
+                file_remote_checksum: blake3::hash(b"data").to_hex().to_string(),
+                file_length: 4,
+                has_local_baseline: installed,
+                ..test_job(0, 0)
+            };
+            let (results, cancelled) = recalculate_parts_for_jobs(
+                vec![job],
+                (1, 1),
+                None,
+                HashRunProgress::new(1, 0, 4),
+                None,
+                WholeFileHashIo::new(HashIoProfilePreference::Balanced, HashStorageClass::Ssd),
+                Arc::new(super::evidence::HashEvidenceState::default()),
+            )
+            .await;
+            assert!(!cancelled);
+            assert_eq!(results.len(), 1);
+            assert_eq!(
+                results[0].issue,
+                Some(if installed {
+                    super::evidence::HashIssueKind::Unreadable
+                } else {
+                    super::evidence::HashIssueKind::Missing
+                })
+            );
+            assert_eq!(results[0].missing_file, !installed);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_deleted_addon_folder_is_missing_while_the_repository_remains_accessible() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().to_string_lossy().into_owned();
+        let job = FileHashJob {
+            file_path: directory
+                .path()
+                .join("@mod_01/file.bin")
+                .to_string_lossy()
+                .into_owned(),
+            file_remote_checksum: blake3::hash(b"data").to_hex().to_string(),
+            file_length: 4,
+            has_local_baseline: true,
+            ..test_job(0, 0)
+        };
+        let (results, _) = recalculate_parts_for_jobs(
+            vec![job],
+            (1, 1),
+            None,
+            HashRunProgress::new(1, 0, 4),
+            None,
+            WholeFileHashIo::new(HashIoProfilePreference::Balanced, HashStorageClass::Ssd)
+                .with_repository_root(Some(&root)),
+            Arc::new(super::evidence::HashEvidenceState::default()),
+        )
+        .await;
+        assert_eq!(
+            results[0].issue,
+            Some(super::evidence::HashIssueKind::Missing)
+        );
+        assert!(results[0].missing_file);
     }
 
     fn tree_with_one_file(
@@ -2541,23 +3033,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn whole_file_checksum_uses_mmap_for_blake3_on_ssd() {
+    async fn whole_file_checksum_hashes_blake3_on_ssd() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("file.bin");
         let bytes = vec![0x5au8; 256 * 1024];
         std::fs::write(&path, &bytes).unwrap();
         let expected = blake3::hash(&bytes).to_hex().to_uppercase();
 
-        let (checksum, _, _) = calculate_whole_file_checksum(
+        let (checksum, _, _, _, _) = calculate_whole_file_checksum_monitored(
             path.to_string_lossy().to_string(),
             expected.clone(),
             bytes.len() as u64,
             Arc::new(Semaphore::new(1)),
-            WholeFileHashIo::new(HashIoProfilePreference::Auto, HashStorageClass::Ssd),
+            None,
+            Arc::new(super::super::evidence::HashEvidenceState::default()),
+            None,
         )
         .await;
 
         assert_eq!(checksum.as_deref(), Some(expected.as_str()));
+    }
+
+    #[tokio::test]
+    async fn whole_file_checksum_observes_cancellation_before_reading() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.bin");
+        std::fs::write(&path, b"hello").unwrap();
+        let expected = blake3::hash(b"hello").to_hex().to_uppercase();
+        let (_cancel_tx, cancel_rx) = watch::channel(true);
+
+        let (checksum, _, _, issue, cancelled) = calculate_whole_file_checksum_monitored(
+            path.to_string_lossy().to_string(),
+            expected,
+            5,
+            Arc::new(Semaphore::new(1)),
+            None,
+            Arc::new(super::super::evidence::HashEvidenceState::default()),
+            Some(cancel_rx),
+        )
+        .await;
+
+        assert!(checksum.is_none());
+        assert_eq!(issue, Some(super::super::evidence::HashIssueKind::Skipped));
+        assert!(cancelled);
     }
 
     #[tokio::test]
@@ -2569,12 +3087,14 @@ mod tests {
         md5.update(b"hello");
         let expected = md5.finalize_hex();
 
-        let (checksum, _, _) = calculate_whole_file_checksum(
+        let (checksum, _, _, _, _) = calculate_whole_file_checksum_monitored(
             path.to_string_lossy().to_string(),
             expected.clone(),
             5,
             Arc::new(Semaphore::new(1)),
-            WholeFileHashIo::new(HashIoProfilePreference::Aggressive, HashStorageClass::Ssd),
+            None,
+            Arc::new(super::super::evidence::HashEvidenceState::default()),
+            None,
         )
         .await;
 
@@ -2588,12 +3108,14 @@ mod tests {
         std::fs::write(&path, b"hello").unwrap();
         let expected = blake3::hash(b"hello").to_hex().to_uppercase();
 
-        let (checksum, _, metrics) = calculate_whole_file_checksum(
+        let (checksum, _, metrics, _, _) = calculate_whole_file_checksum_monitored(
             path.to_string_lossy().to_string(),
             expected.clone(),
             5,
             Arc::new(Semaphore::new(1)),
-            WholeFileHashIo::new(HashIoProfilePreference::Auto, HashStorageClass::Unknown),
+            None,
+            Arc::new(super::super::evidence::HashEvidenceState::default()),
+            None,
         )
         .await;
 
@@ -2608,12 +3130,14 @@ mod tests {
         std::fs::write(&path, b"hello").unwrap();
         let expected = blake3::hash(b"hello").to_hex().to_uppercase();
 
-        let (checksum, _, metrics) = calculate_whole_file_checksum(
+        let (checksum, _, metrics, _, _) = calculate_whole_file_checksum_monitored(
             path.to_string_lossy().to_string(),
             expected,
             10,
             Arc::new(Semaphore::new(1)),
-            WholeFileHashIo::new(HashIoProfilePreference::Auto, HashStorageClass::Unknown),
+            None,
+            Arc::new(super::super::evidence::HashEvidenceState::default()),
+            None,
         )
         .await;
 

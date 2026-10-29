@@ -433,7 +433,7 @@ impl Foxy {
                                             ui,
                                             "\u{1F4DA}",
                                             toolbar_icon_size,
-                                            tr("Quick local check.\nIt checks local files for integrity issues or changes.").as_str(),
+                                            tr("Quick local check.\nA lightweight change detector; it does not read every file. Use Integrity recheck for a full verification.").as_str(),
                                             !quick_check_disabled,
                                             None,
                                         );
@@ -496,6 +496,11 @@ impl Foxy {
                         });
                     }
 
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(ui.available_width(), ui.spacing().interact_size.y),
+                        Layout::right_to_left(Align::Center),
+                        |ui| self.render_repository_check_time(ui, selected_idx),
+                    );
                     ui.separator();
                     ui.add_space(10.0);
 

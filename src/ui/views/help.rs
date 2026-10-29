@@ -343,7 +343,7 @@ impl Foxy {
             HelpTab::ChecksAndUpdates => HelpPage::new(
                 "Checks and updates",
                 &[
-                    "Foxy uses different checks for different jobs. The short version is: Refresh quickly compares the remote repository hash with the local one, Quick local check inspects your local files, and Recheck repository integrity performs a full remote fetch with complete hash recalculation.",
+                    "Refresh checks fresh server metadata and local drift. Quick local check stays offline and may miss unsampled edits. Integrity recheck reads every selected file and falls back to cached metadata when the server is unavailable.",
                 ],
                 &[
                     "Use Refresh when you want the latest remote metadata and update plan for a repository.",

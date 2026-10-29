@@ -1,0 +1,57 @@
+{
+  "id": "state-h8-offline-integrity-ssd",
+  "kind": "perf",
+  "description": "With a complete accepted synthetic manifest and installed payload, make the origin unavailable and verify explicit integrity check falls back to a full local diagnosis without changing files.",
+  "build": "release",
+  "harness": "gui",
+  "timeout_s": 600,
+  "origin": {
+    "root": "${RUN_DIR}/origin",
+    "port": 18144,
+    "synthetic": [
+      { "root": "${RUN_DIR}/origin", "seed": 20261065, "mods": 1, "files_per_mod": 2, "file_bytes": 1048576, "pbo_entries": 32, "entry_bytes": 32768 }
+    ]
+  },
+  "repository": {
+    "name": "RepoAlpha",
+    "address": "http://127.0.0.1:18144/",
+    "path": "${RUN_DIR}/repo-alpha",
+    "space_id": null
+  },
+  "operations": [
+    { "op": "download", "setup_once": true, "wait_timeout_s": 180 },
+    { "op": "capture-file-state", "setup_once": true, "label": "installed" },
+    { "op": "prepare-test-directory", "setup_once": true, "path": "${RUN_DIR}/offline-origin" },
+    { "op": "origin-switch", "root": "${RUN_DIR}/offline-origin" },
+    {
+      "op": "recheck-integrity",
+      "label": "offline-integrity-fallback",
+      "wait_timeout_s": 240,
+      "expect": [
+        { "path": "breakdown.run_metrics.failed_pipelines", "equals": 0 },
+        { "path": "breakdown.run_metrics.hash_work_bytes", "min": 1 }
+      ]
+    },
+    { "op": "assert-file-state", "label": "installed", "comparison": "equal" },
+    { "op": "origin-switch", "root": "${RUN_DIR}/origin" },
+    {
+      "op": "download",
+      "label": "oracle-clean-install",
+      "wait_timeout_s": 180,
+      "expect": [
+        { "path": "breakdown.run_metrics.failed_pipelines", "equals": 0 }
+      ]
+    },
+    { "op": "assert-file-state", "label": "installed", "comparison": "equal" }
+  ],
+  "repetitions": 1,
+  "warmup": false,
+  "guards": {
+    "require_storage_class": "ssd",
+    "require_no_other_foxy": true,
+    "require_clean_worktree": false,
+    "fail_on_db_wipe": true,
+    "max_run_gb": 1,
+    "oracle_command": ["${REPO_ROOT}/target/release/foxy-testkit-oracle.exe", "--repository-path", "${REPOSITORY_PATH}"]
+  }
+}

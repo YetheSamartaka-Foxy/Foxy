@@ -120,6 +120,11 @@ younger than 30 days; replacing the database file loses it.
 
 #### Accepted product contracts
 
+The [accepted hash-check contracts](HASH_CHECK_CONTRACTS.md) add settled H1-H18
+for local/remote verification, failure evidence, managed files and periodic
+checks. Use them as acceptance criteria in later gap reviews; do not reopen
+their product choices without a materially different tradeoff.
+
 These IDs are settled requirements from the design review. Future gap reviews must use them as acceptance criteria and investigate unreviewed cases; do not reopen a settled choice unless a materially different scenario creates a real conflict.
 
 | ID | Settled contract | Canonical detail |

@@ -48,6 +48,24 @@ foxy-testkit run --case .\testkit\examples\state-bulk-queue-identity-ssd.example
 foxy-testkit run --case .\testkit\examples\state-delta-clean-check-ssd.example.json --no-build
 ```
 
+The hash-check recovery examples use generated origins and repository paths
+under `${RUN_DIR}`. Run them sequentially after building the app, runner,
+oracle, mutator, and repository generator. The unreadable-file lock case is
+Windows-only:
+
+```powershell
+foxy-testkit run --case .\testkit\examples\state-h2-offline-local-check.example.json --no-build
+foxy-testkit run --case .\testkit\examples\state-h3-refresh-local-drift.example.json --no-build
+foxy-testkit run --case .\testkit\examples\state-h4-same-size-after-plan.example.json --no-build
+foxy-testkit run --case .\testkit\examples\state-h8-offline-integrity.example.json --no-build
+foxy-testkit run --case .\testkit\examples\state-h10-approved-extra-cleanup.example.json --no-build
+foxy-testkit run --case .\testkit\examples\state-empty-publication-recovery.example.json --no-build
+foxy-testkit run --case .\testkit\examples\state-integrity-cancel-recovery.example.json --no-build
+foxy-testkit run --case .\testkit\examples\state-independent-copy-refresh.example.json --no-build
+foxy-testkit run --case .\testkit\examples\state-approved-cleanup-only.example.json --no-build
+foxy-testkit run --case .\testkit\examples\state-unreadable-integrity-recovery.example.json --no-build
+```
+
 These are correctness cases, not performance baselines. Their file-state
 assertions compare deterministic per-file BLAKE3 digests stored in the isolated
 run directory. The shared-path driver intent is accepted only when
@@ -302,6 +320,10 @@ each. Pass `--pbo-entries N` to write PBOs of `N` entries instead: the repositor
 generator splits a PBO into one part per entry, so part rows scale with entries
 rather than with payload size. `--entry-bytes` sets the payload behind each
 entry.
+
+For a versioned multi-mod case that changes only selected addons, repeat
+`--mod-seed` once per mod; payload under each mod then depends on its own seed.
+Case `origin.synthetic` versions accept the corresponding `mod_seeds` array.
 
 ```powershell
 foxy-testkit synthetic --output .\testkit\origin\data\synthetic-parts --mods 96 --files-per-mod 8 --pbo-entries 562 --entry-bytes 64 --force

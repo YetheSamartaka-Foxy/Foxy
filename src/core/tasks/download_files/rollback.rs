@@ -528,6 +528,17 @@ impl UpdateRollbackSession {
         Ok(())
     }
 
+    pub(crate) async fn remove_file(
+        &mut self,
+        file_id: u64,
+        target_path: &Path,
+    ) -> anyhow::Result<()> {
+        let target_path = normalize_path(target_path);
+        self.prepare_replace(file_id, &target_path).await?;
+        remove_file_if_exists(&target_path).await?;
+        self.record(JournalEvent::Promoted { target_path }).await
+    }
+
     async fn prepare_replace(&mut self, file_id: u64, target_path: &Path) -> anyhow::Result<()> {
         // A restored entry put the original back and consumed its sidecar (a
         // patch that failed verification, a promote retried after a failure),
@@ -1087,6 +1098,25 @@ mod tests {
         );
         assert_eq!(fs::read(target).await.unwrap(), b"updated");
         assert!(session_dir.join(RESTORE_REQUEST_FILE_NAME).exists());
+    }
+
+    #[tokio::test]
+    async fn approved_extra_removal_is_restored_on_cancel() {
+        let root = tempdir().unwrap();
+        let extra = root.path().join("personal.cfg");
+        fs::write(&extra, b"user data").await.unwrap();
+        let mut session = UpdateRollbackSession::new(
+            root.path().join("recovery"),
+            "https://repo.example.invalid/",
+        )
+        .await
+        .unwrap();
+        session.remove_file(0, &extra).await.unwrap();
+        assert!(!extra.exists());
+        session.restore_all(None).await.unwrap();
+        assert_eq!(fs::read(&extra).await.unwrap(), b"user data");
+        session.commit().await.unwrap();
+        assert_eq!(fs::read(&extra).await.unwrap(), b"user data");
     }
 
     async fn dir_size(path: &Path) -> u64 {

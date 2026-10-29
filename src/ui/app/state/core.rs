@@ -168,6 +168,52 @@ pub struct RepositoryCheckCompletionState {
     pub error_message: Option<String>,
 }
 
+#[derive(Debug)]
+pub(crate) struct PendingLinkedTargetSync {
+    pub repo_address: String,
+    pub repo_path: String,
+    pub mode: crate::core::api::SyncMode,
+    pub selected_mod_states: Option<Vec<(String, bool)>>,
+    pub force_redownload: bool,
+    pub prepare_download_plan: bool,
+    pub force_full_downloads: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct LinkedTargetPreviewResult {
+    pub repo_address: String,
+    pub repo_path: String,
+    pub result: Result<Vec<crate::core::api::LinkedTargetPreview>, String>,
+}
+
+#[derive(Debug)]
+pub(crate) struct RetainedFilePreviewResult {
+    pub repo_url: String,
+    pub local_path: String,
+    pub result: Result<
+        (
+            Vec<crate::core::api::RetainedFilePreview>,
+            Vec<crate::core::api::LinkedTargetPreview>,
+        ),
+        String,
+    >,
+}
+
+#[derive(Debug)]
+pub(crate) struct RetainedFileRemovalResult {
+    pub repo_url: String,
+    pub local_path: String,
+    pub result: Result<usize, String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PendingRetainedFileRemoval {
+    pub repo_url: String,
+    pub local_path: String,
+    pub files: Vec<crate::core::api::RetainedFilePreview>,
+    pub linked_targets: Vec<crate::core::api::LinkedTargetPreview>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UiToastKind {
     Success,

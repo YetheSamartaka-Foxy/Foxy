@@ -199,15 +199,21 @@ After adding a repository, check it against the remote server and download any u
 
 ### Refresh (remote data recheck)
 
-Click the **refresh icon** to fetch the latest metadata from the remote server and build an update plan. This is the main way to see whether your local files are up to date.
+Click the **refresh icon** to fetch the latest metadata, check local drift and build an update plan. The local check also runs when the server publication is unchanged.
 
 ### Quick local check
 
-Click the **book icon** to run a quick local content check. It compares local content hashes (BLAKE3 fingerprints) to detect files that changed on disk, without contacting the server. It is fast and useful for catching local drift, for example after you edited a file by hand.
+Click the **book icon** to run a quick local content check without contacting the server. It uses folder metadata and sampled BLAKE3 fingerprints to detect ordinary changes. It can miss edits outside sampled bytes when timestamps are preserved; no detected changes is not a fresh full integrity read. Missing metadata produces an incomplete result with a Refresh action and preserves the previous update list.
 
 ### Recheck repository integrity
 
-Available from **Repository Settings > Configuration**, this performs a full remote metadata fetch and rebuilds all stored checksums by reading every file. Use it after major local changes or suspected corruption.
+Available from **Repository Settings > Configuration**, this reads every selected file and rebuilds its checksums. It first requests fresh server metadata. If the server is unavailable, it automatically checks against available cached metadata and labels the result accordingly. Files not described by that metadata remain unverified. Use this after major local changes or suspected corruption.
+
+The timestamp below the repository header shows the last successful remote check. Hover over it or focus it with Tab to see the last completed local check, whether it used a full read or quick checking, its metadata basis, and the last full integrity verification. Unreadable or changing files leave a check incomplete while accessible files can still be checked. A changing file is retried once. If a read stalls, Keep waiting, Skip this file, and Cancel remain available; skipping does not make the check complete. Command-line checks use a two-minute no-progress limit.
+
+If checksums could not be saved, Foxy reports that the result is unsaved and offers Retry save. Retained evidence is checked against the file identities and manifest before saving. If it is no longer valid, choose Discard and run the check again. New checks and downloads wait until the retained result is saved or discarded. Cancelling a check keeps completed stable verification work for later ordinary checks, while a new integrity recheck still performs a full read.
+
+**Periodically check repository metadata** is enabled by default in Application settings, with a 30-minute interval. Checks run only while the active game space is idle and never start a download. Change the interval from 5 minutes to one day, or disable it. CLI settings use `--periodic-remote-check-enabled` and `--periodic-remote-check-interval-minutes`.
 
 ### Understanding the update flow
 
@@ -233,7 +239,15 @@ Before downloading, Foxy checks that the destination has enough free space and i
 
 Foxy also checks that no other program holds the files it is about to replace. A running game keeps its mod files open, so update before starting the game: if a file is in use, Foxy names it and stops before downloading anything. If the game starts during an update, the update stops as soon as a file cannot be replaced and restores the previous files.
 
-A saved update plan is reused only while the files it does not touch are still on disk at their recorded size. If you deleted or replaced a mod file after the check, the update checks the repository again and repairs that file too.
+A saved update plan is reused only after ordinary drift checks of selected files outside its download queue. Missing, resized or changed fingerprints rebuild the relevant scope, including same-size edits in previously clean addons.
+
+Checks and update previews preserve extra files. The update view lists files absent from the accepted manifest; an approved update removes them with the same rollback protection as replacements. Files owned by another known repository remain protected. Known local differences also offer backup before replacement, alongside the automatic-backup setting.
+
+Explicit empty publications are supported and keep installed files and ownership records. Use **Review removal of retained files** for a separate confirmation of the exact previously managed files. Shared files cannot be removed through this action. A failed or omitted manifest is never treated as an empty publication.
+
+Linked addon folders require approval of their resolved targets before updating. Foxy shows the destinations and known affected installations, then rechecks them before writing. Checking linked content alone does not approve modification. Another Foxy operation claiming the same shared addon blocks the update until it finishes.
+
+If a publication changes during metadata fetching, Foxy retries the snapshot once and then stops if it remains inconsistent. A full-file checksum failure rolls back the attempt and allows one fresh automatic attempt; a second verification failure remains failed with pending work preserved.
 
 Each game space keeps one saved update plan at a time, for the repository that was checked last. Checking or updating any other repository replaces it. After a startup check finds updates in several repositories, only the last one checked starts downloading right away. The others still show their update, but each first rebuilds its plan, which takes about as long as a check. Nothing is downloaded twice. A saved update from an earlier session is checked again at the next startup, so a plan left over from an interrupted check is rebuilt or cleared before you download it.
 

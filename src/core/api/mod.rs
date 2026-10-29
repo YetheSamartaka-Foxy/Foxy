@@ -39,12 +39,17 @@ use flexi_logger::{
 };
 
 mod background_runtime;
+pub(crate) mod check_contracts;
 mod fs_watcher;
 mod logging;
 mod quick_scan;
 mod startup_diagnostics;
 mod sync_pipeline;
 mod types;
+pub use check_contracts::{LinkedTargetPreview, preview_linked_targets};
+pub use check_contracts::{
+    RetainedFilePreview, preview_retained_empty_files, remove_retained_empty_files,
+};
 
 pub(crate) use background_runtime::background_runtime;
 

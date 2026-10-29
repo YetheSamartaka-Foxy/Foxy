@@ -1132,6 +1132,16 @@ pub struct SettingsSetArgs {
     pub auto_recheck_on_launch: Option<bool>,
     #[arg(
         long,
+        help = "Refresh repository metadata while the desktop app is idle (true/false)"
+    )]
+    pub periodic_remote_check_enabled: Option<bool>,
+    #[arg(
+        long,
+        help = "Minutes between idle repository metadata refreshes (5-1440)"
+    )]
+    pub periodic_remote_check_interval_minutes: Option<u32>,
+    #[arg(
+        long,
         help = "Automatically run quick local scan on startup (true/false)"
     )]
     pub auto_quick_scan_on_launch: Option<bool>,

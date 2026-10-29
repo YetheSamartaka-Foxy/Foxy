@@ -196,6 +196,61 @@ impl Foxy {
         self.note_startup_rechecks_queued(queued);
     }
 
+    pub(crate) fn maybe_queue_periodic_remote_checks(&mut self) {
+        if !self.settings_view_state.periodic_remote_check_enabled
+            || !self.startup_tasks_started
+            || self.database_updates_blocked()
+            || self.repository_sync_active()
+            || self.has_pending_hash_save()
+            || self.quick_scan_worker.is_some()
+            || self.is_direct_download_running()
+            || self.scheduler_active_run.is_some()
+            || !self.startup_recheck_queue.is_empty()
+            || !self.repository_space_sync_queue.is_empty()
+            || !self.repository_visual_folder_sync_queue.is_empty()
+            || self.retained_files_cleanup_in_flight
+            || self.pending_retained_file_removal.is_some()
+        {
+            return;
+        }
+
+        let now = Instant::now();
+        let interval = Duration::from_secs(
+            u64::from(
+                self.settings_view_state
+                    .periodic_remote_check_interval_minutes
+                    .max(5),
+            )
+            .saturating_mul(60),
+        );
+        let Some(last_run) = self.periodic_remote_check_last_run else {
+            self.periodic_remote_check_last_run = Some(now);
+            return;
+        };
+        if now.duration_since(last_run) < interval {
+            return;
+        }
+
+        let repositories = self
+            .repository_view_state
+            .repositories
+            .iter()
+            .filter(|repo| !repo.address.trim().is_empty() && !repo.path.trim().is_empty())
+            .map(|repo| (repo.address.clone(), sanitize_user_path(&repo.path)))
+            .collect::<Vec<_>>();
+        if repositories.is_empty() {
+            self.periodic_remote_check_last_run = Some(now);
+            return;
+        }
+
+        self.startup_recheck_queue.extend(
+            repositories
+                .into_iter()
+                .map(|(address, path)| (address, path, SyncMode::RemoteRefreshOnly)),
+        );
+        self.periodic_remote_check_last_run = Some(now);
+    }
+
     fn queue_startup_remote_refreshes(
         &mut self,
         repositories: Vec<api::StartupRepositoryInstance>,
@@ -455,7 +510,11 @@ impl Foxy {
             let prevalidated_repositories: HashSet<api::StartupRepositoryInstance> =
                 payload.prevalidated_repositories.into_iter().collect();
             let eligible_repositories = payload.eligible_repositories;
-            if self.syncing_repository.is_none() && self.quick_scan_worker.is_none() {
+            if self.syncing_repository.is_none()
+                && self.quick_scan_worker.is_none()
+                && !self.retained_files_cleanup_in_flight
+                && self.pending_retained_file_removal.is_none()
+            {
                 self.mark_quick_scan_instances_active(eligible_repositories.iter().cloned());
                 self.quick_scan_worker = Some(api::spawn_quick_local_scan_instances(
                     eligible_repositories,
@@ -536,7 +595,10 @@ impl Foxy {
             }
         }
 
-        if self.syncing_repository.is_some() {
+        if self.repository_sync_active()
+            || self.retained_files_cleanup_in_flight
+            || self.pending_retained_file_removal.is_some()
+        {
             if newly_added > 0 {
                 debug!(
                     "Deferring {} quick-scan repositories because sync is active",
@@ -1131,9 +1193,13 @@ impl Foxy {
 
     pub fn process_startup_rechecks(&mut self) {
         if self.database_updates_blocked()
+            || self.hash_evidence_retry_in_flight
+            || self.has_pending_hash_save()
             || self.syncing_repository.is_some()
             || self.current_sync_mode.is_some()
             || self.quick_scan_worker.is_some()
+            || self.retained_files_cleanup_in_flight
+            || self.pending_retained_file_removal.is_some()
         {
             return;
         }
@@ -1162,7 +1228,9 @@ impl Foxy {
                 );
                 continue;
             }
+            self.dispatching_background_sync = true;
             self.start_core_sync(idx, mode);
+            self.dispatching_background_sync = false;
             if self.syncing_repository.is_some() {
                 info!(
                     "Started startup {:?} for repository {}",

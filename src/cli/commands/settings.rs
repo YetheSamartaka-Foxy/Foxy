@@ -98,6 +98,20 @@ fn cmd_settings_set(
         state.settings.auto_recheck_on_launch = v;
         changed = true;
     }
+    if let Some(v) = args.periodic_remote_check_enabled {
+        state.settings.periodic_remote_check_enabled = v;
+        changed = true;
+    }
+    if let Some(v) = args.periodic_remote_check_interval_minutes {
+        if !(5..=1440).contains(&v) {
+            return Err(CommandError::validation(
+                "settings.set",
+                "Periodic remote check interval must be between 5 and 1440 minutes",
+            ));
+        }
+        state.settings.periodic_remote_check_interval_minutes = v;
+        changed = true;
+    }
     if let Some(v) = args.auto_quick_scan_on_launch {
         state.settings.auto_quick_scan_on_launch = v;
         changed = true;

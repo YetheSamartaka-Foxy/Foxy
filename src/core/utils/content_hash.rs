@@ -77,8 +77,13 @@ pub(crate) fn normalize_path(path: &str) -> String {
     normalized
 }
 
+pub(crate) const ADDON_WRITE_LOCK_FILE: &str = ".foxy-write.lock";
+
 pub(crate) fn is_foxy_temp_artifact_path(path: &str) -> bool {
-    path.ends_with(".foxy.part") || path.ends_with(".foxy.tmp") || path.ends_with(".foxy.bak")
+    path.ends_with(".foxy.part")
+        || path.ends_with(".foxy.tmp")
+        || path.ends_with(".foxy.bak")
+        || path.rsplit(['/', '\\']).next() == Some(ADDON_WRITE_LOCK_FILE)
 }
 
 /// Sampled fingerprint of a local file: length, mtime and eight evenly spaced
@@ -373,23 +378,6 @@ fn blake3_mmap_file_hash(path: &Path) -> std::io::Result<String> {
     Ok(blake3_hex(hasher))
 }
 
-/// Whole-file BLAKE3 via mmap, returning the same full-length uppercase digest
-/// as [`FlexHasher::finalize_hex`] rather than the 32-char truncation.
-///
-/// `None` means the caller must fall back to a buffered read: either the
-/// strategy forbids mmap for this path or the mapping failed.
-pub(crate) fn blake3_mmap_file_hash_full(
-    path: &Path,
-    strategy: Blake3ReadStrategy,
-) -> Option<String> {
-    if strategy == Blake3ReadStrategy::Buffered {
-        return None;
-    }
-    let mut hasher = blake3::Hasher::new();
-    hasher.update_mmap(path).ok()?;
-    Some(hasher.finalize().to_hex().to_uppercase())
-}
-
 fn blake3_mmap_path_allowed(path: &Path) -> bool {
     if path_is_network_share(path) {
         return false;
@@ -627,6 +615,8 @@ mod tests {
         assert!(is_foxy_temp_artifact_path("addons/file.pbo.foxy.tmp"));
         assert!(is_foxy_temp_artifact_path("addons/file.pbo.foxy.bak"));
         assert!(!is_foxy_temp_artifact_path("addons/file.pbo"));
+        assert!(is_foxy_temp_artifact_path("addons/.foxy-write.lock"));
+        assert!(!is_foxy_temp_artifact_path("addons/other.foxy-write.lock"));
     }
 
     #[cfg(windows)]
@@ -1013,47 +1003,6 @@ mod tests {
         assert!(!path_string_is_network_share(r"\\?\C:\Mods\file.pbo"));
         assert!(!path_string_is_network_share(r"C:\Mods\file.pbo"));
         assert!(!path_string_is_network_share("/home/user/mods/file.pbo"));
-    }
-
-    #[test]
-    fn blake3_mmap_file_hash_full_matches_flex_hasher() {
-        let dir = tempfile::tempdir().unwrap();
-        let cases: &[(&str, &[u8])] = &[
-            ("empty.bin", b""),
-            ("one.bin", b"x"),
-            ("small.bin", &[0x33; 64 * 1024]),
-            ("large.bin", &[0x44; 2 * 1024 * 1024]),
-        ];
-        for (name, bytes) in cases {
-            let path = dir.path().join(name);
-            std::fs::write(&path, bytes).unwrap();
-            let mut flex = FlexHasher::new_blake3();
-            flex.update(bytes);
-            let expected = flex.finalize_hex();
-            assert_eq!(expected.len(), 64);
-            assert_eq!(
-                blake3_mmap_file_hash_full(&path, Blake3ReadStrategy::Mmap).as_deref(),
-                Some(expected.as_str()),
-                "{name}"
-            );
-            assert_eq!(
-                blake3_mmap_file_hash_full(&path, Blake3ReadStrategy::MmapRayon).as_deref(),
-                Some(expected.as_str()),
-                "{name}"
-            );
-        }
-    }
-
-    #[test]
-    fn blake3_mmap_file_hash_full_defers_to_caller_when_unusable() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("file.bin");
-        std::fs::write(&path, b"data").unwrap();
-        assert!(blake3_mmap_file_hash_full(&path, Blake3ReadStrategy::Buffered).is_none());
-        assert!(
-            blake3_mmap_file_hash_full(&dir.path().join("missing.bin"), Blake3ReadStrategy::Mmap)
-                .is_none()
-        );
     }
 
     struct CountingReader<R> {

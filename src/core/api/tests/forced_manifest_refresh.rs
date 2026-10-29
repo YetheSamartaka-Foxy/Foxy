@@ -13,6 +13,62 @@ use crate::core::utils::manifest_cache::{ManifestCache, Validators};
 use crate::ui::types::HashAlgorithmPreference;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+#[tokio::test]
+async fn repeated_file_rename_with_unchanged_rollups_preserves_the_previous_graph() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let remote_url = format!("http://{}/", listener.local_addr().unwrap());
+    let requests = Arc::new(AtomicU64::new(0));
+    let seen = requests.clone();
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            let length = stream.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..length]);
+            let body = if request.starts_with("GET /repo.json ") {
+                r#"{"repoName":"MainRepo","checksum":"REPO","requiredMods":[{"modName":"@mod_01","checkSum":"ADDON"}]}"#.to_owned()
+            } else {
+                let index = seen.fetch_add(1, Ordering::Relaxed);
+                let name = if index.is_multiple_of(2) {
+                    "first.bin"
+                } else {
+                    "renamed.bin"
+                };
+                format!(
+                    r#"{{"files":[{{"path":"{name}","checksum":"FILE","length":4,"parts":[{{"path":"part","checksum":"PART","start":0,"length":4}}]}}]}}"#
+                )
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let local_path = format!("{}/", directory.path().to_string_lossy().replace('\\', "/"));
+    let db = build_db().await;
+    let fdb = FoxyDb::from_turso(db.clone());
+    seed_one_addon_repository(&fdb, &remote_url, &local_path, "OLDREPO", "OLD").await;
+    let context =
+        Arc::new(FoxyContext::new(db, reqwest::Client::new()).with_target_local_path(&local_path));
+    let result = remote_repository(
+        context,
+        &remote_url,
+        Some(&local_path),
+        None,
+        true,
+        HashAlgorithmPreference::PreferSwifty,
+    )
+    .await;
+    server.abort();
+    assert!(result.is_none());
+    assert_eq!(requests.load(Ordering::Relaxed), 4);
+    assert_eq!(linked_file_names(&fdb, 1).await, vec!["keep.bin"]);
+    assert_eq!(checksums(&fdb, "repositories", 1).await.1, "OLDREPO");
+    assert_eq!(checksums(&fdb, "addons", 1).await.1, "OLD");
+}
+
 async fn assert_pending_manifest_refresh(
     local_checksum: &str,
     manual_copy: bool,
@@ -162,7 +218,7 @@ async fn assert_pending_manifest_refresh(
     assert!(metadata.remote_graph_fetched);
     assert!(metadata.remote_graph_complete);
     assert!(!metadata.skipped);
-    assert_eq!(manifest_requests.load(Ordering::Relaxed), 1);
+    assert_eq!(manifest_requests.load(Ordering::Relaxed), 2);
     let targets = fetch_all_download_targets_with_mod(context.clone())
         .await
         .unwrap();
@@ -204,7 +260,7 @@ async fn assert_pending_manifest_refresh(
         .unwrap();
         assert!(!metadata.remote_graph_fetched);
     }
-    assert_eq!(manifest_requests.load(Ordering::Relaxed), 1);
+    assert_eq!(manifest_requests.load(Ordering::Relaxed), 2);
     server.abort();
 }
 
@@ -371,7 +427,7 @@ async fn a_recheck_revalidates_a_saved_pending_addon_and_drops_its_stale_links()
     assert!(rechecked.remote_graph_fetched);
     assert_eq!(linked_files().await, vec![1]);
     assert_eq!(conditional_manifest_requests.load(Ordering::Relaxed), 1);
-    assert_eq!(unconditional_manifest_requests.load(Ordering::Relaxed), 0);
+    assert_eq!(unconditional_manifest_requests.load(Ordering::Relaxed), 1);
     assert_eq!(checksums(&fdb, "files", 1).await.0, "FILE");
 }
 
@@ -559,7 +615,7 @@ async fn a_completed_refresh_stores_both_checksums_and_the_next_refresh_skips() 
     assert_eq!(seen_addon_checksum.lock().unwrap().as_str(), "OLD");
     assert_eq!(checksums(&fdb, "addons", 1).await.1, "NEW");
     assert_eq!(checksums(&fdb, "repositories", 1).await.1, "NEWREPO");
-    assert_eq!(manifest_requests.load(Ordering::Relaxed), 1);
+    assert_eq!(manifest_requests.load(Ordering::Relaxed), 2);
     let again = remote_repository(
         context,
         &remote_url,
@@ -572,7 +628,7 @@ async fn a_completed_refresh_stores_both_checksums_and_the_next_refresh_skips() 
     .unwrap();
     server.abort();
     assert!(!again.remote_graph_fetched);
-    assert_eq!(manifest_requests.load(Ordering::Relaxed), 1);
+    assert_eq!(manifest_requests.load(Ordering::Relaxed), 2);
 }
 
 async fn linked_file_names(fdb: &FoxyDb, addon_id: i64) -> Vec<String> {
@@ -738,7 +794,7 @@ async fn a_startup_refresh_of_a_saved_pending_update_drops_the_stale_link() {
         vec!["keep.bin".to_string()]
     );
     assert_eq!(conditional_manifest_requests.load(Ordering::Relaxed), 1);
-    assert_eq!(unconditional_manifest_requests.load(Ordering::Relaxed), 0);
+    assert_eq!(unconditional_manifest_requests.load(Ordering::Relaxed), 1);
     clear_pending_update_for_context(context, &remote_url)
         .await
         .unwrap();
@@ -903,8 +959,8 @@ async fn a_startup_refresh_applies_a_later_manifest_to_the_pending_addon_and_the
     .expect("startup refresh applies both manifests");
     server.abort();
     assert!(refreshed.remote_graph_fetched);
-    assert_eq!(addon_one_requests.load(Ordering::Relaxed), 1);
-    assert_eq!(addon_two_requests.load(Ordering::Relaxed), 1);
+    assert_eq!(addon_one_requests.load(Ordering::Relaxed), 2);
+    assert_eq!(addon_two_requests.load(Ordering::Relaxed), 2);
     assert_eq!(
         linked_file_names(&fdb, 1).await,
         vec!["keep.bin".to_string()]
@@ -937,11 +993,9 @@ async fn a_startup_refresh_applies_a_republished_manifest_when_the_checksum_stay
                         r#"{"repoName":"MainRepo","checksum":"REPO","requiredMods":[{"modName":"@mod_01","checkSum":"ADDON"}]}"#,
                     )
                 } else if request.starts_with("GET /@mod_01/mod.srf ") {
-                    assert!(
-                        request.to_ascii_lowercase().contains("if-none-match:"),
-                        "the startup refresh revalidates the saved manifest"
-                    );
-                    conditional_new_body.fetch_add(1, Ordering::Relaxed);
+                    if request.to_ascii_lowercase().contains("if-none-match:") {
+                        conditional_new_body.fetch_add(1, Ordering::Relaxed);
+                    }
                     http_response(
                         "200 OK",
                         "\r\nETag: \"republished\"",

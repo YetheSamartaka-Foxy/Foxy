@@ -89,9 +89,21 @@ fn database_files(config: &Path) -> Result<Vec<PathBuf>> {
     Ok(found)
 }
 
-pub fn apply(config: &Path, remote_url: &str, local_path: &str, stale_link: bool) -> Result<()> {
+pub fn apply(
+    config: &Path,
+    remote_url: &str,
+    local_path: &str,
+    stale_link: bool,
+    incomplete_parts: bool,
+) -> Result<()> {
     let runtime = tokio::runtime::Runtime::new().context("Starting the database runtime")?;
-    runtime.block_on(apply_async(config, remote_url, local_path, stale_link))
+    runtime.block_on(apply_async(
+        config,
+        remote_url,
+        local_path,
+        stale_link,
+        incomplete_parts,
+    ))
 }
 
 async fn apply_async(
@@ -99,12 +111,21 @@ async fn apply_async(
     remote_url: &str,
     local_path: &str,
     stale_link: bool,
+    incomplete_parts: bool,
 ) -> Result<()> {
     let wanted_url = canonical_repository_url(remote_url);
     let wanted_path = normalize_local_path(local_path);
     let mut last_error = None;
     for _ in 0..20 {
-        match seed_once(config, &wanted_url, &wanted_path, stale_link).await {
+        match seed_once(
+            config,
+            &wanted_url,
+            &wanted_path,
+            stale_link,
+            incomplete_parts,
+        )
+        .await
+        {
             Ok(()) => return Ok(()),
             Err(error) if database_locked(&error) => {
                 last_error = Some(error);
@@ -126,6 +147,7 @@ async fn seed_once(
     wanted_url: &str,
     wanted_path: &str,
     stale_link: bool,
+    incomplete_parts: bool,
 ) -> Result<()> {
     for database_path in database_files(config)? {
         let database = turso::Builder::new_local(&database_path.to_string_lossy())
@@ -138,8 +160,17 @@ async fn seed_once(
         if let Some(repository_id) =
             matching_repository(&connection, wanted_url, wanted_path).await?
         {
-            seed_repository(&connection, repository_id, wanted_path, stale_link).await?;
-            eprintln!("seed-startup-state: stale_link={stale_link}");
+            seed_repository(
+                &connection,
+                repository_id,
+                wanted_path,
+                stale_link,
+                incomplete_parts,
+            )
+            .await?;
+            eprintln!(
+                "seed-startup-state: stale_link={stale_link} incomplete_parts={incomplete_parts}"
+            );
             return Ok(());
         }
     }
@@ -170,6 +201,7 @@ async fn seed_repository(
     repository_id: i64,
     local_path: &str,
     stale_link: bool,
+    incomplete_parts: bool,
 ) -> Result<()> {
     let addons = repository_addons(connection, repository_id).await?;
     ensure!(
@@ -206,6 +238,14 @@ async fn seed_repository(
     }
     if stale_link {
         insert_stale_link(connection, &addon).await?;
+    }
+    if incomplete_parts {
+        connection
+            .execute(
+                "DELETE FROM subfiles WHERE file_id IN (SELECT file_id FROM addon_files WHERE addon_id = ?)",
+                [turso::Value::Integer(addon.id)],
+            )
+            .await?;
     }
     Ok(())
 }

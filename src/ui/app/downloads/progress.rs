@@ -49,9 +49,21 @@ impl Foxy {
     }
 
     pub fn start_direct_download(&mut self) -> bool {
+        if self.hash_evidence_retry_in_flight
+            || self.retained_files_cleanup_in_flight
+            || self.pending_retained_file_removal.is_some()
+        {
+            self.direct_download_error =
+                Some(self.t("Finish reviewing retained files before starting another download."));
+            return false;
+        }
         if self.repository_sync_active() {
             self.direct_download_error = Some(self.t("Another download is already running"));
             warn!("Direct download ignored: repository sync is currently active");
+            return false;
+        }
+        if self.has_pending_hash_save() {
+            self.hash_evidence_notice_open = true;
             return false;
         }
         if self.is_direct_download_running() {

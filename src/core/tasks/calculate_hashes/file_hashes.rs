@@ -102,6 +102,10 @@ fn clean_part_mark_for_file(data_tree: &Tree, file_idx: usize) -> Option<CleanPa
     })
 }
 
+fn is_safe_cancelled_file_result(result: &super::scheduling::FileHashResult) -> bool {
+    result.completed && result.read_identity.is_some() && result.issue.is_none()
+}
+
 pub(crate) async fn calculate_hashes_for_files(
     context: Arc<FoxyContext>,
     repository_url: &str,
@@ -222,6 +226,8 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
     clean_part_mark_downloaded_files: bool,
     cancel_rx: Option<&watch::Receiver<bool>>,
 ) -> FileHashBatchResult {
+    let context_cancel_rx = context.hash_cancel_rx();
+    let cancel_rx = cancel_rx.or(context_cancel_rx.as_ref());
     let requested_file_ids = file_ids.clone();
     if file_ids.is_empty() {
         return FileHashBatchResult::default();
@@ -408,6 +414,17 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
         cancel_rx,
     )
     .await;
+    for result in &hash_results {
+        if let Some(kind) = result.issue.clone() {
+            context
+                .hash_evidence
+                .record_issue(crate::core::tasks::calculate_hashes::HashIssue {
+                    file_path: result.file_path.clone(),
+                    kind,
+                    detail: None,
+                });
+        }
+    }
     return_tree_parts(data_tree, lent_parts);
     phase_timings.hash_wall += hash_started.elapsed();
     if cancelled || cancel_rx.is_some_and(|rx| *rx.borrow()) {
@@ -416,8 +433,118 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
             hash_started.elapsed().as_secs_f64()
         );
         await_deferred_part_metadata_insert(&mut background_part_insert, &repository_label).await;
+        let mut completed_file_indices = HashSet::new();
+        let mut whole_file_checksums = HashMap::new();
+        let mut fresh_content_hashes = Vec::new();
+        let apply_started = Instant::now();
+        for result in hash_results
+            .into_iter()
+            .filter(is_safe_cancelled_file_result)
+        {
+            if super::verified_record::capture_identity_async(&result.file_path).await
+                != result.read_identity
+            {
+                continue;
+            }
+            completed_file_indices.insert(result.file_idx);
+            if let Some(checksum) = result.whole_file_checksum {
+                whole_file_checksums.insert(result.file_idx, checksum);
+            }
+            if let Some(content_hash) = result.content_hash
+                && let Some(file) = data_tree.files.get(result.file_idx)
+            {
+                fresh_content_hashes.push((file.id, content_hash));
+            }
+            for (part_idx, updated_part) in result.updated_parts {
+                if let Some(dest) = data_tree.parts.get_mut(part_idx) {
+                    *dest = updated_part;
+                    updated_part_indices.insert(part_idx);
+                }
+            }
+        }
+        phase_timings.apply_part_hashes += apply_started.elapsed();
+        let mut updated_file_ids = HashSet::new();
+        let mut file_updates = Vec::new();
+        let file_rollup_started = Instant::now();
+        for &file_idx in &completed_file_indices {
+            let Some(file_node) = data_tree.file_nodes.get(file_idx) else {
+                continue;
+            };
+            let Some(file) = data_tree.files.get_mut(file_idx) else {
+                continue;
+            };
+            let old_checksum = file.local_checksum.clone();
+            let mut parts: Vec<_> = file_node
+                .parts
+                .iter()
+                .filter_map(|&part_idx| data_tree.parts.get(part_idx).cloned())
+                .collect();
+            parts.sort_by_key(|part| part.data_order);
+            if parts.is_empty() {
+                if let Some(checksum) = whole_file_checksums.get(&file_idx) {
+                    file.local_checksum = checksum.clone();
+                }
+            } else {
+                let parts_match = parts.iter().all(|part| {
+                    !part.local_checksum.is_empty() && part.local_checksum == part.remote_checksum
+                });
+                let layout_matches =
+                    local_file_matches_part_layout(&file.local_path, file.length, &parts);
+                let new_checksum = calculate_hash_from_items(&mut parts);
+                if parts_match && layout_matches {
+                    file.local_checksum = file.remote_checksum.clone();
+                } else if parts_match {
+                    file.local_checksum.clear();
+                } else {
+                    file.local_checksum = new_checksum.to_uppercase();
+                }
+            }
+            if file.local_checksum != old_checksum {
+                updated_file_ids.insert(file.id);
+                file_updates.push(file.clone());
+            }
+        }
+        phase_timings.file_rollup += file_rollup_started.elapsed();
+        let part_updates: Vec<_> = updated_part_indices
+            .iter()
+            .filter_map(|&part_idx| data_tree.parts.get(part_idx).cloned())
+            .collect();
+        let persist_started = Instant::now();
+        let parts_saved = persist_part_checksums(&db, &part_updates, |_| {}).await;
+        phase_timings.part_checksum_persist += persist_started.elapsed();
+        let file_persist_started = Instant::now();
+        let files_saved = parts_saved && persist_file_checksums(&db, &file_updates, |_| {}).await;
+        phase_timings.file_rollup_persist += file_persist_started.elapsed();
+        if !files_saved {
+            context
+                .hash_evidence
+                .record_issue(crate::core::tasks::calculate_hashes::HashIssue {
+                    file_path: repository_label.clone(),
+                    kind: crate::core::tasks::calculate_hashes::HashIssueKind::SaveFailed,
+                    detail: Some(
+                        "Completed file hashes could not be saved; rerun the check.".to_owned(),
+                    ),
+                });
+        } else {
+            context.record_fresh_file_content_hashes(fresh_content_hashes);
+        }
+        let processed_file_ids = if files_saved {
+            completed_file_indices
+                .iter()
+                .filter_map(|&file_idx| data_tree.files.get(file_idx).map(|file| file.id))
+                .collect()
+        } else {
+            HashSet::new()
+        };
+        if !files_saved {
+            updated_file_ids.clear();
+        }
         return FileHashBatchResult {
             requested_file_ids,
+            processed_file_ids,
+            updated_file_ids,
+            profile_decision: Some(profile_decision),
+            phase_timings,
             ..Default::default()
         };
     }
@@ -444,6 +571,11 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
         .iter()
         .filter(|result| result.missing_file)
         .count();
+    let missing_file_indices: HashSet<usize> = hash_results
+        .iter()
+        .filter(|result| result.missing_file)
+        .map(|result| result.file_idx)
+        .collect();
     if missing_hash_files > 0 {
         let missing_percent = missing_hash_files.saturating_mul(100) / total_files.max(1);
         if missing_percent >= 50 {
@@ -518,6 +650,25 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
         .collect();
     let fallback_part_count = fallback_part_indices.len();
     let part_count = clean_part_count.saturating_add(fallback_part_count);
+    let mut persistence_ok = true;
+    let deferred_parts_retry =
+        background_part_insert.is_some() || context.deferred_part_count() > 0;
+    let retry_all_parts = if deferred_parts_retry {
+        data_tree.parts.clone()
+    } else {
+        Vec::new()
+    };
+    let retry_deferred_rows: Vec<_> = retry_all_parts
+        .iter()
+        .map(|part| crate::core::models::context::DeferredPartInsert {
+            file_id: part.file_id as i64,
+            path: part.path.clone(),
+            remote_length: part.remote_length as i64,
+            remote_start: part.remote_start as i64,
+            remote_checksum: part.remote_checksum.clone(),
+            data_order: part.data_order,
+        })
+        .collect();
     if let Some(tx) = progress_tx {
         let _ = tx.send(ProgressEvent::Stage {
             label: format!("Saving parts 0/{}", part_count),
@@ -557,8 +708,8 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
         let inserted =
             await_deferred_part_metadata_insert(&mut background_part_insert, &repository_label)
                 .await;
-        if !inserted
-            || !persist_part_local_state_by_file_path(&db, &part_updates, |persisted_chunk| {
+        let saved = inserted
+            && persist_part_local_state_by_file_path(&db, &part_updates, |persisted_chunk| {
                 parts_persisted += persisted_chunk;
                 if parts_persisted % PERSIST_LOG_INTERVAL == 0 || parts_persisted == part_count {
                     info!(
@@ -574,8 +725,9 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
                     });
                 }
             })
-            .await
-        {
+            .await;
+        if !saved {
+            persistence_ok = false;
             error!(
                 "Failed to persist manifest parts or their local hash state for repo {}",
                 repository_label
@@ -588,7 +740,7 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
             total_deferred_parts
         );
         let mut next_progress_log = PERSIST_LOG_INTERVAL;
-        if !flush_deferred_part_inserts_with_local_state(
+        let saved = flush_deferred_part_inserts_with_local_state(
             context.clone(),
             &data_tree.parts,
             |persisted_chunk| {
@@ -610,8 +762,9 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
                 }
             },
         )
-        .await
-        {
+        .await;
+        if !saved {
+            persistence_ok = false;
             error!(
                 "Failed to persist deferred manifest parts with local hash state during targeted tree-hash init; subfiles remain empty and a re-download may be falsely flagged"
             );
@@ -639,23 +792,27 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
                 });
             }
         }
-        persist_part_checksums(&db, &part_updates, |persisted_chunk| {
-            parts_persisted += persisted_chunk;
-            if parts_persisted % PERSIST_LOG_INTERVAL == 0 || parts_persisted == part_count {
-                info!(
-                    "Phase 2 progress: {}/{} parts persisted",
-                    parts_persisted, part_count
-                );
-            }
-            if let Some(tx) = progress_tx {
-                let pct = 0.50 + 0.20 * (parts_persisted as f32 / part_count.max(1) as f32);
-                let _ = tx.send(ProgressEvent::Stage {
-                    label: format!("Saving parts {}/{}", parts_persisted, part_count),
-                    percent: pct,
-                });
-            }
-        })
-        .await;
+        let saved = persistence_ok
+            && persist_part_checksums(&db, &part_updates, |persisted_chunk| {
+                parts_persisted += persisted_chunk;
+                if parts_persisted % PERSIST_LOG_INTERVAL == 0 || parts_persisted == part_count {
+                    info!(
+                        "Phase 2 progress: {}/{} parts persisted",
+                        parts_persisted, part_count
+                    );
+                }
+                if let Some(tx) = progress_tx {
+                    let pct = 0.50 + 0.20 * (parts_persisted as f32 / part_count.max(1) as f32);
+                    let _ = tx.send(ProgressEvent::Stage {
+                        label: format!("Saving parts {}/{}", parts_persisted, part_count),
+                        percent: pct,
+                    });
+                }
+            })
+            .await;
+        if !saved {
+            persistence_ok = false;
+        }
     }
     let committed_clean_files = clean_part_marks.len();
     let committed_clean_parts = clean_part_count;
@@ -707,7 +864,9 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
                 new_checksum = file.remote_checksum.clone();
             }
 
-            if !has_parts {
+            if missing_file_indices.contains(file_idx) {
+                file.local_checksum.clear();
+            } else if !has_parts {
                 if let Some(checksum) = whole_file_checksums_by_file_idx.get(file_idx) {
                     file.local_checksum = checksum.clone();
                 } else if !old_checksum.is_empty() && old_checksum == file.remote_checksum {
@@ -744,23 +903,28 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
         .collect();
     let file_persist_count = file_updates.len();
     let mut files_persisted = 0;
-    persist_file_checksums(&db, &file_updates, |persisted_chunk| {
-        files_persisted += persisted_chunk;
-        if files_persisted % PERSIST_LOG_INTERVAL == 0 || files_persisted == file_persist_count {
-            info!(
-                "Phase 3 progress: {}/{} files persisted",
-                files_persisted, file_persist_count
-            );
-        }
-        if let Some(tx) = progress_tx {
-            let pct = 0.72 + 0.10 * (files_persisted as f32 / file_persist_count.max(1) as f32);
-            let _ = tx.send(ProgressEvent::Stage {
-                label: format!("Saving files {}/{}", files_persisted, file_persist_count),
-                percent: pct,
-            });
-        }
-    })
-    .await;
+    let files_saved = persistence_ok
+        && persist_file_checksums(&db, &file_updates, |persisted_chunk| {
+            files_persisted += persisted_chunk;
+            if files_persisted % PERSIST_LOG_INTERVAL == 0 || files_persisted == file_persist_count
+            {
+                info!(
+                    "Phase 3 progress: {}/{} files persisted",
+                    files_persisted, file_persist_count
+                );
+            }
+            if let Some(tx) = progress_tx {
+                let pct = 0.72 + 0.10 * (files_persisted as f32 / file_persist_count.max(1) as f32);
+                let _ = tx.send(ProgressEvent::Stage {
+                    label: format!("Saving files {}/{}", files_persisted, file_persist_count),
+                    percent: pct,
+                });
+            }
+        })
+        .await;
+    if !files_saved {
+        persistence_ok = false;
+    }
     info!(
         "Phase 3 (persist files) completed in {:.2}s ({} files)",
         file_persist_started.elapsed().as_secs_f64(),
@@ -791,23 +955,27 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
         .collect();
     let mod_persist_count = mod_updates.len();
     let mut mods_persisted = 0;
-    persist_mod_checksums(&db, &mod_updates, |persisted_chunk| {
-        mods_persisted += persisted_chunk;
-        if mods_persisted % 500 == 0 || mods_persisted == mod_persist_count {
-            info!(
-                "Phase 4 progress: {}/{} mods persisted",
-                mods_persisted, mod_persist_count
-            );
-        }
-        if let Some(tx) = progress_tx {
-            let pct = 0.84 + 0.06 * (mods_persisted as f32 / mod_persist_count.max(1) as f32);
-            let _ = tx.send(ProgressEvent::Stage {
-                label: format!("Saving addons {}/{}", mods_persisted, mod_persist_count),
-                percent: pct,
-            });
-        }
-    })
-    .await;
+    let mods_saved = persistence_ok
+        && persist_mod_checksums(&db, &mod_updates, |persisted_chunk| {
+            mods_persisted += persisted_chunk;
+            if mods_persisted % 500 == 0 || mods_persisted == mod_persist_count {
+                info!(
+                    "Phase 4 progress: {}/{} mods persisted",
+                    mods_persisted, mod_persist_count
+                );
+            }
+            if let Some(tx) = progress_tx {
+                let pct = 0.84 + 0.06 * (mods_persisted as f32 / mod_persist_count.max(1) as f32);
+                let _ = tx.send(ProgressEvent::Stage {
+                    label: format!("Saving addons {}/{}", mods_persisted, mod_persist_count),
+                    percent: pct,
+                });
+            }
+        })
+        .await;
+    if !mods_saved {
+        persistence_ok = false;
+    }
     info!(
         "Phase 4 (persist mods) completed in {:.2}s ({} mods)",
         mod_persist_started.elapsed().as_secs_f64(),
@@ -837,29 +1005,84 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
         .collect();
     let repo_count = repo_updates.len();
     let mut repos_persisted = 0usize;
-    persist_repository_checksums(&db, &repo_updates, |persisted_chunk| {
-        repos_persisted += persisted_chunk;
-        if repos_persisted == repo_count || repos_persisted.is_multiple_of(PERSIST_LOG_INTERVAL) {
-            info!(
-                "Phase 5 progress: {}/{} repositories persisted",
-                repos_persisted, repo_count
-            );
-        }
-        if let Some(tx) = progress_tx {
-            let pct = 0.92 + 0.06 * (repos_persisted as f32 / repo_count.max(1) as f32);
-            let _ = tx.send(ProgressEvent::Stage {
-                label: format!("Saving repositories {}/{}", repos_persisted, repo_count),
-                percent: pct,
-            });
-        }
-    })
-    .await;
+    let repos_saved = persistence_ok
+        && persist_repository_checksums(&db, &repo_updates, |persisted_chunk| {
+            repos_persisted += persisted_chunk;
+            if repos_persisted == repo_count || repos_persisted.is_multiple_of(PERSIST_LOG_INTERVAL)
+            {
+                info!(
+                    "Phase 5 progress: {}/{} repositories persisted",
+                    repos_persisted, repo_count
+                );
+            }
+            if let Some(tx) = progress_tx {
+                let pct = 0.92 + 0.06 * (repos_persisted as f32 / repo_count.max(1) as f32);
+                let _ = tx.send(ProgressEvent::Stage {
+                    label: format!("Saving repositories {}/{}", repos_persisted, repo_count),
+                    percent: pct,
+                });
+            }
+        })
+        .await;
+    if !repos_saved {
+        persistence_ok = false;
+    }
     info!(
         "Phase 5 (persist repos) completed in {:.2}s ({} repositories)",
         repo_persist_started.elapsed().as_secs_f64(),
         repo_count
     );
     phase_timings.repository_rollup_persist += repo_persist_started.elapsed();
+    if !persistence_ok {
+        let retry_context = context.clone_for_hash_retry();
+        let retry_db = db.clone();
+        let retry_part_rows = part_updates.clone();
+        let retry_file_rows = file_updates.clone();
+        let retry_mod_rows = mod_updates.clone();
+        let retry_repo_rows = repo_updates.clone();
+        context.hash_evidence.set_retry_save(move || {
+            let context = Arc::new(retry_context.clone());
+            let db = retry_db.clone();
+            let all_parts = retry_all_parts.clone();
+            let deferred_rows = retry_deferred_rows.clone();
+            let part_rows = retry_part_rows.clone();
+            let file_rows = retry_file_rows.clone();
+            let mod_rows = retry_mod_rows.clone();
+            let repo_rows = retry_repo_rows.clone();
+            async move {
+                let parts_saved = if deferred_parts_retry {
+                    let _ = context.take_deferred_parts();
+                    context.buffer_deferred_parts(deferred_rows);
+                    context.set_deferred_part_inserts_fresh_load(false);
+                    flush_deferred_part_inserts_with_local_state(context, &all_parts, |_| {}).await
+                } else {
+                    persist_part_checksums(&db, &part_rows, |_| {}).await
+                };
+                if !parts_saved {
+                    return Err("Part hash persistence failed".to_owned());
+                }
+                if !persist_file_checksums(&db, &file_rows, |_| {}).await {
+                    return Err("File hash persistence failed".to_owned());
+                }
+                if !persist_mod_checksums(&db, &mod_rows, |_| {}).await {
+                    return Err("Addon hash persistence failed".to_owned());
+                }
+                if !persist_repository_checksums(&db, &repo_rows, |_| {}).await {
+                    return Err("Repository hash persistence failed".to_owned());
+                }
+                Ok(())
+            }
+        });
+        context
+            .hash_evidence
+            .record_issue(crate::core::tasks::calculate_hashes::HashIssue {
+                file_path: repository_label.clone(),
+                kind: crate::core::tasks::calculate_hashes::HashIssueKind::SaveFailed,
+                detail: Some(
+                    "Hash results could not be saved. Retry saving or rerun the check.".to_owned(),
+                ),
+            });
+    }
     info!(
         "Total partial hash recalculation completed in {:.2}s",
         total_start.elapsed().as_secs_f64()
@@ -880,6 +1103,47 @@ mod tests {
     use super::*;
     use crate::core::models::model_tree::FileNode;
     use std::io::Write;
+
+    #[tokio::test]
+    async fn cancelled_checkpoint_accepts_only_completed_stable_clean_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stable.bin");
+        std::fs::write(&path, b"data").unwrap();
+        let identity =
+            super::super::verified_record::capture_identity_async(&path.to_string_lossy()).await;
+        let result = |completed, issue, read_identity| super::scheduling::FileHashResult {
+            file_idx: 0,
+            updated_parts: Vec::new(),
+            whole_file_checksum: None,
+            content_hash: None,
+            file_path: path.to_string_lossy().to_string(),
+            elapsed: std::time::Duration::ZERO,
+            parts_count: 0,
+            missing_file: false,
+            issue,
+            completed,
+            read_identity,
+            manifest_signature: String::new(),
+            part_metrics: Default::default(),
+            verified: None,
+        };
+
+        assert!(is_safe_cancelled_file_result(&result(
+            true,
+            None,
+            identity.clone()
+        )));
+        assert!(!is_safe_cancelled_file_result(&result(
+            false,
+            None,
+            identity.clone()
+        )));
+        assert!(!is_safe_cancelled_file_result(&result(
+            true,
+            Some(crate::core::tasks::calculate_hashes::HashIssueKind::Unstable),
+            identity,
+        )));
+    }
 
     fn tree_with_one_file(local_path: String, parts: Vec<FoxyModFilePart>) -> Tree {
         let part_indices: Vec<usize> = (0..parts.len()).collect();
@@ -1084,6 +1348,60 @@ mod tests {
         let tree = Tree::load(context, REPO_URL).await.unwrap();
         let clean = &tree.parts[tree.file_nodes[tree.file_id_to_index[&100]].parts[0]];
         assert_eq!(clean.local_checksum, checksum(b"clean"));
+    }
+
+    #[tokio::test]
+    async fn missing_files_never_acquire_a_checksum_from_an_empty_part_rollup() {
+        for full_pass in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let (context, file_ids) = fresh_staged_repository(root.path()).await;
+            std::fs::remove_file(root.path().join("clean.pbo")).unwrap();
+            if full_pass {
+                super::pipeline::calculate_hashes_with_tree_and_profile_cancellable(
+                    context.clone(),
+                    REPO_URL,
+                    None,
+                    None,
+                    HashIoProfilePreference::Balanced,
+                    None,
+                )
+                .await;
+            } else {
+                calculate_hashes_for_files_with_profile(
+                    context.clone(),
+                    REPO_URL,
+                    &file_ids,
+                    None,
+                    false,
+                    HashIoProfilePreference::Balanced,
+                    None,
+                )
+                .await;
+            }
+            let row = context
+                .db()
+                .query_one(
+                    "SELECT local_checksum FROM files WHERE id = 100",
+                    crate::core::db::params![],
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.get_string("local_checksum").unwrap(), "");
+            assert!(
+                !context.hash_evidence.is_incomplete(),
+                "{:?}",
+                context.hash_evidence.issues_snapshot()
+            );
+            assert!(
+                context
+                    .hash_evidence
+                    .issues_snapshot()
+                    .iter()
+                    .any(|issue| issue.kind
+                        == crate::core::tasks::calculate_hashes::HashIssueKind::Missing)
+            );
+        }
     }
 
     #[tokio::test]

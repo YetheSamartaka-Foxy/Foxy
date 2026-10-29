@@ -36,6 +36,8 @@ pub(super) struct PartHashCalculation {
     /// only samples the parts did not cover. `None` when the file could not be
     /// read or the pass was cancelled before it finished.
     pub(super) content_hash: Option<String>,
+    pub(super) issue: Option<super::evidence::HashIssueKind>,
+    pub(super) cancelled: bool,
 }
 
 /// Shared counters of one hash run, advanced by every file's hasher.
@@ -74,14 +76,23 @@ impl HashRunCounters {
 #[derive(Clone)]
 pub(super) struct PartHashProgress {
     counters: HashRunCounters,
-    progress_tx: Sender<ProgressEvent>,
+    progress_tx: Option<Sender<ProgressEvent>>,
+    evidence: Arc<super::evidence::HashEvidenceState>,
+    unattended: bool,
 }
 
 impl PartHashProgress {
-    pub(super) fn new(counters: HashRunCounters, progress_tx: Sender<ProgressEvent>) -> Self {
+    pub(super) fn new(
+        counters: HashRunCounters,
+        progress_tx: Option<Sender<ProgressEvent>>,
+        evidence: Arc<super::evidence::HashEvidenceState>,
+        unattended: bool,
+    ) -> Self {
         Self {
             counters,
             progress_tx,
+            evidence,
+            unattended,
         }
     }
 
@@ -112,8 +123,10 @@ impl PartHashProgress {
         let crossed_bytes =
             checked_bytes / BYTE_PROGRESS_INTERVAL != previous_bytes / BYTE_PROGRESS_INTERVAL;
 
-        if crossed_parts || crossed_bytes || checked_parts == counters.total_parts {
-            let _ = self.progress_tx.send(counters.event());
+        if (crossed_parts || crossed_bytes || checked_parts == counters.total_parts)
+            && let Some(progress_tx) = &self.progress_tx
+        {
+            let _ = progress_tx.send(counters.event());
         }
     }
 }
@@ -124,7 +137,7 @@ pub(super) const HASH_READER_CAPACITY: usize = 4 * 1024 * 1024;
 pub(super) const ROTATIONAL_HASH_READER_CAPACITY: usize = 128 * 1024 * 1024;
 
 /// How one file's parts are located and read.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) struct PartReadOptions<'a> {
     pub(super) span_source: PartSpanSource,
     /// The active game's declared container formats.
@@ -158,6 +171,15 @@ pub(super) async fn calculate_part_hashes(
         sequential_scan,
         direct,
     } = read;
+    let (evidence, unattended) = progress
+        .as_ref()
+        .map(|progress| (progress.evidence.clone(), progress.unattended))
+        .unwrap_or_else(|| {
+            (
+                Arc::new(super::evidence::HashEvidenceState::default()),
+                false,
+            )
+        });
     let direct = direct.cloned();
     let pbo_name = Path::new(file_path)
         .file_name()
@@ -181,6 +203,8 @@ pub(super) async fn calculate_part_hashes(
             parts: Vec::new(),
             metrics,
             content_hash: None,
+            issue: None,
+            cancelled: false,
         };
     }
 
@@ -201,8 +225,9 @@ pub(super) async fn calculate_part_hashes(
             }
             meta
         }
-        Err(_) => {
-            debug!("File {} does not exist, skipping hash", file_path);
+        Err(err) => {
+            let missing = err.kind() == std::io::ErrorKind::NotFound;
+            debug!("File {} could not be inspected: {}", file_path, err);
             metrics.metadata_elapsed = metadata_started.elapsed();
             metrics.total_elapsed = started_at.elapsed();
             if let Some(progress) = &progress {
@@ -212,14 +237,22 @@ pub(super) async fn calculate_part_hashes(
                 parts: parts
                     .into_iter()
                     .map(|mut part| {
-                        part.local_checksum = String::new();
-                        part.local_length = 0;
-                        part.local_start = 0;
+                        if missing {
+                            part.local_checksum = String::new();
+                            part.local_length = 0;
+                            part.local_start = 0;
+                        }
                         part
                     })
                     .collect(),
                 metrics,
                 content_hash: None,
+                issue: Some(if missing {
+                    super::evidence::HashIssueKind::Missing
+                } else {
+                    super::evidence::HashIssueKind::Unreadable
+                }),
+                cancelled: false,
             };
         }
     };
@@ -258,6 +291,8 @@ pub(super) async fn calculate_part_hashes(
             parts: indexed_parts.into_iter().map(|(_, part)| part).collect(),
             metrics,
             content_hash: None,
+            issue: Some(super::evidence::HashIssueKind::Unreadable),
+            cancelled: false,
         };
     };
     metrics.semaphore_wait_elapsed = semaphore_started.elapsed();
@@ -265,8 +300,11 @@ pub(super) async fn calculate_part_hashes(
     // Open the file once and hash all parts sequentially within a single
     // spawn_blocking task.  This eliminates N redundant open/close syscalls
     // (one per part) and lets the OS read-ahead prefetcher work efficiently.
-    let blocking_started = Instant::now();
     let blocking_progress = progress.clone();
+    let read_heartbeat = Arc::new(AtomicU64::new(0));
+    let blocking_heartbeat = read_heartbeat.clone();
+    let stop_read = Arc::new(std::sync::atomic::AtomicU8::new(0));
+    let blocking_stop = stop_read.clone();
     let estimated_bytes = metrics.estimated_bytes;
     let result = tokio::task::spawn_blocking(move || {
         let mut layout_metrics = LayoutMetrics::default();
@@ -287,7 +325,7 @@ pub(super) async fn calculate_part_hashes(
                     if let Some(progress) = &blocking_progress {
                         progress.mark_parts_done(total_part_count, estimated_bytes);
                     }
-                    return (indexed_parts, None, layout_metrics);
+                    return (indexed_parts, None, layout_metrics, true, false, false);
                 }
             },
         };
@@ -352,6 +390,8 @@ pub(super) async fn calculate_part_hashes(
         let mut consecutive_read_failures: usize = 0;
         let total_part_count = indexed_parts.len();
         let mut cancelled = false;
+        let mut unreadable = false;
+        let mut skipped = false;
 
         for (idx, part) in &mut indexed_parts {
             // A multi-gigabyte PBO would otherwise keep the disk busy for
@@ -411,6 +451,7 @@ pub(super) async fn calculate_part_hashes(
                 total_len,
                 &part.remote_checksum,
                 &mut fingerprint,
+                (Some(&blocking_heartbeat), &blocking_stop),
             );
             if hashed.is_err()
                 && reader.direct_failed()
@@ -430,12 +471,38 @@ pub(super) async fn calculate_part_hashes(
                     total_len,
                     &part.remote_checksum,
                     &mut fingerprint,
+                    (Some(&blocking_heartbeat), &blocking_stop),
                 );
+            }
+
+            match blocking_stop.load(Ordering::Relaxed) {
+                1 => {
+                    skipped = true;
+                    part.local_checksum.clear();
+                    part.local_length = 0;
+                    part.local_start = 0;
+                    if let Some(progress) = &blocking_progress {
+                        progress.mark_parts_done(1, part.remote_length);
+                    }
+                    break;
+                }
+                2 => {
+                    cancelled = true;
+                    part.local_checksum.clear();
+                    part.local_length = 0;
+                    part.local_start = 0;
+                    if let Some(progress) = &blocking_progress {
+                        progress.mark_parts_done(1, part.remote_length);
+                    }
+                    break;
+                }
+                _ => {}
             }
 
             let local_checksum = match hashed {
                 Ok(checksum) => checksum,
                 Err(e) => {
+                    unreadable = true;
                     if consecutive_read_failures == 0 {
                         warn!("Read failed for {}: {}", file_path_owned, e);
                     }
@@ -473,32 +540,121 @@ pub(super) async fn calculate_part_hashes(
                 .map(|(_, part)| part.local_length)
                 .sum::<u64>(),
         );
-        let content_hash = if cancelled || consecutive_read_failures >= MAX_READ_FAILURES {
+        let content_hash = if cancelled || skipped || consecutive_read_failures >= MAX_READ_FAILURES
+        {
             None
         } else {
             fingerprint
                 .finish()
                 .or_else(|| reader.sampled_fingerprint(&file_path_owned, &file_metadata))
         };
-        (indexed_parts, content_hash, layout_metrics)
-    })
-    .await;
+        (
+            indexed_parts,
+            content_hash,
+            layout_metrics,
+            unreadable,
+            skipped,
+            cancelled,
+        )
+    });
+    let blocking_started = Instant::now();
+    let mut last_heartbeat = read_heartbeat.load(Ordering::Relaxed);
+    let mut last_progress = Instant::now();
+    let mut stalled_secs = 0u64;
+    let mut task = result;
+    let joined = 'worker: loop {
+        tokio::select! {
+            joined = &mut task => break joined,
+            _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+                let heartbeat = read_heartbeat.load(Ordering::Relaxed);
+                if heartbeat != last_heartbeat {
+                    last_heartbeat = heartbeat;
+                    last_progress = Instant::now();
+                    if stalled_secs > 0 {
+                        evidence.finish_stalled_read(file_path);
+                        stalled_secs = 0;
+                    }
+                    continue;
+                }
+                let idle = last_progress.elapsed().as_secs();
+                if unattended {
+                    if idle >= 120 {
+                        stop_read.store(1, Ordering::Relaxed);
+                        stalled_secs = idle;
+                    }
+                    continue;
+                }
+                if idle >= 60 && stalled_secs == 0 {
+                    stalled_secs = idle;
+                }
+                if stalled_secs > 0 {
+                    let mut decision = evidence.begin_stalled_read(
+                        super::evidence::StalledRead {
+                            file_path: file_path.to_owned(),
+                            no_progress_secs: idle,
+                        },
+                    );
+                    loop {
+                        tokio::select! {
+                            joined = &mut task => break 'worker joined,
+                            changed = decision.changed() => {
+                                if changed.is_err() { break; }
+                                let decision_value = *decision.borrow_and_update();
+                                match decision_value {
+                                    super::evidence::StalledReadDecision::Continue => {
+                                        evidence.finish_stalled_read(file_path);
+                                        last_progress = Instant::now();
+                                        stalled_secs = 0;
+                                        break;
+                                    }
+                                    super::evidence::StalledReadDecision::Skip => {
+                                        stop_read.store(1, Ordering::Relaxed);
+                                        evidence.finish_stalled_read(file_path);
+                                        break 'worker (&mut task).await;
+                                    }
+                                    super::evidence::StalledReadDecision::Cancel => {
+                                        stop_read.store(2, Ordering::Relaxed);
+                                        evidence.finish_stalled_read(file_path);
+                                        break 'worker (&mut task).await;
+                                    }
+                                    super::evidence::StalledReadDecision::Waiting => {}
+                                }
+                            }
+                            _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+                                let heartbeat = read_heartbeat.load(Ordering::Relaxed);
+                                if heartbeat != last_heartbeat {
+                                    last_heartbeat = heartbeat;
+                                    evidence.finish_stalled_read(file_path);
+                                    last_progress = Instant::now();
+                                    stalled_secs = 0;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
     let blocking_elapsed = blocking_started.elapsed();
     // _permit is dropped here, releasing the semaphore slot
 
-    let (mut final_parts, content_hash, layout_metrics) = match result {
-        Ok(parts) => parts,
-        Err(e) => {
-            error!("Part hashing task panicked for {}: {}", pbo_name, e);
-            metrics.blocking_hash_elapsed = blocking_elapsed;
-            metrics.total_elapsed = started_at.elapsed();
-            return PartHashCalculation {
-                parts: Vec::new(),
-                metrics,
-                content_hash: None,
-            };
-        }
-    };
+    let (mut final_parts, content_hash, layout_metrics, unreadable, skipped, locally_cancelled) =
+        match joined {
+            Ok(parts) => parts,
+            Err(e) => {
+                error!("Part hashing task panicked for {}: {}", pbo_name, e);
+                metrics.blocking_hash_elapsed = blocking_elapsed;
+                metrics.total_elapsed = started_at.elapsed();
+                return PartHashCalculation {
+                    parts: Vec::new(),
+                    metrics,
+                    content_hash: None,
+                    issue: Some(super::evidence::HashIssueKind::Unreadable),
+                    cancelled: false,
+                };
+            }
+        };
     metrics.direct_files = usize::from(layout_metrics.direct);
     metrics.direct_fallback_files = usize::from(layout_metrics.direct_fallback);
     metrics.layout_files = usize::from(layout_metrics.attempted);
@@ -543,6 +699,14 @@ pub(super) async fn calculate_part_hashes(
         parts,
         metrics,
         content_hash,
+        issue: if unreadable {
+            Some(super::evidence::HashIssueKind::Unreadable)
+        } else if skipped {
+            Some(super::evidence::HashIssueKind::Skipped)
+        } else {
+            None
+        },
+        cancelled: locally_cancelled,
     }
 }
 
@@ -648,7 +812,9 @@ fn hash_span(
     len: usize,
     remote_checksum: &str,
     fingerprint: &mut crate::core::utils::content_hash::FingerprintTap,
+    read_control: (Option<&AtomicU64>, &std::sync::atomic::AtomicU8),
 ) -> std::io::Result<String> {
+    let (heartbeat, stop) = read_control;
     let seeked = match *reader_pos {
         Some(pos) if pos == span.start => Ok(()),
         Some(pos) => match i64::try_from(span.start as i128 - pos as i128) {
@@ -666,11 +832,17 @@ fn hash_span(
     let mut hasher = FlexHasher::from_checksum(remote_checksum);
     let mut remaining = len;
     while remaining > 0 {
+        if stop.load(Ordering::Relaxed) != 0 {
+            return Err(std::io::Error::from(std::io::ErrorKind::Interrupted));
+        }
         let available = match reader.fill_buf()? {
             [] => return Err(std::io::ErrorKind::UnexpectedEof.into()),
             available => available,
         };
         let chunk = remaining.min(available.len());
+        if let Some(heartbeat) = heartbeat {
+            heartbeat.fetch_add(1, Ordering::Relaxed);
+        }
         hasher.update(&available[..chunk]);
         fingerprint.observe(span.start + (len - remaining) as u64, &available[..chunk]);
         reader.consume(chunk);
@@ -1045,7 +1217,9 @@ mod tests {
                 bytes_done: Arc::new(AtomicU64::new(0)),
                 total_bytes: 1 << 40,
             },
-            tx,
+            Some(tx),
+            Arc::new(super::evidence::HashEvidenceState::default()),
+            false,
         );
         (progress, rx)
     }

@@ -2,6 +2,7 @@ mod actions;
 mod addons;
 pub(crate) mod game_space_overview;
 mod join_preflight;
+mod linked_targets;
 mod list_cache;
 mod maintenance;
 mod media;

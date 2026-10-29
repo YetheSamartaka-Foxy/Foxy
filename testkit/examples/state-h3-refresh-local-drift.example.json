@@ -1,0 +1,58 @@
+{
+  "id": "state-h3-refresh-local-drift-ssd",
+  "kind": "perf",
+  "description": "Change one installed PBO without changing the server publication, run manual Refresh, then prove the pending repair survives into Update and the installed tree returns to the server oracle.",
+  "build": "release",
+  "harness": "gui",
+  "timeout_s": 600,
+  "origin": {
+    "root": "${RUN_DIR}/origin",
+    "port": 18142,
+    "synthetic": [
+      { "root": "${RUN_DIR}/origin", "seed": 20261062, "mods": 1, "files_per_mod": 2, "file_bytes": 1048576, "pbo_entries": 64, "entry_bytes": 16384 }
+    ]
+  },
+  "repository": {
+    "name": "RepoAlpha",
+    "address": "http://127.0.0.1:18142/",
+    "path": "${RUN_DIR}/repo-alpha",
+    "space_id": null
+  },
+  "operations": [
+    { "op": "download", "setup_once": true, "wait_timeout_s": 180 },
+    { "op": "capture-file-state", "setup_once": true, "label": "published" },
+    { "op": "mutate", "profile": "single-entry", "seed": 6201, "targets": ["@synthetic_000/addons/part_00000.pbo"] },
+    { "op": "capture-file-state", "label": "local-drift" },
+    {
+      "op": "remote-refresh",
+      "label": "refresh-after-local-edit",
+      "wait_timeout_s": 180,
+      "expect": [
+        { "path": "breakdown.run_metrics.failed_pipelines", "equals": 0 }
+      ]
+    },
+    { "op": "assert-pending-update-count", "minimum": 1 },
+    { "op": "assert-file-state", "label": "local-drift", "comparison": "equal" },
+    { "op": "assert-file-state", "label": "published", "comparison": "different" },
+    {
+      "op": "download",
+      "label": "repair-from-saved-pending-state",
+      "wait_timeout_s": 180,
+      "expect": [
+        { "path": "breakdown.run_metrics.failed_pipelines", "equals": 0 },
+        { "path": "summary.files_updated", "min": 1 }
+      ]
+    },
+    { "op": "assert-file-state", "label": "published", "comparison": "equal" }
+  ],
+  "repetitions": 1,
+  "warmup": false,
+  "guards": {
+    "require_storage_class": "ssd",
+    "require_no_other_foxy": true,
+    "require_clean_worktree": false,
+    "fail_on_db_wipe": true,
+    "max_run_gb": 1,
+    "oracle_command": ["${REPO_ROOT}/target/release/foxy-testkit-oracle.exe", "--repository-path", "${REPOSITORY_PATH}"]
+  }
+}

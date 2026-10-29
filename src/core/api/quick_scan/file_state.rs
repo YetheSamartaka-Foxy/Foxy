@@ -12,12 +12,14 @@ pub(super) struct LocalFileState {
     pub(super) length: u64,
     pub(super) content_hash: String,
     pub(super) hashed_for_length: Option<u64>,
+    pub(super) read_error: Option<String>,
 }
 
 #[derive(Clone, Default)]
 pub(super) struct AddonFolderState {
     pub(super) exists: bool,
     pub(super) content_hash: String,
+    pub(super) read_error: Option<String>,
 }
 
 /// Probe using a fingerprint the caller already walked.
@@ -28,10 +30,13 @@ pub(super) fn probe_addon_folder_state_with_fingerprint(
     if !fingerprint.exists || !fingerprint.is_dir {
         return AddonFolderState::default();
     }
-    let content_hash = calculate_fast_addon_folder_content_hash(path).unwrap_or_default();
+    let content = calculate_fast_addon_folder_content_hash(path);
+    let read_error = content.as_ref().err().map(|error| error.to_string());
+    let content_hash = content.unwrap_or_default();
     AddonFolderState {
         exists: true,
         content_hash,
+        read_error,
     }
 }
 
@@ -43,19 +48,26 @@ fn probe_local_file_state(path: &str, expected_length: u64) -> LocalFileState {
     match std::fs::metadata(&trimmed) {
         Ok(meta) => {
             let size_ok = meta.is_file() && meta.len() == expected_length;
-            let content_hash = if size_ok {
-                calculate_fast_file_content_hash(&trimmed).unwrap_or_default()
+            let content = if size_ok {
+                calculate_fast_file_content_hash(&trimmed).map(Some)
             } else {
-                String::new()
+                Ok(None)
             };
+            let read_error = content.as_ref().err().map(|error| error.to_string());
+            let content_hash = content.ok().flatten().unwrap_or_default();
             LocalFileState {
                 exists: meta.is_file(),
                 length: meta.len(),
                 content_hash,
                 hashed_for_length: if size_ok { Some(expected_length) } else { None },
+                read_error,
             }
         }
-        Err(_) => LocalFileState::default(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => LocalFileState::default(),
+        Err(error) => LocalFileState {
+            read_error: Some(error.to_string()),
+            ..Default::default()
+        },
     }
 }
 

@@ -4,7 +4,7 @@ use super::helpers::{
 use crate::core::addon_metadata::{
     extract_addon_display_name, regenerate_addon_display_names_for_ids,
 };
-use crate::core::db::{DbValue, FoxyDb};
+use crate::core::db::{DbValue, FoxyDb, params};
 use crate::core::models::context::FoxyContext;
 use crate::core::models::modification::{ADDON_COLUMNS, FoxyMod};
 use crate::core::models::recheck_level::RecheckLevel;
@@ -50,6 +50,7 @@ struct ParsedMod {
     remote_path: String,
     local_path: String,
     enabled: bool,
+    required: bool,
     client_side: bool,
     checksum: String,
     data_order: i64,
@@ -252,6 +253,7 @@ pub(super) async fn process_mods_upsert(
                 remote_path,
                 local_path,
                 enabled,
+                required,
                 client_side,
                 checksum,
                 data_order: data_order as i64,
@@ -602,6 +604,156 @@ pub(super) async fn process_mods_upsert(
     flush_pending_patch_clears(context).await;
 
     (collected, resolved_mod_ids)
+}
+
+pub(super) async fn stage_manifests_for_publication(
+    context: Arc<FoxyContext>,
+    repository: &FoxyRepository,
+    data: &Value,
+    enabled_overrides: Option<&HashMap<String, bool>>,
+) -> Result<(), String> {
+    let mut parsed = Vec::new();
+    for (required, list_key) in [(true, "requiredMods"), (false, "optionalMods")] {
+        let Some(entries) = data.get(list_key).and_then(Value::as_array) else {
+            continue;
+        };
+        for (data_order, entry) in entries.iter().enumerate() {
+            let name = entry
+                .get("modName")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if name.is_empty() {
+                continue;
+            }
+            let enabled = enabled_overrides
+                .and_then(|overrides| overrides.get(&name.to_lowercase()).copied())
+                .unwrap_or_else(|| {
+                    entry
+                        .get("enabled")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true)
+                });
+            if !enabled {
+                continue;
+            }
+            let remote_path = join_path(&repository.remote_url, name);
+            let local_path = resolve_mod_local_path(
+                &repository.local_path,
+                context.repository_space_shared_path.as_deref(),
+                name,
+            );
+            parsed.push(ParsedMod {
+                mod_name: name.to_owned(),
+                remote_path: remote_path.clone(),
+                local_path: local_path.clone(),
+                enabled,
+                required,
+                client_side: entry
+                    .get("clientSide")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                checksum: entry
+                    .get("checkSum")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                data_order: data_order as i64,
+                key: format!("{remote_path}|{local_path}"),
+            });
+        }
+    }
+    if parsed.is_empty() {
+        return Ok(());
+    }
+    let db = context.db();
+    let existing = load_existing_mods_by_identity(&db, &parsed).await;
+    let repository_links = db
+        .query_all(
+            "SELECT addon_id FROM repository_addons WHERE repository_id = ?",
+            params![repository.id as i64],
+        )
+        .await
+        .map_err(|error| format!("Could not inspect existing addon graph: {error}"))?;
+    let linked_before: HashSet<i64> = repository_links
+        .iter()
+        .filter_map(|row| row.get_i64("addon_id").ok())
+        .collect();
+    let mod_ids: HashSet<i64> = parsed
+        .iter()
+        .filter_map(|entry| {
+            existing
+                .get(&entry.key)
+                .map(|mod_entry| mod_entry.id as i64)
+        })
+        .collect();
+    let graph_states = load_mod_remote_graph_states(&db, &mod_ids, &linked_before).await;
+
+    let mut manifests_to_stage = Vec::new();
+    for entry in parsed {
+        let previous = existing.get(&entry.key);
+        let forced = context
+            .forced_mod_refreshes
+            .contains(&entry.mod_name.to_lowercase())
+            || context
+                .reapplied_mod_manifests
+                .contains(&entry.mod_name.to_lowercase());
+        let graph_unchanged = previous.is_some_and(|previous| {
+            previous.remote_checksum == entry.checksum
+                && normalize_path_key(&previous.local_path) == normalize_path_key(&entry.local_path)
+                && previous.enabled == entry.enabled
+                && previous.client_side == entry.client_side
+                && previous.required == entry.required
+        });
+        let graph_complete = previous
+            .and_then(|previous| graph_states.get(&(previous.id as i64)))
+            .is_some_and(ModRemoteGraphState::complete);
+        let has_content_hash =
+            previous.is_some_and(|previous| !previous.local_content_hash.trim().is_empty());
+        let local_exists = crate::core::utils::profiling::fs::exists(entry.local_path.trim());
+        if graph_unchanged
+            && !forced
+            && graph_complete
+            && has_content_hash
+            && context.recheck_level < RecheckLevel::MOD
+            && local_exists
+        {
+            continue;
+        }
+        let remote_version_changed =
+            previous.is_some_and(|previous| previous.remote_checksum != entry.checksum);
+        let mut staged_mod = previous.cloned().unwrap_or_else(|| FoxyMod {
+            name: entry.mod_name.clone(),
+            remote_path: entry.remote_path.clone(),
+            local_path: entry.local_path.clone(),
+            ..Default::default()
+        });
+        staged_mod.remote_checksum = entry.checksum;
+        manifests_to_stage.push((staged_mod, remote_version_changed));
+    }
+    let fetch_semaphore = Arc::new(Semaphore::new(MANIFEST_FETCH_CONCURRENCY));
+    let mut fetches = FuturesUnordered::new();
+    for (staged_mod, remote_version_changed) in manifests_to_stage {
+        let context = context.clone();
+        let repository = repository.clone();
+        let fetch_semaphore = fetch_semaphore.clone();
+        fetches.push(async move {
+            let _permit = fetch_semaphore
+                .acquire_owned()
+                .await
+                .map_err(|_| "Manifest staging was interrupted".to_owned())?;
+            crate::core::tasks::remote_files::stage_mod_manifest_response(
+                context,
+                &repository,
+                &staged_mod,
+                remote_version_changed,
+            )
+            .await
+        });
+    }
+    while let Some(result) = fetches.next().await {
+        result?;
+    }
+    Ok(())
 }
 
 async fn apply_staged_mods(

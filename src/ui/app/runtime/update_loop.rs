@@ -186,6 +186,29 @@ impl Foxy {
 
         let mut interval = None;
 
+        if self.settings_view_state.periodic_remote_check_enabled
+            && self.startup_tasks_started
+            && !self.repository_sync_active()
+            && self.quick_scan_worker.is_none()
+            && !self.is_direct_download_running()
+            && self.scheduler_active_run.is_none()
+            && self.startup_recheck_queue.is_empty()
+        {
+            let period = Duration::from_secs(
+                u64::from(
+                    self.settings_view_state
+                        .periodic_remote_check_interval_minutes
+                        .max(5),
+                )
+                .saturating_mul(60),
+            );
+            let until_due = self
+                .periodic_remote_check_last_run
+                .map(|last| period.saturating_sub(last.elapsed()))
+                .unwrap_or(Duration::ZERO);
+            Self::merge_repaint_interval(&mut interval, until_due.max(Duration::from_millis(16)));
+        }
+
         let repository_download_visible = self.update_modal_open
             && self.current_sync_mode == Some(SyncMode::Download)
             && self.syncing_repository.is_some();
@@ -296,7 +319,9 @@ impl Foxy {
                 .backend_worker
                 .as_ref()
                 .is_some_and(|handle| !handle.is_finished())
-                || self.is_direct_download_running());
+                || self.is_direct_download_running()
+                || self.retained_files_cleanup_in_flight
+                || self.hash_evidence_retry_in_flight);
         if close_waits_for_worker {
             self.close_worker_wait_started_at.get_or_insert_with(|| {
                 info!(
@@ -398,7 +423,11 @@ impl Foxy {
         self.poll_repository_addon_size_load_results();
         self.poll_persistence_results();
         self.poll_backend_progress();
+        self.poll_linked_target_preview_results();
+        self.poll_hash_evidence_retry();
+        self.poll_retained_file_task_results();
         self.poll_finished_backend_worker();
+        self.process_pending_integrity_recheck();
         self.poll_benchmark_save_results();
         self.tick_benchmark_capture(&ctx);
         self.poll_benchmark_export_screenshot(&ctx);
@@ -434,6 +463,7 @@ impl Foxy {
         self.poll_cached_update_load_results();
         self.poll_ts3_plugin_scan();
         self.maybe_dispatch_persistence_requests(false);
+        self.maybe_queue_periodic_remote_checks();
         self.process_startup_rechecks();
         self.maybe_log_startup_repository_layout();
         self.process_repository_space_sync_queue();
@@ -600,6 +630,10 @@ impl Foxy {
         self.render_app_update_prompt(&ctx);
         self.render_benchmark_save_prompt(&ctx);
         self.render_scheduled_post_action_overlay(&ctx);
+        self.render_integrity_recheck_prompt(&ctx);
+        self.render_link_target_enrollment_prompt(&ctx);
+        self.render_hash_evidence_notice(&ctx);
+        self.render_retained_file_removal_confirmation(&ctx);
         overlays.stop(&mut self.frame_cost);
 
         if !self.startup_frame_rendered {

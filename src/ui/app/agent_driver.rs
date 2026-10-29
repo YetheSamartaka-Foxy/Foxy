@@ -3664,6 +3664,23 @@ impl Foxy {
     }
 
     fn agent_gui_progress_value(&self) -> Value {
+        let mut hash_evidence_issue_counts = json!({
+            "missing": 0, "unreadable": 0, "unstable": 0, "save_failed": 0, "skipped": 0
+        });
+        if let Some(evidence) = &self.hash_evidence_state {
+            use crate::core::tasks::calculate_hashes::HashIssueKind;
+            for issue in evidence.issues_snapshot() {
+                let key = match issue.kind {
+                    HashIssueKind::Missing => "missing",
+                    HashIssueKind::Unreadable => "unreadable",
+                    HashIssueKind::Unstable => "unstable",
+                    HashIssueKind::SaveFailed => "save_failed",
+                    HashIssueKind::Skipped => "skipped",
+                };
+                let count = hash_evidence_issue_counts[key].as_u64().unwrap_or_default();
+                hash_evidence_issue_counts[key] = json!(count + 1);
+            }
+        }
         let download_label = self
             .download_progress
             .as_ref()
@@ -3705,6 +3722,7 @@ impl Foxy {
             "recheck_hash_counter": recheck_hash,
             "recheck_hash_bytes": recheck_hash_bytes,
             "recheck_hash_progress": self.recheck_hash_progress_fraction(),
+            "hash_evidence_issue_counts": hash_evidence_issue_counts,
             "recheck_progress": self.recheck_progress_fraction(),
             "update_modal_open": self.update_modal_open,
         })

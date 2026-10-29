@@ -13,13 +13,17 @@ use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 use std::{
     cell::RefCell,
-    fs,
+    collections::HashMap,
+    fs::{self, File},
     path::{Path, PathBuf},
     process::Command,
     sync::Arc,
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(windows)]
+use std::fs::OpenOptions;
 
 #[derive(Clone, Debug)]
 pub struct RunOptions {
@@ -56,9 +60,10 @@ fn ensure_run_path(run: &Path, path: &Path) -> Result<PathBuf> {
 
 fn is_download_sidecar(path: &Path) -> bool {
     let name = path.file_name().unwrap_or_default().to_string_lossy();
-    [".foxy.bak", ".foxy.part", ".foxy.part.meta", ".foxy.tmp"]
-        .iter()
-        .any(|suffix| name.ends_with(suffix))
+    name == ".foxy-write.lock"
+        || [".foxy.bak", ".foxy.part", ".foxy.part.meta", ".foxy.tmp"]
+            .iter()
+            .any(|suffix| name.ends_with(suffix))
 }
 
 fn file_state_contains(current: &Value, expected: &Value) -> bool {
@@ -83,6 +88,8 @@ struct ContextRun<'a> {
     /// The live GUI child, when the case runs on the GUI harness. The `startup`
     /// operation replaces it, so it cannot be owned by `execute` alone.
     gui: &'a RefCell<Option<launch::ManagedChild>>,
+    origin: Option<&'a crate::origin::server::Origin>,
+    test_file_locks: RefCell<HashMap<PathBuf, File>>,
     /// The pid the memory sampler follows, kept in step with `gui`.
     pid: &'a memory::Target,
 }
@@ -315,11 +322,103 @@ impl ContextRun<'_> {
         self.repository_file_state_at(&self.repository_path()?)
     }
 
+    fn test_file_lock_path(&self, operation: &Value, require_file: bool) -> Result<PathBuf> {
+        let raw_path = operation["path"]
+            .as_str()
+            .context("Test file lock requires path")?;
+        let requested = PathBuf::from(raw_path);
+        ensure!(
+            requested.is_absolute(),
+            "Test file lock path must be absolute"
+        );
+        ensure!(
+            requested
+                .components()
+                .all(|component| !matches!(component, std::path::Component::ParentDir)),
+            "Test file lock path cannot contain parent-directory components"
+        );
+        let file_name = requested
+            .file_name()
+            .context("Test file lock path must name a file")?;
+        let parent = fs::canonicalize(
+            requested
+                .parent()
+                .context("Test file lock path must have a parent")?,
+        )?;
+        let run = fs::canonicalize(self.run)?;
+        ensure!(
+            parent.starts_with(&run),
+            "Test file locks are restricted to the case run directory"
+        );
+        let path = parent.join(file_name);
+        let repository = fs::canonicalize(self.repository_path()?)?;
+        ensure!(
+            path.starts_with(repository),
+            "Test file locks are restricted to existing files in the run's repository"
+        );
+        if require_file {
+            let metadata =
+                fs::symlink_metadata(&path).context("Test file lock target must exist")?;
+            ensure!(
+                metadata.file_type().is_file(),
+                "Test file lock target must be a regular file, not a link"
+            );
+        }
+        Ok(path)
+    }
+
+    fn acquire_test_file_lock(&self, operation: &Value) -> Result<()> {
+        let path = self.test_file_lock_path(operation, true)?;
+        let target = fs::canonicalize(&path)?;
+        let repository = fs::canonicalize(self.repository_path()?)?;
+        ensure!(
+            target.starts_with(repository),
+            "Test file locks cannot follow links outside the run's repository"
+        );
+        ensure!(
+            !self.test_file_locks.borrow().contains_key(&path),
+            "Test file is already locked"
+        );
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            let file = OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(&target)
+                .context("Acquiring exclusive test file lock")?;
+            self.test_file_locks.borrow_mut().insert(path, file);
+            Ok(())
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = path;
+            bail!("Test file locks are available only on Windows")
+        }
+    }
+
+    fn release_test_file_lock(&self, operation: &Value) -> Result<()> {
+        let path = self.test_file_lock_path(operation, false)?;
+        ensure!(
+            self.test_file_locks.borrow_mut().remove(&path).is_some(),
+            "Test file is not locked"
+        );
+        Ok(())
+    }
+
     fn state_operation(&self, operation: &Value) -> Result<bool> {
         let Some(name) = operation["op"].as_str() else {
             return Ok(false);
         };
         match name {
+            "acquire-test-file-lock" => {
+                self.acquire_test_file_lock(operation)?;
+                Ok(true)
+            }
+            "release-test-file-lock" => {
+                self.release_test_file_lock(operation)?;
+                Ok(true)
+            }
             "capture-file-state" => {
                 let label = operation["label"]
                     .as_str()
@@ -444,6 +543,20 @@ impl ContextRun<'_> {
                     thread::sleep(Duration::from_millis(50));
                 }
             }
+            "seed-startup-state" => {
+                self.seed_startup_state(operation)?;
+                Ok(true)
+            }
+            "origin-switch" => {
+                let root = operation["root"]
+                    .as_str()
+                    .context("origin-switch requires a root directory")?;
+                self.origin
+                    .context("origin-switch requires a case origin")?
+                    .set_root(Path::new(root))?;
+                crate::origin::server::touch_manifests(Path::new(root))?;
+                Ok(true)
+            }
             "prepare-test-directory" => {
                 let path = operation["path"]
                     .as_str()
@@ -451,6 +564,107 @@ impl ContextRun<'_> {
                 let path = ensure_run_path(self.run, &PathBuf::from(path))?;
                 fs::create_dir_all(&path)?;
                 ensure_run_path(self.run, &path)?;
+                Ok(true)
+            }
+            "write-file" => {
+                let path = operation["path"]
+                    .as_str()
+                    .context("write-file requires path")?;
+                let path = ensure_run_path(self.run, &PathBuf::from(path))?;
+                let content = operation["content"]
+                    .as_str()
+                    .context("write-file requires string content")?;
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent)?;
+                    ensure_run_path(self.run, parent)?;
+                }
+                use std::fs::OpenOptions;
+                use std::io::Write;
+                let mut file = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)?;
+                file.write_all(content.as_bytes())?;
+                Ok(true)
+            }
+            "assert-file-exists" | "assert-file-absent" => {
+                let path = operation["path"]
+                    .as_str()
+                    .context("File existence assertion requires path")?;
+                let path = ensure_run_path(self.run, &PathBuf::from(path))?;
+                let expected = operation["op"].as_str() == Some("assert-file-exists");
+                ensure!(
+                    path.is_file() == expected,
+                    "Expected file {} to {}",
+                    path.display(),
+                    if expected { "exist" } else { "be absent" }
+                );
+                Ok(true)
+            }
+            "assert-pending-update-count" => {
+                let repository = self.operation_repository(operation)?;
+                let minimum = operation["minimum"]
+                    .as_u64()
+                    .context("assert-pending-update-count requires minimum")?;
+                let pending = self.data(&["pending-updates"])?;
+                let pending_repo = pending["repositories"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|entry| entry["repository_name"].as_str() == Some(repository))
+                    .cloned();
+                let count = pending_repo
+                    .as_ref()
+                    .and_then(|entry| entry["needs_update_count"].as_u64())
+                    .unwrap_or(0);
+                let maximum = operation["maximum"].as_u64();
+                ensure!(
+                    count >= minimum,
+                    "Repository {repository:?} has {count} pending addon updates, expected at least {minimum}"
+                );
+                if let Some(maximum) = maximum {
+                    ensure!(
+                        count <= maximum,
+                        "Repository {repository:?} has {count} pending addon updates, expected at most {maximum}"
+                    );
+                }
+                for addon in operation["addons"].as_array().into_iter().flatten() {
+                    let addon = addon.as_str().context("Addon names must be strings")?;
+                    ensure!(
+                        pending_repo.as_ref().is_some_and(|entry| {
+                            entry["mods"].as_array().is_some_and(|mods| {
+                                mods.iter().any(|item| {
+                                    item["name"].as_str() == Some(addon)
+                                        && item["needs_update"].as_bool() == Some(true)
+                                })
+                            })
+                        }),
+                        "Repository {repository:?} does not have pending update for {addon:?}"
+                    );
+                }
+                Ok(true)
+            }
+            "capture-origin-requests" => {
+                let label = operation["label"]
+                    .as_str()
+                    .context("capture-origin-requests requires label")?;
+                let origin = self.origin.context("Case has no loopback origin")?;
+                write_json(
+                    &self.run.join(format!("origin-requests-{label}.json")),
+                    &json!({"requests": origin.request_count()}),
+                )?;
+                Ok(true)
+            }
+            "assert-origin-requests-unchanged" => {
+                let label = operation["label"]
+                    .as_str()
+                    .context("assert-origin-requests-unchanged requires label")?;
+                let origin = self.origin.context("Case has no loopback origin")?;
+                let captured = read_json(&self.run.join(format!("origin-requests-{label}.json")))?;
+                ensure!(
+                    origin.request_count() == captured["requests"].as_u64().unwrap_or(u64::MAX),
+                    "Loopback origin received a request during the offline operation"
+                );
                 Ok(true)
             }
             "invoke-driver" => {
@@ -588,6 +802,7 @@ impl ContextRun<'_> {
             address,
             path,
             operation["stale_link"].as_bool().unwrap_or(false),
+            operation["incomplete_parts"].as_bool().unwrap_or(false),
         )
     }
 
@@ -1002,6 +1217,7 @@ impl ContextRun<'_> {
         // A cancellation lane: let the transfer run for `cancel_after_s`, then
         // cancel and measure cancel-to-quiescent (the busy reason clearing).
         let mut cancel_quiescent_ms = Value::Null;
+        let mut cancel_trigger_hash_progress = Value::Null;
         let mut promoted_file = None;
         let mut close_wait_ms = Value::Null;
         let mut paused = false;
@@ -1047,6 +1263,54 @@ impl ContextRun<'_> {
             let cancel_started = Instant::now();
             self.data(&["invoke", "cancel-download"])?;
             let wait = operation["wait_timeout_s"].as_u64().unwrap_or(300);
+            self.driver(
+                &[
+                    "wait".into(),
+                    "--busy-reason-cleared".into(),
+                    busy_reason.into(),
+                    "--timeout-ms".into(),
+                    (wait * 1000).to_string(),
+                ],
+                Duration::from_secs(wait + 10),
+            )?;
+            cancel_quiescent_ms = (cancel_started.elapsed().as_secs_f64() * 1000.0)
+                .round()
+                .into();
+            finished_between_polls = true;
+        } else if let Some(threshold) = operation["cancel_after_hash_progress"].as_f64()
+            && !finished_between_polls
+        {
+            let wait = operation["wait_timeout_s"].as_u64().unwrap_or(300);
+            let deadline = Instant::now() + Duration::from_secs(wait);
+            let observed = loop {
+                let progress = self.data(&["progress"])?;
+                ensure!(
+                    progress["busy_reasons"]
+                        .as_array()
+                        .is_some_and(|reasons| reasons.iter().any(|v| v == busy_reason)),
+                    "Integrity sync stopped before hash progress reached cancellation threshold {threshold:.3}"
+                );
+                let fraction = progress["recheck_hash_progress"].as_f64().unwrap_or(0.0);
+                if fraction >= threshold && fraction < 1.0 {
+                    break fraction;
+                }
+                ensure!(
+                    fraction < 1.0,
+                    "Integrity hashing reached completion before the cancellation threshold {threshold:.3}"
+                );
+                ensure!(
+                    !self.logged_since(generation, "Pipeline summary: op=")?,
+                    "Sync finished before integrity hash progress reached cancellation threshold {threshold:.3}"
+                );
+                ensure!(
+                    Instant::now() < deadline,
+                    "Integrity hash progress did not reach cancellation threshold {threshold:.3}"
+                );
+                thread::sleep(Duration::from_millis(100));
+            };
+            cancel_trigger_hash_progress = observed.into();
+            let cancel_started = Instant::now();
+            self.data(&["invoke", "cancel-download"])?;
             self.driver(
                 &[
                     "wait".into(),
@@ -1135,6 +1399,9 @@ impl ContextRun<'_> {
         };
         if !cancel_quiescent_ms.is_null() {
             summary["cancel_quiescent_ms"] = cancel_quiescent_ms;
+        }
+        if !cancel_trigger_hash_progress.is_null() {
+            summary["cancel_trigger_hash_progress"] = cancel_trigger_hash_progress;
         }
         if !close_wait_ms.is_null() {
             summary["close_wait_ms"] = close_wait_ms;
@@ -1332,7 +1599,23 @@ impl ContextRun<'_> {
     }
 }
 
-fn oracle(case: &Value, root: &Path, run: &Path, timeout: Duration) -> Result<bool> {
+fn oracle_repository<'a>(case: &'a Value, operation: &Value) -> Result<&'a Value> {
+    let Some(name) = operation["repository"].as_str() else {
+        return Ok(&case["repository"]);
+    };
+    std::iter::once(&case["repository"])
+        .chain(case["extra_repositories"].as_array().into_iter().flatten())
+        .find(|repository| repository["name"].as_str() == Some(name))
+        .context("Oracle target repository was not declared in the case")
+}
+
+fn oracle(
+    case: &Value,
+    operation: &Value,
+    root: &Path,
+    run: &Path,
+    timeout: Duration,
+) -> Result<bool> {
     let Some(argv) = case["guards"]
         .get("oracle_command")
         .filter(|v| !v.is_null())
@@ -1343,8 +1626,20 @@ fn oracle(case: &Value, root: &Path, run: &Path, timeout: Duration) -> Result<bo
         .as_array()
         .context("guards.oracle_command must be an argv array, not a command string")?;
     ensure!(!argv.is_empty(), "guards.oracle_command cannot be empty");
-    let repository = case["repository"]["path"].as_str().unwrap_or("");
-    let url = case["repository"]["address"].as_str().unwrap_or("");
+    let target = oracle_repository(case, operation)?;
+    let repository = target["path"].as_str().unwrap_or("");
+    let url = target["address"].as_str().unwrap_or("");
+    let stem = if operation["setup_once"].as_bool() == Some(true) {
+        let name: String = target["name"]
+            .as_str()
+            .unwrap_or("repository")
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .collect();
+        format!("oracle-setup-{name}")
+    } else {
+        "oracle".to_owned()
+    };
     let expanded: Vec<String> = argv
         .iter()
         .map(|arg| {
@@ -1365,12 +1660,12 @@ fn oracle(case: &Value, root: &Path, run: &Path, timeout: Duration) -> Result<bo
         .env("FOXY_TESTKIT_RUN_DIR", run);
     match launch::process(&mut command, timeout) {
         Ok(output) => {
-            fs::write(run.join("oracle.out"), &output.stdout)?;
-            fs::write(run.join("oracle.err"), &output.stderr)?;
+            fs::write(run.join(format!("{stem}.out")), &output.stdout)?;
+            fs::write(run.join(format!("{stem}.err")), &output.stderr)?;
             Ok(output.status.success())
         }
         Err(error) => {
-            fs::write(run.join("oracle.err"), error.to_string())?;
+            fs::write(run.join(format!("{stem}.err")), error.to_string())?;
             Ok(false)
         }
     }
@@ -1526,6 +1821,13 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                     pbo_entries: version["pbo_entries"].as_u64().unwrap_or(0) as u32,
                     entry_bytes: version["entry_bytes"].as_u64().unwrap_or(64) as usize,
                     seed: version["seed"].as_i64().unwrap_or(20261028) as i32,
+                    mod_seeds: version["mod_seeds"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_i64)
+                        .map(|seed| seed as i32)
+                        .collect(),
                     repo_name: version["repo_name"]
                         .as_str()
                         .unwrap_or("RepoAlpha")
@@ -1645,6 +1947,8 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
             progress_probe: (options.progress_probe_ms > 0)
                 .then(|| Duration::from_millis(options.progress_probe_ms)),
             gui: &gui,
+            origin: _origin.as_ref(),
+            test_file_locks: RefCell::new(HashMap::new()),
             pid: &pid,
         };
         let mut effective_gate = options.db_write_gate;
@@ -1699,7 +2003,22 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                 evict(operation)?;
                 continue;
             }
-            context.operation(operation)?;
+            let collected = context.operation(operation)?;
+            if matches!(
+                operation["op"].as_str(),
+                Some("download" | "download-full-files" | "force-redownload")
+            ) && operation.get("expect_outcome").is_none()
+                && resolved["harness"].as_str().unwrap_or("gui") == "gui"
+            {
+                ensure!(
+                    collected["progress"]["download_finished"].as_bool() == Some(true),
+                    "The setup download did not finish successfully; refusing to test an invalid initial state"
+                );
+                ensure!(
+                    oracle(&resolved, operation, root, &run, timeout)?,
+                    "The independent oracle rejected the setup payload"
+                );
+            }
         }
         let warmup = resolved["warmup"].as_bool().unwrap_or(false);
         let passes = resolved["repetitions"].as_u64().unwrap_or(3);
@@ -1736,24 +2055,6 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                     "evict-cache" => {
                         evict(operation)?;
                         evicted_pending = true;
-                        continue;
-                    }
-                    "origin-switch" => {
-                        let root = operation["root"]
-                            .as_str()
-                            .context("origin-switch requires a root directory")?;
-                        _origin
-                            .as_ref()
-                            .context("origin-switch requires a case origin")?
-                            .set_root(Path::new(root))?;
-                        let touched = crate::origin::server::touch_manifests(Path::new(root))?;
-                        eprintln!(
-                            "origin-switch: serving {root} ({touched} manifests republished)"
-                        );
-                        continue;
-                    }
-                    "seed-startup-state" => {
-                        context.seed_startup_state(operation)?;
                         continue;
                     }
                     _ => {}
@@ -1819,6 +2120,8 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                 write_json(&run.join(format!("summary-{stem}.json")), &summary)?;
                 let mut view = json!({
                     "summary": summary,
+                    "progress": collected["progress"],
+                    "snapshot": collected["snapshot"],
                     "sol": sol,
                     "breakdown": breakdown,
                     "references": references,
@@ -1840,7 +2143,12 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                 }
                 crate::references::attach(&mut view);
                 let mut flags = Vec::new();
-                if !expect::expectations(&view, &operation["expect"]).is_empty() {
+                let assertion_failures = expect::expectations(&view, &operation["expect"]);
+                write_json(
+                    &run.join(format!("assertions-{stem}.json")),
+                    &json!(assertion_failures),
+                )?;
+                if !assertion_failures.is_empty() {
                     flags.push("assertion-failed");
                 }
                 if !expect::thresholds(&view, &resolved["thresholds"]).is_empty() {
@@ -1890,7 +2198,7 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                     && operation["kill_after_promoted_file"].as_bool() != Some(true)
                     && operation["kill_after_s"].as_f64().is_none()
                 {
-                    if oracle(&resolved, root, &run, timeout)? {
+                    if oracle(&resolved, operation, root, &run, timeout)? {
                         "passed"
                     } else {
                         flags.push("oracle-failed");
@@ -2016,12 +2324,28 @@ mod cache_state_tests {
     use std::path::PathBuf;
 
     #[test]
+    fn oracle_targets_the_operation_instance_even_when_urls_match() {
+        let case = json!({"repository": {"name":"RepoAlpha", "address":"http://127.0.0.1/", "path":"R:/Mods/RepoAlpha"},
+            "extra_repositories":[{"name":"RepoBeta", "address":"http://127.0.0.1/", "path":"R:/Mods/RepoBeta"}]});
+        assert_eq!(
+            super::oracle_repository(&case, &json!({})).unwrap()["path"],
+            "R:/Mods/RepoAlpha"
+        );
+        assert_eq!(
+            super::oracle_repository(&case, &json!({"repository":"RepoBeta"})).unwrap()["path"],
+            "R:/Mods/RepoBeta"
+        );
+        assert!(super::oracle_repository(&case, &json!({"repository":"Unknown"})).is_err());
+    }
+
+    #[test]
     fn payload_state_ignores_sidecars_and_preserves_captured_file_bytes() {
         for path in [
             "file.foxy.bak",
             "file.foxy.part",
             "file.foxy.part.meta",
             "file.foxy.tmp",
+            ".foxy-write.lock",
         ] {
             assert!(is_download_sidecar(std::path::Path::new(path)));
         }

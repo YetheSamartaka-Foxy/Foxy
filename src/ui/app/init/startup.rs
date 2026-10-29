@@ -8,11 +8,11 @@ use crate::core::api::{self, QuickScanProgressEvent, QuickScanResult};
 use crate::ui::app::{
     AddonBackupTaskResult, AddonDeleteResult, AddonForceRedownloadProbeResult,
     AddonHashRecalcResult, AddonInventoryViewCache, CachedUpdateLoadResult, Foxy, ImageLoadResult,
-    JoinPreflightQueryResult, ListGalleyCache, MissionRowGalleyCache, PersistenceRequest,
-    PersistenceResult, RepoMetadataFetchResult, RepositoryAddonListCache,
+    JoinPreflightQueryResult, LinkedTargetPreviewResult, ListGalleyCache, MissionRowGalleyCache,
+    PersistenceRequest, PersistenceResult, RepoMetadataFetchResult, RepositoryAddonListCache,
     RepositoryAddonSizeLoadResult, RepositoryDbWipeResult, RepositoryExternalAddonsListCache,
     RepositoryListCache, RepositorySettingsAddonPreloadResult, RepositorySpaceImportResult,
-    agent_driver::AgentGuiLaunchConfig,
+    RetainedFilePreviewResult, RetainedFileRemovalResult, agent_driver::AgentGuiLaunchConfig,
 };
 use crate::ui::i18n::I18n;
 use crate::ui::palette;
@@ -168,6 +168,14 @@ impl Foxy {
         let (quick_scan_tx, quick_scan_rx) = std::sync::mpsc::channel::<QuickScanResult>();
         let (quick_scan_progress_tx, quick_scan_progress_rx) =
             std::sync::mpsc::channel::<QuickScanProgressEvent>();
+        let (hash_evidence_retry_tx, hash_evidence_retry_rx) =
+            std::sync::mpsc::channel::<Result<bool, String>>();
+        let (link_target_preview_tx, link_target_preview_rx) =
+            std::sync::mpsc::channel::<LinkedTargetPreviewResult>();
+        let (retained_file_preview_tx, retained_file_preview_rx) =
+            std::sync::mpsc::channel::<RetainedFilePreviewResult>();
+        let (retained_file_removal_tx, retained_file_removal_rx) =
+            std::sync::mpsc::channel::<RetainedFileRemovalResult>();
         let (fs_watch_tx, fs_watch_rx) = std::sync::mpsc::channel::<api::FsChangeEvent>();
         let fs_watch_suppressed_until_ms =
             std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -347,6 +355,8 @@ impl Foxy {
             repository_space_import_in_flight: false,
             repository_space_freshness_rx: None,
             repository_space_last_refresh: None,
+            periodic_remote_check_last_run: None,
+            dispatching_background_sync: false,
             repository_space_remote_changes: Default::default(),
             addon_hash_recalc_result_rx,
             addon_hash_recalc_result_tx,
@@ -465,9 +475,34 @@ impl Foxy {
             pending_update_cache: HashMap::new(),
             mod_diff_cache: Vec::new(),
             progress_events: VecDeque::new(),
+            hash_evidence_state: None,
+            hash_evidence_retry_tx,
+            hash_evidence_retry_rx,
+            hash_evidence_retry_in_flight: false,
+            hash_evidence_notice_open: false,
+            hash_evidence_notice_seen: (0, 0, false),
+            hash_stall_acknowledged: HashSet::new(),
             update_modal_open: false,
             update_ready_repo: None,
+            local_drift_addons: Vec::new(),
+            backup_local_drift_requested: false,
+            empty_publication_status: None,
+            enrolled_link_targets: Vec::new(),
+            cleanup_plan_files: Vec::new(),
+            pending_link_target_sync: None,
+            pending_link_target_previews: None,
+            link_target_preview_bypass_once: false,
+            link_target_preview_tx,
+            link_target_preview_rx,
+            retained_file_preview_tx,
+            retained_file_preview_rx,
+            retained_file_removal_tx,
+            retained_file_removal_rx,
+            retained_files_cleanup_in_flight: false,
+            pending_retained_file_removal: None,
             current_sync_mode: None,
+            pending_integrity_recheck_prompt: None,
+            integrity_recheck_after_settlement: None,
             download_progress: None,
             download_finished: false,
             download_finished_repo: None,

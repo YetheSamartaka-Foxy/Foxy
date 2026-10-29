@@ -425,6 +425,10 @@ impl Foxy {
             Some("the running repository database wipe")
         } else if self.pending_db_schema_wipe.is_some() {
             Some("the database rebuild")
+        } else if self.retained_files_cleanup_in_flight
+            || self.pending_retained_file_removal.is_some()
+        {
+            Some("the retained-file review or removal")
         } else if self.db_lock_conflict.is_some() {
             Some("the other Foxy holding the database")
         } else {

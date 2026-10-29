@@ -58,6 +58,12 @@ pub struct SettingsViewState {
     pub auto_quick_scan_on_launch: bool,
     #[serde(default)]
     pub auto_backup_on_update: bool,
+    /// Refresh repository metadata periodically while Foxy is idle.
+    #[serde(default = "default_periodic_remote_check_enabled")]
+    pub periodic_remote_check_enabled: bool,
+    /// Minutes between idle repository metadata refreshes.
+    #[serde(default = "default_periodic_remote_check_interval_minutes")]
+    pub periodic_remote_check_interval_minutes: u32,
     #[serde(default = "default_auto_recheck_on_launch")]
     pub retry_failed_downloads: bool,
     #[serde(default = "default_apply_repo_json_client_parameters")]
@@ -282,6 +288,14 @@ fn default_auto_recheck_on_launch() -> bool {
     true
 }
 
+fn default_periodic_remote_check_enabled() -> bool {
+    true
+}
+
+fn default_periodic_remote_check_interval_minutes() -> u32 {
+    30
+}
+
 fn default_trust_verified_hashes() -> bool {
     true
 }
@@ -356,6 +370,9 @@ impl Default for SettingsViewState {
             auto_recheck_on_launch: default_auto_recheck_on_launch(),
             auto_quick_scan_on_launch: default_auto_quick_scan_on_launch(),
             auto_backup_on_update: false,
+            periodic_remote_check_enabled: default_periodic_remote_check_enabled(),
+            periodic_remote_check_interval_minutes: default_periodic_remote_check_interval_minutes(
+            ),
             retry_failed_downloads: true,
             apply_repo_json_client_parameters: default_apply_repo_json_client_parameters(),
             apply_repo_json_dlc_content: default_apply_repo_json_dlc_content(),

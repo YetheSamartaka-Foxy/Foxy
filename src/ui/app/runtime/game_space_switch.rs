@@ -24,6 +24,14 @@ impl Foxy {
         if self.settings_view_state.debug_mode {
             return Some("Leave debug mode before switching game spaces.");
         }
+        if self.hash_evidence_retry_in_flight
+            || self.retained_files_cleanup_in_flight
+            || self.pending_retained_file_removal.is_some()
+        {
+            return Some(
+                "Finish reviewing or removing retained files before switching game spaces.",
+            );
+        }
         let busy = self.repository_sync_active()
             || self.update_modal_open
             || !self.active_quick_scan_instance_keys.is_empty()
@@ -171,6 +179,7 @@ impl Foxy {
     }
 
     fn finish_game_space_switch(&mut self, ctx: &egui::Context, entry: &GameSpaceEntry) {
+        self.hash_evidence_state = None;
         // Release the outgoing space's database before retargeting. The handle
         // slot would otherwise only swap on the next database access, leaving
         // `database.db` open in a space the user can now remove.
@@ -393,6 +402,8 @@ impl Foxy {
         self.repository_space_import_in_flight = false;
         self.repository_space_freshness_rx = None;
         self.repository_space_last_refresh = None;
+        self.periodic_remote_check_last_run = None;
+        self.dispatching_background_sync = false;
         self.repository_space_remote_changes.clear();
         self.repository_selection = None;
         self.selected_repository_for_settings = None;
@@ -570,9 +581,26 @@ impl Foxy {
         self.pending_update_cache.clear();
         self.clear_mod_diff_cache();
         self.progress_events.clear();
+        self.hash_evidence_state = None;
+        self.hash_evidence_retry_in_flight = false;
+        self.hash_evidence_notice_open = false;
+        self.hash_evidence_notice_seen = (0, 0, false);
+        self.hash_stall_acknowledged.clear();
         self.update_modal_open = false;
+        self.local_drift_addons.clear();
+        self.backup_local_drift_requested = false;
+        self.empty_publication_status = None;
+        self.retained_files_cleanup_in_flight = false;
+        self.pending_retained_file_removal = None;
+        self.enrolled_link_targets.clear();
+        self.cleanup_plan_files.clear();
+        self.pending_link_target_sync = None;
+        self.pending_link_target_previews = None;
+        self.link_target_preview_bypass_once = false;
         self.update_ready_repo = None;
         self.current_sync_mode = None;
+        self.pending_integrity_recheck_prompt = None;
+        self.integrity_recheck_after_settlement = None;
         self.download_progress = None;
         self.download_finished = false;
         self.download_finished_repo = None;
@@ -807,6 +835,14 @@ const APP_GLOBAL_FOXY_FIELDS: &[&str] = &[
     "join_preflight_worker",
     "join_preflight_result_rx",
     "join_preflight_result_tx",
+    "hash_evidence_retry_tx",
+    "hash_evidence_retry_rx",
+    "link_target_preview_tx",
+    "link_target_preview_rx",
+    "retained_file_preview_tx",
+    "retained_file_preview_rx",
+    "retained_file_removal_tx",
+    "retained_file_removal_rx",
     "image_result_rx",
     "image_result_tx",
     "repo_metadata_result_rx",

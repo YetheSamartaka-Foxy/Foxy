@@ -44,11 +44,12 @@ pub(super) async fn persist_part_checksums<F>(
     db: &FoxyDb,
     part_updates: &[FoxyModFilePart],
     mut on_chunk_persisted: F,
-) where
+) -> bool
+where
     F: FnMut(usize),
 {
     if part_updates.is_empty() {
-        return;
+        return true;
     }
 
     debug_assert!(
@@ -202,6 +203,7 @@ pub(super) async fn persist_part_checksums<F>(
         commit_elapsed.as_secs_f64(),
         persist_started.elapsed().as_secs_f64()
     );
+    committed
 }
 
 #[allow(dead_code)]
@@ -361,15 +363,17 @@ pub(super) async fn persist_file_checksums<F>(
     db: &FoxyDb,
     file_updates: &[FoxyModFile],
     mut on_chunk_persisted: F,
-) where
+) -> bool
+where
     F: FnMut(usize),
 {
     if file_updates.is_empty() {
-        return;
+        return true;
     }
     let started = Instant::now();
     let sqlite_baseline = sqlite_perf_snapshot();
     let mut chunks = 0usize;
+    let mut all_committed = true;
     let batch_size = bulk_write_rows_for(9);
     for chunk in file_updates.chunks(PERSIST_LOG_INTERVAL) {
         chunks += 1;
@@ -404,8 +408,10 @@ pub(super) async fn persist_file_checksums<F>(
             .await
         {
             error!("Failed to persist files chunk: {}", e);
+            all_committed = false;
+        } else {
+            on_chunk_persisted(chunk.len());
         }
-        on_chunk_persisted(chunk.len());
     }
     log_rollup_persistence_metrics(
         "files",
@@ -414,21 +420,24 @@ pub(super) async fn persist_file_checksums<F>(
         sqlite_perf_snapshot().delta_since(sqlite_baseline),
         started.elapsed(),
     );
+    all_committed
 }
 
 pub(super) async fn persist_mod_checksums<F>(
     db: &FoxyDb,
     mod_updates: &[FoxyMod],
     mut on_chunk_persisted: F,
-) where
+) -> bool
+where
     F: FnMut(usize),
 {
     if mod_updates.is_empty() {
-        return;
+        return true;
     }
     let started = Instant::now();
     let sqlite_baseline = sqlite_perf_snapshot();
     let mut chunks = 0usize;
+    let mut all_committed = true;
     let batch_size = bulk_write_rows_for(12);
     for chunk in mod_updates.chunks(PERSIST_LOG_INTERVAL) {
         chunks += 1;
@@ -466,8 +475,10 @@ pub(super) async fn persist_mod_checksums<F>(
             .await
         {
             error!("Failed to persist mods chunk: {}", e);
+            all_committed = false;
+        } else {
+            on_chunk_persisted(chunk.len());
         }
-        on_chunk_persisted(chunk.len());
     }
     log_rollup_persistence_metrics(
         "addons",
@@ -476,21 +487,24 @@ pub(super) async fn persist_mod_checksums<F>(
         sqlite_perf_snapshot().delta_since(sqlite_baseline),
         started.elapsed(),
     );
+    all_committed
 }
 
 pub(super) async fn persist_repository_checksums<F>(
     db: &FoxyDb,
     repo_updates: &[FoxyRepository],
     mut on_chunk_persisted: F,
-) where
+) -> bool
+where
     F: FnMut(usize),
 {
     if repo_updates.is_empty() {
-        return;
+        return true;
     }
     let started = Instant::now();
     let sqlite_baseline = sqlite_perf_snapshot();
     let mut chunks = 0usize;
+    let mut all_committed = true;
     let batch_size = bulk_write_rows_for(9);
     for chunk in repo_updates.chunks(PERSIST_LOG_INTERVAL) {
         chunks += 1;
@@ -525,8 +539,10 @@ pub(super) async fn persist_repository_checksums<F>(
             .await
         {
             error!("Failed to persist repos chunk: {}", e);
+            all_committed = false;
+        } else {
+            on_chunk_persisted(chunk.len());
         }
-        on_chunk_persisted(chunk.len());
     }
     log_rollup_persistence_metrics(
         "repositories",
@@ -535,6 +551,7 @@ pub(super) async fn persist_repository_checksums<F>(
         sqlite_perf_snapshot().delta_since(sqlite_baseline),
         started.elapsed(),
     );
+    all_committed
 }
 
 fn log_rollup_persistence_metrics(

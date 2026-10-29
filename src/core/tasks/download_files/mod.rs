@@ -9,6 +9,7 @@ mod range_scheduler;
 mod recovery_tests;
 mod request;
 mod rollback;
+mod target_binding;
 mod transfer;
 
 pub(crate) use bandwidth::AdaptiveBandwidthLimiter;
@@ -20,6 +21,7 @@ pub(crate) use orchestrator::{
     apply_download_plan_bytes, build_download_estimate_diffs, download_files,
 };
 pub(crate) use rollback::{SharedRollbackSession, UpdateRollbackSession};
+pub(crate) use target_binding::PinnedDownloadTargets;
 
 pub(super) const LARGE_FILE_THRESHOLD: usize = 10 * 1024 * 1024;
 pub(super) const ATTEMPT_DELAY_MS: u64 = 25;

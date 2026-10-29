@@ -30,6 +30,9 @@ impl Foxy {
     }
 
     pub(crate) fn repository_sync_active(&self) -> bool {
+        if self.hash_evidence_retry_in_flight {
+            return true;
+        }
         self.database_wipe_in_flight
             || self.syncing_repository.is_some()
             || self.current_sync_mode.is_some()
@@ -372,6 +375,13 @@ impl Foxy {
             self.benchmark_observe_event(&evt);
 
             match &evt {
+                ProgressEvent::HashEvidence { state } => {
+                    self.hash_evidence_state = Some(state.clone());
+                    if !state.issues_snapshot().is_empty() || !state.stalled_snapshot().is_empty() {
+                        self.hash_evidence_notice_open = true;
+                    }
+                    self.needs_repaint = true;
+                }
                 ProgressEvent::RetryableDownloadFailure => self.sync_retryable_failure = true,
                 ProgressEvent::SharedVersionWarning { repositories } => {
                     self.show_error_toast(self.t_fmt(
@@ -561,6 +571,54 @@ impl Foxy {
                         }
                         self.needs_repaint = true;
                     }
+                }
+                ProgressEvent::VerificationBasis { full, remote_fresh } => {
+                    if let Some(repo_index) = self.syncing_repository
+                        && let Some(repo) =
+                            self.repository_view_state.repositories.get_mut(repo_index)
+                    {
+                        let checked_at = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|duration| duration.as_secs())
+                            .unwrap_or_default();
+                        repo.last_check_at = Some(checked_at);
+                        repo.last_check_full = *full;
+                        repo.last_check_remote_fresh = *remote_fresh;
+                        if *full {
+                            repo.last_full_verification_at = Some(checked_at);
+                        }
+                        self.save_repositories();
+                    }
+                    self.needs_repaint = true;
+                }
+                ProgressEvent::LocalDrift { addons } => {
+                    self.local_drift_addons = addons.clone();
+                    self.backup_local_drift_requested = self
+                        .syncing_repository
+                        .and_then(|idx| self.repository_view_state.repositories.get(idx))
+                        .is_some_and(|repo| self.repo_auto_backup_on_update(repo));
+                    self.needs_repaint = true;
+                }
+                ProgressEvent::CleanupPlan { files } => {
+                    self.cleanup_plan_files.clone_from(files);
+                    self.needs_repaint = true;
+                }
+                ProgressEvent::EmptyPublication {
+                    repository_empty,
+                    addons,
+                } => {
+                    if let Some(repo) = self
+                        .syncing_repository
+                        .and_then(|idx| self.repository_view_state.repositories.get(idx))
+                    {
+                        self.empty_publication_status = Some((
+                            Self::normalize_repo_url(&repo.address),
+                            Self::repo_instance_path_key(&repo.path),
+                            *repository_empty,
+                            addons.clone(),
+                        ));
+                    }
+                    self.needs_repaint = true;
                 }
                 ProgressEvent::DownloadMod {
                     mod_name,
@@ -1021,8 +1079,10 @@ impl Foxy {
                                 // it would reset the finished-download summary the
                                 // update modal is still displaying.
                                 let queue_len = self.startup_recheck_queue.len();
-                                self.startup_recheck_queue.retain(|(address, _, _)| {
+                                let completed_path = Self::repo_instance_path_key(&repo_path);
+                                self.startup_recheck_queue.retain(|(address, path, _)| {
                                     Self::normalize_repo_url(address) != normalized_url
+                                        || Self::repo_instance_path_key(path) != completed_path
                                 });
                                 if self.startup_recheck_queue.len() != queue_len {
                                     info!(

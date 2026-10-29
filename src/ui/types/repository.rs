@@ -195,9 +195,25 @@ pub struct Repository {
     pub last_updated_at: Option<u64>,
     #[serde(default)]
     pub last_remote_check_at: Option<u64>,
+    /// Unix seconds of the last completed local or remote check.
+    #[serde(default)]
+    pub last_check_at: Option<u64>,
+    /// Unix seconds of the last completed full local integrity verification.
+    #[serde(default)]
+    pub last_full_verification_at: Option<u64>,
+    /// Whether the most recent local or remote check used fresh remote metadata.
+    #[serde(default = "default_last_check_remote_fresh")]
+    pub last_check_remote_fresh: bool,
+    /// Whether the most recent local verification read every selected file.
+    #[serde(default)]
+    pub last_check_full: bool,
     /// Unix seconds of the last game launch from this instance.
     #[serde(default)]
     pub last_launched_at: Option<u64>,
+}
+
+fn default_last_check_remote_fresh() -> bool {
+    true
 }
 
 impl Default for Repository {
@@ -262,6 +278,10 @@ impl Default for Repository {
             hash_algorithm_preference: HashAlgorithmPreference::default(),
             last_updated_at: None,
             last_remote_check_at: None,
+            last_check_at: None,
+            last_full_verification_at: None,
+            last_check_remote_fresh: true,
+            last_check_full: false,
             last_launched_at: None,
         }
     }

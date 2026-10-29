@@ -429,6 +429,8 @@ impl Foxy {
             || self.database_updates_blocked()
             || self.repository_sync_active()
             || self.is_direct_download_running()
+            || self.retained_files_cleanup_in_flight
+            || self.pending_retained_file_removal.is_some()
         {
             return;
         }

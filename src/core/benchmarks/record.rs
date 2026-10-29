@@ -391,7 +391,7 @@ mod tests {
     fn current_action_total_stages_are_the_pipeline_early_exit_totals() {
         let pipeline = include_str!("../api/sync_pipeline/pipeline.rs");
         for name in ACTION_TOTAL_STAGES {
-            if *name == "quick_verify_only" {
+            if matches!(*name, "quick_verify_only" | "remote_refresh_skip") {
                 continue;
             }
             assert!(

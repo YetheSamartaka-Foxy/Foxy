@@ -3,9 +3,9 @@ use super::super::quick_scan::{
     apply_patch_plan_estimates_to_pending_updates,
     collect_hashable_files_with_missing_local_tree_hashes, collect_repo_download_targets,
     collect_targeted_init_content_baseline_files, collect_unexpected_files_for_repo_mods,
-    delete_unexpected_local_files, format_local_path_mismatch_message, log_addon_path_disk_state,
-    log_local_path_availability, pending_update_mod_scope, persist_pending_updates,
-    quick_local_change_diff, quick_local_change_diff_with_prehashed,
+    format_local_path_mismatch_message, log_addon_path_disk_state, log_local_path_availability,
+    pending_update_mod_scope, persist_pending_updates, quick_local_change_diff,
+    quick_local_change_diff_with_prehashed, quick_scan_preflight_for_local_check,
     refresh_content_hashes_for_file_ids, refresh_content_hashes_for_repository,
     refresh_content_hashes_for_tree_files, refresh_patch_plan_metadata_for_pending_updates,
     summarize_local_path_availability, suspect_local_path_mismatch,
@@ -202,15 +202,6 @@ fn local_path_mismatch_guard_applies(mode: SyncMode) -> bool {
 
 fn should_build_download_plan(mode: SyncMode, prepare_download_plan: bool) -> bool {
     mode == SyncMode::Download || prepare_download_plan
-}
-
-/// A local quick check that has to be escalated to a remote refresh already
-/// pays for the metadata rebuild, the tree-hash init and the quick verify, so
-/// it also prepares the download queue once. The following `Download` then
-/// takes the prepared-queue reuse fast path instead of running the whole
-/// prepare pipeline a second time. A plain `QuickCheckOnly` stays local-only.
-fn escalated_quick_check_plan() -> (SyncMode, bool) {
-    (SyncMode::RemoteRefreshOnly, true)
 }
 
 fn should_refresh_delta_plan_after_quick_verify(
@@ -927,7 +918,7 @@ async fn addons_with_changed_kept_files(
     let rows = match context
         .db()
         .query_all(
-            "SELECT DISTINCT a.name, f.local_path, f.length FROM repository_addons ra \
+            "SELECT DISTINCT a.name, f.local_path, f.length, f.local_content_hash FROM repository_addons ra \
          JOIN addons a ON a.id = ra.addon_id JOIN addon_files af ON af.addon_id = a.id \
          JOIN files f ON f.id = af.file_id \
          WHERE ra.repository_id = ? AND a.enabled = 1 AND f.local_checksum != '' \
@@ -948,6 +939,11 @@ async fn addons_with_changed_kept_files(
             Some(KeptFile {
                 addon: row.get_opt_string("name").ok().flatten()?.to_lowercase(),
                 path: row.get_opt_string("local_path").ok().flatten()?,
+                content_hash: row
+                    .get_opt_string("local_content_hash")
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default(),
                 length: row
                     .get_opt_i64("length")
                     .ok()
@@ -969,6 +965,7 @@ struct KeptFile {
     addon: String,
     path: String,
     length: Option<u64>,
+    content_hash: String,
 }
 
 fn addons_with_changed_files(expected: &[KeptFile]) -> HashSet<String> {
@@ -976,7 +973,12 @@ fn addons_with_changed_files(expected: &[KeptFile]) -> HashSet<String> {
         .iter()
         .filter(|file| match std::fs::metadata(&file.path) {
             Ok(metadata) => {
-                !metadata.is_file() || file.length.is_some_and(|length| metadata.len() != length)
+                !metadata.is_file()
+                    || file.length.is_some_and(|length| metadata.len() != length)
+                    || (!file.content_hash.is_empty()
+                        && crate::core::utils::content_hash::fast_file_content_hash(&file.path)
+                            .ok()
+                            .is_none_or(|current| current != file.content_hash))
             }
             Err(_) => true,
         })
@@ -1068,17 +1070,22 @@ async fn load_pending_update_mods(
 async fn run_repository_pipeline(
     repository_url: String,
     local_path: String,
-    mod_enabled_overrides: HashMap<String, bool>,
+    mut mod_enabled_overrides: HashMap<String, bool>,
     progress_tx: Sender<ProgressEvent>,
-    mut mode: SyncMode,
+    mode: SyncMode,
     options: RepositorySyncOptions,
+    retry_control: (&std::sync::atomic::AtomicBool, bool),
 ) {
+    let (verification_retry, allow_verification_retry) = retry_control;
     let RepositorySyncOptions {
         operation_id,
-        mut prepare_download_plan,
+        prepare_download_plan,
         repository_space_shared_path,
         repository_space_members,
         auto_backup_directory,
+        backup_local_drift,
+        enrolled_link_targets,
+        interactive_hash_checks,
         rollback_temp_directory,
         download_speed_limit_mbps,
         recent_local_path_reset,
@@ -1093,7 +1100,7 @@ async fn run_repository_pipeline(
         trust_verified_hashes,
         persisted_addon_selection,
     } = options;
-    let mut builds_download_plan = should_build_download_plan(mode, prepare_download_plan);
+    let builds_download_plan = should_build_download_plan(mode, prepare_download_plan);
     macro_rules! emit_progress {
         ($event:expr) => {
             send_progress_event(&progress_tx, $event, &operation_id)
@@ -1175,7 +1182,7 @@ async fn run_repository_pipeline(
             return;
         }
     };
-    let mut context = Arc::new(
+    let context = Arc::new(
         base_context
             .as_ref()
             .clone()
@@ -1185,6 +1192,7 @@ async fn run_repository_pipeline(
             .with_target_local_path(local_path.clone())
             .with_repository_space_shared_path(repository_space_shared_path.clone())
             .with_operation_id(operation_id.as_str())
+            .with_hash_cancel_rx(cancel_rx.clone())
             .with_verified_hash_record(VerifiedHashRecordUse::for_active_space(
                 trust_verified_hashes && mode != SyncMode::RecheckIntegrity && !force_redownload,
             ))
@@ -1192,6 +1200,36 @@ async fn run_repository_pipeline(
                 &crate::core::game::spaces::active_game_space_dir(),
             )),
     );
+    context
+        .hash_evidence
+        .set_unattended(!interactive_hash_checks);
+    emit_progress!(ProgressEvent::HashEvidence {
+        state: context.hash_evidence.clone()
+    });
+    let mut remote_fresh = mode != SyncMode::QuickCheckOnly;
+    macro_rules! emit_progress {
+        ($event:expr) => {{
+            let event = $event;
+            if matches!(event, ProgressEvent::Diff { .. }) && context.hash_evidence.is_incomplete() {
+                warn!("Withholding incomplete update diff; preserving prior pending state");
+            } else if matches!(event, ProgressEvent::Finished) {
+                if context.hash_evidence.is_incomplete() {
+                    send_progress_event(&progress_tx, ProgressEvent::Failed("Verification is incomplete. Resolve the reported files or retry saving the result.".into()), &operation_id);
+                } else {
+                    if mode == SyncMode::Download {
+                        context.hash_evidence.clear_repaired_missing_files();
+                    }
+                    send_progress_event(&progress_tx, ProgressEvent::VerificationBasis {
+                        full: mode == SyncMode::RecheckIntegrity,
+                        remote_fresh,
+                    }, &operation_id);
+                    send_progress_event(&progress_tx, event, &operation_id);
+                }
+            } else {
+                send_progress_event(&progress_tx, event, &operation_id);
+            }
+        }};
+    }
     summary.push(StageEntry::new("create_context", stage.elapsed()));
     stage = std::time::Instant::now();
 
@@ -1214,16 +1252,6 @@ async fn run_repository_pipeline(
         .await;
     }
 
-    // Self-heal a part-less repository. A repo whose files exist on disk but
-    // whose `subfiles` (parts) were lost - e.g. an interrupted force-redownload
-    // or the deferred-part flush gap - can never be repaired by a local-only
-    // QuickCheckOnly: the tree-hash rollup reads from parts, so with zero parts
-    // every file checksum stays NULL and every scan falsely re-flags all addons
-    // for download forever. Escalate it to a forced (RecheckLevel::REPOSITORY)
-    // RemoteRefreshOnly: that re-fetches the manifest, rebuilds the parts (the
-    // "complete" gate treats `part_count == 0` as a valid whole-file manifest,
-    // so without forcing it the unchanged-graph skip would never rebuild them),
-    // and hashes the existing on-disk files - no file content is re-downloaded.
     if mode == SyncMode::QuickCheckOnly && !force_redownload {
         let part_less = match load_repository_by_remote_url_and_local_path(
             context.clone(),
@@ -1236,32 +1264,11 @@ async fn run_repository_pipeline(
             Err(_) => false,
         };
         if part_less {
-            warn!(
-                "Repository {} has file rows but zero part rows (subfiles); a local quick check cannot rebuild its tree hashes. Escalating QuickCheckOnly to a forced RemoteRefreshOnly to rebuild parts from remote metadata and re-hash the on-disk files (no content re-download).",
-                sanitize_log_url(&normalized_repo_url)
-            );
-            (mode, prepare_download_plan) = escalated_quick_check_plan();
-            builds_download_plan = should_build_download_plan(mode, prepare_download_plan);
-            context = Arc::new(
-                create_context_with_recheck_level(RecheckLevel::REPOSITORY)
-                    .await
-                    .as_ref()
-                    .clone()
-                    .with_download_target_queueing(builds_download_plan)
-                    .with_target_local_path(local_path.clone())
-                    .with_repository_space_shared_path(repository_space_shared_path.clone())
-                    .with_verified_hash_record(VerifiedHashRecordUse::for_active_space(
-                        trust_verified_hashes,
-                    ))
-                    .with_manifest_cache(ManifestCache::in_space(
-                        &crate::core::game::spaces::active_game_space_dir(),
-                    )),
-            );
-            summary.push(
-                StageEntry::new("part_rebuild_escalation", stage.elapsed())
-                    .with("reason", "files_without_parts"),
-            );
-            stage = std::time::Instant::now();
+            emit_progress!(ProgressEvent::Failed(
+                "Local check is incomplete. Refresh repository metadata first.".into()
+            ));
+            summary.log_table("incomplete-local-metadata");
+            return;
         }
     }
 
@@ -1332,6 +1339,7 @@ async fn run_repository_pipeline(
     // verify; for a reused confirmation queue it is loaded from the prepared
     // pending-update payload instead.
     let mut mods: Vec<ModDiffSummary> = Vec::new();
+    let mut unexpected_by_mod: HashMap<String, Vec<String>> = HashMap::new();
     let mut cached_pending_scope =
         pending_update_mod_scope(context.clone(), &normalized_repo_url).await;
     let changed_kept_addons = if mode == SyncMode::Download && !force_redownload {
@@ -1346,6 +1354,9 @@ async fn run_repository_pipeline(
         .as_ref()
         .filter(|addons| !addons.is_empty())
     {
+        emit_progress!(ProgressEvent::LocalDrift {
+            addons: addons.iter().cloned().collect()
+        });
         info!(
             "Files of {} addon(s) changed on disk since the last check for repo={}; verifying them with the pending addons",
             addons.len(),
@@ -1403,7 +1414,15 @@ async fn run_repository_pipeline(
         }
     }
 
-    if builds_download_plan && !reuse_prepared_queue {
+    let cached_local_check_ready = !reuse_prepared_queue
+        && builds_download_plan
+        && super::super::quick_scan::quick_scan_preflight_for_local_check(
+            context.clone(),
+            &normalized_repo_url,
+        )
+        .await
+        .is_some_and(|preflight| preflight.remote_ready);
+    if cached_local_check_ready {
         let quick_verify_start = std::time::Instant::now();
         send_progress_event(
             &progress_tx,
@@ -1492,6 +1511,15 @@ async fn run_repository_pipeline(
         }
         let integrity_start = std::time::Instant::now();
         let mut integrity_stage = std::time::Instant::now();
+        let cached_tree = Tree::load(context.clone(), &normalized_repo_url).await.ok();
+        let cached_metadata_complete =
+            super::super::quick_scan::quick_scan_preflight_for_local_check(
+                context.clone(),
+                &normalized_repo_url,
+            )
+            .await
+            .is_some_and(|result| result.remote_ready);
+        let mut offline_tree = None;
 
         // Phase 1: Full remote metadata fetch
         emit_progress!(ProgressEvent::Stage {
@@ -1507,20 +1535,47 @@ async fn run_repository_pipeline(
             hash_algorithm_preference,
         )
         .await;
-        let Some(metadata) = &repo_metadata else {
-            let message = format!(
-                "Could not load remote repository metadata for {}; the integrity recheck cannot verify against the remote",
-                sanitize_log_url(&normalized_repo_url)
-            );
-            error!("{}", message);
-            summary.log_table("failed-remote-metadata");
-            emit_progress!(ProgressEvent::Failed(message));
-            return;
-        };
-        emit_progress!(ProgressEvent::RepositoryFoxyMode {
-            is_foxy: metadata.foxy_mode.is_foxy(),
-            app_update_url: metadata.app_update_url.clone(),
-        });
+        if let Some(metadata) = &repo_metadata {
+            if metadata.accepted_empty {
+                emit_progress!(ProgressEvent::EmptyPublication {
+                    repository_empty: true,
+                    addons: Vec::new()
+                });
+                persist_pending_updates(context.clone(), &normalized_repo_url, &[]).await;
+                emit_progress!(ProgressEvent::Diff { mods: Vec::new() });
+                emit_progress!(ProgressEvent::Finished);
+                return;
+            }
+            emit_progress!(ProgressEvent::RepositoryFoxyMode {
+                is_foxy: metadata.foxy_mode.is_foxy(),
+                app_update_url: metadata.app_update_url.clone(),
+            });
+        } else {
+            remote_fresh = false;
+            if cached_tree
+                .as_ref()
+                .is_none_or(|tree| tree.files.is_empty())
+            {
+                summary.log_table("failed-offline-metadata");
+                emit_progress!(ProgressEvent::Failed(
+                    "Integrity check cannot continue offline without accepted file metadata."
+                        .into()
+                ));
+                return;
+            }
+            if !cached_metadata_complete {
+                context.hash_evidence.record_issue(crate::core::tasks::calculate_hashes::HashIssue {
+                    file_path: String::new(),
+                    kind: crate::core::tasks::calculate_hashes::HashIssueKind::Skipped,
+                    detail: Some("Cached file metadata is incomplete. Restore the server connection and refresh before relying on a full integrity verdict.".into()),
+                });
+            }
+            offline_tree = cached_tree;
+            emit_progress!(ProgressEvent::Stage {
+                label: "Checking integrity against cached metadata; server not checked".into(),
+                percent: 0.10
+            });
+        }
         summary.push(StageEntry::new(
             "remote_metadata_fetch",
             integrity_stage.elapsed(),
@@ -1547,7 +1602,7 @@ async fn run_repository_pipeline(
         let hash_result = calculate_hashes_with_tree_and_profile_cancellable(
             context.clone(),
             &normalized_repo_url,
-            None,
+            offline_tree,
             Some(&progress_tx),
             hash_io_profile,
             Some(&cancel_rx),
@@ -1565,6 +1620,13 @@ async fn run_repository_pipeline(
             );
             summary.log_table("cancelled");
             emit_progress!(ProgressEvent::Cancelled);
+            return;
+        }
+        if matches!(hash_result, HashCalculationResult::Failed)
+            || context.hash_evidence.is_incomplete()
+        {
+            summary.log_table("incomplete-integrity");
+            emit_progress!(ProgressEvent::Failed("Verification is incomplete. Resolve the reported files or retry saving the result.".into()));
             return;
         }
 
@@ -1643,6 +1705,16 @@ async fn run_repository_pipeline(
     }
 
     if mode == SyncMode::QuickCheckOnly {
+        let ready = quick_scan_preflight_for_local_check(context.clone(), &normalized_repo_url)
+            .await
+            .is_some_and(|preflight| preflight.remote_ready);
+        if !ready {
+            summary.log_table("incomplete-local-metadata");
+            emit_progress!(ProgressEvent::Failed(
+                "Local check is incomplete. Refresh repository metadata first.".into()
+            ));
+            return;
+        }
         emit_progress!(ProgressEvent::Stage {
             label: "Quick local check".into(),
             percent: 0.20,
@@ -1661,6 +1733,11 @@ async fn run_repository_pipeline(
             None,
         )
         .await;
+        if *cancel_rx.borrow() {
+            summary.log_table("cancelled");
+            emit_progress!(ProgressEvent::Cancelled);
+            return;
+        }
         let quick_diff_elapsed = quick_diff_start.elapsed();
         let emit_diff_started = std::time::Instant::now();
         emit_progress!(ProgressEvent::Diff { mods: mods.clone() });
@@ -1708,6 +1785,7 @@ async fn run_repository_pipeline(
     }
 
     // Produce mod-level diff (needs_update + size) scoped to the current repository only
+    let emit_diff_overrides = mod_enabled_overrides.clone();
     let emit_diff = |tree: &Tree, mod_filter: Option<&HashSet<u64>>| -> Vec<ModDiffSummary> {
         let mut repo_mod_indices: Vec<usize> = tree
             .repo_nodes
@@ -1726,7 +1804,7 @@ async fn run_repository_pipeline(
             let Some(m) = tree.mods.get(mod_idx) else {
                 continue;
             };
-            let is_enabled = mod_enabled_overrides
+            let is_enabled = emit_diff_overrides
                 .get(&m.name.to_lowercase())
                 .copied()
                 .unwrap_or(m.enabled);
@@ -1943,6 +2021,16 @@ async fn run_repository_pipeline(
     };
 
     if let Some(metadata) = &repo_metadata {
+        if metadata.accepted_empty {
+            emit_progress!(ProgressEvent::EmptyPublication {
+                repository_empty: true,
+                addons: Vec::new()
+            });
+            persist_pending_updates(context.clone(), &normalized_repo_url, &[]).await;
+            emit_progress!(ProgressEvent::Diff { mods: Vec::new() });
+            emit_progress!(ProgressEvent::Finished);
+            return;
+        }
         info!(
             "Remote repository gate result: repo={} skipped_clean={} remote_graph_complete={} remote_graph_fetched={}",
             normalized_repo_url,
@@ -1954,6 +2042,26 @@ async fn run_repository_pipeline(
             is_foxy: metadata.foxy_mode.is_foxy(),
             app_update_url: metadata.app_update_url.clone(),
         });
+    }
+    let (_, empty_addons) = match super::super::check_contracts::accepted_empty_scope(
+        &context,
+        &normalized_repo_url,
+        &local_path,
+    ) {
+        Ok(scope) => scope,
+        Err(message) => {
+            emit_progress!(ProgressEvent::Failed(message));
+            return;
+        }
+    };
+    if !empty_addons.is_empty() {
+        emit_progress!(ProgressEvent::EmptyPublication {
+            repository_empty: false,
+            addons: empty_addons.iter().cloned().collect()
+        });
+        for name in empty_addons {
+            mod_enabled_overrides.insert(name, false);
+        }
     }
 
     if !reuse_prepared_queue && (builds_download_plan || cached_pending_scope.is_some()) {
@@ -2004,30 +2112,6 @@ async fn run_repository_pipeline(
         label: recheck_completed_label,
         percent: 0.25,
     });
-
-    // Fast path: when RemoteRefreshOnly and remote said checksums already match,
-    // skip the expensive local verification and return immediately.
-    if mode == SyncMode::RemoteRefreshOnly
-        && let Some(metadata) = &repo_metadata
-        && metadata.skipped
-    {
-        info!(
-            "Remote refresh skipped (checksums match) for repo={}; finishing early",
-            normalized_repo_url
-        );
-        context.set_defer_part_inserts(false);
-        summary.push(
-            StageEntry::new("remote_refresh_skip", overall_start.elapsed())
-                .with("reason", "checksums_match"),
-        );
-        summary.log_table("early-exit-skip");
-        emit_progress!(ProgressEvent::Stage {
-            label: "Done".into(),
-            percent: 1.0,
-        });
-        emit_progress!(ProgressEvent::Finished);
-        return;
-    }
 
     // When the repository is already complete (has linked addons, remote state,
     // and non-empty checksums), we can skip the expensive Tree::load + hash
@@ -2667,15 +2751,13 @@ async fn run_repository_pipeline(
     stage = std::time::Instant::now();
 
     if builds_download_plan {
-        let mut pending_mod_names: HashSet<String> = mods
+        let pending_mod_names: HashSet<String> = mods
             .iter()
             .filter(|m| m.needs_update)
             .map(|m| m.name.to_lowercase())
             .collect();
-        // Unexpected-file cleanup already ran during the confirmation preflight;
-        // skip it when reusing that prepared queue.
-        if !reuse_prepared_queue && !pending_mod_names.is_empty() {
-            let unexpected_by_mod = collect_unexpected_files_for_repo_mods(
+        if !pending_mod_names.is_empty() {
+            unexpected_by_mod = collect_unexpected_files_for_repo_mods(
                 context.clone(),
                 &normalized_repo_url,
                 &pending_mod_names,
@@ -2690,43 +2772,9 @@ async fn run_repository_pipeline(
                     unexpected_by_mod.len(),
                     normalized_repo_url
                 );
-                emit_progress!(ProgressEvent::Stage {
-                    label: "Cleaning unexpected local files".into(),
-                    percent: 0.82,
+                emit_progress!(ProgressEvent::CleanupPlan {
+                    files: unexpected_by_mod.values().flatten().cloned().collect()
                 });
-                let (deleted_unexpected, failed_unexpected) =
-                    delete_unexpected_local_files(&unexpected_by_mod).await;
-                info!(
-                    "Unexpected local file cleanup finished for repo={} (deleted={} failed={})",
-                    normalized_repo_url, deleted_unexpected, failed_unexpected
-                );
-                summary.push(
-                    StageEntry::new("unexpected_file_cleanup", stage.elapsed())
-                        .with("deleted", deleted_unexpected)
-                        .with("failed", failed_unexpected),
-                );
-                stage = std::time::Instant::now();
-                if deleted_unexpected > 0 {
-                    mods = quick_local_change_diff(
-                        context.clone(),
-                        &normalized_repo_url,
-                        Some(&pending_mod_names),
-                        Some(&mod_enabled_overrides),
-                        Some(&progress_tx),
-                        false,
-                        true, // already_eligible: tree state is established from earlier phases
-                        false,
-                        None,
-                    )
-                    .await;
-                    emit_progress!(ProgressEvent::Diff { mods: mods.clone() });
-                    persist_pending_updates(context.clone(), &normalized_repo_url, &mods).await;
-                    pending_mod_names = mods
-                        .iter()
-                        .filter(|m| m.needs_update)
-                        .map(|m| m.name.to_lowercase())
-                        .collect();
-                }
             }
         }
 
@@ -3061,7 +3109,7 @@ async fn run_repository_pipeline(
             return;
         }
 
-        if download_file_ids.is_empty() {
+        if download_file_ids.is_empty() && unexpected_by_mod.values().all(Vec::is_empty) {
             let pending_mods = mods.iter().filter(|m| m.needs_update).count();
             let message = format!(
                 "Unable to build a download queue for repo {} despite {} pending addon updates (possible undeletable unexpected local files)",
@@ -3083,7 +3131,9 @@ async fn run_repository_pipeline(
             return;
         }
 
-        if let Some(backup_root) = auto_backup_directory.as_deref()
+        if let Some(backup_root) = auto_backup_directory
+            .as_deref()
+            .or(backup_local_drift.then_some(""))
             && let Err(err) = backup_pending_addons_for_download(
                 backup_root,
                 &local_path,
@@ -3129,6 +3179,41 @@ async fn run_repository_pipeline(
         emit_progress!(ProgressEvent::Cancelled);
         return;
     }
+
+    if context.hash_evidence.is_incomplete() {
+        emit_progress!(ProgressEvent::Failed(
+            "Verification is incomplete. Resolve the reported files or retry saving the result."
+                .into()
+        ));
+        return;
+    }
+    let write_targets = match super::super::check_contracts::bind_write_targets(
+        &local_path,
+        &enrolled_link_targets,
+    )
+    .await
+    {
+        Ok(targets) => targets,
+        Err(message) => {
+            emit_progress!(ProgressEvent::Failed(message));
+            return;
+        }
+    };
+    let _addon_write_claims = match super::super::check_contracts::claim_addon_writes(
+        context.clone(),
+        &normalized_repo_url,
+        &mod_enabled_overrides,
+        Some(write_targets.clone()),
+    )
+    .await
+    {
+        Ok(claims) => claims,
+        Err(message) => {
+            emit_progress!(ProgressEvent::Failed(message));
+            return;
+        }
+    };
+    context.pin_hash_targets(write_targets.clone());
 
     // Download files
     let mut shared_version_advisory = false;
@@ -3207,6 +3292,36 @@ async fn run_repository_pipeline(
             return;
         }
     };
+    if let Some(session) = rollback_session.as_ref() {
+        for path in unexpected_by_mod.values().flatten() {
+            if *cancel_rx.borrow() {
+                let mut rollback = session.lock().await;
+                match rollback.restore_all(Some(progress_tx.clone())).await {
+                    Ok(()) => emit_progress!(ProgressEvent::Cancelled),
+                    Err(error) => emit_progress!(ProgressEvent::Failed(format!(
+                        "Cleanup rollback failed: {error}"
+                    ))),
+                }
+                return;
+            }
+            let mut rollback = session.lock().await;
+            let pinned_path = match write_targets.resolve(Path::new(path)) {
+                Ok(path) => path,
+                Err(message) => {
+                    let _ = rollback.restore_all(Some(progress_tx.clone())).await;
+                    emit_progress!(ProgressEvent::Failed(message));
+                    return;
+                }
+            };
+            if let Err(error) = rollback.remove_file(0, &pinned_path).await {
+                let restore = rollback.restore_all(Some(progress_tx.clone())).await;
+                emit_progress!(ProgressEvent::Failed(format!(
+                    "Unexpected-file cleanup failed: {error}; rollback: {restore:?}"
+                )));
+                return;
+            }
+        }
+    }
     let mut cancel_watch = cancel_rx.clone();
     let allowed_ids_for_download = if download_file_ids.is_empty() {
         None
@@ -3508,6 +3623,7 @@ async fn run_repository_pipeline(
         allowed_ids_for_download,
         operation_id.clone(),
         telemetry_epoch.clone(),
+        Some(write_targets.clone()),
     ));
     let mut cancelled_during_download = false;
     let download_result = loop {
@@ -3782,9 +3898,20 @@ async fn run_repository_pipeline(
         "Total incremental hash tree loads for repo={} before final consistency pass: {}",
         normalized_repo_url, hash_tree_loads
     );
+    if let Err(detail) = write_targets.validate_current() {
+        context
+            .hash_evidence
+            .record_issue(crate::core::tasks::calculate_hashes::HashIssue {
+                file_path: local_path.clone(),
+                kind: crate::core::tasks::calculate_hashes::HashIssueKind::Unstable,
+                detail: Some(detail),
+            });
+    }
     let hash_work_performed =
         incremental_hash_tree_context.is_some() || !addon_hash_metrics.is_empty();
-    let finalized_hashes = if !hash_work_performed {
+    let finalized_hashes = if context.hash_evidence.is_incomplete() {
+        false
+    } else if !hash_work_performed {
         info!(
             "Skipping repository hash finalization for repo={} because all requested files were already verified",
             normalized_repo_url
@@ -3803,7 +3930,7 @@ async fn run_repository_pipeline(
             normalized_repo_url
         );
     }
-    let verification = if finalized_hashes {
+    let verification = if finalized_hashes && !context.hash_evidence.is_incomplete() {
         verify_downloaded_files(context.clone(), &normalized_repo_url, &download_file_ids).await
     } else {
         Err(anyhow::anyhow!(
@@ -3841,6 +3968,15 @@ async fn run_repository_pipeline(
             error!("{}", message);
             summary.log_table("failed-rollback");
             emit_progress!(ProgressEvent::Failed(message));
+            return;
+        }
+        if allow_verification_retry && !context.hash_evidence.is_incomplete() {
+            verification_retry.store(true, std::sync::atomic::Ordering::Relaxed);
+            summary.log_table("retrying-verification");
+            emit_progress!(ProgressEvent::Stage {
+                label: "Verification failed; retrying with fresh metadata".into(),
+                percent: 0.0
+            });
             return;
         }
         summary.log_table("failed-verification");
@@ -3946,12 +4082,31 @@ async fn run_repository_pipeline(
     });
     crate::core::utils::profiling::phase("finalize");
 
+    if let Err(detail) = write_targets.validate_current() {
+        context
+            .hash_evidence
+            .record_issue(crate::core::tasks::calculate_hashes::HashIssue {
+                file_path: local_path.clone(),
+                kind: crate::core::tasks::calculate_hashes::HashIssueKind::Unstable,
+                detail: Some(detail),
+            });
+    }
     // Emit a fresh diff after hashes so UI can update downloaded states immediately
     if download_file_ids.is_empty() {
-        info!(
-            "Skipping post-download diff refresh for repo={} because there were no downloaded file IDs",
-            normalized_repo_url
-        );
+        let cleaned = quick_local_change_diff(
+            context.clone(),
+            &normalized_repo_url,
+            None,
+            Some(&mod_enabled_overrides),
+            Some(&progress_tx),
+            false,
+            true,
+            true,
+            None,
+        )
+        .await;
+        persist_pending_updates(context.clone(), &normalized_repo_url, &cleaned).await;
+        emit_progress!(ProgressEvent::Diff { mods: cleaned });
     } else if let Some(hash_context) = incremental_hash_tree_context.as_ref() {
         let diff_filter = if download_mod_ids.is_empty() {
             None
@@ -3970,6 +4125,23 @@ async fn run_repository_pipeline(
         persist_pending_updates(context.clone(), &normalized_repo_url, &mods).await;
     } else {
         warn!("Failed to build diff tree after hash stage");
+    }
+
+    if context.hash_evidence.is_incomplete() {
+        if let Some(session) = rollback_session.as_ref() {
+            let mut rollback = session.lock().await;
+            let _ = rollback.restore_all(Some(progress_tx.clone())).await;
+            forget_reverted_hashes(
+                context.clone(),
+                &rollback.touched_file_ids(),
+                "verification evidence save failure",
+            )
+            .await;
+        }
+        emit_progress!(ProgressEvent::Failed(
+            "Verification evidence could not be saved. Restore database access and retry.".into()
+        ));
+        return;
     }
 
     // Only clear queued downloads after a successful full download cycle
@@ -4086,14 +4258,24 @@ pub fn spawn_repository_sync(
                 return;
             }
         };
-        rt.block_on(run_repository_pipeline(
-            repository_url,
-            local_path,
-            mod_enabled_overrides,
-            progress_tx.clone(),
-            mode,
-            options,
-        ));
+        rt.block_on(async {
+            let retry = std::sync::atomic::AtomicBool::new(false);
+            for attempt in 0..2 {
+                run_repository_pipeline(
+                    repository_url.clone(),
+                    local_path.clone(),
+                    mod_enabled_overrides.clone(),
+                    progress_tx.clone(),
+                    mode,
+                    options.clone(),
+                    (&retry, attempt == 0),
+                )
+                .await;
+                if !retry.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+            }
+        });
     })
 }
 
@@ -4459,6 +4641,7 @@ mod tests {
             addon: addon.to_string(),
             path: path.to_string(),
             length,
+            content_hash: String::new(),
         };
 
         assert!(addons_with_changed_files(&[file("@mod_01", &kept, Some(5))]).is_empty());
@@ -4473,6 +4656,28 @@ mod tests {
                 file("@mod_02", &missing, Some(5)),
             ]),
             HashSet::from(["@mod_02".to_string()])
+        );
+    }
+
+    #[test]
+    fn same_size_content_drift_outside_the_queue_invalidates_reuse() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("kept.bin");
+        std::fs::write(&path, b"original").unwrap();
+        let baseline =
+            crate::core::utils::content_hash::fast_file_content_hash(path.to_str().unwrap())
+                .unwrap();
+        let file = KeptFile {
+            addon: "@mod_02".into(),
+            path: path.to_string_lossy().into_owned(),
+            length: Some(8),
+            content_hash: baseline,
+        };
+        assert!(addons_with_changed_files(std::slice::from_ref(&file)).is_empty());
+        std::fs::write(&path, b"replaced").unwrap();
+        assert_eq!(
+            addons_with_changed_files(&[file]),
+            HashSet::from(["@mod_02".into()])
         );
     }
 
@@ -4640,11 +4845,8 @@ mod tests {
     }
 
     #[test]
-    fn escalated_quick_check_prepares_the_download_plan() {
+    fn local_quick_check_does_not_prepare_a_remote_download_plan() {
         assert!(!should_build_download_plan(SyncMode::QuickCheckOnly, false));
-        let (mode, prepare_download_plan) = escalated_quick_check_plan();
-        assert_eq!(mode, SyncMode::RemoteRefreshOnly);
-        assert!(should_build_download_plan(mode, prepare_download_plan));
     }
 
     #[test]

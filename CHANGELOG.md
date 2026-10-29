@@ -1,5 +1,7 @@
 # 1.2.2
 ## Added
+- Periodic repository metadata checks run while Foxy is idle, with a configurable interval that defaults to 30 minutes. They find updates without starting downloads.
+- Integrity rechecks can fall back to cached metadata when the server is unavailable, and repositories show the basis and time of their last checks. Empty publications keep installed files until a separate reviewed removal.
 - Temporary update failures can now retry automatically while Foxy stays open, with a countdown and Cancel retry control. This is enabled by default and can be disabled in Application settings or with `foxy settings set --retry-failed-downloads false`. Bulk runs retry a temporary failure once before continuing with other repositories.
 - Launch and Join can wait for an update that is replacing files the game needs. The queued launch can be cancelled, checks readiness again after the update succeeds, and does not launch after a failed or cancelled update.
 - Addons, Optional Addons, and External Addons now have a default-off Filtered only checkbox. Turn it on to make Enable all and Disable all affect only addons matching the current filters.
@@ -15,6 +17,9 @@
 - Failed repository checks, failed database wipes, bulk rechecks or updates with failures, and dialogs that show an error now offer Export logs to ZIP next to the message, so you can share the logs with support without opening Settings.
 
 ## Changed
+- Quick local checks stay offline and report incomplete metadata explicitly. Refresh also checks local drift, and updates revalidate selected files outside their prepared queue, including same-size edits.
+- Checks retain completed stable file verification when cancelled, retry files that change during reading once, and offer controls for stalled reads. Unreadable files and unsaved results remain incomplete, with a guarded Retry save action where possible.
+- Updating linked addon folders requires review of the resolved targets and affected installations. Known local differences offer backup before replacement.
 - Paused repository updates stay paused after closing and reopening Foxy. Resume checks the current update plan before downloading; scheduled and bulk updates respect the saved pause.
 - Before joining, Foxy refreshes the server's addon requirements and local availability. Changed requirements keep compatible choices and ask for confirmation again.
 - Updating shared files with conflicting versions is blocked within a repository space. For independently configured repositories sharing a folder, Foxy warns which other repositories will need updating and keeps their status accurate.
@@ -25,6 +30,8 @@
 - While Foxy's window is in the background it redraws at most 10 times per second, and once per second when minimized or in the tray, so showing progress uses less processor time while you play. The FPS counter no longer keeps a background window redrawing.
 
 ## Fixed
+- Checking a repository or previewing an update no longer removes extra local files. Approved cleanup protects files owned by other repositories and restores removed files if the update is cancelled or fails.
+- Metadata publication races get one fresh retry before an update can proceed. Failed full-file verification rolls back and allows one fresh attempt; persistent checksum disagreement cannot report success.
 - Database startup errors caused by file access or an incompatible operation no longer silently replace existing database records. Foxy preserves the database and reports the failure instead. A corrupt database that cannot be backed up requires explicit confirmation before it is discarded and rebuilt.
 - Repository space rechecks, quick local checks, and updates now follow the repository order you set in the sidebar instead of the server's order.
 - Downloads now retry temporary connection failures and busy-server responses without restarting the whole file attempt. Interrupted transfers validate resumed byte ranges, and cancellation stops waiting for stalled server responses promptly. This reduces repeated failures partway through an update and keeps invalid resumed data from being accepted.

@@ -287,6 +287,10 @@ fn restored_result(job: FileHashJob, entry: &Entry, signature: String) -> FileHa
         elapsed: std::time::Duration::ZERO,
         parts_count,
         missing_file: false,
+        issue: None,
+        completed: true,
+        read_identity: Some(entry.identity.clone()),
+        manifest_signature: signature.clone(),
         part_metrics: Default::default(),
         verified: Some(VerifiedFile {
             identity: entry.identity.clone(),
@@ -330,6 +334,19 @@ pub(super) async fn update<'a>(
         Ok(Err(err)) => warn!("Verified hash record could not be saved: {}", err),
         Err(err) => error!("Verified hash record save task failed: {}", err),
     }
+}
+
+/// Checkpoint only positive per-file evidence from a cancelled pass. A partial
+/// pass cannot prove that an older record entry is stale for files it did not
+/// finish examining.
+pub(super) async fn retain_completed<'a>(
+    record: &VerifiedHashRecordUse,
+    results: impl Iterator<Item = &'a FileHashResult>,
+) {
+    let verified: Vec<_> = results
+        .filter(|result| result.completed && result.verified.is_some())
+        .collect();
+    update(record, verified.into_iter()).await;
 }
 
 fn update_blocking(
@@ -491,9 +508,45 @@ fn usn_from_record(bytes: &[u8], len: usize) -> Option<i64> {
     Some(i64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?))
 }
 
-#[cfg(not(windows))]
-pub(super) fn capture_identity(_path: &Path) -> Option<FileIdentity> {
-    None
+#[cfg(unix)]
+pub(super) fn capture_identity(path: &Path) -> Option<FileIdentity> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = std::fs::metadata(path).ok()?;
+    Some(FileIdentity {
+        volume: metadata.dev() as u32,
+        file_id: metadata.ino(),
+        size: metadata.len(),
+        modified: metadata
+            .mtime()
+            .saturating_mul(1_000_000_000)
+            .saturating_add(metadata.mtime_nsec()),
+        changed: metadata
+            .ctime()
+            .saturating_mul(1_000_000_000)
+            .saturating_add(metadata.ctime_nsec()),
+        usn: None,
+    })
+}
+
+#[cfg(not(any(windows, unix)))]
+pub(super) fn capture_identity(path: &Path) -> Option<FileIdentity> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified = metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos()
+        .min(i64::MAX as u128) as i64;
+    Some(FileIdentity {
+        volume: 0,
+        file_id: 0,
+        size: metadata.len(),
+        modified,
+        changed: modified,
+        usn: None,
+    })
 }
 
 #[cfg(test)]
@@ -550,6 +603,51 @@ mod tests {
         assert!(!result_is_clean("FF", &[], Some("FE")));
         assert!(!result_is_clean("FF", &[], None));
         assert!(!result_is_clean("", &[], Some("")));
+    }
+
+    #[tokio::test]
+    async fn cancelled_checkpoint_keeps_unexamined_record_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(RECORD_FILE);
+        let key = path_key("C:/Repo/@a/already-verified.pbo");
+        let old = Entry {
+            identity: FileIdentity {
+                volume: 1,
+                file_id: 2,
+                size: 3,
+                modified: 4,
+                changed: 5,
+                usn: None,
+            },
+            signature: "old-manifest".into(),
+            fingerprint: Some("old-fingerprint".into()),
+            seen: 0,
+        };
+        update_blocking(&path, vec![(key.clone(), Some(old.clone()))], now_secs()).unwrap();
+
+        let unfinished = FileHashResult {
+            file_idx: 0,
+            updated_parts: Vec::new(),
+            whole_file_checksum: None,
+            content_hash: None,
+            file_path: "C:/Repo/@a/not-finished.pbo".into(),
+            elapsed: std::time::Duration::ZERO,
+            parts_count: 1,
+            missing_file: false,
+            issue: None,
+            completed: false,
+            read_identity: None,
+            manifest_signature: String::new(),
+            part_metrics: Default::default(),
+            verified: None,
+        };
+        let record = VerifiedHashRecordUse::at(path.clone(), true);
+        retain_completed(&record, std::iter::once(&unfinished)).await;
+
+        let saved = load(&path);
+        let saved = saved.entries.get(&key).unwrap();
+        assert_eq!(saved.signature, old.signature);
+        assert_eq!(saved.identity, old.identity);
     }
 
     #[test]
@@ -715,6 +813,10 @@ mod tests {
             elapsed: std::time::Duration::ZERO,
             parts_count: 1,
             missing_file: false,
+            issue: None,
+            completed: true,
+            read_identity: Some(capture_identity(&file_path).unwrap()),
+            manifest_signature: signature.clone(),
             part_metrics: Default::default(),
             verified: Some(VerifiedFile {
                 identity: capture_identity(&file_path).unwrap(),
