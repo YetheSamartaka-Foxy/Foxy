@@ -283,6 +283,8 @@ pub struct LinkedTargetPreview {
     pub link_path: String,
     pub target_path: String,
     pub affected_repositories: Vec<String>,
+    pub storage_identity: Option<crate::core::utils::storage_compat::VolumeIdentity>,
+    pub storage_changed: bool,
 }
 
 pub(crate) fn linked_targets(root: &Path) -> std::io::Result<Vec<(PathBuf, PathBuf)>> {
@@ -335,17 +337,48 @@ pub async fn preview_linked_targets(
     root: &str,
     shared_root: Option<&str>,
 ) -> Result<Vec<LinkedTargetPreview>, String> {
+    let space_dir = crate::core::game::spaces::active_game_space_dir();
+    preview_linked_targets_in_space(root, shared_root, &space_dir).await
+}
+
+pub(crate) async fn preview_linked_targets_in_space(
+    root: &str,
+    shared_root: Option<&str>,
+    space_dir: &Path,
+) -> Result<Vec<LinkedTargetPreview>, String> {
     let roots = owned_write_roots(root, shared_root);
-    let links = tokio::task::spawn_blocking(move || linked_targets_for_roots(&roots))
-        .await
-        .map_err(|_| "Linked-folder inspection stopped".to_owned())?
-        .map_err(|_| {
+    let inspect_roots = roots.clone();
+    let records_space = space_dir.to_path_buf();
+    let (links, changed_roots) = tokio::task::spawn_blocking(move || {
+        let links = linked_targets_for_roots(&inspect_roots).map_err(|_| {
             "Could not inspect linked folders. Restore access before updating.".to_owned()
         })?;
+        let changed_roots =
+            crate::core::api::storage_targets::changed_targets(&records_space, &roots)?;
+        Ok::<_, String>((links, changed_roots))
+    })
+    .await
+    .map_err(|_| "Linked-folder inspection stopped".to_owned())??;
     if links.is_empty() {
-        return Ok(Vec::new());
+        return Ok(changed_roots);
+    }
+    if crate::core::utils::content_hash::normalize_path(
+        &crate::core::game::spaces::active_game_space_dir().to_string_lossy(),
+    ) != crate::core::utils::content_hash::normalize_path(&space_dir.to_string_lossy())
+    {
+        return Err(
+            "The active game space changed during target inspection. Retry the update.".into(),
+        );
     }
     let context = create_context_with_recheck_level(RecheckLevel::DEFAULT).await;
+    if crate::core::utils::content_hash::normalize_path(
+        &crate::core::game::spaces::active_game_space_dir().to_string_lossy(),
+    ) != crate::core::utils::content_hash::normalize_path(&space_dir.to_string_lossy())
+    {
+        return Err(
+            "The active game space changed during target inspection. Retry the update.".into(),
+        );
+    }
     let rows = context
         .db()
         .query_all(
@@ -364,7 +397,7 @@ pub async fn preview_linked_targets(
         })
         .collect();
     tokio::task::spawn_blocking(move || {
-        links
+        let mut previews: Vec<LinkedTargetPreview> = links
             .into_iter()
             .map(|(link, target)| {
                 let affected_repositories = repositories
@@ -380,22 +413,34 @@ pub async fn preview_linked_targets(
                         .then(|| name.clone())
                     })
                     .collect();
-                LinkedTargetPreview {
+                Ok(LinkedTargetPreview {
                     link_path: link.to_string_lossy().into_owned(),
                     target_path: target.to_string_lossy().into_owned(),
                     affected_repositories,
-                }
+                    storage_identity: Some(crate::core::utils::storage_compat::volume_identity(
+                        &target,
+                    )?),
+                    storage_changed: false,
+                })
             })
-            .collect()
+            .collect::<Result<Vec<_>, String>>()?;
+        previews.extend(changed_roots);
+        previews.sort_by(|left, right| {
+            crate::core::utils::content_hash::normalize_path(&left.link_path).cmp(
+                &crate::core::utils::content_hash::normalize_path(&right.link_path),
+            )
+        });
+        Ok(previews)
     })
     .await
-    .map_err(|_| "Linked-folder inspection stopped".to_owned())
+    .map_err(|_| "Linked-folder inspection stopped".to_owned())?
 }
 
 pub(crate) async fn bind_write_targets(
     root: &str,
     shared_root: Option<&str>,
     enrolled: &[LinkedTargetPreview],
+    space_dir: &Path,
 ) -> Result<Arc<crate::core::tasks::download_files::PinnedDownloadTargets>, String> {
     let roots = owned_write_roots(root, shared_root);
     let inspect_roots = roots.clone();
@@ -405,9 +450,16 @@ pub(crate) async fn bind_write_targets(
         .map_err(|_| {
             "Could not inspect linked folders. Restore access before updating.".to_owned()
         })?;
-    if links.len() != enrolled.len()
+    let linked_enrollment: Vec<_> = enrolled
+        .iter()
+        .filter(|entry| {
+            crate::core::utils::content_hash::normalize_path(&entry.link_path)
+                != crate::core::utils::content_hash::normalize_path(&entry.target_path)
+        })
+        .collect();
+    if links.len() != linked_enrollment.len()
         || links.iter().any(|(link, target)| {
-            !enrolled.iter().any(|approved| {
+            !linked_enrollment.iter().any(|approved| {
                 crate::core::utils::content_hash::normalize_path(&approved.link_path)
                     == crate::core::utils::content_hash::normalize_path(&link.to_string_lossy())
                     && crate::core::utils::content_hash::normalize_path(&approved.target_path)
@@ -419,8 +471,36 @@ pub(crate) async fn bind_write_targets(
     {
         return Err("Linked folders require explicit target approval before updating. Review the linked destinations and retry.".into());
     }
+    let mut linked_identities = Vec::with_capacity(links.len());
+    for (link, target) in &links {
+        let approval = linked_enrollment
+            .iter()
+            .find(|approved| {
+                crate::core::utils::content_hash::normalize_path(&approved.link_path)
+                    == crate::core::utils::content_hash::normalize_path(&link.to_string_lossy())
+            })
+            .and_then(|approved| approved.storage_identity.as_ref())
+            .ok_or_else(|| {
+                "Linked storage requires explicit review before updating. Review the destination and retry.".to_owned()
+            })?;
+        super::storage_targets::check_link_identity(target, approval)?;
+        linked_identities.push((target.clone(), approval.clone()));
+    }
+    let inspected = roots.clone();
+    let approved = enrolled.to_vec();
+    let space_dir = space_dir.to_path_buf();
+    let root_identities = tokio::task::spawn_blocking(move || {
+        super::storage_targets::bind_targets(&space_dir, &inspected, &approved)
+    })
+    .await
+    .map_err(|_| "Target storage inspection stopped".to_string())??;
     Ok(Arc::new(
-        crate::core::tasks::download_files::PinnedDownloadTargets::from_roots(roots, links)?,
+        crate::core::tasks::download_files::PinnedDownloadTargets::from_approved_roots(
+            roots,
+            links,
+            root_identities,
+            linked_identities,
+        )?,
     ))
 }
 
@@ -480,7 +560,9 @@ mod tests {
         let shared = temp.path().join("shared");
         let primary = primary.to_string_lossy().into_owned();
         let shared = shared.to_string_lossy().into_owned();
-        let bound = bind_write_targets(&primary, Some(&shared), &[])
+        let space = temp.path().join("space");
+        std::fs::create_dir_all(&space).unwrap();
+        let bound = bind_write_targets(&primary, Some(&shared), &[], &space)
             .await
             .unwrap();
         assert!(
@@ -512,8 +594,9 @@ mod tests {
         std::os::unix::fs::symlink(target.path(), &link).unwrap();
         let primary = primary.path().to_string_lossy().into_owned();
         let shared = shared.path().to_string_lossy().into_owned();
+        let space = tempfile::tempdir().unwrap();
         assert!(
-            bind_write_targets(&primary, Some(&shared), &[])
+            bind_write_targets(&primary, Some(&shared), &[], space.path())
                 .await
                 .is_err()
         );
@@ -526,8 +609,12 @@ mod tests {
                 .to_string_lossy()
                 .into_owned(),
             affected_repositories: Vec::new(),
+            storage_identity: Some(
+                crate::core::utils::storage_compat::volume_identity(target.path()).unwrap(),
+            ),
+            storage_changed: false,
         }];
-        let bound = bind_write_targets(&primary, Some(&shared), &approved)
+        let bound = bind_write_targets(&primary, Some(&shared), &approved, space.path())
             .await
             .unwrap();
         assert!(bound.validate_current().is_ok());

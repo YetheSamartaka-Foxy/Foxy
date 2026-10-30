@@ -114,13 +114,15 @@ The panel at the top of the sidebar shows the open game space:
 
 Language, renderer, backups, and the other **Application** settings are shared by all game spaces. Scheduled jobs, cleanup folders, additional search folders, and pending updates belong to the game space they were created in.
 
-Each game space stores its data under `games/<game space>` in the Foxy config directory. Only one Foxy window or command can use a game space at a time.
+Each game space stores its data under `games/<game space>` in the Foxy config directory. Only one operational Foxy window or command can own that config directory at a time, even when opening different game spaces. Close the other instance before continuing.
 
 ### Upgrading from an older Foxy
 
 Windows updates preserve your saved repositories, settings, and databases. Silent installers always keep this data. During a manual install, **Delete all existing Foxy user data** starts unchecked each time and requires confirmation before removing your setup. Leave it unchecked to keep your configuration; downloaded mod folders are kept even when you explicitly reset Foxy.
 
 When you upgrade from a Foxy version without game spaces, your existing setup moves into an Arma 3 game space automatically. The previous files are kept as `.pre-gamespaces.bak` copies, so the change can be rolled back.
+
+If valid legacy and game-space files disagree, Foxy preserves both and shows a review notice with **Open both folders** and **Mark reviewed**. A switch keeps your current workspace active while the destination is prepared; failure offers **Retry opening** or **Cancel opening**. Ordinary settings saves preserve a successfully saved application or game-space half and identify the half still unsaved. Valid unknown settings fields remain in their original file when an older build saves known settings.
 
 ---
 
@@ -462,7 +464,7 @@ When you click **Join**, these warnings appear before Foxy checks the server and
 
 When the Steam check is enabled, **Launch** and **Join** stay disabled in the warning dialog until Steam is running. TeamSpeak 3, missing external addons, addon selections, and Creator DLC differences are advisory: you can continue after reviewing them. Missing external addons are also reported on Join when server-addon checking is disabled or the server reports no addons. An offline server, a failed server query, or an invalid game installation still stops the launch or join.
 
-The warning dialog checks for Steam and TeamSpeak in the background, keeping its buttons and keyboard controls responsive while waiting for either client to start. Before Join starts, Foxy refreshes the server requirements and relevant local addon state again. If the checklist changed, Foxy preserves compatible choices and asks you to confirm the difference.
+The warning dialog checks for Steam and TeamSpeak in the background, keeping its buttons and keyboard controls responsive while waiting for either client to start. Before Join starts, Foxy refreshes the server requirements and relevant local addon state again. If the checklist changed, Foxy preserves compatible choices and asks you to confirm the difference. A failed final refresh keeps the reviewed Join available for **Retry** or **Cancel**. A different installation's queued Launch or Join offers **Replace** or **Keep**; only one action remains queued.
 
 On Windows, Steam detection and the running-client checks do not open command windows. This also applies to the Arma 3 running check before managing profiles.
 
@@ -513,6 +515,10 @@ Arma Reforger Workshop addons are managed by GUID on the command line with `foxy
 - A **`.foxypack` config pack** exports a game space's repositories, Workshop ids, profiles, and extra files so you can import them on another machine. Packs reference mods by id and never carry mod files. Import applies the configuration as one recoverable change, including replacing existing configuration and payloads. Use `foxy config export <file>` and `foxy config import <file>`.
 
 Both are command-line features for now.
+
+Extra files are applied in their stored order, with later entries winning at shared destinations. Use `--order <zero-based position>` when adding or setting an entry. Preview `foxy config extra-file activate --dry-run --json` before approving new overlaps with `--approve-extra-file-layers --yes`. Launch previews include the same preparation details. If a destination changed since its last successful activation, choose `--keep-extra-file <id>` or `--reapply-extra-file <id>` for this attempt. Reapplying requires `--yes`; Keep preserves the current file and the stored template. GUI launches offer the same choices. Failed preparation restores the files as they were immediately before that attempt.
+
+Refreshing all Workshop pins stages every requested snapshot before changing the active selection. If any snapshot or the final save fails, the previous active pins remain selected.
 
 ---
 

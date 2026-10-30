@@ -1,7 +1,7 @@
 use eframe::egui;
 use log::warn;
 
-use crate::core::api::{self, SyncMode};
+use crate::core::api::SyncMode;
 use crate::ui::app::{Foxy, LinkedTargetPreviewResult, PendingLinkedTargetSync};
 use crate::ui::types::{Repository, sanitize_user_path};
 
@@ -24,13 +24,20 @@ impl Foxy {
                             != crate::core::utils::content_hash::normalize_path(&path)
                 })
         });
+        let space_dir = Self::get_game_space_directory();
         self.pending_link_target_sync = Some(intent);
         self.pending_link_target_previews = None;
         let tx = self.link_target_preview_tx.clone();
         std::thread::spawn(move || {
             let result = crate::core::api::background_runtime()
                 .map(|runtime| {
-                    runtime.block_on(api::preview_linked_targets(&path, shared_root.as_deref()))
+                    runtime.block_on(
+                        crate::core::api::check_contracts::preview_linked_targets_in_space(
+                            &path,
+                            shared_root.as_deref(),
+                            &space_dir,
+                        ),
+                    )
                 })
                 .unwrap_or_else(|| Err("Background runtime is unavailable".to_owned()));
             let _ = tx.send(LinkedTargetPreviewResult {
@@ -98,18 +105,29 @@ impl Foxy {
         let mut open = true;
         let mut approve = false;
         let mut cancel = false;
-        egui::Window::new(self.t("Review linked addon targets"))
+        egui::Window::new(self.t("Review update targets"))
             .id(egui::Id::unique("linked-target-enrollment"))
             .collapsible(false)
             .resizable(true)
             .open(&mut open)
             .show(ctx, |ui| {
-                ui.label(self.t("This update may write outside the repository folder. Review and enroll each shared target for this update."));
+                if previews.iter().any(|preview| !preview.storage_changed) {
+                    ui.label(self.t("This update may write outside the repository folder. Review and approve each listed target before continuing."));
+                }
+                if previews.iter().any(|preview| preview.storage_changed) {
+                    ui.label(self.t("At least one target uses a different storage device than before. Review the affected path before writing."));
+                }
                 ui.separator();
                 for (index, preview) in previews.iter().enumerate() {
                     ui.push_id(("linked-target-preview", index), |ui| {
-                        ui.label(self.t_fmt("Link: {path}", &[("path", preview.link_path.clone())]));
-                        ui.label(self.t_fmt("Shared target: {path}", &[("path", preview.target_path.clone())]));
+                        if preview.storage_changed {
+                            ui.label(self.t_fmt("Storage device changed at: {path}", &[("path", preview.target_path.clone())]));
+                        } else {
+                            ui.label(self.t_fmt("Link: {path}", &[("path", preview.link_path.clone())]));
+                        }
+                        if !preview.storage_changed {
+                            ui.label(self.t_fmt("Shared target: {path}", &[("path", preview.target_path.clone())]));
+                        }
                         if preview.affected_repositories.is_empty() {
                             ui.label(self.t("No other configured installation was found for this target."));
                         } else {
@@ -122,7 +140,7 @@ impl Foxy {
                     ui.separator();
                 }
                 ui.horizontal(|ui| {
-                    if ui.button(self.t("Enroll targets and continue update")).clicked() {
+                    if ui.button(self.t("Approve targets and continue update")).clicked() {
                         approve = true;
                     }
                     if ui.button(self.t("Cancel update")).clicked() {

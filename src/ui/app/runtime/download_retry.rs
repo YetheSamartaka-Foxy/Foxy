@@ -13,9 +13,29 @@ pub(crate) struct PendingDownloadRetry {
     scheduled_job_id: Option<String>,
     due: Instant,
     grouped: bool,
+    transfer_attempt: u32,
 }
 
 impl Foxy {
+    pub(crate) fn pending_retry_matches_instance(&self, url: &str, path: &str) -> bool {
+        self.pending_download_retry
+            .as_ref()
+            .is_some_and(|retry| retry_targets_instance(&retry.target, url, path))
+    }
+
+    pub(crate) fn supersede_pending_retry_for_instance(&mut self, url: &str, path: &str) -> bool {
+        if self
+            .pending_download_retry
+            .as_ref()
+            .is_some_and(|retry| retry_targets_instance(&retry.target, url, path))
+        {
+            self.pending_download_retry = None;
+            true
+        } else {
+            false
+        }
+    }
+
     pub(crate) fn queue_failed_download_retry(&mut self, repo_idx: usize) -> bool {
         if !self.settings_view_state.retry_failed_downloads || self.close_requested_at.is_some() {
             return false;
@@ -59,6 +79,7 @@ impl Foxy {
             scheduled_job_id,
             due: Instant::now() + Duration::from_secs(30),
             grouped,
+            transfer_attempt: self.download_transfer_attempt,
         });
         true
     }
@@ -114,6 +135,20 @@ impl Foxy {
         if self.pending_download_retry.is_none() {
             return;
         }
+        if self
+            .addon_backup_restore_state
+            .as_ref()
+            .is_some_and(|state| {
+                !state.allow_retry
+                    && self.pending_retry_matches_instance(
+                        &state.repository_url,
+                        &state.repository_path,
+                    )
+            })
+        {
+            ctx.request_repaint_after(Duration::from_millis(250));
+            return;
+        }
         if !self.settings_view_state.retry_failed_downloads {
             self.cancel_pending_download_retry();
             return;
@@ -131,8 +166,11 @@ impl Foxy {
             .resizable(false)
             .show(ctx, |ui| {
                 ui.label(self.t_fmt(
-                    "Temporary download failure. Retrying in {seconds} seconds.",
-                    &[("seconds", remaining.to_string())],
+                    "Temporary download failure. Retrying as attempt {attempt} in {seconds} seconds.",
+                    &[
+                        ("attempt", retry.transfer_attempt.to_string()),
+                        ("seconds", remaining.to_string()),
+                    ],
                 ));
                 stop = ui.button(self.t("Cancel retry")).clicked();
             });
@@ -183,6 +221,7 @@ impl Foxy {
         if let Some(idx) = idx {
             self.start_core_sync(idx, SyncMode::Download);
             if self.syncing_repository == Some(idx) {
+                self.download_transfer_attempt = retry.transfer_attempt.max(1);
                 self.sync_is_bulk = retry.grouped;
                 self.sync_visual_folder_id = retry.visual_folder_id.clone();
                 return;
@@ -190,5 +229,35 @@ impl Foxy {
         }
         self.finish_download_retry_owner(&retry, false);
         self.clear_download_retry_attempt(&retry.target);
+    }
+}
+
+fn retry_targets_instance(target: &RepoInstanceKey, url: &str, path: &str) -> bool {
+    Foxy::normalize_repo_url(&target.remote_url) == Foxy::normalize_repo_url(url)
+        && Foxy::repo_instance_path_key(&target.local_path) == Foxy::repo_instance_path_key(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::retry_targets_instance;
+    use crate::ui::types::RepoInstanceKey;
+
+    #[test]
+    fn retry_target_matching_keeps_same_url_installs_independent() {
+        let target = RepoInstanceKey {
+            remote_url: "https://repo.example.invalid/mods".to_string(),
+            local_path: "R:/Mods/RepoAlpha".to_string(),
+        };
+
+        assert!(retry_targets_instance(
+            &target,
+            "https://repo.example.invalid/mods/",
+            "R:/Mods/RepoAlpha/"
+        ));
+        assert!(!retry_targets_instance(
+            &target,
+            "https://repo.example.invalid/mods/",
+            "R:/Mods/RepoBeta"
+        ));
     }
 }

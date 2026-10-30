@@ -380,6 +380,7 @@ impl Foxy {
                         self.backend_progress_rx = None;
                         self.syncing_repository = None;
                         self.current_sync_mode = None;
+                        self.active_sync_selection = None;
                         self.refresh_repository_space_bulk_current_repo();
                         self.download_pause_tx = None;
                         self.download_paused = false;
@@ -405,7 +406,16 @@ impl Foxy {
                     }
                     self.needs_repaint = true;
                 }
-                ProgressEvent::RetryableDownloadFailure => self.sync_retryable_failure = true,
+                ProgressEvent::RetryableDownloadFailure => {
+                    self.sync_retryable_failure = true;
+                    self.mod_download_attempts.clear();
+                    self.download_transfer_attempt =
+                        self.download_transfer_attempt.saturating_add(1).max(2);
+                    if !self.mod_download_progress.is_empty() {
+                        self.mod_download_progress.clear();
+                        self.invalidate_update_modal_sort_cache();
+                    }
+                }
                 ProgressEvent::SharedVersionWarning { repositories } => {
                     self.show_error_toast(self.t_fmt(
                         "Updating shared files will require updates in: {repositories}",
@@ -645,12 +655,25 @@ impl Foxy {
                 }
                 ProgressEvent::DownloadMod {
                     mod_name,
+                    attempt,
                     percent,
                     files_done,
                     files_total,
                     bytes_done,
                     bytes_total,
                 } => {
+                    let current_attempt = self
+                        .mod_download_attempts
+                        .entry(mod_name.clone())
+                        .or_insert(*attempt);
+                    if *attempt < *current_attempt {
+                        continue;
+                    }
+                    if *attempt > *current_attempt {
+                        *current_attempt = *attempt;
+                        self.mod_download_progress
+                            .insert(mod_name.clone(), (0.0, 0, 0, 0, 0));
+                    }
                     if self.current_sync_mode == Some(SyncMode::Download) {
                         let now = Instant::now();
                         if self.download_stage_started_at.is_none() {
@@ -874,8 +897,31 @@ impl Foxy {
                     {
                         self.note_successful_remote_check(&repo.address, &repo.path);
                     }
+                    if finished_successfully
+                        && matches!(
+                            last_mode,
+                            Some(
+                                SyncMode::QuickCheckOnly
+                                    | SyncMode::RecheckIntegrity
+                                    | SyncMode::RecheckOnly
+                                    | SyncMode::RemoteRefreshOnly
+                                    | SyncMode::Download
+                            )
+                        )
+                        && let Some(repo_idx) = last_repo
+                    {
+                        self.note_preset_check_complete(
+                            repo_idx,
+                            if last_mode != Some(SyncMode::Download) && update_count > 0 {
+                                crate::ui::types::RepositoryPresetCheckOutcome::PendingUpdate
+                            } else {
+                                crate::ui::types::RepositoryPresetCheckOutcome::Synced
+                            },
+                        );
+                    }
                     self.syncing_repository = None;
                     self.current_sync_mode = None;
+                    self.active_sync_selection = None;
                     // A sync is what first writes a repository's addon rows, and
                     // the watcher indexes those only when it starts.
                     if finished_successfully {
@@ -1240,6 +1286,7 @@ impl Foxy {
                         self.mod_download_progress.clear();
                         self.invalidate_update_modal_sort_cache();
                     }
+                    self.mod_download_attempts.clear();
                     self.download_speed_bps = 0.0;
                     self.download_speed_sample_at = None;
                     self.download_speed_sample_bytes = 0;

@@ -8,6 +8,7 @@ use crate::core::utils::fs_safety::{atomic_write, is_safe_child_path};
 pub const EXTRA_FILES_FILE: &str = "extra_files.json";
 pub const EXTRA_FILES_DIR: &str = "extra_files";
 pub const GAME_DIR_PLACEHOLDER: &str = "{game_dir}";
+const ACTIVATION_STATE_FILE: &str = "extra_file_activations.json";
 
 const MAX_COPY_DEPTH: usize = 32;
 
@@ -29,6 +30,37 @@ pub struct ExtraFileEntry {
     pub enabled: bool,
     #[serde(default)]
     pub created_at: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct ActivationState {
+    entries: std::collections::BTreeMap<String, AppliedDestination>,
+    #[serde(default)]
+    reviewed_layer_signature: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct AppliedDestination {
+    destination: String,
+    content_hash: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct DestinationConflict {
+    pub entry_id: String,
+    pub name: String,
+    pub destination: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct LayerConflict {
+    pub target: String,
+    pub layer_ids: Vec<String>,
+    pub layers: Vec<String>,
+    pub winner_id: String,
+    pub winner: String,
+    #[serde(skip)]
+    source_hashes: Vec<String>,
 }
 
 fn default_enabled() -> bool {
@@ -212,7 +244,23 @@ pub fn set_entry_enabled(
     Ok(entry)
 }
 
-pub fn activate_entries(space_dir: &Path, game_dir: &str) -> Result<ActivationSummary, String> {
+pub fn set_entry_order(space_dir: &Path, id: &str, order: usize) -> Result<ExtraFileEntry, String> {
+    let mut store = load_store(space_dir)?;
+    let current = store
+        .entries
+        .iter()
+        .position(|entry| entry.id == id)
+        .ok_or_else(|| format!("Extra file {} does not exist", id))?;
+    let entry = store.entries.remove(current);
+    let new_index = order.min(store.entries.len());
+    store.entries.insert(new_index, entry);
+    let entry = store.entries[new_index].clone();
+    save_store(space_dir, &store)?;
+    Ok(entry)
+}
+
+#[cfg(test)]
+fn activate_entries(space_dir: &Path, game_dir: &str) -> Result<ActivationSummary, String> {
     let store = load_store(space_dir)?;
     let mut summary = ActivationSummary::default();
     for entry in &store.entries {
@@ -224,28 +272,6 @@ pub fn activate_entries(space_dir: &Path, game_dir: &str) -> Result<ActivationSu
             Ok(destination) => summary.activated.push((entry.name.clone(), destination)),
             Err(err) => summary.failed.push((entry.name.clone(), err)),
         }
-    }
-    Ok(summary)
-}
-
-pub fn activate_for_launch(space_dir: &Path, game_dir: &str) -> Result<ActivationSummary, String> {
-    if !store_path(space_dir).is_file() {
-        return Ok(ActivationSummary::default());
-    }
-    let summary = activate_entries(space_dir, game_dir)?;
-    if !summary.activated.is_empty() {
-        log::info!(
-            "Applied {} extra file entr{} before launch",
-            summary.activated.len(),
-            if summary.activated.len() == 1 {
-                "y"
-            } else {
-                "ies"
-            }
-        );
-    }
-    for (name, err) in &summary.failed {
-        log::warn!("Extra file entry {} could not be applied: {}", name, err);
     }
     Ok(summary)
 }
@@ -292,6 +318,223 @@ pub(crate) fn activate_entry(
     };
     result.map_err(|err| explain_unwritable_destination(&destination_dir, err))?;
     Ok(destination.display().to_string())
+}
+
+fn hash_extra_target(path: &Path) -> Result<String, std::io::Error> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(std::io::Error::other(
+            "Extra-file evidence cannot follow links",
+        ));
+    }
+    if metadata.is_file() {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update_reader(fs::File::open(path)?)?;
+        Ok(hasher.finalize().to_hex().to_string())
+    } else {
+        crate::core::utils::content_hash::calculate_addon_folder_content_hash(path)
+    }
+}
+
+pub(crate) fn destination_conflicts(
+    space_dir: &Path,
+    game_dir: &str,
+) -> Result<Vec<DestinationConflict>, String> {
+    let state_path = space_dir.join(ACTIVATION_STATE_FILE);
+    let state: ActivationState = match fs::read(&state_path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| {
+            format!(
+                "Failed to parse {}: {error}",
+                sanitize_log_path(&state_path)
+            )
+        })?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(format!(
+                "Failed to read {}: {error}",
+                sanitize_log_path(&state_path)
+            ));
+        }
+    };
+    let store = load_store(space_dir)?;
+    let mut conflicts = Vec::new();
+    for entry in store.entries.iter().filter(|entry| entry.enabled) {
+        let Some(previous) = state.entries.get(&entry.id) else {
+            continue;
+        };
+        let destination = resolve_destination(&entry.destination, game_dir)?;
+        if previous.destination != destination.to_string_lossy() || !destination.exists() {
+            continue;
+        }
+        let current_hash = hash_extra_target(&destination).map_err(|error| {
+            format!(
+                "Failed to inspect {}: {error}",
+                sanitize_log_path(&destination)
+            )
+        })?;
+        if current_hash != previous.content_hash {
+            conflicts.push(DestinationConflict {
+                entry_id: entry.id.clone(),
+                name: entry.name.clone(),
+                destination: destination.display().to_string(),
+            });
+        }
+    }
+    Ok(conflicts)
+}
+
+pub(crate) fn save_activation_evidence(
+    space_dir: &Path,
+    entries: &[ExtraFileEntry],
+    game_dir: &str,
+) -> Result<(), String> {
+    let path = space_dir.join(ACTIVATION_STATE_FILE);
+    let mut state: ActivationState = match fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| error.to_string())?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => ActivationState::default(),
+        Err(error) => return Err(error.to_string()),
+    };
+    for entry in entries {
+        let destination = resolve_destination(&entry.destination, game_dir)?;
+        let content_hash = hash_extra_target(&destination).map_err(|error| {
+            format!(
+                "Failed to inspect {}: {error}",
+                sanitize_log_path(&destination)
+            )
+        })?;
+        state.entries.insert(
+            entry.id.clone(),
+            AppliedDestination {
+                destination: destination.to_string_lossy().into_owned(),
+                content_hash,
+            },
+        );
+    }
+    let serialized = serde_json::to_vec_pretty(&state).map_err(|error| error.to_string())?;
+    atomic_write(&path, &serialized).map_err(|error| error.to_string())
+}
+
+pub(crate) fn layer_conflicts(
+    space_dir: &Path,
+    game_dir: &str,
+) -> Result<Vec<LayerConflict>, String> {
+    fn collect(
+        source: &Path,
+        target: &Path,
+        entry: &ExtraFileEntry,
+        files: &mut std::collections::BTreeMap<String, Vec<(String, String, String)>>,
+    ) -> Result<(), String> {
+        let metadata = match fs::symlink_metadata(source) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.to_string()),
+        };
+        if metadata.file_type().is_symlink() {
+            return Err("A managed extra-file source contains a link".to_string());
+        }
+        if metadata.is_dir() {
+            for child in fs::read_dir(source).map_err(|error| error.to_string())? {
+                let child = child.map_err(|error| error.to_string())?;
+                collect(&child.path(), &target.join(child.file_name()), entry, files)?;
+            }
+        } else if metadata.is_file() {
+            let hash = hash_extra_target(source).map_err(|error| error.to_string())?;
+            let key = normalized_path_text(target);
+            files
+                .entry(key)
+                .or_default()
+                .push((entry.id.clone(), entry.name.clone(), hash));
+        }
+        Ok(())
+    }
+
+    let store = load_store(space_dir)?;
+    let mut files = std::collections::BTreeMap::new();
+    for entry in store.entries.iter().filter(|entry| entry.enabled) {
+        validate_entry(entry)?;
+        let destination = resolve_destination(&entry.destination, game_dir)?;
+        let source = payload_dir(space_dir, &entry.id).join(&entry.source_name);
+        match entry.kind {
+            ExtraFileKind::File => collect(&source, &destination, entry, &mut files)?,
+            ExtraFileKind::Folder => collect(&source, &destination, entry, &mut files)?,
+        }
+    }
+    Ok(files
+        .into_iter()
+        .filter_map(|(target, layers)| {
+            let distinct: std::collections::BTreeSet<_> =
+                layers.iter().map(|layer| &layer.2).collect();
+            if distinct.len() < 2 {
+                return None;
+            }
+            let names = layers
+                .iter()
+                .map(|layer| layer.1.clone())
+                .collect::<Vec<_>>();
+            Some(LayerConflict {
+                target,
+                layer_ids: layers.iter().map(|layer| layer.0.clone()).collect(),
+                winner_id: layers
+                    .last()
+                    .map(|layer| layer.0.clone())
+                    .unwrap_or_default(),
+                winner: names.last().cloned().unwrap_or_default(),
+                layers: names,
+                source_hashes: layers.iter().map(|layer| layer.2.clone()).collect(),
+            })
+        })
+        .collect())
+}
+
+pub(crate) fn layer_review_needed(
+    space_dir: &Path,
+    conflicts: &[LayerConflict],
+) -> Result<bool, String> {
+    if conflicts.is_empty() {
+        return Ok(false);
+    }
+    let signature = layer_review_signature(conflicts);
+    let path = space_dir.join(ACTIVATION_STATE_FILE);
+    let state: ActivationState = match fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| error.to_string())?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => ActivationState::default(),
+        Err(error) => return Err(error.to_string()),
+    };
+    Ok(state.reviewed_layer_signature.as_deref() != Some(&signature))
+}
+
+pub(crate) fn record_layer_review(
+    space_dir: &Path,
+    conflicts: &[LayerConflict],
+) -> Result<(), String> {
+    let path = space_dir.join(ACTIVATION_STATE_FILE);
+    let mut state: ActivationState = match fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| error.to_string())?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => ActivationState::default(),
+        Err(error) => return Err(error.to_string()),
+    };
+    state.reviewed_layer_signature = Some(layer_review_signature(conflicts));
+    atomic_write(
+        &path,
+        &serde_json::to_vec_pretty(&state).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())
+}
+
+pub(crate) fn layer_review_signature(conflicts: &[LayerConflict]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    for conflict in conflicts {
+        for value in std::iter::once(conflict.target.as_str())
+            .chain(conflict.layer_ids.iter().map(String::as_str))
+            .chain(conflict.layers.iter().map(String::as_str))
+            .chain(conflict.source_hashes.iter().map(String::as_str))
+            .chain([conflict.winner_id.as_str(), conflict.winner.as_str()])
+        {
+            hasher.update(&(value.len() as u64).to_le_bytes());
+            hasher.update(value.as_bytes());
+        }
+    }
+    hasher.finalize().to_hex().to_string()
 }
 
 /// Turn a raw OS write failure into something the user can act on when the
@@ -477,6 +720,74 @@ mod tests {
         )
         .expect("add second");
         assert_eq!(second.id, "server-config-2");
+    }
+
+    #[test]
+    fn changed_successful_destination_is_detected_as_a_conflict() {
+        let space = tempfile::tempdir().expect("space");
+        let work = tempfile::tempdir().expect("work");
+        let source = work.path().join("config.cfg");
+        let destination = work.path().join("game/config.cfg");
+        fs::write(&source, b"template").expect("source");
+        let entry = add_entry(
+            space.path(),
+            "Config",
+            &source,
+            &destination.display().to_string(),
+            true,
+        )
+        .expect("entry");
+        fs::create_dir_all(destination.parent().unwrap()).expect("destination dir");
+        fs::copy(&source, &destination).expect("first activation");
+        save_activation_evidence(space.path(), &[entry], "").expect("evidence");
+
+        fs::write(&destination, b"user edit").expect("user edit");
+        let conflicts = destination_conflicts(space.path(), "").expect("conflicts");
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].entry_id, "config");
+        assert_eq!(conflicts[0].destination, destination.display().to_string());
+    }
+
+    #[test]
+    fn conflicting_layers_keep_order_and_require_review_after_reorder() {
+        let space = tempfile::tempdir().expect("space");
+        let work = tempfile::tempdir().expect("work");
+        let first = work.path().join("first.cfg");
+        let second = work.path().join("second.cfg");
+        fs::write(&first, b"first").expect("first");
+        fs::write(&second, b"second").expect("second");
+        let destination = work.path().join("game/config.cfg").display().to_string();
+        add_entry(space.path(), "First", &first, &destination, true).expect("first entry");
+        add_entry(space.path(), "Second", &second, &destination, true).expect("second entry");
+
+        let conflicts = layer_conflicts(space.path(), "").expect("preview");
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].layers, ["First", "Second"]);
+        assert_eq!(conflicts[0].winner, "Second");
+        assert_eq!(conflicts[0].winner_id, "second");
+        let approved_signature = layer_review_signature(&conflicts);
+        assert!(layer_review_needed(space.path(), &conflicts).expect("needs review"));
+        record_layer_review(space.path(), &conflicts).expect("record review");
+        assert!(!layer_review_needed(space.path(), &conflicts).expect("reviewed"));
+
+        let mut store = load_store(space.path()).expect("store");
+        store.entries.reverse();
+        save_store(space.path(), &store).expect("reorder");
+        let reordered = layer_conflicts(space.path(), "").expect("reordered preview");
+        assert_eq!(reordered[0].winner, "First");
+        assert_ne!(layer_review_signature(&reordered), approved_signature);
+        assert!(layer_review_needed(space.path(), &reordered).expect("review order change"));
+
+        fs::write(
+            payload_dir(space.path(), "first").join("first.cfg"),
+            b"changed source",
+        )
+        .expect("change source");
+        let changed_source = layer_conflicts(space.path(), "").expect("changed source preview");
+        assert_ne!(
+            layer_review_signature(&changed_source),
+            layer_review_signature(&reordered)
+        );
     }
 
     #[test]

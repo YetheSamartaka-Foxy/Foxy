@@ -72,6 +72,7 @@ pub fn cmd_launch(cli: &CliArgs, args: LaunchArgs) -> Result<CommandSuccess, Com
                 "args": launch_spec.args,
                 "cwd": launch_spec.cwd.display().to_string(),
                 "execute": false,
+                "extra_file_preparation": super::extra_file_launch_preview("launch", &state.settings)?,
                 "dry_run": cli.dry_run
             }),
             exit_code: exit_codes::SUCCESS,
@@ -92,6 +93,19 @@ pub fn cmd_launch(cli: &CliArgs, args: LaunchArgs) -> Result<CommandSuccess, Com
     let approval = LaunchApproval {
         incomplete_extra_files: args.allow_incomplete_preparation,
         live_workshop_fallback: args.allow_live_fallback,
+        extra_file_conflicts: super::extra_file_launch_choices(
+            "launch",
+            &state.settings,
+            &args.keep_extra_file,
+            &args.reapply_extra_file,
+            args.approve_extra_file_layers,
+            cli.yes,
+        )?,
+        approve_extra_file_layers: super::approved_extra_file_layers(
+            "launch",
+            &state.settings,
+            args.approve_extra_file_layers,
+        )?,
     };
     let cancelled = AtomicBool::new(false);
     let handoff = crate::core::game::launch_preparation::dispatch_repository(
@@ -183,6 +197,21 @@ fn build_launch_spec(
 
 fn launch_failure_to_command_error(action: &str, failure: LaunchFailure) -> CommandError {
     match failure {
+        LaunchFailure::ExtraFileConflicts(conflicts) => CommandError::validation(
+            action,
+            format!(
+                "Extra files changed: {}. Choose --keep-extra-file <id> or --reapply-extra-file <id> --yes.",
+                conflicts
+                    .iter()
+                    .map(|entry| entry.entry_id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ),
+        LaunchFailure::ExtraFileLayers(_) => CommandError::validation(
+            action,
+            "Review extra-file layer replacements with config extra-file activate --dry-run, then pass --approve-extra-file-layers --yes",
+        ),
         LaunchFailure::ExtraFiles(failures) => CommandError::validation(
             action,
             format!(

@@ -1094,6 +1094,8 @@ impl Foxy {
 
     fn render_addon_backup_restore_modal(&mut self, ctx: &egui::Context, repo_index: usize) {
         let mut restore_request: Option<crate::ui::app::AddonBackupRestoreState> = None;
+        let mut stop_retry_restore: Option<crate::ui::app::AddonBackupRestoreState> = None;
+        let mut keep_retrying = false;
         let mut close_restore_modal = false;
 
         if let Some(mut restore_state) = self
@@ -1110,6 +1112,26 @@ impl Foxy {
                 .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
                 .default_width(560.0)
                 .show(ctx, |ui| {
+                    if restore_state.retry_arbitration {
+                        ui.label(tr("An automatic update retry is waiting for this repository."));
+                        if let Some(backup) = restore_state.backups.get(restore_state.selected_backup_index) {
+                            ui.label(tr_fmt(
+                                "Selected backup: {name} ({hash})",
+                                &[("name", backup.folder_name.clone()), ("hash", backup.content_hash.clone())],
+                            ));
+                        }
+                        ui.label(tr("Choose whether restoring this backup should stop the retry, or keep the retry and retain this backup selection."));
+                        ui.add_space(12.0);
+                        ui.horizontal(|ui| {
+                            if ui.button(tr("Restore and stop retry")).clicked() {
+                                stop_retry_restore = Some(restore_state.clone());
+                            }
+                            if ui.button(tr("Keep retrying")).clicked() {
+                                keep_retrying = true;
+                            }
+                        });
+                        return;
+                    }
                     ui.label(tr_fmt(
                         "Choose addon backup to restore for {name}.",
                         &[("name", restore_state.addon_name.clone())],
@@ -1177,7 +1199,11 @@ impl Foxy {
                     });
                 });
 
-            if close_restore_modal {
+            if keep_retrying {
+                restore_state.retry_arbitration = false;
+                restore_state.allow_retry = true;
+                self.addon_backup_restore_state = Some(restore_state);
+            } else if close_restore_modal {
                 self.addon_backup_restore_state = None;
             } else {
                 self.addon_backup_restore_state = Some(restore_state);
@@ -1185,6 +1211,12 @@ impl Foxy {
         }
 
         if let Some(restore_state) = restore_request {
+            self.start_manual_addon_restore(restore_state);
+        }
+        if let Some(mut restore_state) = stop_retry_restore {
+            self.addon_backup_restore_state = None;
+            self.cancel_pending_download_retry();
+            restore_state.retry_arbitration = false;
             self.start_manual_addon_restore(restore_state);
         }
     }

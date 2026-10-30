@@ -192,9 +192,12 @@ Switching happens in-process (`src/ui/app/runtime/game_space_switch.rs`):
    Per-space artifacts outside the space folder (delta-patch plans) live in a
    folder keyed by the space directory.
 2. Drain the persistence queue so queued writes land in the space they belong to.
-3. Release the outgoing database handle (`close_active_database_sync`), activate
-   the target, honor a pending wipe marker, stop the filesystem watcher.
-4. Reset every space-scoped `Foxy` field, then reload the space the way startup
+3. Prepare the destination on a worker while the outgoing workspace stays active:
+   reserve its database claim, recover configuration/launch journals, and validate
+   its settings, repositories, spaces and folders. Failure offers Retry or Cancel.
+4. Release the outgoing database handle (`close_active_database_sync`), promote the
+   reservation, activate the target, honor a pending wipe marker and stop the watcher.
+5. Reset every space-scoped `Foxy` field, then reload the space the way startup
    would.
 
 Consequences for new code:
@@ -209,6 +212,13 @@ Consequences for new code:
   data into the next one.
 
 ### Accepted game-space and queued-work contracts
+
+R01-R24 in [reviewed contracts](REVIEWED_BEHAVIOR_CONTRACTS.md) also apply.
+Configuration ownership is root-wide. Ordinary partial settings saves preserve
+the successfully saved half; opaque valid values stay in their original file.
+Divergent readable legacy/current copies remain preserved with a persistent
+review notice. A remotely removed space member requires an explicit Keep in
+group or Keep standalone choice without moving or deleting payloads.
 
 - A space switch drains saves into the outgoing space before activation. While it waits, freeze new edits and show a Switching state with a cancel action. On save failure, stay in the outgoing space and offer Retry, explicit Discard changes and switch, or Cancel switching. Discard waits for in-flight writes to settle; no queued save may be retargeted to the destination.
 - A manual bulk request freezes its target set and each target's normalized `(remote_url, local_path)` identity at enqueue time. If a queued row is removed or its identity changes, skip that target and explain why. Do not add repositories that join the group later. Resolve that repository's current profile when its unchanged identity actually starts.

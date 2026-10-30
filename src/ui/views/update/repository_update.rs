@@ -529,7 +529,20 @@ impl Foxy {
                                                             &[("size", fmt_bytes(m.total_bytes))],
                                                         )
                                                     } else {
-                                                        bar_text
+                                                        self.t_fmt(
+                                                            "Attempt {attempt}: {progress}",
+                                                            &[
+                                                                    (
+                                                                        "attempt",
+                                                                        self.mod_download_attempts
+                                                                            .get(&m.name)
+                                                                            .copied()
+                                                                            .unwrap_or(1)
+                                                                            .to_string(),
+                                                                    ),
+                                                                ("progress", bar_text),
+                                                            ],
+                                                        )
                                                     };
                                                     let motion = update_bar_motion(
                                                         !mod_done && per_mod.is_some(),

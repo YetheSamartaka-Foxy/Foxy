@@ -11,7 +11,9 @@
 //! `last_result`) are persisted. Live execution state lives on `Foxy` behind
 //! `#[serde(skip)]` runtime fields, never here.
 
-use chrono::{DateTime, Datelike, Local, NaiveTime, TimeZone, Timelike};
+use chrono::{
+    DateTime, Datelike, Local, LocalResult, NaiveDateTime, NaiveTime, TimeZone, Timelike,
+};
 use serde::{Deserialize, Serialize};
 
 /// A job that fires more than this many seconds after its scheduled time (for
@@ -175,9 +177,9 @@ fn recurring_fire(
         if weekdays & (1u8 << date.weekday().num_days_from_monday()) == 0 {
             continue;
         }
-        // A local time can be ambiguous or non-existent across DST shifts; skip
-        // those candidates rather than guess.
-        let Some(candidate) = Local.from_local_datetime(&date.and_time(time)).single() else {
+        let Some(candidate) = first_valid_local_instant(date.and_time(time), |local| {
+            Local.from_local_datetime(local)
+        }) else {
             continue;
         };
         if forward {
@@ -186,6 +188,31 @@ fn recurring_fire(
             }
         } else if candidate <= anchor {
             return Some(candidate);
+        }
+    }
+    None
+}
+
+fn first_valid_local_instant<Tz, F>(
+    requested: NaiveDateTime,
+    mut resolve: F,
+) -> Option<DateTime<Tz>>
+where
+    Tz: TimeZone,
+    F: FnMut(&NaiveDateTime) -> LocalResult<DateTime<Tz>>,
+{
+    for minute in 0..=24 * 60 {
+        let local = requested + chrono::Duration::minutes(minute);
+        match resolve(&local) {
+            LocalResult::Single(value) => return Some(value),
+            LocalResult::Ambiguous(first, second) => {
+                return Some(if first.timestamp() <= second.timestamp() {
+                    first
+                } else {
+                    second
+                });
+            }
+            LocalResult::None => {}
         }
     }
     None
@@ -413,10 +440,10 @@ impl ScheduleJobDraft {
                     .ok_or_else(|| "Invalid date.".to_string())?;
                 let time = NaiveTime::from_hms_opt(self.hour, self.minute, 0)
                     .ok_or_else(|| "Invalid time.".to_string())?;
-                let local = Local
-                    .from_local_datetime(&date.and_time(time))
-                    .single()
-                    .ok_or_else(|| "That local time does not exist (clock change).".to_string())?;
+                let local = first_valid_local_instant(date.and_time(time), |local| {
+                    Local.from_local_datetime(local)
+                })
+                .ok_or_else(|| "That local time could not be resolved.".to_string())?;
                 if local <= now {
                     return Err("Pick a date and time in the future.".into());
                 }
@@ -490,6 +517,37 @@ mod tests {
 
     fn at(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> DateTime<Local> {
         Local.with_ymd_and_hms(y, mo, d, h, mi, 0).single().unwrap()
+    }
+
+    #[test]
+    fn local_time_gap_uses_first_valid_instant() {
+        let requested = chrono::NaiveDate::from_ymd_opt(2026, 3, 29)
+            .unwrap()
+            .and_hms_opt(2, 0, 0)
+            .unwrap();
+        let resolved = first_valid_local_instant(requested, |local| {
+            if local.hour() == 2 {
+                LocalResult::None
+            } else {
+                LocalResult::Single(chrono::Utc.from_utc_datetime(local))
+            }
+        })
+        .unwrap();
+        assert_eq!(resolved.naive_utc(), requested + chrono::Duration::hours(1));
+    }
+
+    #[test]
+    fn ambiguous_local_time_uses_earlier_instant() {
+        let requested = chrono::NaiveDate::from_ymd_opt(2026, 10, 25)
+            .unwrap()
+            .and_hms_opt(2, 0, 0)
+            .unwrap();
+        let earlier = chrono::Utc.from_utc_datetime(&requested);
+        let later = earlier + chrono::Duration::hours(1);
+        let resolved =
+            first_valid_local_instant(requested, |_| LocalResult::Ambiguous(later, earlier))
+                .unwrap();
+        assert_eq!(resolved, earlier);
     }
 
     fn once_job(fire: DateTime<Local>) -> ScheduledJob {

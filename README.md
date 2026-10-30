@@ -45,6 +45,11 @@ checks server metadata and local drift; full integrity checks read selected
 files and can diagnose them against cached metadata when offline. Periodic idle
 metadata checks default to 30 minutes and never start downloads.
 
+One operational Foxy process owns a configuration directory, including all its
+game spaces. Space switches prepare the destination before leaving the current
+workspace. Extra-file activation reviews edited destinations and ordered overlaps;
+use its CLI dry run to inspect the required choices before writing.
+
 - [User Guide](wiki/User-Guide.md) - game spaces, repositories, syncing, launching, Steam Workshop, benchmarks, settings, troubleshooting, and the CLI.
 - [Server Admin Guide](wiki/Server-Admin-Guide.md) - generating and hosting Arma 3 and Arma Reforger repositories and repository spaces with `foxy-server-backend-cli`, server launch lines and keys, and self-hosted app updates.
 - The in-app Help page (**F1**) covers the same ground in every bundled language, with search across topic titles and text.

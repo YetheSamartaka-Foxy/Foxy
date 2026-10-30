@@ -178,8 +178,59 @@ impl AppState {
     }
 }
 
+fn extra_file_launch_choices(
+    action: &str,
+    settings: &SettingsViewState,
+    keep: &[String],
+    reapply: &[String],
+    approve_layers: bool,
+    yes: bool,
+) -> Result<Vec<crate::core::game::launch_preparation::ExtraFileConflictChoice>, CommandError> {
+    let module = crate::core::game::registry().active();
+    let conflicts = crate::core::game::extra_files::destination_conflicts(
+        &crate::core::game::spaces::active_game_space_dir(),
+        module.install_dir_from_settings(settings),
+    )
+    .map_err(|error| CommandError::operation(action, error))?;
+    let keep_ids = config::resolve_extra_file_choices(action, &conflicts, keep, reapply)?;
+    if (!reapply.is_empty() || approve_layers) && !yes {
+        return Err(CommandError::validation(
+            action,
+            "Replacing changed extra files or approving layers also requires --yes",
+        ));
+    }
+    Ok(conflicts
+        .into_iter()
+        .map(
+            |entry| crate::core::game::launch_preparation::ExtraFileConflictChoice {
+                keep_current: keep_ids.contains(&entry.entry_id),
+                entry_id: entry.entry_id,
+            },
+        )
+        .collect())
+}
+
 fn progress_output_muted(cli: &CliArgs) -> bool {
     cli.quiet || cli.json || cli.no_progress
+}
+
+fn approved_extra_file_layers(
+    action: &str,
+    settings: &SettingsViewState,
+    approved: bool,
+) -> Result<Option<String>, CommandError> {
+    if !approved {
+        return Ok(None);
+    }
+    let module = crate::core::game::registry().active();
+    let layers = crate::core::game::extra_files::layer_conflicts(
+        &crate::core::game::spaces::active_game_space_dir(),
+        module.install_dir_from_settings(settings),
+    )
+    .map_err(|error| CommandError::operation(action, error))?;
+    Ok(Some(
+        crate::core::game::extra_files::layer_review_signature(&layers),
+    ))
 }
 
 pub fn apply_config_override(config_dir: Option<&PathBuf>) -> Result<(), CommandError> {
@@ -224,8 +275,31 @@ fn ensure_remote_reachable_before_destructive(
         })
 }
 
+fn extra_file_launch_preview(
+    action: &str,
+    settings: &SettingsViewState,
+) -> Result<serde_json::Value, CommandError> {
+    let space = crate::core::game::spaces::active_game_space_dir();
+    let module = crate::core::game::registry().active();
+    let game_dir = module.install_dir_from_settings(settings);
+    let conflicts = crate::core::game::extra_files::destination_conflicts(&space, game_dir)
+        .map_err(|error| CommandError::operation(action, error))?;
+    let layers = crate::core::game::extra_files::layer_conflicts(&space, game_dir)
+        .map_err(|error| CommandError::operation(action, error))?;
+    let review = crate::core::game::extra_files::layer_review_needed(&space, &layers)
+        .map_err(|error| CommandError::operation(action, error))?;
+    Ok(json!({
+        "destination_conflicts": conflicts,
+        "layers": layers,
+        "layer_review_needed": review,
+    }))
+}
+
 pub fn run_command(cli: &CliArgs, command: CliCommand) -> Result<CommandSuccess, CommandError> {
-    crate::core::game::spaces::ensure_game_spaces_layout();
+    if super::command_uses_database(Some(&command), false) {
+        crate::core::game::spaces::ensure_game_spaces_layout()
+            .map_err(|error| CommandError::validation("configuration", error))?;
+    }
     let started = Instant::now();
     let result = match command {
         CliCommand::Version => Ok(CommandSuccess {
@@ -559,6 +633,7 @@ fn run_repository_sync(
                 ProgressEvent::DiskSpaceShortfall(_) => {}
                 ProgressEvent::DownloadMod {
                     mod_name,
+                    attempt: _,
                     files_done,
                     files_total,
                     bytes_done,

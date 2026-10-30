@@ -18,4 +18,5 @@ pub mod remote_repository;
 pub mod truncate_download_targets;
 // Turso data layer (plan.md) - the live persistence engine after the Phase-4
 // cutover.
+pub mod config_process_lock;
 pub(crate) mod db_turso;

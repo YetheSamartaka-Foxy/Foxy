@@ -478,6 +478,7 @@ impl Foxy {
             addon_hash_recalc_queue: VecDeque::new(),
             scheduler_active_run: None,
             scheduler_pending_post_action: None,
+            scheduler_deferred_post_actions: Vec::new(),
             scheduler_held_jobs: HashMap::new(),
             scheduler_last_tick_at: None,
             addon_selection_baseline: HashMap::new(),
@@ -514,10 +515,19 @@ impl Foxy {
             retained_files_cleanup_in_flight: false,
             pending_retained_file_removal: None,
             current_sync_mode: None,
+            active_sync_selection: None,
+            active_sync_modifiers: None,
+            proxy_change_prompt: None,
+            game_space_switch_prepare_rx: None,
+            game_space_switch_prepare_worker: None,
+            game_space_switch_open_error: None,
+            legacy_migration_review_files: Vec::new(),
+            settings_save_error: None,
             pending_integrity_recheck_prompt: None,
             integrity_recheck_after_settlement: None,
             download_progress: None,
             download_finished: false,
+            download_transfer_attempt: 0,
             download_finished_repo: None,
             download_summary: None,
             download_disk_space_shortfall: None,
@@ -525,6 +535,7 @@ impl Foxy {
             open_update_after_sync: false,
             needs_repaint: false,
             mod_download_progress: HashMap::new(),
+            mod_download_attempts: HashMap::new(),
             download_started_at: None,
             download_stage_started_at: None,
             hash_stage_started_at: None,
@@ -669,6 +680,11 @@ impl Foxy {
         }
         crate::core::tasks::init_database::check_and_wipe_database();
         app.load_settings();
+        app.legacy_migration_review_files =
+            crate::core::game::spaces::pending_legacy_migration_review(
+                &Self::get_game_space_directory(),
+            )
+            .unwrap_or_default();
         app.pending_renderer_fallback_notice =
             crate::core::utils::renderer_fallback::renderer_fallback_notice_path().exists();
         let _ = crate::core::tasks::db_schema_version::evaluate_and_bootstrap();

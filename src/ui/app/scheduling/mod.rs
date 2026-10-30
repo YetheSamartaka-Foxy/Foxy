@@ -91,6 +91,8 @@ pub struct PendingPostAction {
     pub handoff_generation: u64,
     pub gameplay_generation: u64,
     pub requires_confirmation: bool,
+    pub due_batch_ids: Vec<String>,
+    pub action_choice_required: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -311,8 +313,7 @@ impl Foxy {
 
         self.process_scheduled_post_action(ctx);
 
-        // While a post-action counts down, do not advance the run.
-        if self.scheduler_pending_post_action.is_none() && self.scheduler_active_run.is_some() {
+        if self.scheduler_active_run.is_some() {
             self.advance_scheduled_job_run();
         }
 
@@ -347,6 +348,16 @@ impl Foxy {
                 .iter()
                 .any(|(_, due_id, fire_ms)| due_id == id && *fire_ms == held.fire_ms)
         });
+
+        if let Some(pending) = self.scheduler_pending_post_action.as_mut() {
+            pending
+                .due_batch_ids
+                .retain(|id| due_jobs.iter().any(|(_, due_id, _)| due_id == id));
+        }
+
+        if let Some(pending) = self.scheduler_pending_post_action.as_ref() {
+            due_jobs.retain(|(_, id, _)| pending.due_batch_ids.iter().any(|due_id| due_id == id));
+        }
 
         let missed_reason = missed_run_reason(previous_tick, now);
         for (job_idx, fire_ms) in missed_jobs {
@@ -416,7 +427,7 @@ impl Foxy {
 
     /// The work that makes it unsafe to start a scheduled job now, for the log.
     fn scheduled_job_block_reason(&self) -> Option<&'static str> {
-        if self.scheduler_active_run.is_some() || self.scheduler_pending_post_action.is_some() {
+        if self.scheduler_active_run.is_some() {
             Some("another scheduled job")
         } else if self.repository_sync_active() {
             Some("the running check or update")
@@ -483,6 +494,11 @@ impl Foxy {
         else {
             return;
         };
+        if let Some(pending) = self.scheduler_pending_post_action.as_mut() {
+            pending.due_batch_ids.retain(|due_id| due_id != &job.id);
+            pending.deferred_for_work = true;
+            pending.deadline = Instant::now() + Duration::from_secs(POST_ACTION_COUNTDOWN_SECS);
+        }
         if let Some(held) = self.scheduler_held_jobs.remove(&job.id) {
             info!(
                 "Scheduled job '{}' starting {} min after its scheduled time; it waited for {}",
@@ -826,20 +842,53 @@ impl Foxy {
             return;
         }
 
-        info!(
-            "Scheduled job '{}' will run post-action {:?} in {}s",
-            run.job_name, run.post_action, POST_ACTION_COUNTDOWN_SECS
-        );
-        self.scheduler_pending_post_action = Some(PendingPostAction {
+        let now = Local::now();
+        let due_batch_ids = self
+            .settings_view_state
+            .scheduled_jobs
+            .iter()
+            .filter_map(|job| {
+                if job.id == run.job_id {
+                    return None;
+                }
+                let held_fire_ms = self
+                    .scheduler_held_jobs
+                    .get(&job.id)
+                    .map(|held| held.fire_ms);
+                matches!(
+                    job.due_state_with_hold(now, held_fire_ms),
+                    DueState::Due { .. }
+                )
+                .then(|| job.id.clone())
+            })
+            .collect::<Vec<_>>();
+        let deferred_for_due_batch = !due_batch_ids.is_empty();
+        let next_action = PendingPostAction {
             job_id: run.job_id.clone(),
             action: run.post_action,
-            job_name: run.job_name,
+            job_name: run.job_name.clone(),
             deadline: Instant::now() + Duration::from_secs(POST_ACTION_COUNTDOWN_SECS),
-            deferred_for_work: false,
+            deferred_for_work: deferred_for_due_batch,
             handoff_generation: self.launch_action.handoff_generation,
             gameplay_generation: self.launch_action.gameplay_generation,
             requires_confirmation: false,
-        });
+            due_batch_ids,
+            action_choice_required: false,
+        };
+        if let Some(pending) = self.scheduler_pending_post_action.as_mut() {
+            if pending.action != next_action.action {
+                pending.action_choice_required = true;
+            }
+            self.scheduler_deferred_post_actions.push(next_action);
+            pending.deadline = Instant::now() + Duration::from_secs(POST_ACTION_COUNTDOWN_SECS);
+            pending.deferred_for_work = true;
+        } else {
+            info!(
+                "Scheduled job '{}' will run post-action {:?} in {}s",
+                run.job_name, run.post_action, POST_ACTION_COUNTDOWN_SECS
+            );
+            self.scheduler_pending_post_action = Some(next_action);
+        }
     }
 
     fn record_scheduled_job_result(
@@ -870,10 +919,20 @@ impl Foxy {
     }
 
     fn process_scheduled_post_action(&mut self, ctx: &egui::Context) {
+        if self.close_requested_at.is_some() {
+            return;
+        }
         let work_running = self.accepted_work_in_flight();
         let Some(pending) = self.scheduler_pending_post_action.as_mut() else {
             return;
         };
+        if !pending.due_batch_ids.is_empty() {
+            ctx.request_repaint_after(Duration::from_millis(250));
+            return;
+        }
+        if pending.action_choice_required {
+            return;
+        }
         if pending.action == PostAction::ShutdownPc
             && (pending.handoff_generation != self.launch_action.handoff_generation
                 || pending.gameplay_generation != self.launch_action.gameplay_generation)
@@ -901,7 +960,10 @@ impl Foxy {
         }
         if Instant::now() >= pending.deadline {
             let action = pending.action;
-            self.scheduler_pending_post_action = None;
+            if action != PostAction::ShutdownPc {
+                self.scheduler_pending_post_action = None;
+            }
+            self.scheduler_deferred_post_actions.clear();
             self.execute_scheduled_post_action(action, ctx);
         } else {
             ctx.request_repaint_after(Duration::from_millis(250));
@@ -935,6 +997,7 @@ impl Foxy {
 
     /// Cancel a pending post-action from the countdown overlay.
     pub fn cancel_scheduled_post_action(&mut self) {
+        self.scheduler_deferred_post_actions.clear();
         if let Some(pending) = self.scheduler_pending_post_action.take() {
             info!(
                 "Scheduled post-action {:?} for job '{}' cancelled by user",
@@ -960,9 +1023,76 @@ impl Foxy {
         let Some(pending) = self.scheduler_pending_post_action.as_ref() else {
             return;
         };
+        if pending.action_choice_required {
+            if !pending.due_batch_ids.is_empty() || self.scheduler_active_run.is_some() {
+                let mut cancel = false;
+                egui::Window::new(self.t("Scheduled actions conflict"))
+                    .frame(self.modal_window_chrome(ctx))
+                    .title_frame(self.modal_window_chrome(ctx))
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .default_width(480.0)
+                    .show(ctx, |ui| {
+                        ui.label(self.t("Already-due jobs are still finishing. Choose an action after the captured batch completes."));
+                        cancel = ui.button(self.t("Cancel all post-actions")).clicked();
+                    });
+                if cancel {
+                    self.cancel_scheduled_post_action();
+                }
+                return;
+            }
+            let options = std::iter::once((pending.action, pending.job_name.clone()))
+                .chain(
+                    self.scheduler_deferred_post_actions
+                        .iter()
+                        .map(|item| (item.action, item.job_name.clone())),
+                )
+                .collect::<Vec<_>>();
+            let mut selected_action = None;
+            let mut cancel = false;
+            egui::Window::new(self.t("Scheduled actions conflict"))
+                .frame(self.modal_window_chrome(ctx))
+                .title_frame(self.modal_window_chrome(ctx))
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .default_width(480.0)
+                .show(ctx, |ui| {
+                    ui.label(self.t("The due jobs finished with different post-actions. Choose one action for this completed batch."));
+                    for (candidate_action, candidate_name) in &options {
+                        selected_action = selected_action.or_else(|| {
+                            let action_name = match candidate_action {
+                                PostAction::CloseApp => self.t("Close Foxy"),
+                                PostAction::ShutdownPc => self.t("Shut down the PC"),
+                                PostAction::None => return None,
+                            };
+                            ui.button(self.t_fmt(
+                                "Use {action} from {job}",
+                                &[("action", action_name), ("job", candidate_name.clone())],
+                            ))
+                            .clicked()
+                            .then_some(*candidate_action)
+                        });
+                    }
+                    cancel = ui.button(self.t("Cancel all post-actions")).clicked();
+                });
+            if cancel {
+                self.cancel_scheduled_post_action();
+            } else if let Some(action) = selected_action
+                && let Some(pending) = self.scheduler_pending_post_action.as_mut()
+            {
+                pending.action = action;
+                pending.action_choice_required = false;
+                pending.deadline = Instant::now() + Duration::from_secs(POST_ACTION_COUNTDOWN_SECS);
+                self.scheduler_deferred_post_actions.clear();
+            }
+            return;
+        }
         let action = pending.action;
         let requires_confirmation = pending.requires_confirmation;
         let job_name = pending.job_name.clone();
+        let waiting_for_due_jobs = !pending.due_batch_ids.is_empty();
         let remaining = pending
             .deadline
             .saturating_duration_since(Instant::now())
@@ -1001,7 +1131,12 @@ impl Foxy {
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .default_width(480.0)
             .show(ctx, |ui| {
-                if requires_confirmation {
+                if waiting_for_due_jobs {
+                    ui.label(self.t_fmt(
+                        "Waiting for {count} already-due jobs to finish before this action.",
+                        &[("count", pending.due_batch_ids.len().to_string())],
+                    ));
+                } else if requires_confirmation {
                     ui.label(self.t("A game started after shutdown was scheduled. Confirm again to shut down the PC."));
                 } else { ui.label(message); }
                 if action == PostAction::ShutdownPc && self.launch_action.game_running.is_none() {
@@ -1017,7 +1152,10 @@ impl Foxy {
                         cancel = true;
                     }
 
-                    let proceed_btn = ui.add(egui::Button::new(proceed_label).fill(destructive));
+                    let proceed_btn = ui.add_enabled(
+                        !waiting_for_due_jobs,
+                        egui::Button::new(proceed_label).fill(destructive),
+                    );
                     if proceed_btn.hovered() {
                         ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                     }

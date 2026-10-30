@@ -8,6 +8,7 @@ use futures::stream::FuturesUnordered;
 use log::{debug, error, info, warn};
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast::Sender;
@@ -30,6 +31,74 @@ use super::{LARGE_FILE_THRESHOLD, MAX_FILE_RETRIES};
 /// small metadata/signature files typical in mod repositories.
 const TINY_FILE_THRESHOLD: usize = 64 * 1024;
 const MOD_PROGRESS_TICK_INTERVAL: Duration = Duration::from_millis(500);
+
+struct ModAttemptProgressEntry {
+    file_id: u64,
+    file_size: usize,
+    transfer_size: AtomicUsize,
+    download_cycle: Arc<AtomicUsize>,
+    active: Arc<AtomicBool>,
+}
+
+#[derive(Clone)]
+struct ModAttemptProgress {
+    attempt: Arc<AtomicUsize>,
+    files_total: Arc<AtomicUsize>,
+    bytes_total: Arc<AtomicUsize>,
+    generation: Arc<AtomicUsize>,
+    update_lock: Arc<Mutex<()>>,
+    entries: Arc<Vec<ModAttemptProgressEntry>>,
+}
+
+fn summarize_attempt_progress(entries: &[ModAttemptProgressEntry]) -> (usize, u64) {
+    let mut files_done = 0usize;
+    let mut bytes_done = 0u64;
+    for entry in entries {
+        if !entry.active.load(Ordering::Relaxed) {
+            continue;
+        }
+        let transfer_size = entry.transfer_size.load(Ordering::Relaxed);
+        let done = entry
+            .download_cycle
+            .load(Ordering::Relaxed)
+            .min(transfer_size);
+        bytes_done += done as u64;
+        if done >= transfer_size {
+            files_done += 1;
+        }
+    }
+    (files_done, bytes_done)
+}
+
+fn progress_snapshot_is_current(generation_before: usize, generation_after: usize) -> bool {
+    generation_before == generation_after && generation_before.is_multiple_of(2)
+}
+
+fn restart_file_progress_for_fallback(
+    file_id: u64,
+    entries: &[ModAttemptProgressEntry],
+) -> (usize, u64, usize, usize) {
+    if let Some(entry) = entries.iter().find(|entry| entry.file_id == file_id) {
+        entry.transfer_size.store(entry.file_size, Ordering::SeqCst);
+        entry.download_cycle.store(0, Ordering::SeqCst);
+    }
+    let (files_done, bytes_done) = summarize_attempt_progress(entries);
+    let files_total = entries
+        .iter()
+        .filter(|entry| entry.active.load(Ordering::SeqCst))
+        .count();
+    let bytes_total = entries
+        .iter()
+        .filter(|entry| entry.active.load(Ordering::SeqCst))
+        .map(|entry| entry.transfer_size.load(Ordering::SeqCst))
+        .sum::<usize>();
+    (
+        files_done,
+        bytes_done,
+        files_total,
+        bytes_total.max(bytes_done as usize),
+    )
+}
 
 pub(super) struct ModDownloadBatch {
     pub(super) mod_id: u64,
@@ -73,6 +142,8 @@ async fn download_single_file(
     has_patch_plan: bool,
     scheduler: Arc<DownloadSchedulerState>,
     download_completion_tx: Option<mpsc::Sender<DownloadModCompletion>>,
+    progress: ModAttemptProgress,
+    progress_tx: Option<Sender<ProgressEvent>>,
 ) -> Result<(), anyhow::Error> {
     let (permit_pool, permit_type) = if file.size > LARGE_FILE_THRESHOLD {
         (Arc::clone(&large_file_permits), "large")
@@ -158,6 +229,7 @@ async fn download_single_file(
                     (Ok(None), "delta_patch")
                 }
                 Ok(None) => {
+                    progress.begin_full_fallback(&file, &progress_tx, &mod_name);
                     let r = download_file_ranges(
                         context.clone(),
                         &file,
@@ -180,6 +252,7 @@ async fn download_single_file(
                         "Patch-first attempt failed unexpectedly: file_id={} mod_id={} file={} error={}",
                         file.file_id, mod_id, &file.download_remote_url, err
                     );
+                    progress.begin_full_fallback(&file, &progress_tx, &mod_name);
                     let r = download_file_ranges(
                         context.clone(),
                         &file,
@@ -335,6 +408,45 @@ async fn download_single_file(
     result.map(|_| ())
 }
 
+impl ModAttemptProgress {
+    fn begin_full_fallback(
+        &self,
+        file: &DownloadTargetFile,
+        progress_tx: &Option<Sender<ProgressEvent>>,
+        mod_name: &str,
+    ) {
+        let _update_guard = self
+            .update_lock
+            .lock()
+            .expect("progress update lock poisoned");
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        let next_attempt = self
+            .attempt
+            .fetch_add(1, Ordering::SeqCst)
+            .saturating_add(1);
+        let (files_done, bytes_done, total_files, total_bytes) =
+            restart_file_progress_for_fallback(file.file_id, &self.entries);
+        self.files_total.store(total_files, Ordering::SeqCst);
+        self.bytes_total.store(total_bytes, Ordering::SeqCst);
+        if let Some(tx) = progress_tx {
+            let _ = tx.send(ProgressEvent::DownloadMod {
+                mod_name: mod_name.to_string(),
+                attempt: next_attempt,
+                files_done,
+                files_total: total_files,
+                bytes_done,
+                bytes_total: total_bytes as u64,
+                percent: if total_bytes == 0 {
+                    1.0
+                } else {
+                    (bytes_done as f32 / total_bytes as f32).min(1.0)
+                },
+            });
+        }
+        self.generation.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn process_mod_batch(
     mut batch: ModDownloadBatch,
@@ -367,6 +479,11 @@ pub(super) async fn process_mod_batch(
 
     let mod_files_total = batch.files.len();
     let mod_bytes_total = batch.total_size;
+    let progress_attempt = Arc::new(AtomicUsize::new(0));
+    let progress_files_total = Arc::new(AtomicUsize::new(mod_files_total));
+    let progress_bytes_total = Arc::new(AtomicUsize::new(mod_bytes_total));
+    let progress_generation = Arc::new(AtomicUsize::new(0));
+    let progress_update_lock = Arc::new(Mutex::new(()));
     let mod_name_arc: Arc<str> = Arc::from(batch.mod_name.clone());
 
     // Extract lightweight progress entries (just size + download counter)
@@ -381,6 +498,27 @@ pub(super) async fn process_mod_batch(
             })
             .collect(),
     );
+    let attempt_entries: Arc<Vec<ModAttemptProgressEntry>> = Arc::new(
+        batch
+            .files
+            .iter()
+            .map(|file| ModAttemptProgressEntry {
+                file_id: file.file_id,
+                file_size: file.size,
+                transfer_size: AtomicUsize::new(file.expected_download_bytes.min(file.size)),
+                download_cycle: file.download_cycle.clone(),
+                active: Arc::new(AtomicBool::new(false)),
+            })
+            .collect(),
+    );
+    let progress_state = ModAttemptProgress {
+        attempt: progress_attempt.clone(),
+        files_total: progress_files_total.clone(),
+        bytes_total: progress_bytes_total.clone(),
+        generation: progress_generation.clone(),
+        update_lock: progress_update_lock.clone(),
+        entries: attempt_entries.clone(),
+    };
     let batch_files = batch.files.clone();
     let mut remaining = std::mem::take(&mut batch.files);
     batch.files = batch_files;
@@ -390,19 +528,35 @@ pub(super) async fn process_mod_batch(
     let progress_wake = Arc::new(tokio::sync::Notify::new());
     let progress_handle = if let Some(tx) = progress_tx.clone() {
         let mod_name = mod_name_arc.clone();
-        let entries = progress_entries.clone();
+        let entries = attempt_entries.clone();
         let stop_signal = progress_stop.clone();
         let wake_signal = progress_wake.clone();
+        let attempt_signal = progress_attempt.clone();
+        let files_total_signal = progress_files_total.clone();
+        let bytes_total_signal = progress_bytes_total.clone();
+        let generation_signal = progress_generation.clone();
         Some(tokio::spawn(async move {
             let mut last_sent: Option<(usize, u64)> = None;
             loop {
                 if stop_signal.load(Ordering::SeqCst) {
                     break;
                 }
-                let (files_done, bytes_done) = summarize_mod_progress(&entries);
+                let generation_before = generation_signal.load(Ordering::SeqCst);
+                let attempt = attempt_signal.load(Ordering::SeqCst);
+                let files_total = files_total_signal.load(Ordering::SeqCst);
+                let (files_done, bytes_done) = summarize_attempt_progress(&entries);
+                let generation_after = generation_signal.load(Ordering::SeqCst);
+                if !progress_snapshot_is_current(generation_before, generation_after) {
+                    let _ =
+                        tokio::time::timeout(MOD_PROGRESS_TICK_INTERVAL, wake_signal.notified())
+                            .await;
+                    continue;
+                }
                 let snapshot = (files_done, bytes_done);
                 if last_sent != Some(snapshot) {
-                    let effective_total = mod_bytes_total.max(bytes_done as usize);
+                    let effective_total = bytes_total_signal
+                        .load(Ordering::SeqCst)
+                        .max(bytes_done as usize);
                     let percent = if effective_total == 0 {
                         1.0
                     } else {
@@ -410,8 +564,9 @@ pub(super) async fn process_mod_batch(
                     };
                     let _ = tx.send(ProgressEvent::DownloadMod {
                         mod_name: mod_name.to_string(),
+                        attempt,
                         files_done,
-                        files_total: mod_files_total,
+                        files_total,
                         bytes_done,
                         bytes_total: effective_total as u64,
                         percent,
@@ -421,8 +576,12 @@ pub(super) async fn process_mod_batch(
                 let _ =
                     tokio::time::timeout(MOD_PROGRESS_TICK_INTERVAL, wake_signal.notified()).await;
             }
-            let (files_done, bytes_done) = summarize_mod_progress(&entries);
-            let effective_total = mod_bytes_total.max(bytes_done as usize);
+            let (files_done, bytes_done) = summarize_attempt_progress(&entries);
+            let attempt = attempt_signal.load(Ordering::SeqCst);
+            let files_total = files_total_signal.load(Ordering::SeqCst);
+            let effective_total = bytes_total_signal
+                .load(Ordering::SeqCst)
+                .max(bytes_done as usize);
             let percent = if effective_total == 0 {
                 1.0
             } else {
@@ -430,8 +589,9 @@ pub(super) async fn process_mod_batch(
             };
             let _ = tx.send(ProgressEvent::DownloadMod {
                 mod_name: mod_name.to_string(),
+                attempt,
                 files_done,
-                files_total: mod_files_total,
+                files_total,
                 bytes_done,
                 bytes_total: effective_total as u64,
                 percent,
@@ -453,6 +613,50 @@ pub(super) async fn process_mod_batch(
             break;
         }
         attempt += 1;
+
+        let attempt_bytes_total = remaining
+            .iter()
+            .filter_map(|file| {
+                attempt_entries
+                    .iter()
+                    .find(|entry| entry.file_id == file.file_id)
+                    .map(|entry| entry.transfer_size.load(Ordering::SeqCst))
+            })
+            .sum::<usize>();
+        let _progress_update_guard = progress_update_lock
+            .lock()
+            .expect("progress update lock poisoned");
+        progress_generation.fetch_add(1, Ordering::SeqCst);
+        for entry in attempt_entries.iter() {
+            entry.active.store(false, Ordering::SeqCst);
+        }
+        for file in &remaining {
+            file.download_cycle.store(0, Ordering::SeqCst);
+            if let Some(entry) = attempt_entries
+                .iter()
+                .find(|entry| entry.file_id == file.file_id)
+            {
+                entry.active.store(true, Ordering::SeqCst);
+            }
+        }
+        let progress_attempt_number = progress_attempt
+            .fetch_add(1, Ordering::SeqCst)
+            .saturating_add(1);
+        progress_files_total.store(remaining.len(), Ordering::SeqCst);
+        progress_bytes_total.store(attempt_bytes_total, Ordering::SeqCst);
+        progress_generation.fetch_add(1, Ordering::SeqCst);
+        drop(_progress_update_guard);
+        if let Some(tx) = &progress_tx {
+            let _ = tx.send(ProgressEvent::DownloadMod {
+                mod_name: batch.mod_name.clone(),
+                attempt: progress_attempt_number,
+                files_done: 0,
+                files_total: remaining.len(),
+                bytes_done: 0,
+                bytes_total: attempt_bytes_total as u64,
+                percent: if attempt_bytes_total == 0 { 1.0 } else { 0.0 },
+            });
+        }
 
         let mut small_queue: VecDeque<DownloadTargetFile> = VecDeque::new();
         let mut large_files: Vec<DownloadTargetFile> = Vec::new();
@@ -476,52 +680,55 @@ pub(super) async fn process_mod_batch(
         let mod_files_done = Arc::new(AtomicUsize::new(0));
         let mod_bytes_done = Arc::new(AtomicUsize::new(0));
 
-        let push_task =
-            |inflight: &mut FuturesUnordered<_>,
-             file: DownloadTargetFile,
-             is_large: bool,
-             context: Arc<FoxyContext>,
-             limiter: Arc<AdaptiveBandwidthLimiter>,
-             large: Arc<Semaphore>,
-             small: Arc<Semaphore>,
-             completed: Arc<AtomicUsize>,
-             mod_id: u64,
-             mod_name: Arc<str>,
-             mod_files_done: Arc<AtomicUsize>,
-             mod_bytes_done: Arc<AtomicUsize>,
-             download_pause_rx: watch::Receiver<bool>,
-             cancel_rx: watch::Receiver<bool>,
-             rollback_session: Option<SharedRollbackSession>,
-             supports_range: bool,
-             metrics: Arc<DownloadMetrics>,
-             has_patch_plan: bool,
-             scheduler: Arc<DownloadSchedulerState>,
-             download_completion_tx: Option<mpsc::Sender<DownloadModCompletion>>| {
-                inflight.push(tokio::spawn(async move {
-                    let res = download_single_file(
-                        context,
-                        file.clone(),
-                        limiter,
-                        large,
-                        small,
-                        completed,
-                        mod_id,
-                        mod_name,
-                        mod_files_done,
-                        mod_bytes_done,
-                        download_pause_rx,
-                        cancel_rx,
-                        rollback_session,
-                        supports_range,
-                        metrics,
-                        has_patch_plan,
-                        scheduler,
-                        download_completion_tx,
-                    )
-                    .await;
-                    (res, is_large, file)
-                }));
-            };
+        let push_task = |inflight: &mut FuturesUnordered<_>,
+                         file: DownloadTargetFile,
+                         is_large: bool,
+                         context: Arc<FoxyContext>,
+                         limiter: Arc<AdaptiveBandwidthLimiter>,
+                         large: Arc<Semaphore>,
+                         small: Arc<Semaphore>,
+                         completed: Arc<AtomicUsize>,
+                         mod_id: u64,
+                         mod_name: Arc<str>,
+                         mod_files_done: Arc<AtomicUsize>,
+                         mod_bytes_done: Arc<AtomicUsize>,
+                         download_pause_rx: watch::Receiver<bool>,
+                         cancel_rx: watch::Receiver<bool>,
+                         rollback_session: Option<SharedRollbackSession>,
+                         supports_range: bool,
+                         metrics: Arc<DownloadMetrics>,
+                         has_patch_plan: bool,
+                         scheduler: Arc<DownloadSchedulerState>,
+                         download_completion_tx: Option<mpsc::Sender<DownloadModCompletion>>,
+                         progress: ModAttemptProgress,
+                         progress_tx: Option<Sender<ProgressEvent>>| {
+            inflight.push(tokio::spawn(async move {
+                let res = download_single_file(
+                    context,
+                    file.clone(),
+                    limiter,
+                    large,
+                    small,
+                    completed,
+                    mod_id,
+                    mod_name,
+                    mod_files_done,
+                    mod_bytes_done,
+                    download_pause_rx,
+                    cancel_rx,
+                    rollback_session,
+                    supports_range,
+                    metrics,
+                    has_patch_plan,
+                    scheduler,
+                    download_completion_tx,
+                    progress,
+                    progress_tx,
+                )
+                .await;
+                (res, is_large, file)
+            }));
+        };
 
         let ctx = context.clone();
         let limiter = rate_limiter.clone();
@@ -553,6 +760,8 @@ pub(super) async fn process_mod_batch(
                     patchable,
                     scheduler_state.clone(),
                     download_completion_tx.clone(),
+                    progress_state.clone(),
+                    progress_tx.clone(),
                 );
                 running_total += 1;
                 continue;
@@ -580,6 +789,8 @@ pub(super) async fn process_mod_batch(
                     patchable,
                     scheduler_state.clone(),
                     download_completion_tx.clone(),
+                    progress_state.clone(),
+                    progress_tx.clone(),
                 );
                 running_total += 1;
                 continue;
@@ -669,6 +880,8 @@ pub(super) async fn process_mod_batch(
                         patchable,
                         scheduler_state.clone(),
                         download_completion_tx.clone(),
+                        progress_state.clone(),
+                        progress_tx.clone(),
                     );
                     running_total += 1;
                     continue;
@@ -696,6 +909,8 @@ pub(super) async fn process_mod_batch(
                         patchable,
                         scheduler_state.clone(),
                         download_completion_tx.clone(),
+                        progress_state.clone(),
+                        progress_tx.clone(),
                     );
                     running_total += 1;
                     continue;
@@ -803,4 +1018,94 @@ pub(super) async fn process_mod_batch(
     }
 
     (slot_budget, batch, remaining.is_empty() && !cancelled)
+}
+
+#[cfg(test)]
+mod attempt_progress_tests {
+    use super::{
+        ModAttemptProgressEntry, progress_snapshot_is_current, restart_file_progress_for_fallback,
+        summarize_attempt_progress,
+    };
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[test]
+    fn attempt_progress_excludes_files_from_prior_attempts() {
+        let entries = [
+            ModAttemptProgressEntry {
+                file_id: 1,
+                file_size: 100,
+                transfer_size: AtomicUsize::new(100),
+                download_cycle: Arc::new(AtomicUsize::new(100)),
+                active: Arc::new(AtomicBool::new(false)),
+            },
+            ModAttemptProgressEntry {
+                file_id: 2,
+                file_size: 200,
+                transfer_size: AtomicUsize::new(200),
+                download_cycle: Arc::new(AtomicUsize::new(50)),
+                active: Arc::new(AtomicBool::new(true)),
+            },
+        ];
+
+        assert_eq!(summarize_attempt_progress(&entries), (0, 50));
+    }
+
+    #[test]
+    fn attempt_progress_caps_transferred_bytes_at_file_size() {
+        let entries = [ModAttemptProgressEntry {
+            file_id: 3,
+            file_size: 100,
+            transfer_size: AtomicUsize::new(100),
+            download_cycle: Arc::new(AtomicUsize::new(150)),
+            active: Arc::new(AtomicBool::new(true)),
+        }];
+
+        assert_eq!(summarize_attempt_progress(&entries), (1, 100));
+    }
+
+    #[test]
+    fn successful_patch_completes_its_planned_transfer_bytes() {
+        let entries = [ModAttemptProgressEntry {
+            file_id: 9,
+            file_size: 100,
+            transfer_size: AtomicUsize::new(20),
+            download_cycle: Arc::new(AtomicUsize::new(20)),
+            active: Arc::new(AtomicBool::new(true)),
+        }];
+
+        assert_eq!(summarize_attempt_progress(&entries), (1, 20));
+    }
+
+    #[test]
+    fn full_fallback_starts_a_new_attempt_without_counting_patch_bytes() {
+        let entries = [
+            ModAttemptProgressEntry {
+                file_id: 1,
+                file_size: 100,
+                transfer_size: AtomicUsize::new(20),
+                download_cycle: Arc::new(AtomicUsize::new(80)),
+                active: Arc::new(AtomicBool::new(true)),
+            },
+            ModAttemptProgressEntry {
+                file_id: 2,
+                file_size: 50,
+                transfer_size: AtomicUsize::new(50),
+                download_cycle: Arc::new(AtomicUsize::new(20)),
+                active: Arc::new(AtomicBool::new(true)),
+            },
+        ];
+
+        let fallback = restart_file_progress_for_fallback(1, &entries);
+
+        assert_eq!(fallback, (0, 20, 2, 150));
+        assert_eq!(entries[0].transfer_size.load(Ordering::SeqCst), 100);
+    }
+
+    #[test]
+    fn stale_or_in_progress_ticker_generations_are_not_publishable() {
+        assert!(progress_snapshot_is_current(4, 4));
+        assert!(!progress_snapshot_is_current(4, 6));
+        assert!(!progress_snapshot_is_current(5, 5));
+    }
 }

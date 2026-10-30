@@ -25,6 +25,20 @@ pub fn load(path: &Path, repo_root: &Path, run_dir: &Path) -> Result<Value> {
     Ok(value)
 }
 
+fn safe_config_file_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && !path.starts_with('\\')
+        && !path.contains('\\')
+        && !path.contains(':')
+        && path
+            .split('/')
+            .all(|component| !component.is_empty() && component != "." && component != "..")
+        && Path::new(path)
+            .extension()
+            .is_some_and(|extension| extension == "json")
+}
+
 fn expand(value: &mut Value, root: &Path, run: &Path) -> Result<()> {
     match value {
         Value::String(text) => {
@@ -74,6 +88,22 @@ pub fn validate(case: &Value) -> Result<()> {
         matches!(harness, "gui" | "cli"),
         "Case harness must be gui or cli"
     );
+    if let Some(files) = case.get("config_files") {
+        let files = files
+            .as_object()
+            .context("config_files must map relative JSON paths to JSON values")?;
+        ensure!(!files.is_empty(), "config_files cannot be empty");
+        for path in files.keys() {
+            let relative = Path::new(path);
+            ensure!(
+                safe_config_file_path(path)
+                    && relative
+                        .components()
+                        .all(|component| { matches!(component, std::path::Component::Normal(_)) }),
+                "config_files paths must be relative .json paths without traversal"
+            );
+        }
+    }
     if kind == "ux" {
         ensure!(harness == "gui", "UX cases require the gui harness");
         ensure!(case["steps"].is_array(), "UX case requires steps");
@@ -150,6 +180,10 @@ pub fn validate(case: &Value) -> Result<()> {
                         | "capture-origin-requests"
                         | "assert-origin-requests-unchanged"
                         | "assert-pending-update-count"
+                        | "assert-config-json"
+                        | "wait-for-config-json"
+                        | "ui-set-setting"
+                        | "second-process-game-use"
                         | "invoke-driver"
                         | "wait-for-busy"
                 )
@@ -181,6 +215,32 @@ pub fn validate(case: &Value) -> Result<()> {
                         ["config", "export", _]
                             | ["config", "import", _, "--yes"]
                             | ["config", "extra-file", "list"]
+                            | ["config", "extra-file", "activate", "--yes" | "--dry-run"]
+                            | [
+                                "config",
+                                "extra-file",
+                                "activate",
+                                "--keep-extra-file" | "--reapply-extra-file",
+                                _,
+                                "--yes"
+                            ]
+                            | [
+                                "config",
+                                "extra-file",
+                                "activate",
+                                "--approve-extra-file-layers",
+                                "--yes"
+                            ]
+                            | [
+                                "config",
+                                "extra-file",
+                                "set",
+                                _,
+                                "--enabled",
+                                "true" | "false",
+                                "--order",
+                                _
+                            ]
                             | [
                                 "config",
                                 "extra-file",
@@ -255,6 +315,8 @@ pub fn validate(case: &Value) -> Result<()> {
                         _,
                     ] => &[6, 8],
                     ["config", "extra-file", "list"] | ["workshop", "list"] => &[],
+                    ["config", "extra-file", "activate", ..]
+                    | ["config", "extra-file", "set", ..] => &[],
                     ["workshop", "add", _, "--backend", "none", "--skip-metadata"]
                     | ["workshop", "set", _, "--enabled", _]
                     | ["workshop", "remove", _, "--delete-data", "--yes"]
@@ -329,11 +391,17 @@ pub fn validate(case: &Value) -> Result<()> {
             }
             if matches!(
                 operation["op"].as_str(),
-                Some("assert-file-exists" | "assert-file-absent")
+                Some("assert-file-exists" | "assert-file-absent" | "assert-file-content")
             ) {
                 ensure!(
                     operation["path"].is_string(),
                     "File existence assertions require a run-local path"
+                );
+            }
+            if operation["op"].as_str() == Some("assert-file-content") {
+                ensure!(
+                    operation["content"].is_string(),
+                    "assert-file-content requires UTF-8 content"
                 );
             }
             if operation["op"].as_str() == Some("assert-pending-update-count") {
@@ -352,6 +420,62 @@ pub fn validate(case: &Value) -> Result<()> {
                         .as_array()
                         .is_none_or(|addons| addons.iter().all(Value::is_string)),
                     "assert-pending-update-count addons must be an array of names"
+                );
+            }
+            if matches!(
+                operation["op"].as_str(),
+                Some("assert-config-json" | "wait-for-config-json")
+            ) {
+                ensure!(
+                    harness == "gui"
+                        && operation["path"].is_string()
+                        && operation["json_path"]
+                            .as_str()
+                            .is_some_and(|path| !path.is_empty())
+                        && operation.get("equals").is_some(),
+                    "Config JSON assertions require a GUI case, path, json_path, and equals"
+                );
+            }
+            if operation["op"].as_str() == Some("ui-set-setting") {
+                ensure!(
+                    harness == "gui"
+                        && operation["key"].as_str().is_some_and(|key| !key.is_empty())
+                        && operation["value"].is_string(),
+                    "ui-set-setting requires a GUI case, key, and string value"
+                );
+            }
+            if operation["op"].as_str() == Some("second-process-game-use") {
+                ensure!(
+                    harness == "gui"
+                        && operation["setup_once"].as_bool() == Some(true)
+                        && operation["wait_timeout_s"]
+                            .as_u64()
+                            .is_none_or(|seconds| seconds > 0)
+                        && operation["space_id"].as_str().is_some_and(|id| {
+                            id.split('-').all(|part| {
+                                !part.is_empty()
+                                    && part
+                                        .bytes()
+                                        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit())
+                            })
+                        })
+                        && operation["unchanged_paths"]
+                            .as_array()
+                            .is_some_and(|paths| {
+                                !paths.is_empty() && paths.iter().all(Value::is_string)
+                            }),
+                    "second-process-game-use requires a GUI case, space_id, and config unchanged_paths"
+                );
+            }
+            if matches!(
+                operation["op"].as_str(),
+                Some("assert-config-json" | "wait-for-config-json")
+            ) {
+                ensure!(
+                    operation["wait_timeout_s"]
+                        .as_u64()
+                        .is_none_or(|seconds| seconds > 0),
+                    "Config JSON wait_timeout_s must be positive"
                 );
             }
             if matches!(
@@ -449,6 +573,51 @@ mod tests {
             hash(&json!({"a":1,"b":2})).unwrap()
         );
         assert_ne!(hash(&json!([1, 2])).unwrap(), hash(&json!([2, 1])).unwrap());
+    }
+
+    #[test]
+    fn config_file_seed_paths_must_remain_relative_json_paths() {
+        let base = || {
+            json!({
+                "id":"config-seed-paths",
+                "kind":"perf",
+                "repository":{},
+                "operations":[]
+            })
+        };
+        let mut valid = base();
+        valid["config_files"] = json!({"games/space-b/game_settings.json":{"future":1}});
+        assert!(validate(&valid).is_ok());
+        for unsafe_path in [
+            "../outside.json",
+            "games/../../outside.json",
+            "C:/outside.json",
+        ] {
+            let mut invalid = base();
+            invalid["config_files"] = json!({(unsafe_path):{"future":1}});
+            assert!(validate(&invalid).is_err(), "accepted {unsafe_path}");
+        }
+    }
+
+    #[test]
+    fn second_process_lock_case_is_gui_setup_only() {
+        let operation = json!({
+            "op":"second-process-game-use",
+            "setup_once":true,
+            "space_id":"space-b",
+            "unchanged_paths":["${RUN_DIR}/config/games.json"]
+        });
+        let case = json!({
+            "id":"single-config-owner",
+            "kind":"perf",
+            "harness":"gui",
+            "repository":{},
+            "operations":[operation]
+        });
+        assert!(validate(&case).is_ok());
+        let mut invalid = case.clone();
+        invalid["operations"][0]["setup_once"] = json!(false);
+        assert!(validate(&invalid).is_err());
     }
     #[test]
     fn origin_switch_requires_a_root_and_a_case_origin() {
@@ -735,6 +904,18 @@ mod tests {
 
         let mut invalid = case;
         invalid["operations"][0]["external_edit_after_promoted_file"] = json!(true);
+        assert!(validate(&invalid).is_err());
+    }
+
+    #[test]
+    fn reviewed_extra_file_case_and_exact_content_assertions_validate() {
+        let case: Value = serde_json::from_str(include_str!(
+            "../../examples/state-r21-r22-extra-file-review-ssd.example.json"
+        ))
+        .unwrap();
+        assert!(validate(&case).is_ok());
+        let mut invalid = case;
+        invalid["operations"][3]["content"] = Value::Null;
         assert!(validate(&invalid).is_err());
     }
 }

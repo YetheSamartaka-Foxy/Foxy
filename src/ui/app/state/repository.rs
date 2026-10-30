@@ -502,6 +502,7 @@ pub struct PendingJoinPreflightState {
     pub final_facts_refreshed: bool,
     /// The user's pending final choice: true keeps the selected suggestions.
     pub final_confirmation_choice: Option<bool>,
+    pub final_query_error: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -543,6 +544,7 @@ impl PendingJoinPreflightState {
             query_server_before_join: false,
             final_facts_refreshed: false,
             final_confirmation_choice: None,
+            final_query_error: None,
         }
     }
 

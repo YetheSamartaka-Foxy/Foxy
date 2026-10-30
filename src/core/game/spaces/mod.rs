@@ -1,6 +1,7 @@
 mod migration;
 mod preservation;
 mod settings_split;
+pub(crate) use migration::{acknowledge_legacy_migration_review, pending_legacy_migration_review};
 
 pub use preservation::PrivatePayloadPreview;
 
@@ -470,7 +471,7 @@ fn unique_space_id(root: &Path, registry: &GamesRegistryFile, display_name: &str
 /// the active game space for this process. Runs the one-shot legacy migration
 /// when `games.json` is absent. Call before any settings, repository, or
 /// database file is read.
-pub fn ensure_game_spaces_layout() {
+pub fn ensure_game_spaces_layout() -> Result<(), String> {
     match ensure_layout_at(&app_paths::foxy_data_dir()) {
         Ok(active) => {
             set_process_active_game_space(active);
@@ -480,11 +481,35 @@ pub fn ensure_game_spaces_layout() {
                 active.space_id,
                 active.game_id
             );
+            Ok(())
         }
         Err(err) => {
             log::error!("Failed to prepare the game space layout: {}", err);
+            Err(err)
         }
     }
+}
+
+pub(crate) fn unreadable_registry_backup() -> Result<Option<PathBuf>, String> {
+    let path = games_registry_path(&app_paths::foxy_data_dir());
+    if !path.exists() || load_games_registry(&path).is_ok() {
+        return Ok(None);
+    }
+    crate::core::utils::fs_safety::preserve_unreadable_file(&path)
+        .map(Some)
+        .ok_or_else(|| "The unreadable game-space registry could not be preserved".to_string())
+}
+
+pub(crate) fn replace_unreadable_registry(backup: &Path) -> Result<(), String> {
+    let path = games_registry_path(&app_paths::foxy_data_dir());
+    if load_games_registry(&path).is_ok() {
+        return Ok(());
+    }
+    let original = std::fs::read(&path).map_err(|error| error.to_string())?;
+    if std::fs::read(backup).map_err(|error| error.to_string())? != original {
+        return Err("The game-space registry changed. Review it again before replacing it.".into());
+    }
+    save_games_registry(&path, &GamesRegistryFile::single_space_default())
 }
 
 fn ensure_layout_at(root: &Path) -> Result<ActiveGameSpace, String> {
@@ -500,17 +525,10 @@ fn ensure_layout_at(root: &Path) -> Result<ActiveGameSpace, String> {
                         "Games registry is unreadable and could not be preserved: {err}"
                     ));
                 };
-                log::warn!(
-                    "Games registry is unreadable ({}) and was preserved as {}; rewriting the default single-space registry",
-                    err,
-                    backup_path
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                );
-                let registry = GamesRegistryFile::single_space_default();
-                save_games_registry(&registry_path, &registry)?;
-                registry
+                let _ = backup_path;
+                return Err(format!(
+                    "The game-space registry was preserved and requires explicit replacement approval: {err}"
+                ));
             }
         }
     } else {
@@ -679,16 +697,17 @@ mod tests {
     }
 
     #[test]
-    fn ensure_layout_rewrites_corrupt_registry() {
+    fn ensure_layout_preserves_corrupt_registry_without_unconfirmed_replacement() {
         let dir = tempfile::tempdir().expect("temp dir");
         let registry_path = dir.path().join(GAMES_REGISTRY_FILE);
         std::fs::write(&registry_path, "{broken").expect("write");
 
-        let active = ensure_layout_at(dir.path()).expect("layout");
-
-        assert_eq!(active.space_id, DEFAULT_GAME_SPACE_ID);
-        let loaded = load_games_registry(&registry_path).expect("load");
-        assert_eq!(loaded.active_game_space_id, DEFAULT_GAME_SPACE_ID);
+        assert!(ensure_layout_at(dir.path()).is_err());
+        assert_eq!(std::fs::read_to_string(&registry_path).unwrap(), "{broken");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("games.json.unreadable")).unwrap(),
+            "{broken"
+        );
     }
 
     #[test]

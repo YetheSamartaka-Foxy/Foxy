@@ -15,5 +15,6 @@
 - A legacy flat `settings.json`/`repositories.json` layout is migrated on startup into the split layout above (`src/core/game/spaces/migration.rs`, rules in `conventions/GAME_SPACES_CONVENTIONS.md`). `agent-gui fixture` files keep the flat layout on purpose and rely on that migration.
 - Keep `examples/` aligned with real runtime formats used by `%APPDATA%\\Foxy` files and remote `repository_space.json` / `repo.json` manifests.
 - When adding or changing config schemas, manifest schemas, or generated repository JSON, update relevant files in `examples/` in the same change.
+- `games/arma3/storage_targets.json` illustrates the space-local normalized-path to device-identity map. `extra_file_activations.json` records successful destination evidence and reviewed layer signatures; these machine-local records are not portable config-pack contents.
 - The settings examples must match the partition in `GAME_SPACE_SETTINGS_KEYS` (`src/core/game/spaces/settings_split.rs`): a key listed there belongs in a space's `game_settings.json`, never in `app_settings.json`. Moving a key between halves means moving it in the examples too.
 - Treat examples as non-production data: do not store secrets, tokens, or personal local paths.

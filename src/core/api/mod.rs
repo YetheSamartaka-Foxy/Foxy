@@ -44,6 +44,7 @@ mod fs_watcher;
 mod logging;
 mod quick_scan;
 mod startup_diagnostics;
+mod storage_targets;
 mod sync_pipeline;
 mod types;
 pub use check_contracts::{LinkedTargetPreview, preview_linked_targets};

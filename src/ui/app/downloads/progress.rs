@@ -170,6 +170,7 @@ impl Foxy {
         self.download_hash_sample_parts = 0;
         if !self.mod_download_progress.is_empty() {
             self.mod_download_progress.clear();
+            self.mod_download_attempts.clear();
             self.invalidate_update_modal_sort_cache();
         }
         self.current_sync_mode = None;

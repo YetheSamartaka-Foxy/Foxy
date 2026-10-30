@@ -42,6 +42,8 @@ pub struct AddonBackupRestoreState {
     pub selected_backup_index: usize,
     pub origin_consent: Option<AddonBackupRestoreConsent>,
     pub pending_origin_confirmation: Option<BackupOriginConfirmation>,
+    pub retry_arbitration: bool,
+    pub allow_retry: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -49,7 +49,20 @@ foxy-testkit run --case .\testkit\examples\state-delta-clean-check-ssd.example.j
 foxy-testkit run --case .\testkit\examples\state-n01-external-edit-rollback.example.json --no-build
 foxy-testkit run --case .\testkit\examples\state-n05-foxypack-atomic-import.example.json --no-build
 foxy-testkit run --case .\testkit\examples\state-n03-n14-workshop-selection.example.json --no-build
+foxy-testkit run --case .\testkit\examples\state-r14-unknown-settings-roundtrip.example.json --no-build
+foxy-testkit run --case .\testkit\examples\state-r03-r18-single-config-process.example.json --no-build
+foxy-testkit run --case .\testkit\examples\state-r21-r22-extra-file-review-ssd.example.json --no-build
 ```
+
+The R14 case saves a known setting through the running GUI, waits for the
+persisted JSON, restarts Foxy, then checks valid unknown fields in both split
+settings files. The R03/R18 case starts a second CLI command against the same
+isolated root while the GUI is open, targets a different space, and requires
+`DATABASE_BUSY=6` plus byte-identical registry and settings files. Both use
+generated loopback repositories and per-run configuration directories.
+The R21/R22 CLI case checks edited destinations, Keep versus Reapply, retained
+templates, and explicit approval of a changed later-layer winner, asserting
+file contents before and after each decision.
 
 The hash-check recovery examples use generated origins and repository paths
 under `${RUN_DIR}`. Run them sequentially after building the app, runner,

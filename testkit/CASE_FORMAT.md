@@ -20,6 +20,7 @@ the ignored run directory.
 | `config_dir` | no | run-local `config` | isolated path, never the live Foxy root |
 | `config_seed` | no | none | directory copied into `config_dir` before the fixture |
 | `fixture` | no | generated from `repository` | agent-gui fixture object |
+| `config_files` | no | `{}` | synthetic JSON files written under the isolated `config_dir` after fixture setup and before launch |
 | `origin` | no | none | `{root, port}` local origin served for the run |
 | `profile` | no | `false` | boolean; sets `FOXY_PROFILE=1` for the run |
 | `notes` | no | empty | Free text kept with the case; ignored by the runner |
@@ -30,6 +31,12 @@ written straight into the isolated config directory in the legacy flat layout
 so Foxy's one-shot game-space migration converts it on first start. Supply
 `fixture.files` to use an exact fixture instead; only `settings.json`,
 `repositories.json`, and `repository_spaces.json` are accepted.
+
+`config_files` adds or replaces run-local `.json` files after fixture generation
+and before Foxy starts. Paths are relative and cannot traverse outside
+`config_dir`; the runner rejects links and non-file destinations. Use this for
+synthetic split settings or a multi-space `games.json`, not for runtime user
+data.
 
 `config_seed` copies a real Foxy configuration directory into the isolated
 config directory, so a case can measure an already-populated profile - real
@@ -133,7 +140,8 @@ Supported operations are `startup`, `ui-walk`, `switch-game-space`,
 `replace-test-file-with-directory`, `move-origin-addon-category`,
 `capture-origin-requests`, `assert-origin-requests-unchanged`,
 `assert-file-exists`, `assert-file-absent`, and
-`assert-pending-update-count`.
+`assert-pending-update-count`, `ui-set-setting`, `wait-for-config-json`,
+`assert-config-json`, and `second-process-game-use`.
 `seed-startup-state` stops the
 app, then in the case repository's database ensures a saved pending update (an
 existing row is left as it is) and, when `stale_link` is true, an addon file
@@ -458,10 +466,23 @@ HTTP request count, which lets a local-check case prove it made no server
 request. These controls require a case origin and are not ledgered.
 `assert-file-exists` and `assert-file-absent` check a named regular file under
 the run directory and are not ledgered.
+`assert-file-content` compares that run-local regular file with the exact UTF-8
+`content` value, without following a final symbolic link.
 `assert-pending-update-count` checks that the named repository has at least the
 requested number of pending addon updates in the GUI driver's current view; an
 optional `maximum` makes the assertion an exact or bounded count, and optional
 `addons` requires named addons to appear in the pending update set.
+`ui-set-setting` changes one supported setting through the running app's
+`agent-gui` driver. Pair it with `wait-for-config-json`, `startup`, and
+`assert-config-json` to prove a UI save reached disk and survived restart.
+Config JSON assertions resolve a dotted object/array path and compare its value
+exactly; every target must be a regular file inside the isolated config root.
+`second-process-game-use` is a GUI-only setup operation that starts a separate
+Foxy CLI process with the exact same run-local config directory and runs
+`game use <space_id>`. It requires exit code 6 (`DATABASE_BUSY`) and verifies
+that the listed config files are byte-identical before and after the attempt.
+This checks the operational root claim while another game space is targeted;
+it does not replace the database and physical-target lock checks.
 `acquire-test-file-lock` and `release-test-file-lock` are Windows-only state
 operations for deterministic file-operation failures. By default they hold an
 existing regular file under the run's synthetic repository open with sharing

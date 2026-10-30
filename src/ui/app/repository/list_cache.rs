@@ -15,7 +15,9 @@ use crate::ui::app::{
     CachedUpdateLoadOutcome, CachedUpdateLoadResult, Foxy, StartupPendingUpdateRestoreRecord,
     StartupPendingUpdateRestoreRequest,
 };
-use crate::ui::types::{RepoState, Repository, normalize_loaded_repositories};
+use crate::ui::types::{
+    RepoState, Repository, RepositoryPresetCheckOutcome, normalize_loaded_repositories,
+};
 
 impl Foxy {
     pub(in crate::ui::app) fn bump_repository_list_data_version(&mut self) {
@@ -150,6 +152,62 @@ impl Foxy {
             .get(&Self::repo_instance_key(repository_url, local_path))
             .copied()
             .unwrap_or(RepoState::Unknown)
+    }
+
+    pub fn repo_state_for_repository(&self, repository: &Repository) -> RepoState {
+        let instance_key = Self::repo_instance_key(&repository.address, &repository.path);
+        let physical_state = self
+            .repo_states
+            .get(&instance_key)
+            .copied()
+            .unwrap_or(RepoState::Unknown);
+        if physical_state == RepoState::Updating {
+            return RepoState::Updating;
+        }
+
+        let profile = repository.selected_profile.as_deref();
+        let mut selected_addons: Vec<String> = Self::resolve_selected_mod_states(repository, None)
+            .into_iter()
+            .filter(|(_, enabled)| *enabled)
+            .map(|(name, _)| name.to_lowercase())
+            .collect();
+        selected_addons.sort_unstable();
+        selected_addons.dedup();
+
+        if repository.preset_selection_unchecked {
+            return RepoState::Unknown;
+        }
+
+        let evidence_state = preset_evidence_state(repository, profile, &selected_addons);
+
+        if self
+            .pending_update_cache
+            .get(&instance_key)
+            .is_some_and(|mods| pending_for_selection(mods, &selected_addons))
+        {
+            return RepoState::PendingUpdate;
+        }
+
+        if let Some(state) = evidence_state {
+            return state;
+        }
+
+        let has_different_sibling_selection = self
+            .repository_view_state
+            .repositories
+            .iter()
+            .filter(|sibling| {
+                Self::repo_instance_key(&sibling.address, &sibling.path) == instance_key
+            })
+            .any(|sibling| {
+                Foxy::addon_selection_fingerprint(sibling)
+                    != Foxy::addon_selection_fingerprint(repository)
+            });
+        if has_different_sibling_selection {
+            RepoState::Unknown
+        } else {
+            physical_state
+        }
     }
 
     /// State-filter tag describing whether the repository instance has been
@@ -954,6 +1012,33 @@ impl Foxy {
     }
 }
 
+fn preset_evidence_state(
+    repository: &Repository,
+    profile: Option<&str>,
+    selected_addons: &[String],
+) -> Option<RepoState> {
+    repository
+        .preset_check_evidence
+        .iter()
+        .filter(|evidence| {
+            evidence.profile.as_deref() == profile && evidence.selected_addons == selected_addons
+        })
+        .max_by_key(|evidence| evidence.checked_at)
+        .map(|evidence| match evidence.outcome {
+            RepositoryPresetCheckOutcome::Synced => RepoState::Synced,
+            RepositoryPresetCheckOutcome::PendingUpdate => RepoState::PendingUpdate,
+        })
+}
+
+fn pending_for_selection(mods: &[ModDiffSummary], selected_addons: &[String]) -> bool {
+    mods.iter().any(|item| {
+        item.needs_update
+            && selected_addons
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(&item.name))
+    })
+}
+
 /// Position of the only item matching `predicate`; `None` when none or several match.
 fn unique_position<T>(
     items: impl Iterator<Item = T>,
@@ -1065,6 +1150,7 @@ fn load_cached_update_outcome(normalized_url: &str, local_path: &str) -> CachedU
 mod tests {
     use super::*;
     use crate::core::api::{FileDiffSummary, ModDiffSummary};
+    use crate::ui::types::{RepositoryPresetCheckEvidence, RepositoryPresetCheckOutcome};
 
     #[test]
     fn url_fallback_only_resolves_a_single_copy() {
@@ -1093,6 +1179,49 @@ mod tests {
         ));
         assert!(!Foxy::update_record_matches_instance(
             url, "", url, path_b, false,
+        ));
+    }
+
+    #[test]
+    fn preset_readiness_does_not_cross_clone_selections() {
+        let lean = Repository {
+            address: "https://repo.example.invalid/main/".to_string(),
+            path: "R:/Mods/RepoAlpha".to_string(),
+            addons: vec![("@mod_01".to_string(), true)],
+            ..Repository::default()
+        };
+        let mut expanded = lean.clone();
+        expanded.addons.push(("@mod_02".to_string(), true));
+        let mut lean = lean;
+        lean.preset_check_evidence
+            .push(RepositoryPresetCheckEvidence {
+                profile: None,
+                selected_addons: vec!["@mod_01".to_string()],
+                outcome: RepositoryPresetCheckOutcome::Synced,
+                checked_at: 1,
+            });
+
+        assert_eq!(
+            preset_evidence_state(&lean, None, &["@mod_01".to_string()]),
+            Some(RepoState::Synced)
+        );
+        assert_eq!(
+            preset_evidence_state(
+                &expanded,
+                None,
+                &["@mod_01".to_string(), "@mod_02".to_string()]
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn pending_extra_addons_do_not_mark_a_lean_selection_pending() {
+        let mods = vec![mod_summary("@mod_02", true, 1)];
+        assert!(!pending_for_selection(&mods, &["@mod_01".to_string()]));
+        assert!(pending_for_selection(
+            &mods,
+            &["@mod_01".to_string(), "@mod_02".to_string()]
         ));
     }
 

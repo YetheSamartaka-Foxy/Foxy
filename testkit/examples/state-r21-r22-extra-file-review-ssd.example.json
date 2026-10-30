@@ -1,0 +1,259 @@
+{
+  "id": "state-r21-r22-extra-file-review-ssd",
+  "kind": "perf",
+  "description": "Review changed extra-file destinations and changed ordered layer winners using isolated files and offline CLI commands.",
+  "build": "release",
+  "harness": "cli",
+  "timeout_s": 180,
+  "origin": {
+    "root": "${RUN_DIR}/origin",
+    "port": 18173,
+    "synthetic": [
+      {
+        "root": "${RUN_DIR}/origin",
+        "seed": 20261021,
+        "mods": 1,
+        "files_per_mod": 1,
+        "file_bytes": 1024,
+        "repo_name": "RepoAlpha"
+      }
+    ]
+  },
+  "repository": {
+    "name": "RepoAlpha",
+    "address": "http://127.0.0.1:18173/",
+    "path": "${RUN_DIR}/repo-alpha",
+    "space_id": null
+  },
+  "config_files": {
+    "games/arma3/extra_files.json": {
+      "entries": [
+        {
+          "id": "alpha",
+          "name": "Template Alpha",
+          "source_name": "config.cfg",
+          "destination": "${RUN_DIR}/game/config.cfg",
+          "kind": "file",
+          "enabled": true,
+          "created_at": 1
+        },
+        {
+          "id": "beta",
+          "name": "Template Beta",
+          "source_name": "config.cfg",
+          "destination": "${RUN_DIR}/game/config.cfg",
+          "kind": "file",
+          "enabled": false,
+          "created_at": 2
+        }
+      ]
+    }
+  },
+  "operations": [
+    {
+      "op": "write-file",
+      "path": "${RUN_DIR}/config/games/arma3/extra_files/alpha/config.cfg",
+      "content": "template-alpha"
+    },
+    {
+      "op": "write-file",
+      "path": "${RUN_DIR}/config/games/arma3/extra_files/beta/config.cfg",
+      "content": "template-beta"
+    },
+    {
+      "op": "cli-command",
+      "label": "first-activation",
+      "args": [
+        "config",
+        "extra-file",
+        "activate",
+        "--yes"
+      ],
+      "path_arguments": [],
+      "expected_exit_code": 0,
+      "expect": []
+    },
+    {
+      "op": "assert-file-content",
+      "path": "${RUN_DIR}/game/config.cfg",
+      "content": "template-alpha"
+    },
+    {
+      "op": "write-file",
+      "path": "${RUN_DIR}/game/config.cfg",
+      "content": "new-user-edit",
+      "overwrite_existing": true
+    },
+    {
+      "op": "cli-command",
+      "label": "preview-changed-destination",
+      "args": [
+        "config",
+        "extra-file",
+        "activate",
+        "--dry-run"
+      ],
+      "path_arguments": [],
+      "expected_exit_code": 0,
+      "expect": [
+        {
+          "path": "data.destination_conflicts.0.entry_id",
+          "equals": "alpha"
+        }
+      ]
+    },
+    {
+      "op": "cli-command",
+      "label": "consent-required",
+      "args": [
+        "config",
+        "extra-file",
+        "activate",
+        "--yes"
+      ],
+      "path_arguments": [],
+      "expected_exit_code": 2,
+      "expect": []
+    },
+    {
+      "op": "assert-file-content",
+      "path": "${RUN_DIR}/game/config.cfg",
+      "content": "new-user-edit"
+    },
+    {
+      "op": "cli-command",
+      "label": "keep-this-file",
+      "args": [
+        "config",
+        "extra-file",
+        "activate",
+        "--keep-extra-file",
+        "alpha",
+        "--yes"
+      ],
+      "path_arguments": [],
+      "expected_exit_code": 0,
+      "expect": []
+    },
+    {
+      "op": "assert-file-content",
+      "path": "${RUN_DIR}/game/config.cfg",
+      "content": "new-user-edit"
+    },
+    {
+      "op": "assert-file-content",
+      "path": "${RUN_DIR}/config/games/arma3/extra_files/alpha/config.cfg",
+      "content": "template-alpha"
+    },
+    {
+      "op": "cli-command",
+      "label": "reapply-template",
+      "args": [
+        "config",
+        "extra-file",
+        "activate",
+        "--reapply-extra-file",
+        "alpha",
+        "--yes"
+      ],
+      "path_arguments": [],
+      "expected_exit_code": 0,
+      "expect": []
+    },
+    {
+      "op": "assert-file-content",
+      "path": "${RUN_DIR}/game/config.cfg",
+      "content": "template-alpha"
+    },
+    {
+      "op": "cli-command",
+      "label": "enable-later-layer",
+      "args": [
+        "config",
+        "extra-file",
+        "set",
+        "beta",
+        "--enabled",
+        "true",
+        "--order",
+        "1"
+      ],
+      "path_arguments": [],
+      "expected_exit_code": 0,
+      "expect": []
+    },
+    {
+      "op": "cli-command",
+      "label": "preview-layer-winner",
+      "args": [
+        "config",
+        "extra-file",
+        "activate",
+        "--dry-run"
+      ],
+      "path_arguments": [],
+      "expected_exit_code": 0,
+      "expect": [
+        {
+          "path": "data.extra_file_layers.0.winner_id",
+          "equals": "beta"
+        },
+        {
+          "path": "data.layer_review_needed",
+          "equals": true
+        }
+      ]
+    },
+    {
+      "op": "cli-command",
+      "label": "layer-review-required",
+      "args": [
+        "config",
+        "extra-file",
+        "activate",
+        "--yes"
+      ],
+      "path_arguments": [],
+      "expected_exit_code": 2,
+      "expect": []
+    },
+    {
+      "op": "assert-file-content",
+      "path": "${RUN_DIR}/game/config.cfg",
+      "content": "template-alpha"
+    },
+    {
+      "op": "cli-command",
+      "label": "approve-later-layer",
+      "args": [
+        "config",
+        "extra-file",
+        "activate",
+        "--approve-extra-file-layers",
+        "--yes"
+      ],
+      "path_arguments": [],
+      "expected_exit_code": 0,
+      "expect": []
+    },
+    {
+      "op": "assert-file-content",
+      "path": "${RUN_DIR}/game/config.cfg",
+      "content": "template-beta"
+    },
+    {
+      "op": "assert-file-content",
+      "path": "${RUN_DIR}/config/games/arma3/extra_files/alpha/config.cfg",
+      "content": "template-alpha"
+    }
+  ],
+  "repetitions": 1,
+  "warmup": false,
+  "guards": {
+    "require_storage_class": "ssd",
+    "require_no_other_foxy": true,
+    "require_clean_worktree": false,
+    "fail_on_db_wipe": true,
+    "max_run_gb": 1
+  }
+}

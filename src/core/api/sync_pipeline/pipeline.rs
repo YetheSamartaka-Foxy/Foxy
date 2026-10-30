@@ -1100,6 +1100,7 @@ async fn run_repository_pipeline(
         trust_verified_hashes,
         persisted_addon_selection,
     } = options;
+    let captured_space_dir = crate::core::game::spaces::active_game_space_dir();
     let builds_download_plan = should_build_download_plan(mode, prepare_download_plan);
     macro_rules! emit_progress {
         ($event:expr) => {
@@ -3196,6 +3197,7 @@ async fn run_repository_pipeline(
         &local_path,
         repository_space_shared_path.as_deref(),
         &enrolled_link_targets,
+        &captured_space_dir,
     )
     .await
     {
@@ -3205,6 +3207,10 @@ async fn run_repository_pipeline(
             return;
         }
     };
+    if let Err(message) = write_targets.validate_current() {
+        emit_progress!(ProgressEvent::Failed(message));
+        return;
+    }
     let _addon_write_claims = match super::super::check_contracts::claim_addon_writes(
         context.clone(),
         &normalized_repo_url,
@@ -3269,8 +3275,14 @@ async fn run_repository_pipeline(
         .filter(|path| !path.trim().is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(app_paths::foxy_data_dir);
-    if let Err(err) =
-        UpdateRollbackSession::cleanup_stale_sessions(&rollback_root, Some(&progress_tx)).await
+    let recovery_targets = write_targets.recovery_targets();
+    if let Err(err) = UpdateRollbackSession::cleanup_stale_sessions_for_targets(
+        &rollback_root,
+        &recovery_targets,
+        Some(&progress_tx),
+        false,
+    )
+    .await
     {
         warn!(
             "Rollback stale-session cleanup failed for repo={}: {}",

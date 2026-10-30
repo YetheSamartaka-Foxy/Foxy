@@ -3119,7 +3119,7 @@ impl Foxy {
                 "name": repo.name,
                 "address": repo.address,
                 "path": repo.path,
-                "state": repo_state_name(self.repo_state_for_address(&repo.address, &repo.path)),
+                "state": repo_state_name(self.repo_state_for_repository(repo)),
                 "selected": self.repository_view_state.selected_repository == Some(index),
                 "pending_update_count": pending,
                 "addon_count": repo.addons.len(),

@@ -117,7 +117,6 @@ impl Foxy {
                     let (
                         repo_name,
                         repo_address,
-                        repo_path,
                         repo_image_checksum,
                         hide_repo_image_override,
                     ) = {
@@ -125,14 +124,15 @@ impl Foxy {
                         (
                             repo.name.clone(),
                             repo.address.clone(),
-                            repo.path.clone(),
                             repo.repo_image_checksum.clone(),
                             repo.hide_repo_image,
                         )
                     };
                     let hide_repo_image = hide_repo_image_override
                         .unwrap_or(self.settings_view_state.hide_repository_image);
-                    let repo_state = self.repo_state_for_address(&repo_address, &repo_path);
+                    let repo_state = self.repo_state_for_repository(
+                        &self.repository_view_state.repositories[selected_idx],
+                    );
                     let status_banner = self
                         .active_repository_check_banner(selected_idx)
                         .or_else(|| self.active_quick_scan_banner(selected_idx))

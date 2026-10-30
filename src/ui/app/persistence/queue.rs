@@ -304,6 +304,7 @@ impl Foxy {
 
                     match result {
                         Ok(()) => {
+                            self.settings_save_error = None;
                             self.settings_completed_revision =
                                 self.settings_completed_revision.max(revision);
                             self.settings_dirty =
@@ -314,6 +315,13 @@ impl Foxy {
                             debug!("Saved app_settings.json and game_settings.json");
                         }
                         Err(err) => {
+                            if self.settings_save_error.as_ref() != Some(&err) {
+                                self.show_error_toast(self.t_fmt(
+                                    "Some settings remain unsaved: {error}",
+                                    &[("error", err.clone())],
+                                ));
+                            }
+                            self.settings_save_error = Some(err.clone());
                             self.settings_dirty = true;
                             self.settings_last_mutated_at = Some(Instant::now());
                             if self.pending_game_space_switch.is_some() {

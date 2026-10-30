@@ -311,6 +311,100 @@ fn progress_probe_summary(samples: &[(f64, f64)], elapsed_s: f64) -> Value {
 }
 
 impl ContextRun<'_> {
+    fn config_file_path(&self, raw: &str) -> Result<PathBuf> {
+        let requested = PathBuf::from(raw);
+        ensure!(
+            requested.is_absolute(),
+            "Config assertion path must be absolute"
+        );
+        ensure!(
+            requested
+                .components()
+                .all(|component| !matches!(component, std::path::Component::ParentDir)),
+            "Config assertion path cannot contain parent-directory components"
+        );
+        let root = fs::canonicalize(self.config)?;
+        let metadata = fs::symlink_metadata(&requested)?;
+        ensure!(
+            metadata.file_type().is_file(),
+            "Config assertion target must be a regular file"
+        );
+        let canonical = fs::canonicalize(requested)?;
+        ensure!(
+            canonical.starts_with(root),
+            "Config assertion target must stay inside the run config directory"
+        );
+        Ok(canonical)
+    }
+
+    fn assert_config_json_value(&self, operation: &Value) -> Result<bool> {
+        let path = self.config_file_path(
+            operation["path"]
+                .as_str()
+                .context("Config JSON assertion requires path")?,
+        )?;
+        let document = read_json(&path)?;
+        let json_path = operation["json_path"]
+            .as_str()
+            .context("Config JSON assertion requires json_path")?;
+        let actual = json_path
+            .split('.')
+            .try_fold(&document, |value, part| match value {
+                Value::Object(object) => object.get(part),
+                Value::Array(array) => part
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|index| array.get(index)),
+                _ => None,
+            });
+        Ok(actual == operation.get("equals"))
+    }
+
+    fn second_process_game_use(&self, operation: &Value) -> Result<()> {
+        let mut snapshots = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for path in operation["unchanged_paths"]
+            .as_array()
+            .context("second-process-game-use requires unchanged_paths")?
+        {
+            let path = self.config_file_path(
+                path.as_str()
+                    .context("unchanged_paths values must be strings")?,
+            )?;
+            ensure!(
+                seen.insert(path.clone()),
+                "unchanged_paths cannot contain duplicates"
+            );
+            snapshots.push((path.clone(), fs::read(path)?));
+        }
+        let space_id = operation["space_id"]
+            .as_str()
+            .context("second-process-game-use requires space_id")?;
+        let mut command = Command::new(self.exe);
+        command
+            .arg("--config-dir")
+            .arg(self.config)
+            .arg("--json")
+            .args(["game", "use", space_id]);
+        launch::environment(&mut command, self.env);
+        let result = launch::process(
+            &mut command,
+            Duration::from_secs(operation["wait_timeout_s"].as_u64().unwrap_or(30)),
+        )?;
+        ensure!(
+            result.status.code() == Some(6),
+            "Second process exited {:?}; expected DATABASE_BUSY (6)",
+            result.status.code()
+        );
+        for (path, before) in snapshots {
+            ensure!(
+                fs::read(&path)? == before,
+                "Second process changed a protected configuration file"
+            );
+        }
+        Ok(())
+    }
+
     fn repository_path(&self) -> Result<PathBuf> {
         let path = PathBuf::from(
             self.case["repository"]["path"]
@@ -461,6 +555,49 @@ impl ContextRun<'_> {
             return Ok(false);
         };
         match name {
+            "ui-set-setting" => {
+                let key = operation["key"]
+                    .as_str()
+                    .context("ui-set-setting requires key")?;
+                let value = operation["value"]
+                    .as_str()
+                    .context("ui-set-setting requires value")?;
+                driver::call(
+                    self.exe,
+                    self.config,
+                    &["set-setting".into(), key.into(), value.into()],
+                    self.env,
+                    Duration::from_secs(30),
+                )?;
+                Ok(true)
+            }
+            "second-process-game-use" => {
+                self.second_process_game_use(operation)?;
+                Ok(true)
+            }
+            "assert-config-json" => {
+                ensure!(
+                    self.assert_config_json_value(operation)?,
+                    "Config JSON value did not match the expected value"
+                );
+                Ok(true)
+            }
+            "wait-for-config-json" => {
+                let timeout =
+                    Duration::from_secs(operation["wait_timeout_s"].as_u64().unwrap_or(30));
+                let deadline = Instant::now() + timeout;
+                loop {
+                    if self.assert_config_json_value(operation)? {
+                        break;
+                    }
+                    ensure!(
+                        Instant::now() < deadline,
+                        "Timed out waiting for a saved config JSON value"
+                    );
+                    thread::sleep(Duration::from_millis(100));
+                }
+                Ok(true)
+            }
             "cli-command" => {
                 self.run_cli_scenario(operation)?;
                 Ok(true)
@@ -682,6 +819,24 @@ impl ContextRun<'_> {
                 file.write_all(content.as_bytes())?;
                 Ok(true)
             }
+            "assert-file-content" => {
+                let path = operation["path"]
+                    .as_str()
+                    .context("assert-file-content requires path")?;
+                let path = ensure_run_path(self.run, &PathBuf::from(path))?;
+                ensure!(
+                    fs::symlink_metadata(&path)?.file_type().is_file(),
+                    "Content assertion requires a regular file"
+                );
+                let expected = operation["content"]
+                    .as_str()
+                    .context("assert-file-content requires content")?;
+                ensure!(
+                    fs::read(&path)? == expected.as_bytes(),
+                    "File contents differ from the expected value"
+                );
+                Ok(true)
+            }
             "assert-file-exists" | "assert-file-absent" => {
                 let path = operation["path"]
                     .as_str()
@@ -829,6 +984,33 @@ impl ContextRun<'_> {
                 .context("path argument index is out of bounds")?;
             let path = PathBuf::from(path);
             ensure_run_path(self.run, &path)?;
+        }
+        if args
+            .get(0..3)
+            .is_some_and(|prefix| prefix == ["config", "extra-file", "activate"])
+        {
+            for space in fs::read_dir(self.config.join("games"))? {
+                let space = space?.path();
+                let store = space.join("extra_files.json");
+                if !store.is_file() {
+                    continue;
+                }
+                let store: Value = serde_json::from_slice(&fs::read(store)?)?;
+                for entry in store["entries"]
+                    .as_array()
+                    .context("Extra-file scenario requires entries")?
+                {
+                    let destination = entry["destination"]
+                        .as_str()
+                        .context("Extra-file destination missing")?;
+                    ensure_run_path(self.run, Path::new(destination))?;
+                    let id = entry["id"].as_str().context("Extra-file id missing")?;
+                    let source = entry["source_name"]
+                        .as_str()
+                        .context("Extra-file source missing")?;
+                    ensure_run_path(self.run, &space.join("extra_files").join(id).join(source))?;
+                }
+            }
         }
         let mut command = Command::new(self.exe);
         command
@@ -2117,6 +2299,7 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
         )?;
     }
     fixture::install(&resolved, &config, &run)?;
+    fixture::install_config_files(&resolved, &config)?;
     if harness == "gui"
         && !config.join("window_state.json").exists()
         && let Some(appdata) = std::env::var_os("APPDATA")

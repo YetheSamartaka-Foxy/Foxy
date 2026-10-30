@@ -2,8 +2,8 @@ use serde_json::json;
 
 use super::{AppState, CommandError, CommandSuccess};
 use crate::cli::args::{
-    CliArgs, ConfigCommand, ConfigExportArgs, ConfigExtraFileAddArgs, ConfigExtraFileCommand,
-    ConfigExtraFileRemoveArgs, ConfigExtraFileSetArgs, ConfigImportArgs,
+    CliArgs, ConfigCommand, ConfigExportArgs, ConfigExtraFileActivateArgs, ConfigExtraFileAddArgs,
+    ConfigExtraFileCommand, ConfigExtraFileRemoveArgs, ConfigExtraFileSetArgs, ConfigImportArgs,
 };
 use crate::cli::exit_codes;
 use crate::core::game::{extra_files, foxypack, spaces};
@@ -182,7 +182,7 @@ fn run_extra_file_command(
         ConfigExtraFileCommand::Add(args) => cmd_extra_file_add(cli, args),
         ConfigExtraFileCommand::Remove(args) => cmd_extra_file_remove(cli, args),
         ConfigExtraFileCommand::Set(args) => cmd_extra_file_set(cli, args),
-        ConfigExtraFileCommand::Activate => cmd_extra_file_activate(cli),
+        ConfigExtraFileCommand::Activate(args) => cmd_extra_file_activate(cli, args),
     }
 }
 
@@ -196,7 +196,13 @@ fn cmd_extra_file_list() -> Result<CommandSuccess, CommandError> {
         store
             .entries
             .iter()
-            .map(|entry| format!("{} - {} -> {}", entry.id, entry.name, entry.destination))
+            .enumerate()
+            .map(|(order, entry)| {
+                format!(
+                    "{}: {} - {} -> {}",
+                    order, entry.id, entry.name, entry.destination
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n")
     };
@@ -241,6 +247,7 @@ fn cmd_extra_file_add(
                 "source": args.source.display().to_string(),
                 "destination": args.destination,
                 "enabled": !args.disabled,
+                "order": args.order,
                 "dry_run": true
             }),
             exit_code: exit_codes::SUCCESS,
@@ -256,6 +263,12 @@ fn cmd_extra_file_add(
         !args.disabled,
     )
     .map_err(|err| CommandError::operation("config.extra-file.add", err))?;
+    let entry = if let Some(order) = args.order {
+        extra_files::set_entry_order(&space_dir, &entry.id, order)
+            .map_err(|err| CommandError::operation("config.extra-file.add", err))?
+    } else {
+        entry
+    };
     Ok(CommandSuccess {
         action: "config.extra-file.add".to_string(),
         message: format!("Added managed extra file {}", entry.id),
@@ -335,13 +348,29 @@ fn cmd_extra_file_set(
         return Ok(CommandSuccess {
             action: "config.extra-file.set".to_string(),
             message: format!("Dry-run: would update managed extra file {}", id),
-            data: json!({"entry": entry, "enabled": args.enabled, "dry_run": true}),
+            data: json!({"entry": entry, "enabled": args.enabled, "order": args.order, "dry_run": true}),
             exit_code: exit_codes::SUCCESS,
         });
     }
 
-    let entry = extra_files::set_entry_enabled(&space_dir, id, args.enabled)
-        .map_err(|err| CommandError::operation("config.extra-file.set", err))?;
+    let entry = if let Some(enabled) = args.enabled {
+        extra_files::set_entry_enabled(&space_dir, id, enabled)
+            .map_err(|err| CommandError::operation("config.extra-file.set", err))?
+    } else {
+        extra_files::load_store(&space_dir)
+            .map_err(|err| CommandError::operation("config.extra-file.set", err))?
+            .entry(id)
+            .cloned()
+            .ok_or_else(|| {
+                CommandError::not_found("config.extra-file.set", "Extra file not found")
+            })?
+    };
+    let entry = if let Some(order) = args.order {
+        extra_files::set_entry_order(&space_dir, id, order)
+            .map_err(|err| CommandError::operation("config.extra-file.set", err))?
+    } else {
+        entry
+    };
     Ok(CommandSuccess {
         action: "config.extra-file.set".to_string(),
         message: format!("Updated managed extra file {}", entry.id),
@@ -350,11 +379,20 @@ fn cmd_extra_file_set(
     })
 }
 
-fn cmd_extra_file_activate(cli: &CliArgs) -> Result<CommandSuccess, CommandError> {
+fn cmd_extra_file_activate(
+    cli: &CliArgs,
+    args: ConfigExtraFileActivateArgs,
+) -> Result<CommandSuccess, CommandError> {
     let state = AppState::load()?;
     let module = crate::core::game::registry().active();
     let install_dir = module.install_dir_from_settings(&state.settings);
     let space_dir = spaces::active_game_space_dir();
+    let conflicts = extra_files::destination_conflicts(&space_dir, install_dir)
+        .map_err(|err| CommandError::operation("config.extra-file.activate", err))?;
+    let layer_conflicts = extra_files::layer_conflicts(&space_dir, install_dir)
+        .map_err(|err| CommandError::operation("config.extra-file.activate", err))?;
+    let layer_review_needed = extra_files::layer_review_needed(&space_dir, &layer_conflicts)
+        .map_err(|err| CommandError::operation("config.extra-file.activate", err))?;
     if cli.dry_run {
         let store = extra_files::load_store(&space_dir)
             .map_err(|err| CommandError::operation("config.extra-file.activate", err))?;
@@ -365,10 +403,28 @@ fn cmd_extra_file_activate(cli: &CliArgs) -> Result<CommandSuccess, CommandError
             data: json!({
                 "enabled_count": enabled_count,
                 "skipped_disabled": store.entries.len().saturating_sub(enabled_count),
+                "destination_conflicts": conflicts,
+                "extra_file_layers": layer_conflicts,
+                "layer_review_needed": layer_review_needed,
                 "dry_run": true
             }),
             exit_code: exit_codes::SUCCESS,
         });
+    }
+    let keep_ids = resolve_extra_file_choices(
+        "config.extra-file.activate",
+        &conflicts,
+        &args.keep_extra_file,
+        &args.reapply_extra_file,
+    )?;
+    if !layer_conflicts.is_empty() && layer_review_needed && !args.approve_extra_file_layers {
+        return Err(CommandError::validation(
+            "config.extra-file.activate",
+            format!(
+                "Extra-file layers have a new or changed winner: {}. Review and pass --approve-extra-file-layers",
+                serde_json::to_string(&layer_conflicts).unwrap_or_default()
+            ),
+        ));
     }
     if !cli.yes {
         return Err(CommandError::validation(
@@ -376,9 +432,17 @@ fn cmd_extra_file_activate(cli: &CliArgs) -> Result<CommandSuccess, CommandError
             "Activating extra files overwrites destination files; pass --yes to confirm",
         ));
     }
+    if !layer_conflicts.is_empty() && layer_review_needed && args.approve_extra_file_layers {
+        extra_files::record_layer_review(&space_dir, &layer_conflicts)
+            .map_err(|err| CommandError::operation("config.extra-file.activate", err))?;
+    }
 
-    let summary = extra_files::activate_for_launch(&space_dir, install_dir)
-        .map_err(|err| CommandError::operation("config.extra-file.activate", err))?;
+    let summary = crate::core::game::launch_preparation::activate_extra_files(
+        &space_dir,
+        install_dir,
+        &keep_ids,
+    )
+    .map_err(|err| CommandError::operation("config.extra-file.activate", err))?;
     let exit_code = if summary.failed.is_empty() {
         exit_codes::SUCCESS
     } else {
@@ -398,4 +462,54 @@ fn cmd_extra_file_activate(cli: &CliArgs) -> Result<CommandSuccess, CommandError
         }),
         exit_code,
     })
+}
+
+pub(super) fn resolve_extra_file_choices(
+    action: &str,
+    conflicts: &[extra_files::DestinationConflict],
+    keep: &[String],
+    reapply: &[String],
+) -> Result<Vec<String>, CommandError> {
+    let mut choices = std::collections::BTreeMap::new();
+    for (keep_current, ids) in [(true, keep), (false, reapply)] {
+        for id in ids {
+            if choices.insert(id.as_str(), keep_current).is_some() {
+                return Err(CommandError::validation(
+                    action,
+                    format!(
+                        "Extra-file conflict choice for {} was provided more than once",
+                        id
+                    ),
+                ));
+            }
+        }
+    }
+    for id in choices.keys() {
+        if !conflicts
+            .iter()
+            .any(|conflict| conflict.entry_id.as_str() == *id)
+        {
+            return Err(CommandError::validation(
+                action,
+                format!("Extra file {} has no current destination conflict", id),
+            ));
+        }
+    }
+    let mut keep_ids = Vec::new();
+    for conflict in conflicts {
+        match choices.get(conflict.entry_id.as_str()) {
+            Some(true) => keep_ids.push(conflict.entry_id.clone()),
+            Some(false) => {}
+            None => {
+                return Err(CommandError::validation(
+                    action,
+                    format!(
+                        "Extra file {} was changed after its last successful launch at {}; choose --keep-extra-file {} or --reapply-extra-file {}",
+                        conflict.name, conflict.destination, conflict.entry_id, conflict.entry_id
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(keep_ids)
 }

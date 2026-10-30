@@ -85,6 +85,8 @@ impl Foxy {
             selected_backup_index: 0,
             origin_consent: None,
             pending_origin_confirmation: None,
+            retry_arbitration: false,
+            allow_retry: false,
         });
         self.addon_backup_notice = None;
         self.needs_repaint = true;
@@ -92,12 +94,27 @@ impl Foxy {
     }
 
     pub fn start_manual_addon_restore(&mut self, restore_state: AddonBackupRestoreState) -> bool {
+        if self.pending_retry_matches_instance(
+            &restore_state.repository_url,
+            &restore_state.repository_path,
+        ) && !restore_state.retry_arbitration
+        {
+            let mut pending = restore_state;
+            pending.retry_arbitration = true;
+            self.addon_backup_restore_state = Some(pending);
+            self.needs_repaint = true;
+            return true;
+        }
         if self.repository_sync_active()
             || self.is_direct_download_running()
             || self.has_addon_backup_task_running()
             || self.backup_cleanup_in_flight
         {
             warn!("Manual addon restore ignored: background work is currently active");
+            self.addon_backup_restore_state = Some(restore_state);
+            self.show_error_toast(
+                self.t("Wait for the current update or backup task to finish before restoring."),
+            );
             return false;
         }
 
@@ -137,6 +154,11 @@ impl Foxy {
             self.set_addon_backup_notice(repo_index, false, message.clone());
             warn!("{}", message);
             return false;
+        }
+
+        if restore_state.retry_arbitration {
+            self.addon_backup_restore_state = Some(restore_state);
+            return true;
         }
 
         let Some(selected_backup) = restore_state

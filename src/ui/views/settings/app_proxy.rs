@@ -135,6 +135,27 @@ impl Foxy {
 
         if apply {
             crate::core::utils::runtime_settings::apply_runtime_settings(&self.settings_view_state);
+            if self.proxy_change_prompt.is_none()
+                && let (Some(repo_index), Some(mode), Some(selected_mod_states), Some(modifiers)) = (
+                    self.syncing_repository,
+                    self.current_sync_mode,
+                    self.active_sync_selection.clone(),
+                    self.active_sync_modifiers,
+                )
+                && let Some(repo) = self.repository_view_state.repositories.get(repo_index)
+            {
+                self.proxy_change_prompt = Some(crate::ui::app::ProxyChangePrompt {
+                    repository_url: repo.address.clone(),
+                    repository_path: repo.path.clone(),
+                    mode,
+                    selected_mod_states,
+                    force_redownload: modifiers.0,
+                    prepare_download_plan: modifiers.1,
+                    force_full_downloads: modifiers.2,
+                    backup_local_drift: modifiers.3,
+                    restart_requested: false,
+                });
+            }
             *changed = true;
         }
     }

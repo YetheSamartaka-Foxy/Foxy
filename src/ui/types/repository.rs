@@ -189,6 +189,8 @@ pub struct Repository {
     #[serde(default)]
     pub repository_space_entry_address: Option<String>,
     #[serde(default)]
+    pub repository_space_membership_review: bool,
+    #[serde(default)]
     pub hash_algorithm_preference: HashAlgorithmPreference,
     /// Unix seconds of the last successful download for this instance.
     #[serde(default)]
@@ -207,9 +209,29 @@ pub struct Repository {
     /// Whether the most recent local verification read every selected file.
     #[serde(default)]
     pub last_check_full: bool,
+    #[serde(default)]
+    pub preset_check_evidence: Vec<RepositoryPresetCheckEvidence>,
+    #[serde(default)]
+    pub preset_selection_unchecked: bool,
     /// Unix seconds of the last game launch from this instance.
     #[serde(default)]
     pub last_launched_at: Option<u64>,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+pub struct RepositoryPresetCheckEvidence {
+    #[serde(default)]
+    pub profile: Option<String>,
+    #[serde(default)]
+    pub selected_addons: Vec<String>,
+    pub outcome: RepositoryPresetCheckOutcome,
+    pub checked_at: u64,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Serialize, Deserialize)]
+pub enum RepositoryPresetCheckOutcome {
+    Synced,
+    PendingUpdate,
 }
 
 fn default_last_check_remote_fresh() -> bool {
@@ -275,6 +297,7 @@ impl Default for Repository {
             app_update_url: String::new(),
             repository_space_id: None,
             repository_space_entry_address: None,
+            repository_space_membership_review: false,
             hash_algorithm_preference: HashAlgorithmPreference::default(),
             last_updated_at: None,
             last_remote_check_at: None,
@@ -282,8 +305,51 @@ impl Default for Repository {
             last_full_verification_at: None,
             last_check_remote_fresh: true,
             last_check_full: false,
+            preset_check_evidence: Vec::new(),
+            preset_selection_unchecked: false,
             last_launched_at: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod preset_check_tests {
+    use super::{
+        Repository, RepositoryPresetCheckEvidence, RepositoryPresetCheckOutcome, RepositoryProfile,
+    };
+
+    #[test]
+    fn repository_persistence_keeps_unchecked_selection_and_preset_evidence() {
+        let mut repository = Repository {
+            addons: vec![("@mod_01".to_string(), false)],
+            ..Repository::default()
+        };
+        let mut profile = RepositoryProfile {
+            name: "Lean".to_string(),
+            ..RepositoryProfile::default()
+        };
+        profile.addons = vec![("@mod_02".to_string(), false)];
+        repository.profiles.push(profile);
+        repository.selected_profile = Some("Lean".to_string());
+        repository.preset_check_evidence = vec![RepositoryPresetCheckEvidence {
+            profile: None,
+            selected_addons: Vec::new(),
+            outcome: RepositoryPresetCheckOutcome::Synced,
+            checked_at: 17,
+        }];
+
+        let json = serde_json::to_string(&repository).unwrap();
+        let restored: Repository = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.addons, vec![("@mod_01".to_string(), false)]);
+        assert_eq!(
+            restored.profiles[0].addons,
+            vec![("@mod_02".to_string(), false)]
+        );
+        assert_eq!(
+            restored.preset_check_evidence,
+            repository.preset_check_evidence
+        );
     }
 }
 

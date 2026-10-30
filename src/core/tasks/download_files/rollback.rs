@@ -105,6 +105,23 @@ fn apply_event(
     }
 }
 
+fn session_overlaps_targets(manifest: &RollbackManifest, targets: &[PathBuf]) -> bool {
+    manifest.entries.iter().any(|entry| {
+        let target =
+            crate::core::utils::content_hash::normalize_path(&entry.target_path.to_string_lossy());
+        targets.iter().any(|root| {
+            let root = crate::core::utils::content_hash::normalize_path(&root.to_string_lossy());
+            target == root
+                || target
+                    .strip_prefix(&root)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+                || root
+                    .strip_prefix(&target)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+        })
+    })
+}
+
 /// Read a session back: the manifest header, then every complete journal
 /// line (a torn last line from a crash is ignored).
 async fn load_session(session_dir: PathBuf) -> Option<UpdateRollbackSession> {
@@ -244,9 +261,20 @@ impl UpdateRollbackSession {
         rollback_root: impl AsRef<Path>,
         _progress_tx: Option<&Sender<ProgressEvent>>,
     ) -> anyhow::Result<()> {
+        Self::cleanup_stale_sessions_for_targets(rollback_root, &[], _progress_tx, true).await
+    }
+
+    pub(crate) async fn cleanup_stale_sessions_for_targets(
+        rollback_root: impl AsRef<Path>,
+        targets: &[PathBuf],
+        progress_tx: Option<&Sender<ProgressEvent>>,
+        all_sessions: bool,
+    ) -> anyhow::Result<()> {
         let base_dir = rollback_root.as_ref().join(ROLLBACK_DIR_NAME);
-        let Ok(mut sessions) = fs::read_dir(&base_dir).await else {
-            return Ok(());
+        let mut sessions = match fs::read_dir(&base_dir).await {
+            Ok(sessions) => sessions,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error).context("Could not inspect previous update recovery"),
         };
 
         while let Some(entry) = sessions.next_entry().await? {
@@ -254,9 +282,14 @@ impl UpdateRollbackSession {
                 continue;
             }
             let Some(mut session) = load_session(entry.path()).await else {
-                continue;
+                anyhow::bail!(
+                    "Previous update recovery is unreadable; affected targets cannot be determined. Restore access or recover the preserved journal before updating."
+                );
             };
             let manifest = &session.manifest;
+            if !all_sessions && !session_overlaps_targets(manifest, targets) {
+                continue;
+            }
             if manifest.committed || manifest.entries.iter().all(|entry| entry.restored) {
                 discard_sidecars(&manifest.entries).await?;
                 remove_dir_if_exists(&session.session_dir).await?;
@@ -283,7 +316,7 @@ impl UpdateRollbackSession {
                         .open(session.session_dir.join(JOURNAL_FILE_NAME))
                         .await?,
                 );
-                session.restore_all(_progress_tx.cloned()).await?;
+                session.restore_all(progress_tx.cloned()).await?;
                 session.commit().await?;
                 continue;
             }
@@ -787,6 +820,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unreadable_recovery_cannot_authorize_an_unproven_independent_target() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("temporary");
+        let session = root.join(ROLLBACK_DIR_NAME).join("incomplete-session");
+        fs::create_dir_all(&session).await.unwrap();
+        let manifest = session.join(MANIFEST_FILE_NAME);
+        fs::write(&manifest, b"{").await.unwrap();
+        assert!(
+            UpdateRollbackSession::cleanup_stale_sessions_for_targets(
+                &root,
+                &[dir.path().join("independent")],
+                None,
+                false,
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(fs::read(manifest).await.unwrap(), b"{");
+    }
+
+    #[tokio::test]
     async fn journal_replays_the_session_state_for_recovery() {
         let dir = tempdir().unwrap();
         let rollback_root = dir.path().join("tmp");
@@ -866,10 +920,14 @@ mod tests {
         let staged = dir.path().join("addon.pbo.foxy.part");
         fs::write(&target, b"original").await.unwrap();
         fs::write(&staged, b"updated").await.unwrap();
-        let mut session = UpdateRollbackSession::new(&dir.path().join("tmp"), "https://repo.example.invalid/")
-            .await.unwrap();
+        let mut session =
+            UpdateRollbackSession::new(&dir.path().join("tmp"), "https://repo.example.invalid/")
+                .await
+                .unwrap();
         session.promote_file(7, &staged, &target).await.unwrap();
-        fs::write(&target, b"external edit during update").await.unwrap();
+        fs::write(&target, b"external edit during update")
+            .await
+            .unwrap();
         session.restore_all(None).await.unwrap();
         assert_eq!(fs::read(target).await.unwrap(), b"original");
         assert!(session.touched_file_ids().contains(&7));
@@ -1041,6 +1099,36 @@ mod tests {
                 .await
                 .is_err()
         );
+        assert!(session_dir.join(MANIFEST_FILE_NAME).exists());
+        assert!(!target.exists());
+    }
+
+    #[tokio::test]
+    async fn unrelated_failed_recovery_does_not_block_target_scoped_cleanup() {
+        let dir = tempdir().unwrap();
+        let rollback_root = dir.path().join("tmp");
+        let blocked = dir.path().join("blocked");
+        let independent = dir.path().join("independent");
+        fs::create_dir_all(&blocked).await.unwrap();
+        fs::create_dir_all(&independent).await.unwrap();
+        let target = blocked.join("old.pbo");
+        fs::write(&target, b"original").await.unwrap();
+        let mut session = UpdateRollbackSession::new(&rollback_root, "https://example.test/")
+            .await
+            .unwrap();
+        session.prepare_replace(1, &target).await.unwrap();
+        let session_dir = session.session_dir.clone();
+        fs::remove_file(sidecar_bak_path(&target)).await.unwrap();
+        drop(session);
+
+        UpdateRollbackSession::cleanup_stale_sessions_for_targets(
+            &rollback_root,
+            &[independent],
+            None,
+            false,
+        )
+        .await
+        .unwrap();
         assert!(session_dir.join(MANIFEST_FILE_NAME).exists());
         assert!(!target.exists());
     }

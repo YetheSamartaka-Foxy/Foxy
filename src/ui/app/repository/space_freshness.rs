@@ -57,6 +57,13 @@ pub struct RepositorySpaceRemoteDelta {
     pub required_changed: Vec<String>,
 }
 
+fn repository_space_membership_removed(
+    entry_address: &str,
+    published_addresses: &std::collections::HashSet<String>,
+) -> bool {
+    !published_addresses.contains(&Foxy::normalize_repo_url(entry_address))
+}
+
 impl RepositorySpaceRemoteDelta {
     pub fn is_empty(&self) -> bool {
         self.added.is_empty() && self.removed.is_empty() && self.required_changed.is_empty()
@@ -316,6 +323,29 @@ impl Foxy {
             &Self::space_entries(&stored.entries),
             &Self::space_entries(&fetched.entries),
         );
+        let published_addresses = fetched
+            .entries
+            .iter()
+            .map(|entry| Self::normalize_repo_url(&entry.address))
+            .collect::<std::collections::HashSet<_>>();
+        let mut membership_changed = false;
+        for repo in &mut self.repository_view_state.repositories {
+            if repo.repository_space_id.as_deref() != Some(space_id.as_str()) {
+                continue;
+            }
+            let Some(entry_address) = repo.repository_space_entry_address.as_deref() else {
+                continue;
+            };
+            let is_removed =
+                repository_space_membership_removed(entry_address, &published_addresses);
+            if repo.repository_space_membership_review != is_removed {
+                repo.repository_space_membership_review = is_removed;
+                membership_changed = true;
+            }
+        }
+        if membership_changed {
+            self.save_repositories();
+        }
         let refreshed = Self::merged_repository_space(Some(&stored), &space_id, fetched, "");
         if refreshed != stored {
             self.store_repository_space(refreshed, ctx);
@@ -375,6 +405,21 @@ mod tests {
     use super::*;
     use crate::ui::app::RepositorySpaceManifestEntry;
     use crate::ui::types::RepositorySpace;
+
+    #[test]
+    fn removed_membership_uses_normalized_remote_address() {
+        let published = [Foxy::normalize_repo_url("https://repo.example.invalid")]
+            .into_iter()
+            .collect();
+        assert!(!repository_space_membership_removed(
+            "https://repo.example.invalid/",
+            &published,
+        ));
+        assert!(repository_space_membership_removed(
+            "https://repo.example.invalid/other/",
+            &published,
+        ));
+    }
 
     fn entry(address: &str, name: &str, required: bool) -> SpaceEntry {
         SpaceEntry {

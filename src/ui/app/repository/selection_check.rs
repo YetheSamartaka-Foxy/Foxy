@@ -5,7 +5,7 @@ use log::info;
 
 use crate::core::api::SyncMode;
 use crate::ui::app::Foxy;
-use crate::ui::types::{RepoState, Repository};
+use crate::ui::types::{Repository, RepositoryPresetCheckEvidence, RepositoryPresetCheckOutcome};
 
 impl Foxy {
     /// The addons a sync of `repo` treats as enabled, after its selected profile.
@@ -27,8 +27,53 @@ impl Foxy {
         enabled.sort_unstable();
         enabled.dedup();
         let mut hasher = DefaultHasher::new();
+        repo.selected_profile.hash(&mut hasher);
         enabled.hash(&mut hasher);
         hasher.finish()
+    }
+
+    fn selection_identity_key(repo: &Repository, repo_idx: usize) -> String {
+        format!(
+            "{}\u{1e}{}",
+            Self::repo_instance_key(&repo.address, &repo.path),
+            repo_idx
+        )
+    }
+
+    fn remap_selection_identity_key(
+        key: &str,
+        remap: impl FnOnce(usize) -> Option<usize>,
+    ) -> Option<String> {
+        let (instance, index) = key.rsplit_once('\u{1e}')?;
+        let index = index.parse::<usize>().ok()?;
+        Some(format!("{instance}\u{1e}{}", remap(index)?))
+    }
+
+    pub(in crate::ui::app) fn remap_addon_selection_indices(
+        &mut self,
+        remap: impl Fn(usize) -> Option<usize>,
+    ) {
+        self.addon_selection_baseline = std::mem::take(&mut self.addon_selection_baseline)
+            .into_iter()
+            .filter_map(|(key, value)| {
+                Self::remap_selection_identity_key(&key, &remap).map(|key| (key, value))
+            })
+            .collect();
+        self.pending_addon_selection_checks =
+            std::mem::take(&mut self.pending_addon_selection_checks)
+                .into_iter()
+                .filter_map(|key| Self::remap_selection_identity_key(&key, &remap))
+                .collect();
+    }
+
+    fn enabled_addon_names(selection: impl Iterator<Item = (String, bool)>) -> Vec<String> {
+        let mut names: Vec<String> = selection
+            .filter(|(_, enabled)| *enabled)
+            .map(|(name, _)| name.to_lowercase())
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        names
     }
 
     pub(in crate::ui::app) fn reset_addon_selection_baseline(&mut self) {
@@ -37,9 +82,10 @@ impl Foxy {
             .repository_view_state
             .repositories
             .iter()
-            .map(|repo| {
+            .enumerate()
+            .map(|(repo_idx, repo)| {
                 (
-                    Self::repo_instance_key(&repo.address, &repo.path),
+                    Self::selection_identity_key(repo, repo_idx),
                     Self::addon_selection_fingerprint(repo),
                 )
             })
@@ -52,17 +98,83 @@ impl Foxy {
         let Some(repo) = self.repository_view_state.repositories.get(repo_idx) else {
             return;
         };
-        let key = Self::repo_instance_key(&repo.address, &repo.path);
+        let key = Self::selection_identity_key(repo, repo_idx);
         self.addon_selection_baseline
             .insert(key.clone(), Self::addon_selection_fingerprint(repo));
         self.pending_addon_selection_checks.remove(&key);
     }
 
+    pub(in crate::ui::app) fn note_preset_check_complete(
+        &mut self,
+        repo_idx: usize,
+        outcome: RepositoryPresetCheckOutcome,
+    ) {
+        let Some(active_selection) = self.active_sync_selection.as_ref() else {
+            return;
+        };
+        let selected_addons = Self::enabled_addon_names(active_selection.iter().cloned());
+        let Some(repo) = self.repository_view_state.repositories.get_mut(repo_idx) else {
+            return;
+        };
+        let current_selection =
+            Self::enabled_addon_names(Self::resolve_selected_mod_states(repo, None).into_iter());
+        if current_selection != selected_addons {
+            return;
+        }
+        repo.preset_selection_unchecked = false;
+        let profile = repo.selected_profile.clone();
+        let checked_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or_default();
+        repo.preset_check_evidence.retain(|evidence| {
+            evidence.profile != profile || evidence.selected_addons != selected_addons
+        });
+        repo.preset_check_evidence
+            .push(RepositoryPresetCheckEvidence {
+                profile,
+                selected_addons,
+                outcome,
+                checked_at,
+            });
+        const MAX_PRESET_EVIDENCE: usize = 16;
+        if repo.preset_check_evidence.len() > MAX_PRESET_EVIDENCE {
+            let remove_count = repo.preset_check_evidence.len() - MAX_PRESET_EVIDENCE;
+            repo.preset_check_evidence.drain(0..remove_count);
+        }
+        self.save_repositories();
+    }
+
+    pub(in crate::ui::app) fn invalidate_preset_checks_for_instance(
+        &mut self,
+        repository_url: &str,
+        local_path: &str,
+    ) {
+        let instance_key = Self::repo_instance_key(repository_url, local_path);
+        let mut changed = false;
+        for repo in &mut self.repository_view_state.repositories {
+            if Self::repo_instance_key(&repo.address, &repo.path) == instance_key
+                && !repo.preset_check_evidence.is_empty()
+            {
+                repo.preset_check_evidence.clear();
+                changed = true;
+            }
+        }
+        if changed {
+            self.save_repositories();
+        }
+    }
+
     /// Background checks read the selection stored in the database, which only
     /// a sync updates, so a changed selection gets its own quick local check.
     pub(in crate::ui::app) fn queue_checks_for_changed_addon_selections(&mut self) {
-        for repo in &self.repository_view_state.repositories {
-            let key = Self::repo_instance_key(&repo.address, &repo.path);
+        for (repo_idx, repo) in self
+            .repository_view_state
+            .repositories
+            .iter_mut()
+            .enumerate()
+        {
+            let key = Self::selection_identity_key(repo, repo_idx);
             let fingerprint = Self::addon_selection_fingerprint(repo);
             if self
                 .addon_selection_baseline
@@ -70,6 +182,7 @@ impl Foxy {
                 .is_some_and(|previous| previous != fingerprint)
                 && self.pending_addon_selection_checks.insert(key)
             {
+                repo.preset_selection_unchecked = true;
                 info!(
                     "Addon selection changed for {}; queueing a quick local check",
                     repo.name
@@ -108,13 +221,11 @@ impl Foxy {
         let mut still_configured = std::collections::HashSet::new();
         let mut next = None;
         for (idx, repo) in self.repository_view_state.repositories.iter().enumerate() {
-            let key = Self::repo_instance_key(&repo.address, &repo.path);
+            let key = Self::selection_identity_key(repo, idx);
             if !self.pending_addon_selection_checks.contains(&key) {
                 continue;
             }
-            if next.is_none()
-                && self.repo_state_for_address(&repo.address, &repo.path) != RepoState::Unknown
-            {
+            if next.is_none() {
                 next = Some((idx, key.clone()));
             }
             still_configured.insert(key);
@@ -166,5 +277,15 @@ mod tests {
         assert_eq!(Foxy::addon_selection_fingerprint(&repo), enabled_more);
         repo.selected_profile = Some("Lean".to_string());
         assert_ne!(Foxy::addon_selection_fingerprint(&repo), enabled_more);
+    }
+
+    #[test]
+    fn selection_check_key_follows_repository_reordering() {
+        let key = "https://repo.example.invalid/\u{1f}R:/Mods/RepoAlpha\u{1e}2";
+        assert_eq!(
+            Foxy::remap_selection_identity_key(key, |index| Some(index - 1)),
+            Some("https://repo.example.invalid/\u{1f}R:/Mods/RepoAlpha\u{1e}1".to_string())
+        );
+        assert_eq!(Foxy::remap_selection_identity_key(key, |_| None), None);
     }
 }

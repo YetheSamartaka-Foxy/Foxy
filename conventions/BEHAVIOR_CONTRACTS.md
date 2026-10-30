@@ -1,6 +1,6 @@
 # Accepted lifecycle, ownership and launch contracts
 
-N01-N18 are settled product decisions from the behavior review. Future gap
+N01-N18 and [R01-R24](REVIEWED_BEHAVIOR_CONTRACTS.md) are settled product decisions. Future gap
 reviews must enforce these contracts, Q1-Q18 in [core conventions](CORE_CONVENTIONS.md)
 and H1-H18 in [hash-check contracts](HASH_CHECK_CONTRACTS.md). Investigate new
 transitions, integrations and failure paths instead of asking the same product

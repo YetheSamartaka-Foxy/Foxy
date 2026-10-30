@@ -448,6 +448,7 @@ pub struct Foxy {
     /// A pending post-action (close app / shut down PC) waiting out its
     /// cancellable countdown before it fires. Runtime-only.
     pub scheduler_pending_post_action: Option<PendingPostAction>,
+    pub(crate) scheduler_deferred_post_actions: Vec<PendingPostAction>,
     /// Due occurrences held back while other work ran, by job id. Holding
     /// does not age them toward the missed-grace window. Runtime-only.
     pub scheduler_held_jobs: HashMap<String, HeldScheduledJob>,
@@ -494,10 +495,20 @@ pub struct Foxy {
     pub(crate) retained_files_cleanup_in_flight: bool,
     pub(crate) pending_retained_file_removal: Option<PendingRetainedFileRemoval>,
     pub current_sync_mode: Option<SyncMode>,
+    pub(crate) active_sync_selection: Option<Vec<(String, bool)>>,
+    pub(crate) active_sync_modifiers: Option<(bool, bool, bool, bool)>,
+    pub(crate) proxy_change_prompt: Option<ProxyChangePrompt>,
+    pub(crate) game_space_switch_prepare_rx:
+        Option<StdReceiver<Result<crate::core::tasks::db_process_lock::ReservedClaim, String>>>,
+    pub(crate) game_space_switch_prepare_worker: Option<std::thread::JoinHandle<()>>,
+    pub(crate) game_space_switch_open_error: Option<String>,
+    pub(crate) legacy_migration_review_files: Vec<String>,
+    pub(crate) settings_save_error: Option<String>,
     pub(crate) pending_integrity_recheck_prompt: Option<(String, String)>,
     pub(crate) integrity_recheck_after_settlement: Option<(String, String)>,
     pub download_progress: Option<(String, f32)>,
     pub download_finished: bool,
+    pub(crate) download_transfer_attempt: u32,
     pub download_finished_repo: Option<usize>,
     pub download_summary: Option<DownloadSummary>,
     /// The downloader refused the last run for this repository index because
@@ -508,6 +519,7 @@ pub struct Foxy {
     pub open_update_after_sync: bool,
     pub needs_repaint: bool,
     pub mod_download_progress: HashMap<String, (f32, usize, usize, u64, u64)>,
+    pub mod_download_attempts: HashMap<String, usize>,
     pub download_started_at: Option<Instant>,
     pub download_stage_started_at: Option<Instant>,
     pub hash_stage_started_at: Option<Instant>,

@@ -460,7 +460,7 @@ impl Foxy {
                                     (
                                         3_u8,
                                         *repo_idx,
-                                        self.repo_state_for_address(&repo.address, &repo.path) as u8,
+                                        self.repo_state_for_repository(repo) as u8,
                                         *indented as u8,
                                         [0, 0, 0],
                                     )

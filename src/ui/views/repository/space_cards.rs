@@ -38,9 +38,7 @@ impl Foxy {
             .repositories
             .iter()
             .filter(|repo| repo.repository_space_id.as_deref() == Some(space.id.as_str()))
-            .filter(|repo| {
-                self.repo_state_for_address(&repo.address, &repo.path) == RepoState::PendingUpdate
-            })
+            .filter(|repo| self.repo_state_for_repository(repo) == RepoState::PendingUpdate)
             .count();
 
         let mut tiles = vec![StatTile {
@@ -115,13 +113,7 @@ impl Foxy {
                 repo.repository_space_id.as_deref() == Some(space.id.as_str())
                     && Self::repo_url_match_key(&repo.address) == normalized_entry
             })
-            .map(|(idx, repo)| {
-                (
-                    idx,
-                    repo.name.clone(),
-                    self.repo_state_for_address(&repo.address, &repo.path),
-                )
-            })
+            .map(|(idx, repo)| (idx, repo.name.clone(), self.repo_state_for_repository(repo)))
             .collect();
         let added = !instances.is_empty();
         let missing_required = entry.required && !added;

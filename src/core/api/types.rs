@@ -98,6 +98,7 @@ pub enum ProgressEvent {
     },
     DownloadMod {
         mod_name: String,
+        attempt: usize,
         files_done: usize,
         files_total: usize,
         bytes_done: u64,

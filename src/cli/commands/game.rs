@@ -311,6 +311,7 @@ fn cmd_generic_game_launch(
                 "cwd": preview_command.cwd.as_ref().map(|path| path.display().to_string()),
                 "manifest": null,
                 "config": config,
+                "extra_file_preparation": super::extra_file_launch_preview("game.launch", &state.settings)?,
                 "issues": launch_plan.issues,
                 "execute": false,
                 "dry_run": cli.dry_run,
@@ -326,6 +327,19 @@ fn cmd_generic_game_launch(
         LaunchApproval {
             incomplete_extra_files: args.allow_incomplete_preparation,
             live_workshop_fallback: args.allow_live_fallback,
+            extra_file_conflicts: super::extra_file_launch_choices(
+                "game.launch",
+                &state.settings,
+                &args.keep_extra_file,
+                &args.reapply_extra_file,
+                args.approve_extra_file_layers,
+                cli.yes,
+            )?,
+            approve_extra_file_layers: super::approved_extra_file_layers(
+                "game.launch",
+                &state.settings,
+                args.approve_extra_file_layers,
+            )?,
         },
     )?;
     let command = executed.command;
@@ -389,6 +403,7 @@ fn cmd_twwh3_game_launch(
                 "cwd": preview_command.cwd.as_ref().map(|path| path.display().to_string()),
                 "manifest": null,
                 "packs": launch_plan.packs,
+                "extra_file_preparation": super::extra_file_launch_preview("game.launch", &state.settings)?,
                 "issues": launch_plan.issues,
                 "execute": false,
                 "dry_run": cli.dry_run,
@@ -404,6 +419,19 @@ fn cmd_twwh3_game_launch(
         LaunchApproval {
             incomplete_extra_files: args.allow_incomplete_preparation,
             live_workshop_fallback: args.allow_live_fallback,
+            extra_file_conflicts: super::extra_file_launch_choices(
+                "game.launch",
+                &state.settings,
+                &args.keep_extra_file,
+                &args.reapply_extra_file,
+                args.approve_extra_file_layers,
+                cli.yes,
+            )?,
+            approve_extra_file_layers: super::approved_extra_file_layers(
+                "game.launch",
+                &state.settings,
+                args.approve_extra_file_layers,
+            )?,
         },
     )?;
     let command = executed.command;
@@ -461,6 +489,7 @@ fn cmd_reforger_game_launch(
                 "args": preview_command.args,
                 "cwd": preview_command.cwd.as_ref().map(|path| path.display().to_string()),
                 "addons": launch_plan.addons,
+                "extra_file_preparation": super::extra_file_launch_preview("game.launch", &state.settings)?,
                 "issues": launch_plan.issues,
                 "execute": false,
                 "dry_run": cli.dry_run,
@@ -476,6 +505,19 @@ fn cmd_reforger_game_launch(
         LaunchApproval {
             incomplete_extra_files: args.allow_incomplete_preparation,
             live_workshop_fallback: args.allow_live_fallback,
+            extra_file_conflicts: super::extra_file_launch_choices(
+                "game.launch",
+                &state.settings,
+                &args.keep_extra_file,
+                &args.reapply_extra_file,
+                args.approve_extra_file_layers,
+                cli.yes,
+            )?,
+            approve_extra_file_layers: super::approved_extra_file_layers(
+                "game.launch",
+                &state.settings,
+                args.approve_extra_file_layers,
+            )?,
         },
     )?;
     let command = executed.command;
@@ -566,6 +608,21 @@ fn dispatch_standalone_launch(
 
 fn launch_failure_to_command_error(action: &str, failure: LaunchFailure) -> CommandError {
     match failure {
+        LaunchFailure::ExtraFileConflicts(conflicts) => CommandError::validation(
+            action,
+            format!(
+                "Extra files changed: {}. Choose --keep-extra-file <id> or --reapply-extra-file <id> --yes.",
+                conflicts
+                    .iter()
+                    .map(|entry| entry.entry_id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ),
+        LaunchFailure::ExtraFileLayers(_) => CommandError::validation(
+            action,
+            "Review extra-file layer replacements with config extra-file activate --dry-run, then pass --approve-extra-file-layers --yes",
+        ),
         LaunchFailure::ExtraFiles(failures) => CommandError::validation(
             action,
             format!(

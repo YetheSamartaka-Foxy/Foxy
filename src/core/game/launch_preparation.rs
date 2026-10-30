@@ -13,15 +13,25 @@ use crate::ui::types::{Repository, RepositoryServer, SettingsViewState};
 
 static NEXT_PREPARATION: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct LaunchApproval {
     pub incomplete_extra_files: bool,
     pub live_workshop_fallback: bool,
+    pub extra_file_conflicts: Vec<ExtraFileConflictChoice>,
+    pub approve_extra_file_layers: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ExtraFileConflictChoice {
+    pub entry_id: String,
+    pub keep_current: bool,
 }
 
 #[derive(Debug)]
 pub(crate) enum LaunchFailure {
     ExtraFiles(Vec<String>),
+    ExtraFileConflicts(Vec<extra_files::DestinationConflict>),
+    ExtraFileLayers(Vec<extra_files::LayerConflict>),
     FrozenCopies(Vec<String>),
     Recovery(String),
     Failed(String),
@@ -306,6 +316,53 @@ fn extra_targets(
     (targets, directories, entries, failures)
 }
 
+pub(crate) fn activate_extra_files(
+    space_dir: &Path,
+    game_dir: &str,
+    keep_entry_ids: &[String],
+) -> Result<extra_files::ActivationSummary, String> {
+    let (targets, directories, entries, failures) = extra_targets(space_dir, game_dir);
+    if !failures.is_empty() {
+        return Err(failures.join("; "));
+    }
+    let disabled_count = extra_files::load_store(space_dir)?
+        .entries
+        .iter()
+        .filter(|entry| !entry.enabled)
+        .count();
+    let mut preparation = Preparation::begin(space_dir, &targets)?;
+    preparation.remember_directories(&directories)?;
+    let mut summary = extra_files::ActivationSummary {
+        skipped_disabled: disabled_count,
+        ..Default::default()
+    };
+    let mut applied = Vec::new();
+    for entry in &entries {
+        if keep_entry_ids.iter().any(|id| id == &entry.id) {
+            continue;
+        }
+        match extra_files::activate_entry(space_dir, entry, game_dir) {
+            Ok(destination) => {
+                summary.activated.push((entry.name.clone(), destination));
+                applied.push(entry.clone());
+            }
+            Err(error) => summary.failed.push((entry.name.clone(), error)),
+        }
+    }
+    if !summary.failed.is_empty() {
+        preparation.restore()?;
+        return Err(summary
+            .failed
+            .into_iter()
+            .map(|(name, error)| format!("{name}: {error}"))
+            .collect::<Vec<_>>()
+            .join("; "));
+    }
+    extra_files::save_activation_evidence(space_dir, &applied, game_dir)?;
+    preparation.commit()?;
+    Ok(summary)
+}
+
 pub(crate) fn missing_pins(
     space_dir: &Path,
     module: &dyn GameModule,
@@ -398,6 +455,28 @@ fn dispatch_plan_in_space(
     if !missing.is_empty() && !approval.live_workshop_fallback {
         return Err(LaunchFailure::FrozenCopies(missing));
     }
+    let conflicts = extra_files::destination_conflicts(space_dir, ctx.install_dir)
+        .map_err(LaunchFailure::Failed)?;
+    let choices = &approval.extra_file_conflicts;
+    if conflicts.iter().any(|conflict| {
+        !choices
+            .iter()
+            .any(|choice| choice.entry_id == conflict.entry_id)
+    }) {
+        return Err(LaunchFailure::ExtraFileConflicts(conflicts));
+    }
+    let layer_conflicts =
+        extra_files::layer_conflicts(space_dir, ctx.install_dir).map_err(LaunchFailure::Failed)?;
+    if extra_files::layer_review_needed(space_dir, &layer_conflicts)
+        .map_err(LaunchFailure::Failed)?
+    {
+        let current_signature = extra_files::layer_review_signature(&layer_conflicts);
+        if approval.approve_extra_file_layers.as_deref() != Some(current_signature.as_str()) {
+            return Err(LaunchFailure::ExtraFileLayers(layer_conflicts));
+        }
+        extra_files::record_layer_review(space_dir, &layer_conflicts)
+            .map_err(LaunchFailure::Failed)?;
+    }
     let mut targets = module.launch_write_targets(plan, &ctx);
     let (extra, directories, entries, failures) = extra_targets(space_dir, ctx.install_dir);
     if !failures.is_empty() && !approval.incomplete_extra_files {
@@ -415,11 +494,21 @@ fn dispatch_plan_in_space(
             .collect(),
         ..Default::default()
     };
+    let mut activated_entries = Vec::new();
     let outcome = (|| {
-        for entry in entries {
-            match extra_files::activate_entry(space_dir, &entry, ctx.install_dir) {
-                Ok(destination) => activation.activated.push((entry.name, destination)),
-                Err(error) => activation.failed.push((entry.name, error)),
+        for entry in &entries {
+            if choices
+                .iter()
+                .any(|choice| choice.entry_id == entry.id && choice.keep_current)
+            {
+                continue;
+            }
+            match extra_files::activate_entry(space_dir, entry, ctx.install_dir) {
+                Ok(destination) => {
+                    activation.activated.push((entry.name.clone(), destination));
+                    activated_entries.push(entry.clone());
+                }
+                Err(error) => activation.failed.push((entry.name.clone(), error)),
             }
         }
         if !activation.failed.is_empty() && !approval.incomplete_extra_files {
@@ -442,6 +531,15 @@ fn dispatch_plan_in_space(
     })();
     match outcome {
         Ok((pid, command)) => {
+            if let Err(error) = extra_files::save_activation_evidence(
+                space_dir,
+                &activated_entries,
+                ctx.install_dir,
+            ) {
+                log::warn!(
+                    "Launch succeeded; extra-file change detection could not be saved: {error}"
+                );
+            }
             if let Err(error) = preparation.commit() {
                 log::warn!(
                     "Launch handoff succeeded; preparation cleanup remains pending: {error}"

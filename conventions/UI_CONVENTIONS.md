@@ -4,6 +4,17 @@
 
 \- Every new `Foxy` field is either space-scoped (reset in `reset_space_scoped_state`) or app-global (listed in `APP_GLOBAL_FOXY_FIELDS` with a reason). A guard test fails on anything unaccounted, because a space-scoped field left out of the reset leaks the previous game space's data into the next one. See `conventions/GAME_SPACES_CONVENTIONS.md`.
 
+Settled R01-R24 decisions live in [reviewed contracts](REVIEWED_BEHAVIOR_CONTRACTS.md).
+Render preset readiness with `repo_state_for_repository`, including its selected
+profile and enabled addons; physical instance status alone cannot establish a
+different preset's readiness. Closing may leave a saved changed selection unchecked.
+Progress belongs to a phase and per-addon attempt generation; discard older
+snapshots after fallback and label repeated work. Proxy restart retains the exact
+approved instance, selection and modifiers after cancellation/recovery settles.
+Restore arbitrates an automatic retry before accepting the restore action.
+All review dialogs use ordinary focusable buttons and readable text; final Join
+failure retains Retry/Cancel and shutdown requires a fresh post-save gameplay probe.
+
 \- Gate game-varying UI on `GameCapabilities`, never on `module.id() == "arma3"`. A game that lacks a feature renders no control for it rather than a dead or disabled one.
 
 \- Use `render\_\*` or `ui\_\*` for drawing functions; `on\_\*` for event handlers.

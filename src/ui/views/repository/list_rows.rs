@@ -569,13 +569,12 @@ impl Foxy {
         } else {
             self.color_widget_bg()
         };
-        let (name, icon_checksum, address, repo_path, repo_has_local_path, repo_space_id) = {
+        let (name, icon_checksum, address, repo_has_local_path, repo_space_id) = {
             let repo = &self.repository_view_state.repositories[repo_index];
             (
                 repo.name.clone(),
                 repo.icon_image_checksum.clone(),
                 repo.address.clone(),
-                repo.path.clone(),
                 !repo.path.trim().is_empty(),
                 repo.repository_space_id.clone(),
             )
@@ -584,7 +583,8 @@ impl Foxy {
         let can_remove_from_folder = self.repository_visual_folder_for_repo(repo_index).is_some();
         let db_wipe_pending = self.is_repository_db_wipe_pending(&address);
         let icon = self.cached_icons.get(&icon_checksum);
-        let state = self.repo_state_for_address(&address, &repo_path);
+        let state =
+            self.repo_state_for_repository(&self.repository_view_state.repositories[repo_index]);
         let active_operation_tooltip = self.active_repository_row_operation_tooltip(repo_index);
         let (operation_progress, operation_motion) = if active_operation_tooltip.is_some() {
             self.repository_operation_activity(repo_index)

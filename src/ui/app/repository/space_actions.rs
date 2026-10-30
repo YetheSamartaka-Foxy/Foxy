@@ -58,7 +58,9 @@ fn repository_space_sync_targets(
         .iter()
         .enumerate()
         .filter_map(|(idx, repo)| {
-            (repo.repository_space_id.as_deref() == Some(space.id.as_str())).then_some(idx)
+            (repo.repository_space_id.as_deref() == Some(space.id.as_str())
+                && !repo.repository_space_membership_review)
+                .then_some(idx)
         })
         .collect();
     targets.sort_by_cached_key(|idx| {
@@ -87,6 +89,7 @@ impl Foxy {
 
         repo.repository_space_id = None;
         repo.repository_space_entry_address = None;
+        repo.repository_space_membership_review = false;
         self.save_repositories();
         true
     }
@@ -263,7 +266,7 @@ impl Foxy {
             .filter_map(|repo_index| {
                 let repo = self.repository_view_state.repositories.get(repo_index)?;
                 let normalized_repo_url = Self::repo_url_match_key(&repo.address);
-                let state = self.repo_state_for_address(&repo.address, &repo.path);
+                let state = self.repo_state_for_repository(repo);
                 let default_selected = match mode {
                     RepositorySpaceBulkMode::RecheckAll => true,
                     RepositorySpaceBulkMode::UpdateAll => state == RepoState::PendingUpdate,
@@ -789,6 +792,18 @@ mod tests {
         );
         assert!(repository_space_sync_targets(&space, &[], &[]).is_empty());
         assert!(repository_space_sync_targets(&space, &repositories[1..3], &[]).is_empty());
+    }
+
+    #[test]
+    fn unresolved_removed_members_are_excluded_from_new_space_syncs() {
+        let space = space();
+        let mut unresolved = repository(&space.entries[0].address, Some(&space.id));
+        unresolved.repository_space_membership_review = true;
+        let kept = repository(&space.entries[1].address, Some(&space.id));
+        assert_eq!(
+            repository_space_sync_targets(&space, &[unresolved, kept], &[]),
+            vec![1]
+        );
     }
 
     #[test]

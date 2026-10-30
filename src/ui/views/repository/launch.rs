@@ -65,9 +65,13 @@ impl Foxy {
         {
             if pending.server.as_ref() != server || pending.repository != *effective {
                 pending.replacement = Some(Box::new(PendingUpdateLaunch {
-                    repository: effective.clone(), server: server.cloned(), repo_name: repo_name.to_string(),
-                    blocking_instance_key: pending.blocking_instance_key.clone(), target_instance_key,
-                    update_finished: pending.update_finished, update_succeeded: pending.update_succeeded,
+                    repository: effective.clone(),
+                    server: server.cloned(),
+                    repo_name: repo_name.to_string(),
+                    blocking_instance_key: pending.blocking_instance_key.clone(),
+                    target_instance_key,
+                    update_finished: pending.update_finished,
+                    update_succeeded: pending.update_succeeded,
                     replacement: None,
                 }));
             }
@@ -76,8 +80,17 @@ impl Foxy {
         let Some(blocking_instance_key) = self.conflicting_download_instance(effective) else {
             return false;
         };
-        if self.pending_update_launch.is_some() {
-            self.show_error_toast(self.t("Another launch is already waiting for an update."));
+        if let Some(pending) = self.pending_update_launch.as_mut() {
+            pending.replacement = Some(Box::new(PendingUpdateLaunch {
+                repository: effective.clone(),
+                server: server.cloned(),
+                repo_name: repo_name.to_string(),
+                blocking_instance_key: pending.blocking_instance_key.clone(),
+                target_instance_key,
+                update_finished: pending.update_finished,
+                update_succeeded: pending.update_succeeded,
+                replacement: None,
+            }));
             return true;
         }
         info!(
@@ -119,12 +132,50 @@ impl Foxy {
         if let Some(replacement) = pending.replacement.as_ref() {
             let mut replace = false;
             let mut keep = false;
-            let old = pending.server.as_ref().map(|server| server.name.as_str()).unwrap_or("Launch");
-            let new = replacement.server.as_ref().map(|server| server.name.as_str()).unwrap_or("Launch");
             egui::Modal::new(egui::Id::unique("replace_queued_launch")).show(ctx, |ui| {
                 ui.heading(self.t("Replace queued launch?"));
-                ui.label(self.t_fmt("Current request: {target}", &[("target", format!("{} / {}", old, pending.repository.selected_profile.as_deref().unwrap_or("Default")))]));
-                ui.label(self.t_fmt("New request: {target}", &[("target", format!("{} / {}", new, replacement.repository.selected_profile.as_deref().unwrap_or("Default")))]));
+                ui.label(self.t_fmt(
+                    "Current request: {target}",
+                    &[(
+                        "target",
+                        format!(
+                                "{} - {} ({}) - {}",
+                                pending.repo_name,
+                                pending
+                                    .server
+                                    .as_ref()
+                                    .map(|server| server.name.as_str())
+                                    .unwrap_or("Launch"),
+                                pending
+                                    .repository
+                                    .selected_profile
+                                    .as_deref()
+                                    .unwrap_or("Default"),
+                                pending.repository.path
+                            ),
+                    )],
+                ));
+                ui.label(self.t_fmt(
+                    "New request: {target}",
+                    &[(
+                        "target",
+                        format!(
+                                "{} - {} ({}) - {}",
+                                replacement.repo_name,
+                                replacement
+                                    .server
+                                    .as_ref()
+                                    .map(|server| server.name.as_str())
+                                    .unwrap_or("Launch"),
+                                replacement
+                                    .repository
+                                    .selected_profile
+                                    .as_deref()
+                                    .unwrap_or("Default"),
+                                replacement.repository.path
+                            ),
+                    )],
+                ));
                 ui.horizontal(|ui| {
                     keep = ui.button(self.t("Keep current request")).clicked();
                     replace = ui.button(self.t("Replace queued launch")).clicked();
@@ -834,6 +885,7 @@ impl Foxy {
         };
         let mut pending = pending.clone();
         pending.final_confirmation_choice = Some(keep_suggestions);
+        pending.final_query_error = None;
         self.pending_join_preflight = Some(pending.clone());
         self.spawn_join_preflight_query(
             ctx,

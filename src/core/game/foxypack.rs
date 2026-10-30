@@ -755,6 +755,7 @@ fn import_extra_files(
     let imported_count = incoming.entries.len();
     let result = extract_extra_files_to_temp(archive, &incoming, &temp_root).and_then(|_| {
         let mut store = extra_files::load_store(space_dir)?;
+        let mut imported_entries = Vec::with_capacity(incoming.entries.len());
         for entry in incoming.entries {
             let imported_dir = temp_root.join(&entry.id);
             if !imported_dir.exists() {
@@ -786,8 +787,9 @@ fn import_extra_files(
                     err
                 )
             })?;
-            upsert_extra_file_entry(&mut store, entry);
+            imported_entries.push(entry);
         }
+        place_imported_extra_files_in_pack_order(&mut store, imported_entries);
         extra_files::save_store(space_dir, &store)?;
         Ok(imported_count)
     });
@@ -877,19 +879,16 @@ fn extra_file_archive_entry<'a>(
     }
 }
 
-fn upsert_extra_file_entry(
+fn place_imported_extra_files_in_pack_order(
     store: &mut extra_files::ExtraFilesFile,
-    entry: extra_files::ExtraFileEntry,
+    entries: Vec<extra_files::ExtraFileEntry>,
 ) {
-    if let Some(existing) = store
+    let imported_ids: std::collections::HashSet<_> =
+        entries.iter().map(|entry| entry.id.as_str()).collect();
+    store
         .entries
-        .iter_mut()
-        .find(|candidate| candidate.id == entry.id)
-    {
-        *existing = entry;
-    } else {
-        store.entries.push(entry);
-    }
+        .retain(|existing| !imported_ids.contains(existing.id.as_str()));
+    store.entries.extend(entries);
 }
 
 fn read_required_json<T: for<'de> Deserialize<'de>>(
@@ -996,6 +995,45 @@ mod tests {
     use crate::core::game::arma3::Arma3Module;
     use crate::core::game::reforger::{self, ReforgerModule};
     use crate::ui::types::RepositoryProfile;
+
+    #[test]
+    fn importing_existing_extra_files_applies_pack_order() {
+        let entry = |id: &str, name: &str| extra_files::ExtraFileEntry {
+            id: id.to_string(),
+            name: name.to_string(),
+            source_name: format!("{id}.cfg"),
+            destination: "{game_dir}/config.cfg".to_string(),
+            kind: extra_files::ExtraFileKind::File,
+            enabled: true,
+            created_at: 0,
+        };
+        let mut store = extra_files::ExtraFilesFile {
+            entries: vec![
+                entry("first", "First old"),
+                entry("other", "Other"),
+                entry("second", "Second old"),
+            ],
+        };
+
+        place_imported_extra_files_in_pack_order(
+            &mut store,
+            vec![
+                entry("second", "Second from pack"),
+                entry("first", "First from pack"),
+            ],
+        );
+
+        assert_eq!(
+            store
+                .entries
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            ["other", "second", "first"]
+        );
+        assert_eq!(store.entries[1].name, "Second from pack");
+        assert_eq!(store.entries[2].name, "First from pack");
+    }
 
     fn write_pack_for_import_failure(path: &Path) {
         let file = fs::File::create(path).expect("pack file");

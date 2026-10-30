@@ -8,6 +8,8 @@
 
 \- Game-space isolation is by directory, not by a `game_id` column. Do **not** add one to `repositories`; the `(remote_url, local_path)` identity rules stay exactly as they are.
 
+\- **One operational process per configuration root.** Claim `tasks/config_process_lock.rs` before loading, migrating or saving shared configuration, including commands that target another game space. A second owner exits `DATABASE_BUSY`; no cross-process queue is offered. Explicit integration helpers and standalone server tools remain exempt. The database and physical-target claims below remain defense in depth for independent roots and external interference. Do not delete lock files to bypass a claim.
+
 \- **One process per game space database.** Turso has no multi-process access - two processes on one file is undefined behavior, not concurrent-writer WAL. `tasks/db_process_lock.rs` holds an advisory whole-file lock on `database.lock` for the life of the process; the GUI claims it in `Foxy::new` (and again on a space switch), the CLI claims it in `cli::run_from_env` for every command that opens the database, and `open_and_prepare_database` claims it as a backstop. A contended claim retries for 5s (the installer's `/CLOSEAPPLICATIONS` handoff) and then refuses: the GUI shows a close-only prompt, the CLI exits `DATABASE_BUSY`. Commands that deliberately run beside a live GUI (`agent-gui`, `steam-helper`, `server`, `version`, `ui`) are exempt in `command_uses_database`.
 
 \- **The sidecar is not the schema.** `db_schema_version.rs` records the intended generation, but the bootstrap is applied with `CREATE TABLE IF NOT EXISTS`, so it no-ops on an older database and leaves the old tables. `tasks/db_schema_check.rs` probes the live database on every open: column coverage parsed from `sql/turso_schema.sql`, parse-only production upserts, and unique-index column sets for repository, pending-update, addon, and file identities. A composite UNIQUE does not make an obsolete URL-only UNIQUE safe: both must be checked. Keep upsert constants shared between the production write and the probe so they cannot drift. A successful live wipe removes legacy `file_subfiles`, validates the rebuilt schema, then records the current generation. Schema generation remains 25 for 1.2.1; a healthy 1.2.0 database needs no new wipe. A fresh install's generation is recorded by the database opener itself (`bootstrap_if_fresh` in `open_and_prepare_database`) before it creates the file, because any CLI command can be the first to open it, and a populated database without a sidecar reads as one built before versioning.
@@ -119,6 +121,11 @@ younger than 30 days; replacing the database file loses it.
 - Launching while an update owns files needed by that installation queues a cancellable launch for that exact instance. Recheck readiness after the update completes. An update failure never launches automatically. Work in unrelated folders does not block the launch.
 
 #### Accepted product contracts
+
+The [additional reviewed contracts](REVIEWED_BEHAVIOR_CONTRACTS.md) settle
+R01-R24, including configuration-root process ownership, selection-specific
+readiness, device changes, recovery isolation and settings preservation. Apply
+these before selecting new questions for future gap reviews.
 
 The [accepted lifecycle, ownership and launch contracts](BEHAVIOR_CONTRACTS.md)
 settle N01-N18. Use them as acceptance criteria in future gap reviews and target

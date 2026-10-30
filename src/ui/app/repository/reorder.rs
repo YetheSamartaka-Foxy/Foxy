@@ -67,6 +67,7 @@ impl Foxy {
                 self.pending_repository_space_bulk_action = None;
             }
         }
+        self.remap_addon_selection_indices(&remap);
     }
 
     /// Given an optional index referencing a repository, adjust it after the

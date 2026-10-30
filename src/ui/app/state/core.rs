@@ -30,6 +30,19 @@ pub enum RepositoryContextConfirmAction {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct ProxyChangePrompt {
+    pub repository_url: String,
+    pub repository_path: String,
+    pub mode: crate::core::api::SyncMode,
+    pub selected_mod_states: Vec<(String, bool)>,
+    pub force_redownload: bool,
+    pub prepare_download_plan: bool,
+    pub force_full_downloads: bool,
+    pub backup_local_drift: bool,
+    pub restart_requested: bool,
+}
+
+#[derive(Clone, Debug)]
 pub struct RepositoryVisualFolderEditState {
     pub folder_id: Option<String>,
     pub repository_space_id: Option<String>,

@@ -15,7 +15,7 @@ use crate::ui::app::{AddonForceRedownloadProbeResult, AddonHashRecalcResult, Fox
 use crate::ui::types::{DownloadSummary, RepoState, Repository, sanitize_user_path};
 
 impl Foxy {
-    fn resolve_selected_mod_states(
+    pub(crate) fn resolve_selected_mod_states(
         repo: &Repository,
         selected_mod_states_override: Option<Vec<(String, bool)>>,
     ) -> Vec<(String, bool)> {
@@ -59,7 +59,7 @@ impl Foxy {
         self.start_core_sync_internal(repo_idx, SyncMode::Download, None, false, false, true);
     }
 
-    pub(super) fn start_core_sync_internal(
+    pub(crate) fn start_core_sync_internal(
         &mut self,
         repo_idx: usize,
         mode: SyncMode,
@@ -266,7 +266,9 @@ impl Foxy {
                 self.mod_download_progress.clear();
                 self.invalidate_update_modal_sort_cache();
             }
+            self.mod_download_attempts.clear();
             if mode == SyncMode::Download {
+                self.invalidate_preset_checks_for_instance(&repo.address, &repo.path);
                 if self
                     .download_disk_space_shortfall
                     .as_ref()
@@ -377,6 +379,16 @@ impl Foxy {
             let persisted_addon_selection = Self::resolve_selected_mod_states(&repo, None);
             let selected_mod_states =
                 Self::resolve_selected_mod_states(&repo, selected_mod_states_override);
+            self.active_sync_selection = Some(selected_mod_states.clone());
+            self.active_sync_modifiers = Some((
+                force_redownload,
+                prepare_download_plan,
+                force_full_downloads,
+                self.backup_local_drift_requested,
+            ));
+            if mode == SyncMode::Download {
+                self.download_transfer_attempt = 1;
+            }
             let repository_space_shared_path = repo.repository_space_id.as_deref().and_then(|id| {
                 self.repository_spaces
                     .iter()

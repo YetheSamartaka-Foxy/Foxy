@@ -19,6 +19,9 @@
 - Direct downloads preview destination collisions and support replacement only with `--overwrite --yes`. Workshop bundle import offers Merge and Match modes, and removing a game space can preserve its private mod and extra-file payloads.
 
 ## Changed
+- Proxy changes during an update offer applying them to new work or restarting the accepted work after cancellation and recovery. Extra files now support ordered layers, review changed destination files before replacement, and restore the latest pre-attempt contents after a failed launch.
+- Switching game spaces prepares the destination while keeping the current workspace available. Divergent legacy configurations stay preserved with a persistent review notice, and removed repository-space members offer keeping the local installation in the group or as standalone.
+- Scheduled close and shutdown actions wait for jobs already due, resolve conflicting actions explicitly, and check gameplay again after saving. Recurring jobs handle skipped and repeated daylight-saving times once.
 - Quick local checks stay offline and report incomplete metadata explicitly. Refresh also checks local drift, and updates revalidate selected files outside their prepared queue, including same-size edits.
 - Checks retain completed stable file verification when cancelled, retry files that change during reading once, and offer controls for stalled reads. Unreadable files and unsaved results remain incomplete, with a guarded Retry save action where possible.
 - Updating linked addon folders requires review of the resolved targets and affected installations. Known local differences offer backup before replacement.
@@ -35,6 +38,11 @@
 - Scheduled shutdown asks for confirmation again if Foxy detects new gameplay during its countdown. When an addon changes between required and optional, profiles adopt the new published default selection while preserving overrides within an unchanged category.
 
 ## Fixed
+- A second operational Foxy process now refuses the same configuration directory even when targeting a different game space. Recovery blocks only affected storage targets, while a changed device at the same path requires review before updates write to it.
+- Same-folder repository presets keep readiness for their own addon selection. Closing after changing a selection saves it promptly and leaves it unchecked until checked again, respecting disabled startup checks.
+- Partial settings saves retain the successfully saved half, report the unsaved half, and preserve valid unknown settings fields in their original files.
+- Replacing a queued launch across installations keeps only the newly confirmed action. Failed final Join refreshes retain Retry and Cancel, and backup restoration explicitly resolves a waiting automatic update retry.
+- Patch fallback and repeated transfers reset and label the affected attempt's progress instead of reusing stale counters. Refreshing all Workshop pins keeps the previous active selection if any snapshot or final save fails.
 - Checking a repository or previewing an update no longer removes extra local files. Approved cleanup protects files owned by other repositories and restores removed files if the update is cancelled or fails.
 - Metadata publication races get one fresh retry before an update can proceed. Failed full-file verification rolls back and allows one fresh attempt; persistent checksum disagreement cannot report success.
 - Database startup errors caused by file access or an incompatible operation no longer silently replace existing database records. Foxy preserves the database and reports the failure instead. A corrupt database that cannot be backed up requires explicit confirmation before it is discarded and rebuilt.

@@ -89,6 +89,36 @@ pub fn run_from_env() -> CliExecution {
         }
     }
 
+    if command_uses_database(cli.command.as_ref(), cli.wipe_db) {
+        match crate::core::tasks::config_process_lock::acquire_for_config_root() {
+            crate::core::tasks::db_process_lock::LockOutcome::Acquired => {}
+            crate::core::tasks::db_process_lock::LockOutcome::Busy { .. } => {
+                emit_error(
+                    &output,
+                    CommandError {
+                        action: "configuration-lock".to_string(),
+                        message: "another Foxy process owns this configuration; close it and retry"
+                            .to_string(),
+                        code: exit_codes::DATABASE_BUSY,
+                    },
+                );
+                return CliExecution::Exit(exit_codes::DATABASE_BUSY);
+            }
+            crate::core::tasks::db_process_lock::LockOutcome::Unavailable(_) => {
+                emit_error(
+                    &output,
+                    CommandError {
+                        action: "configuration-lock".to_string(),
+                        message: "could not claim this configuration; restore access and retry"
+                            .to_string(),
+                        code: exit_codes::OPERATION_FAILED,
+                    },
+                );
+                return CliExecution::Exit(exit_codes::OPERATION_FAILED);
+            }
+        }
+    }
+
     // Turso has no multi-process access, so a command that touches the database
     // must own it outright. Claim it before dispatching rather than letting the
     // open race a running GUI.
@@ -134,18 +164,30 @@ pub fn run_from_env() -> CliExecution {
             || matches!(&command, CliCommand::Game { command: args::GameCommand::Launch(args) } if !args.execute);
         let space = crate::core::game::spaces::active_game_space_dir();
         let result = if preview {
-            let has_import = space.join(".foxypack-import-recovery").join("pending.json").exists();
+            let has_import = space
+                .join(".foxypack-import-recovery")
+                .join("pending.json")
+                .exists();
             let has_launch = std::fs::read_dir(space.join("launch_preparation"))
                 .is_ok_and(|mut entries| entries.next().is_some());
             if has_import || has_launch {
                 Err("Recovery is pending. Open Foxy or run a non-preview operation before previewing this setup.".to_string())
-            } else { Ok(()) }
+            } else {
+                Ok(())
+            }
         } else {
             crate::core::game::launch_preparation::recover(&space)
                 .and_then(|()| crate::core::game::foxypack::recover_pending_import(&space))
         };
         if let Err(message) = result {
-            emit_error(&output, CommandError { action: "configuration-recovery".to_string(), message, code: exit_codes::OPERATION_FAILED });
+            emit_error(
+                &output,
+                CommandError {
+                    action: "configuration-recovery".to_string(),
+                    message,
+                    code: exit_codes::OPERATION_FAILED,
+                },
+            );
             return CliExecution::Exit(exit_codes::OPERATION_FAILED);
         }
     }

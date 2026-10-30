@@ -1,14 +1,27 @@
 use std::path::{Path, PathBuf};
 
 use crate::core::utils::content_hash::normalize_path;
+#[cfg(test)]
+use crate::core::utils::storage_compat::volume_identity;
+use crate::core::utils::storage_compat::{VolumeIdentity, validate_volume_identity};
 
 #[derive(Clone, Debug)]
 pub(crate) struct PinnedDownloadTargets {
     roots: Vec<(PathBuf, PathBuf)>,
     links: Vec<(PathBuf, PathBuf)>,
+    root_identities: Vec<(PathBuf, VolumeIdentity)>,
+    link_identities: Vec<(PathBuf, VolumeIdentity)>,
 }
 
 impl PinnedDownloadTargets {
+    pub(crate) fn recovery_targets(&self) -> Vec<PathBuf> {
+        self.roots
+            .iter()
+            .map(|(_, canonical)| canonical.clone())
+            .chain(self.links.iter().map(|(_, target)| target.clone()))
+            .collect()
+    }
+
     #[cfg(test)]
     pub(crate) fn from_links(
         root: PathBuf,
@@ -17,23 +30,83 @@ impl PinnedDownloadTargets {
         Self::from_roots(vec![root], links)
     }
 
+    #[cfg(test)]
     pub(crate) fn from_roots(
         roots: Vec<PathBuf>,
+        links: Vec<(PathBuf, PathBuf)>,
+    ) -> Result<Self, String> {
+        let root_identities = roots
+            .iter()
+            .map(|root| Ok((root.clone(), volume_identity(root)?)))
+            .collect::<Result<Vec<_>, String>>()?;
+        let link_identities = links
+            .iter()
+            .map(|(_, target)| Ok((target.clone(), volume_identity(target)?)))
+            .collect::<Result<Vec<_>, String>>()?;
+        Self::from_approved_roots(roots, links, root_identities, link_identities)
+    }
+
+    pub(crate) fn from_approved_roots(
+        roots: Vec<PathBuf>,
         mut links: Vec<(PathBuf, PathBuf)>,
+        root_identities: Vec<(PathBuf, VolumeIdentity)>,
+        link_identities: Vec<(PathBuf, VolumeIdentity)>,
     ) -> Result<Self, String> {
         if roots.is_empty() {
             return Err("No repository write root was supplied".to_string());
         }
+        if root_identities.len() != roots.len() {
+            return Err("Repository storage approval no longer matches its roots".to_string());
+        }
+        let mut checked_root_identities = Vec::with_capacity(roots.len());
         let roots = roots
             .into_iter()
-            .map(|root| canonicalize_existing_ancestor(&root).map(|canonical| (root, canonical)))
+            .map(|root| {
+                let identity = root_identities
+                    .iter()
+                    .find(|(path, _)| {
+                        normalize_path(&path.to_string_lossy())
+                            == normalize_path(&root.to_string_lossy())
+                    })
+                    .map(|(_, identity)| identity.clone())
+                    .ok_or_else(|| {
+                        "Repository storage approval no longer matches its roots".to_string()
+                    })?;
+                let canonical = canonicalize_existing_ancestor(&root)?;
+                validate_volume_identity(&canonical, &identity)?;
+                checked_root_identities.push((root.clone(), identity));
+                Ok::<(PathBuf, PathBuf), String>((root, canonical))
+            })
             .collect::<Result<Vec<_>, _>>()?;
         links.sort();
         links.dedup();
-        Ok(Self { roots, links })
+        let mut checked_link_identities = Vec::with_capacity(links.len());
+        for (_, target) in &links {
+            let identity = link_identities
+                .iter()
+                .find(|(path, _)| {
+                    normalize_path(&path.to_string_lossy())
+                        == normalize_path(&target.to_string_lossy())
+                })
+                .map(|(_, identity)| identity.clone())
+                .ok_or_else(|| {
+                    "Linked storage approval no longer matches its target".to_string()
+                })?;
+            validate_volume_identity(target, &identity)?;
+            checked_link_identities.push((target.clone(), identity));
+        }
+        Ok(Self {
+            roots,
+            links,
+            root_identities: checked_root_identities,
+            link_identities: checked_link_identities,
+        })
     }
 
     pub(crate) fn validate_current(&self) -> Result<(), String> {
+        for (path, identity) in self.root_identities.iter().chain(&self.link_identities) {
+            validate_volume_identity(path, identity)?;
+        }
         let mut current = Vec::new();
         for (root, _) in &self.roots {
             current.extend(
@@ -83,6 +156,18 @@ impl PinnedDownloadTargets {
                 .map(|(_, target)| target)
                 .find(|target| path_starts_with(path, target))
             {
+                let identity = self
+                    .link_identities
+                    .iter()
+                    .find(|(target_path, _)| {
+                        normalize_path(&target_path.to_string_lossy())
+                            == normalize_path(&target.to_string_lossy())
+                    })
+                    .map(|(_, identity)| identity)
+                    .ok_or_else(|| {
+                        "Linked storage approval no longer matches its target".to_string()
+                    })?;
+                validate_volume_identity(target, identity)?;
                 let resolved = canonicalize_existing_ancestor(path)?;
                 if !path_starts_with(&resolved, target) {
                     return Err(
@@ -92,21 +177,31 @@ impl PinnedDownloadTargets {
                 return Ok(resolved);
             }
 
-            let (relative, canonical_root) = self
+            let (relative, canonical_root, root_identity) = self
                 .roots
                 .iter()
                 .find_map(|(root, canonical)| {
-                    path.strip_prefix(root)
+                    let relative = path
+                        .strip_prefix(root)
                         .ok()
                         .or_else(|| path.strip_prefix(canonical).ok())
                         .map(Path::to_path_buf)
                         .or_else(|| {
                             normalized_relative_path(path, root)
                                 .or_else(|| normalized_relative_path(path, canonical))
+                        })?;
+                    let identity = self
+                        .root_identities
+                        .iter()
+                        .find(|(identity_root, _)| {
+                            normalize_path(&identity_root.to_string_lossy())
+                                == normalize_path(&root.to_string_lossy())
                         })
-                        .map(|relative| (relative, canonical))
+                        .map(|(_, identity)| identity)?;
+                    Some((relative, canonical, identity))
                 })
                 .ok_or_else(|| "Download target is outside the repository write root".to_owned())?;
+            validate_volume_identity(canonical_root, root_identity)?;
             let pinned = canonicalize_existing_ancestor(&canonical_root.join(relative))?;
             if !path_starts_with(&pinned, canonical_root) {
                 return Err("Download target resolves outside the repository write root".to_owned());
@@ -127,6 +222,16 @@ impl PinnedDownloadTargets {
             .ok_or_else(|| {
                 "Linked write target changed. Review the destination and retry.".to_owned()
             })?;
+        let target_identity = self
+            .link_identities
+            .iter()
+            .find(|(target_path, _)| {
+                normalize_path(&target_path.to_string_lossy())
+                    == normalize_path(&target.to_string_lossy())
+            })
+            .map(|(_, identity)| identity)
+            .ok_or_else(|| "Linked storage approval no longer matches its target".to_string())?;
+        validate_volume_identity(target, target_identity)?;
         let relative = suffix.trim_start_matches('/');
         let expected = target.join(relative);
         let expected = canonicalize_existing_ancestor(&expected)?;

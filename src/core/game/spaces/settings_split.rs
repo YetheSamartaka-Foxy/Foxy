@@ -144,15 +144,46 @@ pub fn read_merged_settings_value(
     }
 }
 
-/// Split a full settings object and write both halves atomically.
 pub fn write_split_settings(
     value: &Value,
     app_path: &Path,
     game_path: &Path,
 ) -> Result<(), String> {
-    let (app, game) = split_settings_value(value);
-    for (path, half) in [(app_path, &app), (game_path, &game)] {
-        write_settings_half(path, half)?;
+    let (mut app, mut game) = split_settings_value(value);
+    let app_result = preserve_unknown_fields(app_path, value, &mut app)
+        .and_then(|()| write_settings_half(app_path, &app));
+    let game_result = preserve_unknown_fields(game_path, value, &mut game)
+        .and_then(|()| write_settings_half(game_path, &game));
+    match (app_result, game_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Ok(()), Err(error)) => Err(format!(
+            "Application settings saved; game-space settings remain unsaved: {error}"
+        )),
+        (Err(error), Ok(())) => Err(format!(
+            "Game-space settings saved; application settings remain unsaved: {error}"
+        )),
+        (Err(app), Err(game)) => Err(format!(
+            "Application settings remain unsaved: {app}; game-space settings remain unsaved: {game}"
+        )),
+    }
+}
+
+fn preserve_unknown_fields(path: &Path, known: &Value, half: &mut Value) -> Result<(), String> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("Could not preserve existing settings: {error}")),
+    };
+    let Ok(Value::Object(existing)) = serde_json::from_str(&raw) else {
+        return Ok(());
+    };
+    let Some(target) = half.as_object_mut() else {
+        return Err("Settings must be an object".to_string());
+    };
+    for (key, value) in existing {
+        if known.get(&key).is_none() {
+            target.insert(key, value);
+        }
     }
     Ok(())
 }
@@ -176,6 +207,9 @@ pub(super) fn write_settings_half(path: &Path, half: &Value) -> Result<(), Strin
     }
     let serialized = serde_json::to_string_pretty(half)
         .map_err(|err| format!("Failed to serialize {}: {}", sanitize_log_path(path), err))?;
+    if std::fs::read(path).is_ok_and(|existing| existing == serialized.as_bytes()) {
+        return Ok(());
+    }
     atomic_write(path, serialized.as_bytes())
         .map_err(|err| format!("Failed to write {}: {}", sanitize_log_path(path), err))
 }
@@ -184,6 +218,42 @@ pub(super) fn write_settings_half(path: &Path, half: &Value) -> Result<(), Strin
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn unknown_settings_stay_in_their_original_half() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path().join("app_settings.json");
+        let game = root.path().join("game_settings.json");
+        std::fs::write(&app, r#"{"locale":"en","future_app":{"keep":true}}"#).unwrap();
+        std::fs::write(&game, r#"{"future_game":[1,2],"arma3_directory":"old"}"#).unwrap();
+        write_split_settings(&json!({"locale":"cs","arma3_directory":"new"}), &app, &game).unwrap();
+        let app: Value = serde_json::from_str(&std::fs::read_to_string(app).unwrap()).unwrap();
+        let game: Value = serde_json::from_str(&std::fs::read_to_string(game).unwrap()).unwrap();
+        assert_eq!(app["locale"], "cs");
+        assert_eq!(app["future_app"], json!({"keep":true}));
+        assert!(app.get("future_game").is_none());
+        assert_eq!(game["future_game"], json!([1, 2]));
+        assert_eq!(game["arma3_directory"], "new");
+        assert!(game.get("future_app").is_none());
+    }
+
+    #[test]
+    fn a_failed_game_half_keeps_the_successful_application_save() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path().join("app_settings.json");
+        let blocked = root.path().join("blocked");
+        std::fs::write(&blocked, "not a directory").unwrap();
+        let error = write_split_settings(
+            &json!({"locale":"cs"}),
+            &app,
+            &blocked.join("game_settings.json"),
+        )
+        .unwrap_err();
+        assert!(error.starts_with("Application settings saved;"));
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(app).unwrap()).unwrap();
+        assert_eq!(saved["locale"], "cs");
+        assert_eq!(std::fs::read_to_string(blocked).unwrap(), "not a directory");
+    }
 
     #[test]
     fn split_partitions_game_keys_from_app_keys() {

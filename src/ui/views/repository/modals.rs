@@ -38,6 +38,7 @@ impl Foxy {
         let mut launch_ts3 = false;
         let mut launch_steam = false;
         let mut cancel = false;
+        let mut retry_final_query = false;
         let mut pending_changed = false;
         let mut remote_download_request = None;
 
@@ -109,6 +110,15 @@ impl Foxy {
             .default_width(modal_width)
             .show(ctx, |ui| {
                 join_preflight_body(ui, |ui| {
+                    if let Some(error) = pending.final_query_error.as_ref() {
+                        ui.colored_label(
+                            self.color_text_error(),
+                            self.t_fmt(
+                                "The final Join refresh failed: {error}",
+                                &[("error", error.clone())],
+                            ),
+                        );
+                    }
                     if pending.final_facts_refreshed {
                         ui.colored_label(
                             self.color_text_error(),
@@ -557,8 +567,8 @@ impl Foxy {
                         } else {
                             self.t("Launch with selected addons")
                         };
-                        let launch_with_btn = ui.add_enabled(
-                            !final_facts_query_running && has_selected_addons && (selected_missing_known_remote || can_launch),
+                    let launch_with_btn = ui.add_enabled(
+                        !final_facts_query_running && pending.final_query_error.is_none() && has_selected_addons && (selected_missing_known_remote || can_launch),
                             Button::new(action_label),
                         );
                         if launch_with_btn.hovered() && launch_with_btn.enabled() {
@@ -582,7 +592,7 @@ impl Foxy {
                         self.t("Join")
                     };
                     let launch_without_btn = ui.add_enabled(
-                        !final_facts_query_running && can_launch,
+                        !final_facts_query_running && pending.final_query_error.is_none() && can_launch,
                         Button::new(launch_without_label),
                     );
                     if launch_without_btn.hovered() && can_launch {
@@ -590,6 +600,10 @@ impl Foxy {
                     }
                     if launch_without_btn.clicked() {
                         launch_without_suggestions = true;
+                    }
+
+                    if pending.final_query_error.is_some() {
+                        retry_final_query = ui.button(self.t("Retry final Join refresh")).clicked();
                     }
 
                     let cancel_btn = ui.button(self.t("Cancel"));
@@ -606,6 +620,13 @@ impl Foxy {
             self.pending_join_preflight = None;
             self.pending_join_preflight_query = None;
             self.prelaunch_process_checks = Default::default();
+            return;
+        }
+
+        if retry_final_query {
+            if let Some(choice) = pending.final_confirmation_choice {
+                self.confirm_final_join_facts(ctx, &pending, choice);
+            }
             return;
         }
 
@@ -1457,6 +1478,16 @@ impl Foxy {
             self.pending_repository_space_bulk_action = None;
             return;
         }
+        let unresolved_members = self
+            .repository_view_state
+            .repositories
+            .iter()
+            .filter(|repo| {
+                repo.repository_space_id.as_deref() == Some(action.space_id.as_str())
+                    && repo.repository_space_membership_review
+            })
+            .map(|repo| repo.name.clone())
+            .collect::<Vec<_>>();
 
         let mut confirm = false;
         let mut cancel = false;
@@ -1507,6 +1538,12 @@ impl Foxy {
                 "Review repositories in {name}",
                 &[("name", action.space_name.clone())],
             ));
+            if !unresolved_members.is_empty() {
+                ui.label(self.t_fmt(
+                    "Awaiting membership choice and excluded from this run: {repositories}",
+                    &[("repositories", unresolved_members.join(", "))],
+                ));
+            }
             ui.horizontal(|ui| {
                 let select_all_btn = ui.button(self.t("Select all"));
                 if select_all_btn.hovered() {

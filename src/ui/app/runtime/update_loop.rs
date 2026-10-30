@@ -53,6 +53,76 @@ pub(crate) fn frame_interval_stats(intervals: &VecDeque<f32>) -> Option<(f32, f3
 }
 
 impl Foxy {
+    fn service_proxy_change_prompt(&mut self, ctx: &egui::Context) {
+        let Some(prompt) = self.proxy_change_prompt.as_ref() else {
+            return;
+        };
+        let mut apply_to_new_work = false;
+        let mut restart = false;
+        egui::Modal::new(egui::Id::unique("proxy_change_active_work")).show(ctx, |ui| {
+            ui.set_max_width(520.0);
+            ui.heading(self.t("Proxy settings changed during active work"));
+            if prompt.restart_requested {
+                ui.label(self.t("Waiting for the current attempt to cancel and restore its files."));
+            } else {
+                ui.label(self.t("The current attempt keeps its existing connection. Choose when the new proxy settings should affect this work."));
+                ui.horizontal(|ui| {
+                    apply_to_new_work = ui.button(self.t("Apply to new work")).clicked();
+                    restart = ui.button(self.t("Restart this work now")).clicked();
+                });
+            }
+        });
+        if apply_to_new_work {
+            self.proxy_change_prompt = None;
+        } else if restart && let Some(prompt) = self.proxy_change_prompt.as_mut() {
+            prompt.restart_requested = true;
+            self.cancel_sync();
+        }
+
+        let Some(prompt) = self.proxy_change_prompt.as_ref() else {
+            return;
+        };
+        if !prompt.restart_requested
+            || self.repository_sync_active()
+            || self.current_sync_mode.is_some()
+            || self
+                .backend_worker
+                .as_ref()
+                .is_some_and(|worker| !worker.is_finished())
+        {
+            return;
+        }
+        let prompt = self.proxy_change_prompt.take().expect("prompt was checked");
+        let repo_index = self
+            .repository_view_state
+            .repositories
+            .iter()
+            .position(|repo| {
+                repo.address == prompt.repository_url && repo.path == prompt.repository_path
+            });
+        if let Some(repo_index) = repo_index {
+            if prompt.mode == SyncMode::Download {
+                self.supersede_pending_retry_for_instance(
+                    &prompt.repository_url,
+                    &prompt.repository_path,
+                );
+            }
+            let previous_backup_local_drift = self.backup_local_drift_requested;
+            self.backup_local_drift_requested = prompt.backup_local_drift;
+            self.start_core_sync_internal(
+                repo_index,
+                prompt.mode,
+                Some(prompt.selected_mod_states),
+                prompt.force_redownload,
+                prompt.prepare_download_plan,
+                prompt.force_full_downloads,
+            );
+            self.backup_local_drift_requested = previous_backup_local_drift;
+        } else {
+            self.show_error_toast(self.t("The repository changed before the work could restart."));
+        }
+    }
+
     fn handle_tray_events(&mut self, ctx: &egui::Context) {
         let mut restore_requested = false;
 
@@ -80,6 +150,9 @@ impl Foxy {
         if self.close_requested_at.is_none() {
             self.persist_window_state_if_changed(ctx);
             self.close_requested_at = Some(Instant::now());
+            if self.shutdown_after_close {
+                self.launch_action.invalidate_shutdown_sample();
+            }
             info!("Window close requested ({reason})");
         }
         if let Some(tray_manager) = self.tray_manager.as_ref() {
@@ -318,6 +391,7 @@ impl Foxy {
         self.poll_launch_action(&ctx);
         self.poll_game_space_removal(&ctx);
         self.poll_scheduled_gameplay(&ctx);
+        self.service_proxy_change_prompt(&ctx);
         self.render_pending_addon_backup_origin_confirmation(&ctx);
         self.poll_installer_request(&ctx);
 
@@ -372,6 +446,9 @@ impl Foxy {
             self.poll_persistence_results();
             self.maybe_dispatch_persistence_requests(true);
             if self.has_pending_persistence_writes() {
+                if self.shutdown_after_close {
+                    self.launch_action.invalidate_shutdown_sample();
+                }
                 ctx.send_viewport_cmd(ViewportCommand::CancelClose);
                 if self.show_unreadable_config_replacement {
                     self.render_unreadable_config_replacement(&ctx);
@@ -384,6 +461,30 @@ impl Foxy {
 
             #[cfg(target_os = "windows")]
             if self.shutdown_after_close {
+                if !self.launch_action.ensure_shutdown_sample_ready() {
+                    ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+                    ctx.request_repaint_after(Duration::from_millis(50));
+                    return;
+                }
+                let gameplay_changed =
+                    self.scheduler_pending_post_action
+                        .as_ref()
+                        .is_some_and(|pending| {
+                            pending.gameplay_generation != self.launch_action.gameplay_generation
+                        });
+                if gameplay_changed {
+                    if let Some(pending) = self.scheduler_pending_post_action.as_mut() {
+                        pending.requires_confirmation = true;
+                        pending.gameplay_generation = self.launch_action.gameplay_generation;
+                        pending.handoff_generation = self.launch_action.handoff_generation;
+                    }
+                    self.close_requested_at = None;
+                    self.close_worker_wait_started_at = None;
+                    self.shutdown_after_close = false;
+                    ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+                    ctx.request_repaint();
+                    return;
+                }
                 self.shutdown_after_close = false;
                 if let Err(error) = crate::ui::app::scheduling::initiate_pc_shutdown() {
                     self.close_requested_at = None;
@@ -392,6 +493,8 @@ impl Foxy {
                     );
                     return;
                 }
+                self.scheduler_pending_post_action = None;
+                self.scheduler_deferred_post_actions.clear();
             }
             ctx.send_viewport_cmd(ViewportCommand::Close);
             ctx.request_repaint_after(Duration::from_millis(16));
@@ -457,6 +560,11 @@ impl Foxy {
         self.maybe_warm_addon_inventory();
         self.poll_repository_addon_size_load_results();
         self.poll_persistence_results();
+        if self.pending_game_space_switch.is_some() {
+            self.render_pending_game_space_switch(&ctx);
+            polls.stop(&mut self.frame_cost);
+            return;
+        }
         self.poll_backend_progress();
         self.poll_linked_target_preview_results();
         self.poll_hash_evidence_retry();
@@ -663,6 +771,7 @@ impl Foxy {
         self.render_db_lock_conflict_prompt(&ctx);
         self.render_db_schema_wipe_prompt(&ctx);
         self.render_app_update_prompt(&ctx);
+        self.render_legacy_migration_review(&ctx);
         self.render_benchmark_save_prompt(&ctx);
         self.render_scheduled_post_action_overlay(&ctx);
         self.render_integrity_recheck_prompt(&ctx);
@@ -706,10 +815,41 @@ impl Foxy {
                         "Join addon preflight query failed for {}:{}: {}",
                         pending.server.address, pending.server.port, err
                     );
-                    self.show_error_toast(self.t("Operation cancelled"));
+                    if let Some(pending) = self.pending_join_preflight.as_mut().filter(|pending| {
+                        pending.server.address == result.address
+                            && pending.server.port.parse::<u16>().ok() == Some(result.port)
+                            && pending.final_confirmation_choice.is_some()
+                    }) {
+                        pending.final_query_error = Some(err);
+                    }
+                    self.show_error_toast(
+                        self.t("The final Join refresh failed. Retry or cancel the reviewed Join."),
+                    );
                     ctx.request_repaint();
                 }
             }
+        }
+        if self.pending_join_preflight_query.is_some()
+            && self
+                .join_preflight_worker
+                .as_ref()
+                .is_some_and(|worker| worker.is_finished())
+        {
+            let pending = self
+                .pending_join_preflight_query
+                .take()
+                .expect("failed query is present");
+            let message = self.t("The Join requirements refresh ended without a result.");
+            if let Some(state) = self.pending_join_preflight.as_mut().filter(|state| {
+                state.server.address == pending.server.address
+                    && state.server.port == pending.server.port
+                    && state.final_confirmation_choice.is_some()
+            }) {
+                state.final_query_error = Some(message);
+            } else {
+                self.show_error_toast(message);
+            }
+            ctx.request_repaint();
         }
     }
 

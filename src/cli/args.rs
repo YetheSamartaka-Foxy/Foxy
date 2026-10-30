@@ -1588,6 +1588,12 @@ pub struct GameRemoveArgs {
 
 #[derive(Args, Debug)]
 pub struct GameLaunchArgs {
+    #[arg(long, help = "Keep the changed destination for this extra-file id")]
+    pub keep_extra_file: Vec<String>,
+    #[arg(long, help = "Reapply the stored template for this extra-file id")]
+    pub reapply_extra_file: Vec<String>,
+    #[arg(long, help = "Approve the displayed ordered extra-file replacements")]
+    pub approve_extra_file_layers: bool,
     #[arg(
         long,
         help = "Execute launch immediately (without this flag, command prints launch spec)"
@@ -1731,11 +1737,23 @@ pub enum ConfigExtraFileCommand {
     /// Enable or disable one managed extra file.
     Set(ConfigExtraFileSetArgs),
     /// Copy enabled extra files to their configured destinations.
-    Activate,
+    Activate(ConfigExtraFileActivateArgs),
+}
+
+#[derive(Args, Debug, Default)]
+pub struct ConfigExtraFileActivateArgs {
+    #[arg(long, help = "Keep the changed destination for this extra-file id")]
+    pub keep_extra_file: Vec<String>,
+    #[arg(long, help = "Reapply the stored template for this extra-file id")]
+    pub reapply_extra_file: Vec<String>,
+    #[arg(long, help = "Approve the displayed ordered extra-file replacements")]
+    pub approve_extra_file_layers: bool,
 }
 
 #[derive(Args, Debug)]
 pub struct ConfigExtraFileAddArgs {
+    #[arg(long, help = "Insert at this zero-based layer position")]
+    pub order: Option<usize>,
     #[arg(long, help = "Display name")]
     pub name: String,
     #[arg(long, help = "Source file or folder to copy into the Foxy store")]
@@ -1757,10 +1775,12 @@ pub struct ConfigExtraFileRemoveArgs {
 
 #[derive(Args, Debug)]
 pub struct ConfigExtraFileSetArgs {
+    #[arg(long, help = "Move to this zero-based layer position")]
+    pub order: Option<usize>,
     /// Extra-file id from `foxy config extra-file list`.
     pub id: String,
-    #[arg(long, help = "Target enabled state (true/false)")]
-    pub enabled: bool,
+    #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true", help = "Target enabled state (true/false)")]
+    pub enabled: Option<bool>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -2141,6 +2161,12 @@ pub struct DirectDownloadArgs {
 
 #[derive(Args, Debug)]
 pub struct LaunchArgs {
+    #[arg(long, help = "Keep the changed destination for this extra-file id")]
+    pub keep_extra_file: Vec<String>,
+    #[arg(long, help = "Reapply the stored template for this extra-file id")]
+    pub reapply_extra_file: Vec<String>,
+    #[arg(long, help = "Approve the displayed ordered extra-file replacements")]
+    pub approve_extra_file_layers: bool,
     #[command(flatten)]
     pub selector: RepoSelectorArgs,
     #[arg(long, help = "Optional server name from repository server list")]
@@ -2165,6 +2191,51 @@ pub struct LaunchArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extra_file_order_can_change_without_changing_enablement() {
+        let parsed = CliArgs::try_parse_from([
+            "foxy",
+            "config",
+            "extra-file",
+            "set",
+            "alpha",
+            "--order",
+            "0",
+        ])
+        .unwrap();
+        let Some(CliCommand::Config {
+            command:
+                ConfigCommand::ExtraFile {
+                    command: ConfigExtraFileCommand::Set(args),
+                },
+        }) = parsed.command
+        else {
+            panic!("unexpected command");
+        };
+        assert_eq!(args.enabled, None);
+        assert_eq!(args.order, Some(0));
+        let parsed = CliArgs::try_parse_from([
+            "foxy",
+            "config",
+            "extra-file",
+            "set",
+            "alpha",
+            "--enabled",
+            "false",
+        ])
+        .unwrap();
+        let Some(CliCommand::Config {
+            command:
+                ConfigCommand::ExtraFile {
+                    command: ConfigExtraFileCommand::Set(args),
+                },
+        }) = parsed.command
+        else {
+            panic!("unexpected command");
+        };
+        assert_eq!(args.enabled, Some(false));
+    }
 
     #[test]
     fn workshop_selection_accepts_explicit_boolean_and_legacy_flag_forms() {
