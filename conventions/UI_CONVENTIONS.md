@@ -64,6 +64,15 @@ failure retains Retry/Cancel and shutdown requires a fresh post-save gameplay pr
 
 \### Per-instance repository status
 
+- During drawing, calculate selection-aware readiness for visible repository
+  rows. Do not evaluate `repo_state_for_repository` for every repository merely
+  to generate a text-cache key; virtualization does not avoid work performed
+  before `show_rows`. The sidebar caches each fixed status glyph in its own
+  lazy galley slot, then selects the slot from the current readiness result.
+  Keep row identity and layout invalidation, preset-specific readiness and
+  the transition test in `repository/list_rows.rs`. Any broader readiness
+  cache needs explicit invalidation for selection, evidence and instance changes.
+
 \- Repository status/pending-update maps in the UI are keyed per *instance* via `repo\_instance\_key(url, local\_path)` (= `normalize\_repo\_url(url) + U+001F + content\_hash::normalize\_path(path)`), not by URL alone, so two installs of one URL in different folders show independent status. Use the `\*\_for\_address` helpers in `src/ui/app/repository/list\_cache.rs` and thread `local\_path` through results/events. `repo\_foxy\_modes` is the deliberate exception - foxy mode is a URL-level property. See the identity invariant in root `AGENTS.md` and `conventions/CORE\_CONVENTIONS.md`.
 
 \- Fields and queues that name a repository by list position (`syncing\_repository`, `update\_ready\_repo`, `download\_finished\_repo`, the folder and space sync queues, the bulk dialog, the completed-check banner) are re-pointed in one place, `Foxy::remap\_repository\_indices`, which delete, reorder, and clone all call. A new index-keyed field must be added there; queued work for a removed repository is dropped, never left to start on the repository that moved into its slot. Background results resolve their target by `(url, local\_path)` on arrival (`repo\_index\_by\_instance`); the URL-only fallback of `repo\_index\_by\_url\_and\_path` applies only when exactly one instance has the URL, and scheduled jobs never use it.

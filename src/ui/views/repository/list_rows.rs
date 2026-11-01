@@ -4,17 +4,36 @@ use super::{
 };
 use crate::core::api::SyncMode;
 use crate::ui::app::{
-    ActivityBar, BarMotion, Foxy, ProgressOrb, RepositoryListContextAction, RepositoryListRow,
-    RepositoryListSection,
+    ActivityBar, BarMotion, Foxy, ListGalleyCache, ProgressOrb, RepositoryListContextAction,
+    RepositoryListRow, RepositoryListSection,
 };
 use crate::ui::context_menu::{ContextMenuItem, attach_context_menu};
-use crate::ui::types::{FoxyView, Repository, RepositorySpaceBulkMode};
+use crate::ui::types::{FoxyView, RepoState, Repository, RepositorySpaceBulkMode};
 use crate::ui::views::galley_cache;
 use eframe::egui::{
     self, Align, Atom, Button, CornerRadius, CursorIcon, Frame, Image, Label, Layout, Margin,
     RichText, Sense, Stroke, TextStyle, Ui, Vec2,
 };
 use log::info;
+
+fn repository_status_galley(
+    ui: &Ui,
+    cache: &mut ListGalleyCache,
+    row: usize,
+    state: RepoState,
+    font: eframe::egui::FontId,
+    color: egui::Color32,
+) -> std::sync::Arc<egui::Galley> {
+    let (column, icon) = match state {
+        RepoState::Synced => (1, "\u{2705}"),
+        RepoState::PendingUpdate => (2, "\u{26A0}"),
+        RepoState::Updating => (3, "\u{21BB}"),
+        RepoState::Unknown => (4, "\u{2753}"),
+    };
+    galley_cache::lazy_galley_colored(ui, cache.slot(row, column), font, color, || {
+        format!(" {icon}")
+    })
+}
 
 impl Foxy {
     fn render_repository_list_section_row(
@@ -597,12 +616,6 @@ impl Foxy {
             self.color_primary_accent()
         };
 
-        let state_icon = match state {
-            crate::ui::types::RepoState::Synced => "\u{2705}",
-            crate::ui::types::RepoState::PendingUpdate => "\u{26A0}",
-            crate::ui::types::RepoState::Updating => "\u{21BB}",
-            crate::ui::types::RepoState::Unknown => "\u{2753}",
-        };
         let name_max_chars = if icon.is_some() { 20 } else { 24 };
         let truncated_name = Self::truncate_display_name(&name, name_max_chars);
         let row_height = Self::repository_list_row_height();
@@ -611,12 +624,13 @@ impl Foxy {
         let status_size = Vec2::splat(18.0);
         let text_color = self.color_text_normal();
         let font = TextStyle::Heading.resolve(ui.style());
-        let status_text = galley_cache::lazy_galley_colored(
+        let status_text = repository_status_galley(
             ui,
-            self.repository_list_galleys.slot(row_slot, 1),
+            &mut self.repository_list_galleys,
+            row_slot,
+            state,
             font.clone(),
             text_color,
-            || format!(" {state_icon}"),
         );
         let status_width = if active_operation_tooltip.is_some() {
             status_size.x
@@ -862,4 +876,47 @@ fn row_label_width(ui: &Ui, button_width: f32, with_icon: bool) -> f32 {
         0.0
     };
     (button_width - 2.0 * spacing.button_padding.x - icon - 4.0).max(16.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::repository_status_galley;
+    use crate::ui::app::ListGalleyCache;
+    use crate::ui::types::RepoState;
+    use eframe::egui::{self, Color32, FontId};
+    use std::sync::Arc;
+
+    #[test]
+    fn repository_status_galley_tracks_state_without_content_generation_changes() {
+        let ctx = egui::Context::default();
+        let mut cache = ListGalleyCache::default();
+        cache.ensure(1, 5, 7, 11);
+        let mut synced = None;
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            for (state, icon) in [
+                (RepoState::Unknown, "\u{2753}"),
+                (RepoState::Synced, "\u{2705}"),
+                (RepoState::PendingUpdate, "\u{26A0}"),
+                (RepoState::Updating, "\u{21BB}"),
+                (RepoState::Synced, "\u{2705}"),
+            ] {
+                let galley = repository_status_galley(
+                    ui,
+                    &mut cache,
+                    0,
+                    state,
+                    FontId::proportional(20.0),
+                    Color32::WHITE,
+                );
+                assert_eq!(galley.job.text, format!(" {icon}"));
+                if state == RepoState::Synced
+                    && let Some(previous) = synced.replace(galley.clone())
+                {
+                    assert!(Arc::ptr_eq(&previous, &galley));
+                }
+            }
+        });
+        assert!((1..5).all(|column| cache.slot(0, column).is_some()));
+        output.textures_delta.clear();
+    }
 }

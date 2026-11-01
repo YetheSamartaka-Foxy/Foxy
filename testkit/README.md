@@ -91,6 +91,15 @@ before/after comparison, pass `--foxy-binary` with an executable under the
 ignored repository `.local/` directory; e.g. `--foxy-binary
 .local/reference-build/Foxy.exe`. The override does not change any case fields.
 
+Record the overridden executable's version, source revision/diff and SHA-256
+beside its run IDs. Ledger `git_sha` and `git_dirty` currently describe the
+runner's checkout, including when `--foxy-binary` selects another build. The
+`compare` command compares database modes/write gates, not executable revisions.
+For manual build comparisons, preserve the exact case template and publication
+as well as the binary mapping; see [case hash limits](LEDGER_FORMAT.md#case-hashes)
+when the resolved case contains a unique run directory. Such evidence must not
+be accepted with a misleading build identity or incompatible profile.
+
 Run a whole suite (a failing case does not stop the rest):
 
 ```powershell
@@ -216,12 +225,21 @@ foxy-testkit run --case .\testkit\cases\perf-memory-arma3-live.json --no-build
 ```
 
 Read private commit, not working set: the OS trims resident pages under
-pressure, so only commit moves when an allocation regression lands. To separate
-Foxy's own state from the renderer floor, launch once against an empty
-`--config-dir` and subtract - that floor is not Foxy code and moves with eframe,
-wgpu and the graphics driver. `conventions/SPEED_OF_LIGHT.md` M1 has the
-equation; `conventions/SPEED_OF_LIGHT_MEASUREMENTS.md` has the levers and the
-recorded floor for this machine.
+pressure. Saved benchmark memory samples prefer private working set on Windows,
+so their endpoint/peak values cannot stand in for testkit quiet-window private
+commit. Compare the same phase and pending/preview state over repeated cycles.
+An empty isolated `--config-dir` with the same renderer gives a separate empirical
+base-state observation; it includes app/runtime costs and moves with eframe,
+wgpu and the graphics driver. Do not subtract separately observed peaks to
+invent an allocation minimum. `conventions/SPEED_OF_LIGHT.md` M1 owns the model;
+`conventions/SPEED_OF_LIGHT_MEASUREMENTS.md` holds dated observations.
+
+The memory watch continues through `memory_settle_ms`. `memory.cpu_s` includes
+that tail, while the operation's elapsed time excludes it. An `fps` probe can
+keep frames running briefly into the tail. Use the raw cumulative `cpu_series`
+and a declared operation boundary for action-only CPU; retain the original
+total and report the sampler's boundary precision. Keep renderer, view, frame
+work and probe cadence fixed, and label forced-frame attribution cases.
 
 ## Deep profiling
 

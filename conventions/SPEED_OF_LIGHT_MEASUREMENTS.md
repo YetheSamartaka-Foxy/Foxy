@@ -10,6 +10,7 @@ Every row here has a date, a source and a status:
 | Status | Meaning |
 | --- | --- |
 | `accepted` | Measured under the current model on a known checkout; usable as a reference for the same case, machine and lane |
+| `candidate` | Measured experiment with stated build provenance and scope; not an accepted baseline or calibrated reference |
 | `legacy` | Recorded under the pre-2026-09-16 model (clamped `sol`, nominal-tick sampler, last-batch hash view); numbers preserved verbatim, ratios not comparable with new ones without re-derivation |
 | `superseded` | A later accepted row on the same case replaces it as the reference |
 | `disputed` | The ratio's arithmetic or reference is under question; the raw timings stand, the percentage does not |
@@ -515,6 +516,94 @@ and the lane already measured 56.9-57.6 s on Oct 8 (`33538e4`) with the same
 mutated files as Sept 17, so the slowdown predates the 1.2.2 changes. Since
 the origin dropped two mods, the seeded mutation picks different files (24 of
 40 in common), which moves the lane from 57 to 64 s.
+
+### November 1 sidebar CPU and memory investigation (1.2.2 candidate)
+
+Status: **candidate**, no formal baseline accepted. Control A is clean
+`4d77655`; B is the uncommitted sidebar change in
+`src/ui/views/repository/{list,list_rows}.rs` on that revision. Executable
+SHA-256 values: A `9B1B43674E4166A9790AA8079FB6638D68100445F6B753D79B8685E2BF712D5E`,
+B `8084AE0FB4E63CDD76E92F759FADF9C21111E93CF121DDF2AA166D007E80F479`.
+
+The motivating external exports (`3874539` and `4d77655`) processed different
+publications: 3,738 versus 3,976 files, with clean versus six-pending-addon
+outcomes. Their main hash stages were nearly identical, 609.087 and 608.635 s.
+Process CPU grew by 22.204 s, including 16.04 s on the UI thread. This directs
+attribution toward UI work but does not establish a controlled version regression.
+
+Local A/B used a Ryzen 9 9950X3D, 32 logical processors and about 94 GiB RAM,
+Windows/MSVC release builds, WAL/gate 4, a 90% CPU cap and diagnostics off.
+`perf-122-sidebar-attribution-v3-ssd` fixed the renderer/window state, twelve
+presets with 96 addon entries each, and 900 settle frames per operation.
+The FPS probe keeps drawing briefly into the fixed 10-second settle tail;
+this is a forced-frame attribution lane, not ordinary idle use. A/B/A/B runs
+each supplied five samples after warmup:
+
+- A `20261101T130042Z-07a2b960`, B `20261101T131441Z-08459aa4`.
+- A `20261101T131815Z-01c10bdc`, B `20261101T134511Z-350dfdd8`.
+
+| Process metric | A, n=10 | B, n=10 |
+| --- | ---: | ---: |
+| CPU seconds, median including settle | 3.406250 | 2.890625 |
+| CPU seconds, range | 3.234375-3.875000 | 2.703125-3.000000 |
+| Retained private bytes, median | 412,860,416 | 414,054,400 |
+
+The median CPU reduction is 0.515625 s, 15.14%. The first pair's action-only
+CPU medians were 2.406 and 1.953 s; repeat A was 2.406 s, derived from the raw
+CPU series at the last sample before completion (100 ms boundary resolution).
+Variable frame/driver cadence prevents a general wall-time speedup claim.
+
+The eliminated work was `repo_state_for_repository` in every sidebar row's
+cache-generation scan, before row virtualization, repeated by visible-row
+rendering. B keeps live preset-specific readiness on visible rows and caches
+each immutable status glyph separately. Its fixed extra storage is three
+galley slot cells per row, approximately 24 bytes on this target. The status
+transition test protects glyph changes without a content-generation change.
+
+Both storage guards hashed exactly 6,999,535,200 bytes per integrity pass over
+3,936 files / 434,016 parts. Five passes per build and storage class passed,
+with setup content oracles and two zero-hash/zero-tree-verify checks per pass:
+
+| Integrity action | A median / range, s | B median / range, s |
+| --- | --- | --- |
+| SSD | 10.097082 / 9.769382-10.161234 | 9.705212 / 9.645413-9.883194 |
+| HDD | 66.934699 / 50.548459-76.039803 | 65.964404 / 50.298958-99.741600 |
+
+Sources: `perf-122-byte-integrity-ssd` A/B
+`20261101T132158Z-362d0718` / `20261101T132504Z-3821aeac`; HDD A/B
+`20261101T132817Z-0e43be18` / `20261101T133641Z-348ef13c`.
+Medians showed no storage slowdown; the HDD outlier/spread prevents a storage
+speedup or unchanged worst-case latency claim. Memory differences in these
+rows are not credited to the UI change.
+
+`perf-122-memory-pending-repeat-ssd`, B run `20261101T135458Z-1db3a2dc`,
+cycled ten six-addon publications/previews/repairs on a 433,248-part graph.
+All 41 measured operations, ten exact pending-count assertions and ten repair
+oracles passed. Post-repair retained private bytes ranged from 501,116,928 to
+513,785,856; cycle 10 was 510,042,112 and the final quiet minute was
+512,724,992. Empty GUI run `20261101T140510Z-10b286e8` retained 413,290,496
+bytes with the same renderer. The approximately 99.4 MB settled-state
+difference is empirical state cost, not a patch saving or physical minimum.
+No continuing growth was reproduced on this fixture; no 100 MB reduction or
+general absence of leaks is claimed.
+
+Ownership review found that retry jobs share the part graph and duplicate
+index lists, approximately 3.3 MiB for 433k indices on this target. Full
+retry-save backups are failure-only recovery state. The larger overlap is
+the immutable tree alongside full updated part records; removing it requires
+compact owned worker inputs/results across stability, cancellation and save
+boundaries. That redesign, buffer shrinking and allocator purging were left
+out because no safe measured benefit justified them.
+
+Nine synthetic recovery cases passed on both builds (18 executions), plus
+startup convergence, keyboard traversal and a binding low-cap conformance
+check. Workspace Clippy passed with warnings denied; workspace tests passed
+2,422 with 28 ignored. Cases and raw runs remain in ignored testkit locations.
+Runner Git identity describes its checkout even with `--foxy-binary`, and
+resolved case hashes include per-run paths. These comparisons therefore used
+explicit binary/diff provenance, exact template digests, normalized resolved
+configuration and equal publication/work; they do not update the accepted
+baseline registry. See [ledger limitations](../testkit/LEDGER_FORMAT.md#case-hashes).
 
 ## 1a. Current accepted baselines
 

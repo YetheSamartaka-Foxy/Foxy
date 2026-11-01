@@ -456,22 +456,14 @@ impl Foxy {
                                 .repository_view_state
                                 .repositories
                                 .get(*repo_idx)
-                                .map(|repo| {
-                                    (
-                                        3_u8,
-                                        *repo_idx,
-                                        self.repo_state_for_repository(repo) as u8,
-                                        *indented as u8,
-                                        [0, 0, 0],
-                                    )
-                                })
+                                .map(|_| (3_u8, *repo_idx, 0_u8, *indented as u8, [0, 0, 0]))
                                 .unwrap_or((3_u8, *repo_idx, 0_u8, 0_u8, [0, 0, 0])),
                         })
                         .collect::<Vec<_>>(),
                 ));
                 self.repository_list_galleys.ensure(
                     row_count,
-                    2,
+                    5,
                     repository_rows_generation,
                     galley_cache::fingerprint((
                         (self.settings_view_state.font_sizes.repository_view.status_banner as f32)

@@ -719,6 +719,19 @@ access model, and never classify every removable device as a 110 MB/s disk.
 8. Store outcome and oracle result with every row. Missing counters are
    unknown, never implicit zero; failed, partial, incompatible or unverified
    runs cannot become accepted baselines.
+9. For UI CPU attribution, hold the view, row/selection counts, motion, window
+   state and probe cadence fixed. Compare process and UI-thread CPU seconds,
+   frame count and per-frame cost. Repaint requests can coalesce; their count
+   alone does not establish extra frames. Label forced-FPS/settle workloads
+   separately from ordinary progress or idle use. Testkit `memory.cpu_s`
+   includes the settle tail; use `cpu_series` with an explicit action boundary
+   when excluding it, and report the sampling resolution.
+10. Compare memory at the same phase and terminal state, including whether an
+    update preview or recovery evidence is retained. A terminal sample is not
+    quiet-window retention. Use repeated cycles and a fixed settle window to
+    test saturation; compare the same renderer's empty-app state separately.
+    A bounded result on one fixture does not establish that all workloads are
+    leak-free or justify dropping verification/recovery state.
 
 Baseline acceptance keeps the clean-worktree guard. Old records remain
 readable and replayable. Each ledger row carries a derived schema version.
@@ -809,6 +822,14 @@ lists, filters, compares and exports them (ZIP with the record, `summary.txt`
 led by operation, SoL kind and best-measured comparison, the log slice and
 chart PNGs). When a benchmark feeds the measurements file, take its `SOL`
 rows from `benchmark.json`.
+
+Saved benchmark memory samples use `ProcessMemoryStats::baseline_bytes`, which
+prefers private working set on Windows and falls back to available counters.
+They are not interchangeable with testkit private-commit samples, and the saved
+record does not identify the fallback used. Saved `avg_cpu_percent` uses one
+logical processor as 100% and averages nonzero samples; prefer the bracketed
+user/kernel CPU seconds for work comparisons. The testkit machine-normalized
+CPU fields and the in-app transfer telemetry use a different percentage scale.
 
 ## Logging requirements for new code
 
