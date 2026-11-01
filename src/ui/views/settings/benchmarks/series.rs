@@ -2,7 +2,7 @@
 
 use eframe::egui::Color32;
 
-use super::charts::{BarRow, ChartSeries, YUnit};
+use super::charts::{BarRow, ChartSeries, SeriesStyle, YUnit};
 use crate::core::benchmarks::BenchmarkRecord;
 
 /// One chart of a record: title key, unit and the series it plots.
@@ -43,14 +43,48 @@ fn points(
         .collect()
 }
 
-/// The charts for one record, with an optional prefix on every series label
-/// (the comparison view prefixes "A: " / "B: ") and a colour offset so two
-/// records never share a colour.
 pub fn charts_for(record: &BenchmarkRecord, prefix: &str, colors: &[Color32]) -> Vec<ChartDef> {
+    build_charts(record, prefix, colors, SeriesStyle::Single, false)
+}
+
+fn build_charts(
+    record: &BenchmarkRecord,
+    prefix: &str,
+    colors: &[Color32],
+    style: SeriesStyle,
+    split_rates: bool,
+) -> Vec<ChartDef> {
     let color = |index: usize| colors[index % colors.len()];
     let label = |text: &str| format!("{prefix}{text}");
-    let mut defs = vec![
-        ChartDef {
+    let rate_charts = if split_rates {
+        vec![
+            ChartDef {
+                key: "download_rate",
+                title: "Download speed",
+                unit: YUnit::BytesPerSec,
+                series: vec![ChartSeries {
+                    label: label("Download"),
+                    color: color(0),
+                    points: points(record, |s| s.download_bps),
+                    cumulative: false,
+                    style,
+                }],
+            },
+            ChartDef {
+                key: "disk_write_rate",
+                title: "Disk write speed",
+                unit: YUnit::BytesPerSec,
+                series: vec![ChartSeries {
+                    label: label("Disk write"),
+                    color: color(1),
+                    points: points(record, |s| s.disk_write_bps),
+                    cumulative: false,
+                    style,
+                }],
+            },
+        ]
+    } else {
+        vec![ChartDef {
             key: "rates",
             title: "Transfer rates",
             unit: YUnit::BytesPerSec,
@@ -60,15 +94,20 @@ pub fn charts_for(record: &BenchmarkRecord, prefix: &str, colors: &[Color32]) ->
                     color: color(0),
                     points: points(record, |s| s.download_bps),
                     cumulative: false,
+                    style,
                 },
                 ChartSeries {
                     label: label("Disk write"),
                     color: color(1),
                     points: points(record, |s| s.disk_write_bps),
                     cumulative: false,
+                    style,
                 },
             ],
-        },
+        }]
+    };
+    let mut defs = rate_charts;
+    defs.extend([
         ChartDef {
             key: "downloaded",
             title: "Downloaded",
@@ -78,6 +117,7 @@ pub fn charts_for(record: &BenchmarkRecord, prefix: &str, colors: &[Color32]) ->
                 color: color(0),
                 points: points(record, |s| s.downloaded_bytes as f64),
                 cumulative: true,
+                style,
             }],
         },
         ChartDef {
@@ -89,6 +129,7 @@ pub fn charts_for(record: &BenchmarkRecord, prefix: &str, colors: &[Color32]) ->
                 color: color(2),
                 points: points(record, |s| s.hash_files_done as f64),
                 cumulative: true,
+                style,
             }],
         },
         ChartDef {
@@ -100,6 +141,7 @@ pub fn charts_for(record: &BenchmarkRecord, prefix: &str, colors: &[Color32]) ->
                 color: color(3),
                 points: points(record, |s| s.memory_bytes as f64),
                 cumulative: false,
+                style,
             }],
         },
         ChartDef {
@@ -111,6 +153,7 @@ pub fn charts_for(record: &BenchmarkRecord, prefix: &str, colors: &[Color32]) ->
                 color: color(4),
                 points: points(record, |s| s.cpu_percent * cpu_scale(record)),
                 cumulative: false,
+                style,
             }],
         },
         ChartDef {
@@ -122,14 +165,26 @@ pub fn charts_for(record: &BenchmarkRecord, prefix: &str, colors: &[Color32]) ->
                 color: color(5),
                 points: points(record, |s| s.progress_percent as f64),
                 cumulative: true,
+                style,
             }],
         },
-    ];
+    ]);
     for def in &mut defs {
         def.series.retain(ChartSeries::has_signal);
     }
     defs.retain(|def| !def.series.is_empty());
     defs
+}
+
+/// Charts for one record in a comparison, using one color and visual style
+/// consistently across metrics.
+pub fn comparison_charts_for(record: &BenchmarkRecord, style: SeriesStyle) -> Vec<ChartDef> {
+    let (prefix, color) = match style {
+        SeriesStyle::ComparisonA => ("A: ", crate::ui::palette::BENCHMARK_COMPARE_A),
+        SeriesStyle::ComparisonB => ("B: ", crate::ui::palette::BENCHMARK_COMPARE_B),
+        SeriesStyle::Single => ("", crate::ui::palette::BENCHMARK_COMPARE_A),
+    };
+    build_charts(record, prefix, &[color], style, true)
 }
 
 /// Stages under this many seconds in every record are noise the chart
@@ -220,6 +275,85 @@ mod tests {
         assert_eq!(keys, vec!["hashing", "memory"]);
         assert_eq!(defs[0].series[0].label, "A: Files");
         assert_eq!(defs[0].series[0].points, vec![[1.0, 3.0]]);
+    }
+
+    #[test]
+    fn comparison_identity_is_consistent_across_metric_charts() {
+        let rec = record(
+            vec![BenchmarkSample {
+                t_ms: 1000,
+                download_bps: 10.0,
+                disk_write_bps: 20.0,
+                downloaded_bytes: 30,
+                hash_files_done: 4,
+                memory_bytes: 50,
+                cpu_percent: 60.0,
+                progress_percent: 70.0,
+                ..Default::default()
+            }],
+            vec![],
+        );
+        let expected_keys = [
+            "download_rate",
+            "disk_write_rate",
+            "downloaded",
+            "hashing",
+            "memory",
+            "cpu",
+            "progress",
+        ];
+        for (style, prefix, color) in [
+            (
+                SeriesStyle::ComparisonA,
+                "A: ",
+                crate::ui::palette::BENCHMARK_COMPARE_A,
+            ),
+            (
+                SeriesStyle::ComparisonB,
+                "B: ",
+                crate::ui::palette::BENCHMARK_COMPARE_B,
+            ),
+        ] {
+            let charts = comparison_charts_for(&rec, style);
+            let keys: Vec<_> = charts.iter().map(|chart| chart.key).collect();
+            assert_eq!(keys, expected_keys);
+            for chart in charts {
+                let series = &chart.series[0];
+                assert!(series.label.starts_with(prefix));
+                assert_eq!(series.color, color);
+                assert_eq!(series.style, style);
+            }
+        }
+    }
+
+    #[test]
+    fn comparison_rate_charts_filter_independently() {
+        let rec = record(
+            vec![BenchmarkSample {
+                t_ms: 1000,
+                download_bps: 10.0,
+                ..Default::default()
+            }],
+            vec![],
+        );
+        let charts = comparison_charts_for(&rec, SeriesStyle::ComparisonA);
+        assert!(charts.iter().any(|chart| chart.key == "download_rate"));
+        assert!(!charts.iter().any(|chart| chart.key == "disk_write_rate"));
+
+        let disk_only = record(
+            vec![BenchmarkSample {
+                t_ms: 1000,
+                disk_write_bps: 10.0,
+                ..Default::default()
+            }],
+            vec![],
+        );
+        let charts = comparison_charts_for(&disk_only, SeriesStyle::ComparisonB);
+        assert!(!charts.iter().any(|chart| chart.key == "download_rate"));
+        assert!(charts.iter().any(|chart| chart.key == "disk_write_rate"));
+        assert!(
+            comparison_charts_for(&record(vec![], vec![]), SeriesStyle::ComparisonA).is_empty()
+        );
     }
 
     #[test]

@@ -657,6 +657,7 @@ Benchmarks record how a recheck, update, or redownload performed on your compute
 ### Comparing and sharing
 
 - Select two benchmarks and choose **Compare selected** to see them side by side. The older run is A by default; **Oldest as A** controls that, and **Swap A and B** exchanges the sides.
+- Comparisons use blue for A and amber orange for B throughout the charts, badges, and bars. A has solid lines and circle markers; B has dashed lines and diamond markers. Comparison lines have no area fills, and download and disk-write rates appear in separate charts.
 - **Export benchmark to ZIP** packages a benchmark with its charts and log slice for support. The file is named after the Foxy version, start time, and operation. **Open benchmarks folder** shows the stored files.
 - The game space overview lists your recent benchmarks; **Open benchmarks** jumps to the tab.
 

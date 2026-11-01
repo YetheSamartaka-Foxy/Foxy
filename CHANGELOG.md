@@ -19,6 +19,7 @@
 - Direct downloads preview destination collisions and support replacement only with `--overwrite --yes`. Workshop bundle import offers Merge and Match modes, and removing a game space can preserve its private mod and extra-file payloads.
 
 ## Changed
+- Benchmark comparisons use consistent blue for A and orange for B, with solid and dashed lines and distinct markers. Download and disk-write rates have separate charts, and comparison graphs no longer use overlapping area fills.
 - Reduced processor use when drawing repository status in the sidebar, especially with multiple repositories and large addon selections.
 - Proxy changes during an update offer applying them to new work or restarting the accepted work after cancellation and recovery. Extra files now support ordered layers, review changed destination files before replacement, and restore the latest pre-attempt contents after a failed launch.
 - Switching game spaces prepares the destination while keeping the current workspace available. Divergent legacy configurations stay preserved with a persistent review notice, and removed repository-space members offer keeping the local installation in the group or as standalone.

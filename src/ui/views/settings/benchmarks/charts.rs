@@ -58,10 +58,47 @@ pub fn fmt_secs(secs: f64) -> String {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SeriesStyle {
+    Single,
+    ComparisonA,
+    ComparisonB,
+}
+
+impl SeriesStyle {
+    fn paint_line(self, painter: &egui::Painter, points: &[Pos2], color: Color32) {
+        let width = if self == Self::Single { 2.0 } else { 2.5 };
+        let stroke = Stroke::new(width, color);
+        if self == Self::ComparisonB {
+            painter.extend(Shape::dashed_line(points, stroke, 8.0, 5.0));
+        } else {
+            painter.add(Shape::line(points.to_vec(), stroke));
+        }
+    }
+
+    fn paint_marker(self, painter: &egui::Painter, center: Pos2, radius: f32, color: Color32) {
+        if self == Self::ComparisonB {
+            painter.add(Shape::convex_polygon(
+                vec![
+                    center - Vec2::new(0.0, radius),
+                    center + Vec2::new(radius, 0.0),
+                    center + Vec2::new(0.0, radius),
+                    center - Vec2::new(radius, 0.0),
+                ],
+                color,
+                Stroke::NONE,
+            ));
+        } else {
+            painter.circle_filled(center, radius, color);
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ChartSeries {
     pub label: String,
     pub color: Color32,
+    pub style: SeriesStyle,
     /// `[seconds, value]`, sorted by seconds.
     pub points: Vec<[f64; 2]>,
     /// A running total rather than a rate: the mean is meaningless, only
@@ -197,12 +234,12 @@ fn paint_legend(
     painter: &egui::Painter,
     right: f32,
     top: f32,
-    entries: impl DoubleEndedIterator<Item = (String, Color32)>,
+    entries: impl DoubleEndedIterator<Item = (String, Color32, SeriesStyle)>,
     font: &FontId,
     color: Color32,
 ) {
     let mut legend_x = right;
-    for (label, swatch_color) in entries.rev() {
+    for (label, swatch_color, style) in entries.rev() {
         let label_rect = painter.text(
             Pos2::new(legend_x, top),
             Align2::RIGHT_TOP,
@@ -210,11 +247,28 @@ fn paint_legend(
             font.clone(),
             color,
         );
+        let swatch_width = if style == SeriesStyle::Single {
+            8.0
+        } else {
+            32.0
+        };
         let swatch = Rect::from_center_size(
-            Pos2::new(label_rect.min.x - 9.0, label_rect.center().y),
-            Vec2::splat(8.0),
+            Pos2::new(
+                label_rect.min.x - 5.0 - swatch_width / 2.0,
+                label_rect.center().y,
+            ),
+            Vec2::new(swatch_width, 8.0),
         );
-        painter.rect_filled(swatch, 2.0, swatch_color);
+        if style == SeriesStyle::Single {
+            painter.rect_filled(swatch, 2.0, swatch_color);
+        } else {
+            style.paint_line(
+                painter,
+                &[swatch.left_center(), swatch.right_center()],
+                swatch_color,
+            );
+            style.paint_marker(painter, swatch.center(), 3.5, swatch_color);
+        }
         legend_x = swatch.min.x - 12.0;
     }
 }
@@ -255,6 +309,7 @@ pub fn line_chart(
         theme.text,
     );
     if let [single] = series
+        && single.style == SeriesStyle::Single
         && let Some((avg, peak)) = single.stats()
     {
         let summary = if single.cumulative {
@@ -276,7 +331,7 @@ pub fn line_chart(
         rect.min.y + 9.0,
         series
             .iter()
-            .map(|entry| (entry.label.clone(), entry.color)),
+            .map(|entry| (entry.label.clone(), entry.color, entry.style)),
         &font_small,
         theme.text,
     );
@@ -353,17 +408,19 @@ pub fn line_chart(
         match points.as_slice() {
             [] => {}
             [only] => {
-                painter.circle_filled(*only, 3.0, entry.color);
+                entry.style.paint_marker(&painter, *only, 3.0, entry.color);
             }
             _ => {
-                painter.add(Shape::mesh(area_mesh(
-                    &points,
-                    plot.max.y,
-                    with_alpha(entry.color, AREA_ALPHA),
-                )));
-                painter.add(Shape::line(points.clone(), Stroke::new(2.0, entry.color)));
+                if entry.style == SeriesStyle::Single {
+                    painter.add(Shape::mesh(area_mesh(
+                        &points,
+                        plot.max.y,
+                        with_alpha(entry.color, AREA_ALPHA),
+                    )));
+                }
+                entry.style.paint_line(&painter, &points, entry.color);
                 if let Some(last) = points.last() {
-                    painter.circle_filled(*last, 3.0, entry.color);
+                    entry.style.paint_marker(&painter, *last, 3.0, entry.color);
                 }
             }
         }
@@ -382,8 +439,8 @@ pub fn line_chart(
         for entry in series {
             if let Some(value) = value_at(entry, secs) {
                 let marker = to_screen(secs, value);
-                painter.circle_filled(marker, 4.5, theme.plot);
-                painter.circle_filled(marker, 3.0, entry.color);
+                entry.style.paint_marker(&painter, marker, 4.5, theme.plot);
+                entry.style.paint_marker(&painter, marker, 3.0, entry.color);
                 lines.push(format!("{}: {}", entry.label, fmt_y(unit, value)));
             }
         }
@@ -463,7 +520,9 @@ pub fn bar_chart(
         &painter,
         rect.max.x - RIGHT_MARGIN,
         rect.min.y + 9.0,
-        legend.iter().cloned(),
+        legend
+            .iter()
+            .map(|(label, color)| (label.clone(), *color, SeriesStyle::Single)),
         &font_small,
         theme.text,
     );
@@ -551,6 +610,7 @@ mod tests {
         let series = ChartSeries {
             label: "s".into(),
             color: Color32::WHITE,
+            style: SeriesStyle::Single,
             points: vec![[0.0, 1.0], [10.0, 2.0], [20.0, 3.0]],
             cumulative: false,
         };
@@ -562,6 +622,7 @@ mod tests {
                 &ChartSeries {
                     label: "e".into(),
                     color: Color32::WHITE,
+                    style: SeriesStyle::Single,
                     points: vec![],
                     cumulative: false,
                 },
@@ -589,6 +650,7 @@ mod tests {
         let series = ChartSeries {
             label: "s".into(),
             color: Color32::WHITE,
+            style: SeriesStyle::Single,
             points: vec![[0.0, 1.0], [1.0, 3.0], [2.0, 2.0]],
             cumulative: false,
         };
@@ -597,6 +659,7 @@ mod tests {
             ChartSeries {
                 label: "e".into(),
                 color: Color32::WHITE,
+                style: SeriesStyle::Single,
                 points: vec![],
                 cumulative: false,
             }
