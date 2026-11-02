@@ -39,6 +39,7 @@ impl Foxy {
         let mut launch_steam = false;
         let mut cancel = false;
         let mut retry_final_query = false;
+        let mut retry_addon_query = false;
         let mut pending_changed = false;
         let mut remote_download_request = None;
 
@@ -70,7 +71,9 @@ impl Foxy {
         let steam_attention = pending.steam_required && !pending.steam_running;
         let can_launch = pending.can_launch();
 
-        let title = if !has_addon_actions && steam_attention {
+        let title = if pending.addon_query_error.is_some() {
+            self.t("Could not check server addons")
+        } else if !has_addon_actions && steam_attention {
             self.t("Steam is not running")
         } else if !has_addon_actions && ts3_attention {
             self.t("TeamSpeak 3 is not running")
@@ -118,6 +121,17 @@ impl Foxy {
                                 &[("error", error.clone())],
                             ),
                         );
+                    }
+                    if let Some(error) = pending.addon_query_error.as_ref() {
+                        ui.colored_label(
+                            self.color_text_error(),
+                            self.t("The server is online, but Foxy could not read its addon list."),
+                        );
+                        ui.label(RichText::new(error.as_str()).color(self.color_text_dim()));
+                        ui.label(self.t(
+                            "Retry the check, or join without comparing your addons to the server's.",
+                        ));
+                        ui.add_space(6.0);
                     }
                     if pending.final_facts_refreshed {
                         ui.colored_label(
@@ -191,6 +205,7 @@ impl Foxy {
 
                 if !has_addon_actions
                     && pending.unavailable_enabled.is_empty()
+                    && pending.addon_query_error.is_none()
                     && !steam_attention
                     && !ts3_attention
                 {
@@ -582,7 +597,9 @@ impl Foxy {
                     // With no addon actions this is a TeamSpeak/Steam-only modal,
                     // so the button just proceeds: "Launch" for a plain launch,
                     // "Join" for a server join, rather than "Launch without ...".
-                    let launch_without_label = if has_addon_list_actions {
+                    let launch_without_label = if pending.addon_query_error.is_some() {
+                        self.t("Join without addon check")
+                    } else if has_addon_list_actions {
                         self.t("Launch without suggested addons")
                     } else if has_dlc_changes {
                         self.t("Launch without DLC changes")
@@ -604,6 +621,9 @@ impl Foxy {
 
                     if pending.final_query_error.is_some() {
                         retry_final_query = ui.button(self.t("Retry final Join refresh")).clicked();
+                    }
+                    if pending.addon_query_error.is_some() {
+                        retry_addon_query = ui.button(self.t("Retry addon check")).clicked();
                     }
 
                     let cancel_btn = ui.button(self.t("Cancel"));
@@ -627,6 +647,17 @@ impl Foxy {
             if let Some(choice) = pending.final_confirmation_choice {
                 self.confirm_final_join_facts(ctx, &pending, choice);
             }
+            return;
+        }
+
+        if retry_addon_query {
+            self.pending_join_preflight = None;
+            self.prelaunch_process_checks = Default::default();
+            self.start_join_server_query(
+                &pending.original_repository,
+                &pending.server,
+                &pending.repo_name,
+            );
             return;
         }
 

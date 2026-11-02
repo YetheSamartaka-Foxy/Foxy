@@ -56,6 +56,7 @@
 - An interrupted metadata refresh no longer makes the next check treat partially saved repository or addon data as current, which could hide newer updates.
 - Servers that do not answer a startup check are now tried again one minute after startup checks finish, then every 15 minutes while still unreachable. Foxy keeps the local check result meanwhile and waits for ongoing checks or downloads to finish before retrying, so a server coming back online can be checked without restarting Foxy.
 - Joining a server or launching the game no longer freezes Foxy, ignores clicks, or keeps opening and closing command windows while Foxy checks whether Steam and TeamSpeak are running, including while the server addon dialog is open. Detecting Steam and checking whether Arma 3 is running before managing profiles no longer open command windows either.
+- Joining a server that is online but does not report its addon list no longer stops with "Operation cancelled". Foxy now explains that the addon check failed and offers Retry addon check, Join without addon check, or Cancel.
 - Launch now shows an error naming the game when it cannot be started, instead of doing nothing or naming Arma 3 for every game.
 - Updates no longer report success while a mod file is missing. A file deleted or replaced after a check is now noticed and repaired by the update, even when the server did not change its addon.
 - Updating a repository no longer deletes the saved patch plans of repositories in other game spaces, which made their next update download whole files.

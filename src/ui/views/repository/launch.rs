@@ -614,7 +614,7 @@ impl Foxy {
                     "Joining repository {} without addon preflight dialog because no addon preflight gate was active",
                     repo_name
                 );
-                self.present_join_addon_preflight(ctx, effective, server, repo_name, None);
+                self.present_join_addon_preflight(ctx, effective, server, repo_name, None, false);
             }
             ServerOnlineStatus::Offline => {
                 warn!(
@@ -778,14 +778,21 @@ impl Foxy {
             result,
         );
         if let Some(previous) = confirmation {
-            let mut refreshed = addon_state.take().unwrap_or_else(|| {
-                crate::ui::app::PendingJoinPreflightState::empty(
+            let mut refreshed = self
+                .join_preflight_state_or_local_fallback(
+                    addon_state.take(),
+                    effective,
+                    server,
                     repo_name,
-                    server.clone(),
-                    effective.clone(),
-                    false,
                 )
-            });
+                .unwrap_or_else(|| {
+                    crate::ui::app::PendingJoinPreflightState::empty(
+                        repo_name,
+                        server.clone(),
+                        effective.clone(),
+                        false,
+                    )
+                });
             merge_join_preflight_choices(&previous, &mut refreshed);
             let facts_changed =
                 join_preflight_fact_keys(&previous) != join_preflight_fact_keys(&refreshed);
@@ -825,7 +832,7 @@ impl Foxy {
                 result.requirements.len()
             );
         }
-        self.present_join_addon_preflight(ctx, effective, server, repo_name, addon_state);
+        self.present_join_addon_preflight(ctx, effective, server, repo_name, addon_state, true);
     }
 
     fn dispatch_refreshed_join(
@@ -866,7 +873,7 @@ impl Foxy {
         pending: &crate::ui::app::PendingJoinPreflightState,
         keep_suggestions: bool,
     ) -> bool {
-        if pending.launch_only {
+        if !pending.refreshes_server_facts_before_join() {
             return false;
         }
         if self.pending_join_preflight_query.is_some()
@@ -955,17 +962,14 @@ impl Foxy {
         state.dlc_disable = dlc_disable;
     }
 
-    pub(crate) fn present_join_addon_preflight(
-        &mut self,
-        ctx: &egui::Context,
+    fn join_preflight_state_or_local_fallback(
+        &self,
+        addon_state: Option<crate::ui::app::PendingJoinPreflightState>,
         effective: &Repository,
         server: &RepositoryServer,
         repo_name: &str,
-        addon_state: Option<crate::ui::app::PendingJoinPreflightState>,
-    ) {
-        self.prelaunch_process_checks = Default::default();
-        let (steam_required, steam_running) = self.evaluate_steam_launch_gate(effective, repo_name);
-        let mut addon_state = addon_state.or_else(|| {
+    ) -> Option<crate::ui::app::PendingJoinPreflightState> {
+        addon_state.or_else(|| {
             Self::build_join_preflight_state(
                 effective,
                 &self.repository_view_state.repositories,
@@ -974,7 +978,50 @@ impl Foxy {
                 &[],
                 &crate::core::addon_metadata::AddonDisplayNameSnapshot::new(),
             )
-        });
+        })
+    }
+
+    /// The server answered its status query, so a failed addon query is shown
+    /// with Retry and Join without addon check instead of ending the Join.
+    pub(crate) fn present_join_addon_query_failure(
+        &mut self,
+        ctx: &egui::Context,
+        effective: &Repository,
+        server: &RepositoryServer,
+        repo_name: &str,
+        error: String,
+    ) {
+        let mut state = self
+            .join_preflight_state_or_local_fallback(None, effective, server, repo_name)
+            .unwrap_or_else(|| {
+                crate::ui::app::PendingJoinPreflightState::empty(
+                    repo_name,
+                    server.clone(),
+                    effective.clone(),
+                    false,
+                )
+            });
+        state.addon_query_error = Some(error);
+        info!(
+            "Join addon check unavailable for repository {} server {}:{}; offering retry or join without addon check",
+            repo_name, server.address, server.port
+        );
+        self.present_join_addon_preflight(ctx, effective, server, repo_name, Some(state), false);
+    }
+
+    pub(crate) fn present_join_addon_preflight(
+        &mut self,
+        ctx: &egui::Context,
+        effective: &Repository,
+        server: &RepositoryServer,
+        repo_name: &str,
+        addon_state: Option<crate::ui::app::PendingJoinPreflightState>,
+        server_addons_checked: bool,
+    ) {
+        self.prelaunch_process_checks = Default::default();
+        let (steam_required, steam_running) = self.evaluate_steam_launch_gate(effective, repo_name);
+        let mut addon_state =
+            self.join_preflight_state_or_local_fallback(addon_state, effective, server, repo_name);
         if steam_required && !steam_running {
             addon_state.get_or_insert_with(|| {
                 crate::ui::app::PendingJoinPreflightState::empty(
@@ -990,6 +1037,7 @@ impl Foxy {
             Some(mut preflight) => {
                 preflight.steam_required = steam_required;
                 preflight.steam_running = steam_running;
+                preflight.server_addons_checked = server_addons_checked;
                 self.pending_join_preflight = Some(preflight);
             }
             None => {

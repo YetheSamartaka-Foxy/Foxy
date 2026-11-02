@@ -72,6 +72,11 @@ pub(super) fn merge_join_preflight_choices(
     previous: &crate::ui::app::PendingJoinPreflightState,
     refreshed: &mut crate::ui::app::PendingJoinPreflightState,
 ) {
+    refreshed.ts3_required = previous.ts3_required;
+    refreshed.ts3_running = previous.ts3_running;
+    refreshed.steam_required = previous.steam_required;
+    refreshed.steam_running = previous.steam_running;
+    refreshed.server_addons_checked = previous.server_addons_checked;
     for item in &mut refreshed.suggestions {
         if let Some(old) = previous.suggestions.iter().find(|old| {
             old.origin == item.origin && old.addon_name.eq_ignore_ascii_case(&item.addon_name)
@@ -226,11 +231,18 @@ mod tests {
             confidence: JoinPreflightMatchConfidence::ExactNormalizedName,
             selected: true,
         });
+        old.steam_required = true;
+        old.steam_running = true;
+        old.ts3_required = true;
+        old.server_addons_checked = true;
         let mut refreshed = preflight();
         refreshed.known_remote = old.known_remote.clone();
         refreshed.known_remote[0].selected = false;
         merge_join_preflight_choices(&old, &mut refreshed);
         assert!(refreshed.known_remote[0].selected);
+        assert!(refreshed.steam_required && refreshed.steam_running);
+        assert!(refreshed.ts3_required && !refreshed.ts3_running);
+        assert!(refreshed.server_addons_checked);
         assert_eq!(
             join_preflight_fact_keys(&old),
             join_preflight_fact_keys(&refreshed)

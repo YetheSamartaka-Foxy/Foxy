@@ -497,6 +497,12 @@ pub struct PendingJoinPreflightState {
     pub launch_only: bool,
     // Readiness confirmation must resume server checks before any game launch.
     pub query_server_before_join: bool,
+    /// These facts came from a successful server addon query, so Join refreshes
+    /// them before dispatch.
+    pub server_addons_checked: bool,
+    /// The server answered its status query but not the addon query; Join may
+    /// retry or continue without the addon check.
+    pub addon_query_error: Option<String>,
     /// A fresh server/local facts query has been completed and changed facts
     /// are awaiting the user's renewed confirmation.
     pub final_facts_refreshed: bool,
@@ -542,6 +548,8 @@ impl PendingJoinPreflightState {
             steam_running: false,
             launch_only,
             query_server_before_join: false,
+            server_addons_checked: false,
+            addon_query_error: None,
             final_facts_refreshed: false,
             final_confirmation_choice: None,
             final_query_error: None,
@@ -577,6 +585,10 @@ impl PendingJoinPreflightState {
 
     pub(crate) fn can_launch(&self) -> bool {
         !self.steam_required || self.steam_running
+    }
+
+    pub(crate) fn refreshes_server_facts_before_join(&self) -> bool {
+        !self.launch_only && self.server_addons_checked
     }
 }
 
@@ -721,6 +733,7 @@ mod tests {
             assert_eq!((pending.steam_required, pending.steam_running), steam_gate);
             assert_eq!(pending.can_launch(), !steam_gate.0 || steam_gate.1);
             assert!(pending.query_server_before_join);
+            assert!(!pending.refreshes_server_facts_before_join());
             assert!(!pending.launch_only);
             assert_eq!(pending.server, server);
             assert_eq!(pending.original_repository.path, repository.path);
@@ -759,6 +772,26 @@ mod tests {
             );
             assert!(!pending.query_server_before_join);
         }
+    }
+
+    #[test]
+    fn only_join_checklists_from_server_addons_refresh_before_dispatch() {
+        let pending = |launch_only, server_addons_checked, addon_query_error: Option<&str>| {
+            PendingJoinPreflightState {
+                server_addons_checked,
+                addon_query_error: addon_query_error.map(str::to_string),
+                ..PendingJoinPreflightState::empty(
+                    "MainRepo",
+                    RepositoryServer::default(),
+                    Repository::default(),
+                    launch_only,
+                )
+            }
+        };
+        assert!(pending(false, true, None).refreshes_server_facts_before_join());
+        assert!(!pending(false, false, None).refreshes_server_facts_before_join());
+        assert!(!pending(true, true, None).refreshes_server_facts_before_join());
+        assert!(!pending(false, false, Some("timed out")).refreshes_server_facts_before_join());
     }
 
     #[test]

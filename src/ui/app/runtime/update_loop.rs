@@ -832,16 +832,24 @@ impl Foxy {
                         "Join addon preflight query failed for {}:{}: {}",
                         pending.server.address, pending.server.port, err
                     );
-                    if let Some(pending) = self.pending_join_preflight.as_mut().filter(|pending| {
-                        pending.server.address == result.address
-                            && pending.server.port.parse::<u16>().ok() == Some(result.port)
-                            && pending.final_confirmation_choice.is_some()
+                    if let Some(state) = self.pending_join_preflight.as_mut().filter(|state| {
+                        state.server.address == result.address
+                            && state.server.port.parse::<u16>().ok() == Some(result.port)
+                            && state.final_confirmation_choice.is_some()
                     }) {
-                        pending.final_query_error = Some(err);
+                        state.final_query_error = Some(err);
+                        self.show_error_toast(self.t(
+                            "The final Join refresh failed. Retry or cancel the reviewed Join.",
+                        ));
+                    } else {
+                        self.present_join_addon_query_failure(
+                            ctx,
+                            &pending.original_repository,
+                            &pending.server,
+                            &pending.repo_name,
+                            err,
+                        );
                     }
-                    self.show_error_toast(
-                        self.t("The final Join refresh failed. Retry or cancel the reviewed Join."),
-                    );
                     ctx.request_repaint();
                 }
             }
