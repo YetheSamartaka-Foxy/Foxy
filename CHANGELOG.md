@@ -55,8 +55,7 @@
 - With either automatic startup check enabled, saved updates are now confirmed against the server even when the repository checksum is unchanged or the quick local check cannot scan the repository yet. Outdated update lists are rebuilt or cleared instead of returning at every launch.
 - An interrupted metadata refresh no longer makes the next check treat partially saved repository or addon data as current, which could hide newer updates.
 - Servers that do not answer a startup check are now tried again one minute after startup checks finish, then every 15 minutes while still unreachable. Foxy keeps the local check result meanwhile and waits for ongoing checks or downloads to finish before retrying, so a server coming back online can be checked without restarting Foxy.
-- Steam and TeamSpeak launch warnings no longer freeze the interface or delay button hover and clicks while checking whether the clients are running.
-- Windows no longer opens brief command windows when detecting Steam or checking whether Arma 3 is running before managing profiles.
+- Joining a server or launching the game no longer freezes Foxy, ignores clicks, or keeps opening and closing command windows while Foxy checks whether Steam and TeamSpeak are running, including while the server addon dialog is open. Detecting Steam and checking whether Arma 3 is running before managing profiles no longer open command windows either.
 - Launch now shows an error naming the game when it cannot be started, instead of doing nothing or naming Arma 3 for every game.
 - Updates no longer report success while a mod file is missing. A file deleted or replaced after a check is now noticed and repaired by the update, even when the server did not change its addon.
 - Updating a repository no longer deletes the saved patch plans of repositories in other game spaces, which made their next update download whole files.

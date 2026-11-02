@@ -52,6 +52,17 @@ pub(crate) fn frame_interval_stats(intervals: &VecDeque<f32>) -> Option<(f32, f3
     Some((at(50), at(95), sorted[sorted.len() - 1]))
 }
 
+/// Drains queued worker results and reports whether the worker had exited.
+/// The exit is sampled first: a worker queues its result before exiting, so one
+/// seen exited here cannot deliver a result after the drain.
+fn drain_worker_results<T>(
+    receiver: &std::sync::mpsc::Receiver<T>,
+    worker_exited: impl FnOnce() -> bool,
+) -> (Vec<T>, bool) {
+    let exited = worker_exited();
+    (receiver.try_iter().collect(), exited)
+}
+
 impl Foxy {
     fn service_proxy_change_prompt(&mut self, ctx: &egui::Context) {
         let Some(prompt) = self.proxy_change_prompt.as_ref() else {
@@ -648,10 +659,11 @@ impl Foxy {
         }
 
         self.pending_queries.retain(|h| !h.is_finished());
-        if self
-            .join_preflight_worker
-            .as_ref()
-            .is_some_and(|h| h.is_finished())
+        if self.pending_join_preflight_query.is_none()
+            && self
+                .join_preflight_worker
+                .as_ref()
+                .is_some_and(|h| h.is_finished())
         {
             self.join_preflight_worker = None;
         }
@@ -788,7 +800,12 @@ impl Foxy {
     }
 
     fn poll_join_preflight_results(&mut self, ctx: &egui::Context) {
-        while let Ok(result) = self.join_preflight_result_rx.try_recv() {
+        let (results, worker_exited) = drain_worker_results(&self.join_preflight_result_rx, || {
+            self.join_preflight_worker
+                .as_ref()
+                .is_some_and(|worker| worker.is_finished())
+        });
+        for result in results {
             let Some(pending) = self.pending_join_preflight_query.as_ref() else {
                 continue;
             };
@@ -829,12 +846,7 @@ impl Foxy {
                 }
             }
         }
-        if self.pending_join_preflight_query.is_some()
-            && self
-                .join_preflight_worker
-                .as_ref()
-                .is_some_and(|worker| worker.is_finished())
-        {
+        if self.pending_join_preflight_query.is_some() && worker_exited {
             let pending = self
                 .pending_join_preflight_query
                 .take()
@@ -1173,5 +1185,20 @@ mod tests {
             window_presence_for(true, true, Some(false), Some(true)),
             crate::ui::app::WindowPresence::Foreground
         );
+    }
+
+    #[test]
+    fn worker_result_sent_just_before_exit_is_not_reported_as_missing() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let (results, exited) = drain_worker_results(&receiver, || {
+            sender.send("requirements").unwrap();
+            true
+        });
+        assert!(exited);
+        assert_eq!(results, vec!["requirements"]);
+
+        let (results, exited) = drain_worker_results(&receiver, || false);
+        assert!(!exited);
+        assert!(results.is_empty());
     }
 }
