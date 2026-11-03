@@ -579,7 +579,7 @@ None of these needs a restart: storage type and memory pressure apply from the n
 
 - **Open config directory** - opens the folder with Foxy's configuration, settings, and database files.
 - **Open log folder** - opens the folder with Foxy's log files.
-- **Export logs to ZIP** - packages the log files into a timestamped ZIP archive for support.
+- **Export logs to ZIP** - packages diagnostic information, log files, and the last prepared cleanup file list into a timestamped ZIP archive for support.
 - **Migrate from Swifty** - opens the [Swifty Migration](#swifty-migration) wizard.
 - **Reset all settings** - resets all settings to their defaults. Repository data is cleared too.
 - **Wipe Database** - removes all cached repository data from the database, optionally also deleting saved benchmarks. Use it only as a last resort.
@@ -846,6 +846,8 @@ Turn on **Enable benchmarks** in Settings > Benchmarks, repeat the action, save 
 ### Activity log and log files
 
 Open the activity log from the bottom-right footer button to see current work, recent core events, and errors. Use **Export logs to ZIP** immediately to its left to save diagnostic logs for support. The same export button is available in the activity log, Settings > Application, startup troubleshooting notices, and several operation error dialogs. You can also use **Open log folder** in Settings > Application. Log files older than 90 days are removed automatically, and Foxy keeps up to 16 recent log files.
+
+If an update has no download but lists extra files for removal, export logs after its check finishes. The log includes relative filename samples. When an update plan has been prepared, `cleanup_plan.json` also includes its full cleanup file list. Exporting uses the cached plan and does not scan or remove repository files.
 
 ---
 

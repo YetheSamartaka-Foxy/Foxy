@@ -1563,6 +1563,17 @@ The logs should make it possible to answer:
 
 ## Diagnosing False Redownloads
 
+A zero-transfer pending update with matching expected-file checksums can be
+cleanup-only work. Identify the actual candidates before calling the state
+stale or changing verification rules. The diagnostic ZIP includes the cached
+last prepared cleanup plan as `cleanup_plan.json`; a count alone cannot prove
+that the candidates are managed files, internal artifacts, or genuine extras.
+`Cleanup candidate evidence` records the normalized-path ownership decision,
+known-path count, operation id and at most eight addon-relative samples. Keep
+absolute roots out of these samples and preserve the full list only in the
+explicit diagnostic export.
+Remote refresh and integrity checks preserve candidates until cleanup is approved.
+
 When a user reports "Foxy wants to redownload addons that are already present," it is one of these distinct causes - identify which before changing code:
 
 - **Partial install in a shared folder.** Missing-file and missing-addon ratios alone do not prove a wrong local path. For a partially present repository, the preflight requires saved local checksum or content-hash evidence on an unresolved file or an absent addon folder before pausing on the ratios. Present shared addons and a repository rollup can acquire local state through sibling propagation while the missing addons have never been installed. Missing-root and confirmed layout-mismatch checks remain independent. Guarded by `mostly_missing_shared_install_is_allowed_despite_present_local_state` and the `mostly_missing_install_with_prior_missing_*` tests.

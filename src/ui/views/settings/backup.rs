@@ -741,6 +741,23 @@ impl Foxy {
         zip.write_all(self.build_diagnostics_manifest(&entries).as_bytes())
             .map_err(|e| format!("Failed to write ZIP manifest: {e}"))?;
 
+        let cleanup_files: Vec<_> = self
+            .cleanup_plan_files
+            .iter()
+            .map(|path| crate::core::utils::format::sanitize_log_path_str(path))
+            .collect();
+        zip.start_file("cleanup_plan.json", options)
+            .map_err(|e| format!("ZIP cleanup plan error: {e}"))?;
+        serde_json::to_writer_pretty(
+            &mut zip,
+            &serde_json::json!({
+                "basis": "last_prepared_update_plan",
+                "file_count": cleanup_files.len(),
+                "files": cleanup_files,
+            }),
+        )
+        .map_err(|e| format!("Failed to write cleanup plan to ZIP: {e}"))?;
+
         let mut buf = Vec::new();
         for path in &entries {
             let file_name = path

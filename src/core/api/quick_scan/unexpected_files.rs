@@ -1,6 +1,29 @@
 use super::super::fs_watcher::normalize_path_for_match;
 use super::super::*;
 
+fn cleanup_candidate_samples(mod_root: &str, candidates: &[String]) -> Vec<String> {
+    let normalized_root = mod_root.replace('\\', "/");
+    let root = Path::new(&normalized_root);
+    candidates
+        .iter()
+        .take(8)
+        .map(|candidate| {
+            let normalized = candidate.replace('\\', "/");
+            let path = Path::new(&normalized);
+            path.strip_prefix(root)
+                .ok()
+                .filter(|relative| !relative.as_os_str().is_empty())
+                .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_else(|| {
+                    path.file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+        })
+        .collect()
+}
+
 pub(super) async fn load_managed_local_paths(context: &FoxyContext) -> Option<HashSet<String>> {
     match context
         .db()
@@ -84,12 +107,27 @@ pub(super) async fn scan_unexpected_local_files_for_mod(
     expected_local_paths: Arc<HashSet<String>>,
 ) -> Option<Vec<String>> {
     let root = mod_root.to_string();
+    let known_managed_paths = expected_local_paths.len();
     match tokio::task::spawn_blocking(move || {
         collect_unexpected_local_files_for_mod(&root, &expected_local_paths)
     })
     .await
     {
-        Ok(Ok(extras)) => Some(extras),
+        Ok(Ok(extras)) => {
+            if !extras.is_empty() {
+                let normalized_root = mod_root.replace('\\', "/");
+                let addon_directory = Path::new(&normalized_root).file_name().unwrap_or_default();
+                info!(
+                    "Cleanup candidate evidence: reason=normalized_path_not_in_known_manifest_set addon_directory={:?} candidates={} known_managed_paths={} relative_samples={:?} op_id={}",
+                    addon_directory,
+                    extras.len(),
+                    known_managed_paths,
+                    cleanup_candidate_samples(mod_root, &extras),
+                    context.operation_id().unwrap_or("none"),
+                );
+            }
+            Some(extras)
+        }
         Ok(Err(_)) | Err(_) => {
             context
                 .hash_evidence
@@ -239,6 +277,31 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
     use std::fs;
+
+    #[test]
+    fn cleanup_diagnostics_bound_samples_and_preserve_relative_names() {
+        let root = "R:/Mods/RepoAlpha/@mod_01";
+        let candidates = (0..12)
+            .map(|index| format!("{root}/addons/file_{index:02}.pbo"))
+            .collect::<Vec<_>>();
+        let samples = cleanup_candidate_samples(root, &candidates);
+        assert_eq!(samples.len(), 8);
+        assert_eq!(samples[0], "addons/file_00.pbo");
+        assert!(samples.iter().all(|path| !path.contains("R:")));
+        assert!(cleanup_candidate_samples(root, &[]).is_empty());
+    }
+
+    #[test]
+    fn cleanup_diagnostics_do_not_expose_an_unmatched_root() {
+        let samples = cleanup_candidate_samples(
+            "R:/Mods/RepoAlpha/@mod_01",
+            &[
+                "R:\\Mods\\RepoAlpha\\@mod_01\\addons\\file.pbo".to_string(),
+                "R:/Mods/RepoAlphabet/@mod_01/other.pbo".to_string(),
+            ],
+        );
+        assert_eq!(samples, ["addons/file.pbo", "other.pbo"]);
+    }
 
     #[test]
     fn collect_unexpected_returns_empty_for_missing_root() {
