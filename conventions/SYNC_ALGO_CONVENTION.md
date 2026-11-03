@@ -1574,6 +1574,22 @@ absolute roots out of these samples and preserve the full list only in the
 explicit diagnostic export.
 Remote refresh and integrity checks preserve candidates until cleanup is approved.
 
+For versioned `.bisign` and `.bikey` candidates, compare the sampled names with
+the accepted manifest before diagnosing ownership failure. A current published
+signature can verify successfully while an older, differently named signature
+remains unowned beside it. Do not ignore these extensions or replace the folder
+baseline to conceal genuine cleanup work. An approved cleanup-only update must
+preserve published bytes, clear pending state and leave subsequent checks clean
+without tree hashing. Installing a new Foxy build preserves these payload files.
+
+The UI's `Starting repository sync` line precedes linked-target inspection and
+does not prove an update worker started. Correlate it with the core `Starting
+sync` record and terminal action. Repeated Update clicks without a Download
+action can be waiting for `Review update targets`. That review can display a
+Workshop destination when a repository link resolves there; ordinary Workshop
+discovery alone does not make repository files shared. Confirm the displayed
+target before attributing cleanup candidates to Steam or approving shared writes.
+
 When a user reports "Foxy wants to redownload addons that are already present," it is one of these distinct causes - identify which before changing code:
 
 - **Partial install in a shared folder.** Missing-file and missing-addon ratios alone do not prove a wrong local path. For a partially present repository, the preflight requires saved local checksum or content-hash evidence on an unresolved file or an absent addon folder before pausing on the ratios. Present shared addons and a repository rollup can acquire local state through sibling propagation while the missing addons have never been installed. Missing-root and confirmed layout-mismatch checks remain independent. Guarded by `mostly_missing_shared_install_is_allowed_despite_present_local_state` and the `mostly_missing_install_with_prior_missing_*` tests.

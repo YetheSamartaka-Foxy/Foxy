@@ -245,9 +245,13 @@ A saved update plan is reused only after ordinary drift checks of selected files
 
 Checks and update previews preserve extra files. The update view lists files absent from the accepted manifest; an approved update removes them with the same rollback protection as replacements. Files owned by another known addon or repository remain protected, including nested addon folders and Windows path aliases. A saved cleanup notice for these managed files clears after a complete check without downloading files or wiping the database. Known local differences also offer backup before replacement, alongside the automatic-backup setting.
 
+An update can show zero download bytes when published files already match and only extra files need removal. Older `.bisign` signatures and `.bikey` keys can remain beside their current versions after an addon update. Installing a new Foxy version preserves mod folders, so those leftovers remain pending until an approved cleanup finishes. Repeated checks preserve them too.
+
 Explicit empty publications are supported and keep installed files and ownership records. Use **Review removal of retained files** for a separate confirmation of the exact previously managed files. Shared files cannot be removed through this action. A failed or omitted manifest is never treated as an empty publication.
 
 Linked addon folders require approval of their resolved targets before updating. Foxy shows the destinations and known affected installations, then rechecks them before writing. Checking linked content alone does not approve modification. Another Foxy operation claiming the same shared addon blocks the update until it finishes.
+
+If **Review update targets** appears after clicking Update, review its **Shared target** paths. **Approve targets and continue update** resumes that update; clicking Update again does not replace this review. A link into Steam Workshop means Foxy and Steam can modify the same files. Use a separate physical repository folder when those installations need independent versions. Merely enabling Workshop addon discovery does not link the folders.
 
 If a publication changes during metadata fetching, Foxy retries the snapshot once and then stops if it remains inconsistent. A full-file checksum failure rolls back the attempt and allows one fresh automatic attempt; a second verification failure remains failed with pending work preserved.
 
