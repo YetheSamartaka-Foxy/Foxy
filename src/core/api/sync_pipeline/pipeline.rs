@@ -3193,11 +3193,25 @@ async fn run_repository_pipeline(
         ));
         return;
     }
+    let write_roots = match super::super::check_contracts::selected_addon_write_roots(
+        context.clone(),
+        &normalized_repo_url,
+        &mod_enabled_overrides,
+    )
+    .await
+    {
+        Ok(roots) => roots,
+        Err(message) => {
+            emit_progress!(ProgressEvent::Failed(message));
+            return;
+        }
+    };
     let write_targets = match super::super::check_contracts::bind_write_targets(
         &local_path,
         repository_space_shared_path.as_deref(),
         &enrolled_link_targets,
         &captured_space_dir,
+        Some(&write_roots),
     )
     .await
     {

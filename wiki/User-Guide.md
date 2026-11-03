@@ -249,7 +249,7 @@ An update can show zero download bytes when published files already match and on
 
 Explicit empty publications are supported and keep installed files and ownership records. Use **Review removal of retained files** for a separate confirmation of the exact previously managed files. Shared files cannot be removed through this action. A failed or omitted manifest is never treated as an empty publication.
 
-Linked addon folders require approval of their resolved targets before updating. Foxy shows the destinations and known affected installations, then rechecks them before writing. Checking linked content alone does not approve modification. Another Foxy operation claiming the same shared addon blocks the update until it finishes.
+Selected linked addon folders require approval of their resolved targets before updating. Foxy shows the destinations and known affected installations, then rechecks them before writing. Unrelated links elsewhere in a shared repository folder, including Workshop addons outside the selected repository, do not join this review or receive writes. Checking linked content alone does not approve modification. Another Foxy operation claiming the same shared addon blocks the update until it finishes.
 
 If **Review update targets** appears after clicking Update, review its **Shared target** paths. **Approve targets and continue update** resumes that update; clicking Update again does not replace this review. A link into Steam Workshop means Foxy and Steam can modify the same files. Use a separate physical repository folder when those installations need independent versions. Merely enabling Workshop addon discovery does not link the folders.
 

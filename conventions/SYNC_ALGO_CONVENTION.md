@@ -23,7 +23,9 @@ Bulk updates retain their exact pending repository instance through asynchronous
 linked-folder review; a deferred preview is not a failed start. Completion belongs
 to the captured active instance even if rows move. Write binding captures both the
 installation root and its repository-space shared root and still requires explicit
-approval for links below either root. Moving a queued member cannot retarget work
+approval for links used by selected managed addons below either root. Unrelated
+Workshop links and other repository members' addons do not join the write scope.
+Moving a queued member cannot retarget work
 already running under the previous roots.
 
 This convention owns the intended behavior for these current code areas:
@@ -1690,6 +1692,16 @@ that guards it.
    update must clear through an ordinary complete check, repair
    its folder baseline, and leave the next check clean without tree hashing,
    downloads or a database wipe. Guarded by the `shared_cleanup` API tests.
+10. **Target review follows selected addon ownership.** Inspect links along and
+    below selected managed addon roots, including ancestor links, without walking
+    unrelated folders in a repository-space shared root. Preview captures the
+    selection; dispatch resolves the exact instance's fresh manifest paths and
+    checks the same link/target identities. Accepted empty publications do not
+    authorize writes. Keep installation/shared-root storage identities separate
+    from addon write permission. Pinned resolution must reject excluded siblings,
+    even when their links resolve within an owned root, and validate only the
+    scoped link set. Selected links still require explicit approval and fail on
+    retargeting; broad retained-file maintenance keeps its separate review scope.
 
 Diagnostic lines to grep first in a user log for these cases:
 `Carried local part state across manifest update`, `Delta plan skipped`,

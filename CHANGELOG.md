@@ -26,7 +26,7 @@
 - Scheduled close and shutdown actions wait for jobs already due, resolve conflicting actions explicitly, and check gameplay again after saving. Recurring jobs handle skipped and repeated daylight-saving times once.
 - Quick local checks stay offline and report incomplete metadata explicitly. Refresh also checks local drift, and updates revalidate selected files outside their prepared queue, including same-size edits.
 - Checks retain completed stable file verification when cancelled, retry files that change during reading once, and offer controls for stalled reads. Unreadable files and unsaved results remain incomplete, with a guarded Retry save action where possible.
-- Updating linked addon folders requires review of the resolved targets and affected installations. Known local differences offer backup before replacement.
+- Updating selected linked addon folders requires review of the resolved targets and affected installations. Unrelated Workshop links and other addons in a shared folder are excluded. Known local differences offer backup before replacement.
 - Paused repository updates stay paused after closing and reopening Foxy. Resume checks the current update plan before downloading; scheduled and bulk updates respect the saved pause.
 - Before joining, Foxy refreshes the server's addon requirements and local availability. Changed requirements keep compatible choices and ask for confirmation again.
 - Updating shared files with conflicting versions is blocked within a repository space. For independently configured repositories sharing a folder, Foxy warns which other repositories will need updating and keeps their status accurate.

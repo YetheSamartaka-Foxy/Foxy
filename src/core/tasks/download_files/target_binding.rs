@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::core::utils::content_hash::normalize_path;
@@ -11,6 +12,13 @@ pub(crate) struct PinnedDownloadTargets {
     links: Vec<(PathBuf, PathBuf)>,
     root_identities: Vec<(PathBuf, VolumeIdentity)>,
     link_identities: Vec<(PathBuf, VolumeIdentity)>,
+    write_scope: Option<PinnedWriteScope>,
+}
+
+#[derive(Clone, Debug)]
+struct PinnedWriteScope {
+    roots: Vec<PathBuf>,
+    aliases: HashSet<String>,
 }
 
 impl PinnedDownloadTargets {
@@ -100,23 +108,73 @@ impl PinnedDownloadTargets {
             links,
             root_identities: checked_root_identities,
             link_identities: checked_link_identities,
+            write_scope: None,
         })
+    }
+
+    pub(crate) fn with_write_roots(mut self, roots: Option<Vec<PathBuf>>) -> Result<Self, String> {
+        if let Some(roots) = roots {
+            let mut aliases = HashSet::new();
+            for root in &roots {
+                if root
+                    .components()
+                    .any(|part| matches!(part, std::path::Component::ParentDir))
+                {
+                    return Err("Selected addon is outside the repository write roots".into());
+                }
+                if !self
+                    .roots
+                    .iter()
+                    .any(|(owned, _)| path_starts_with(root, owned))
+                {
+                    return Err("Selected addon is outside the repository write roots".into());
+                }
+                aliases.insert(normalize_path(&root.to_string_lossy()));
+                aliases.insert(normalize_path(
+                    &canonicalize_existing_ancestor(root)?.to_string_lossy(),
+                ));
+            }
+            for (link, target) in &self.links {
+                if roots.iter().any(|root| path_starts_with(link, root)) {
+                    aliases.insert(normalize_path(&target.to_string_lossy()));
+                }
+            }
+            self.write_scope = Some(PinnedWriteScope { roots, aliases });
+        }
+        Ok(self)
+    }
+
+    fn check_write_scope(&self, path: &Path) -> Result<(), String> {
+        let Some(scope) = self.write_scope.as_ref() else {
+            return Ok(());
+        };
+        let normalized = normalize_path(&path.to_string_lossy());
+        let mut candidate = normalized.as_str();
+        loop {
+            if scope.aliases.contains(candidate) {
+                return Ok(());
+            }
+            let Some((parent, _)) = candidate.rsplit_once('/') else {
+                return Err("Download target is outside the selected addon write roots".into());
+            };
+            candidate = parent;
+        }
     }
 
     pub(crate) fn validate_current(&self) -> Result<(), String> {
         for (path, identity) in self.root_identities.iter().chain(&self.link_identities) {
             validate_volume_identity(path, identity)?;
         }
-        let mut current = Vec::new();
-        for (root, _) in &self.roots {
-            current.extend(
-                crate::core::api::check_contracts::linked_targets(root).map_err(|_| {
-                    "Linked write targets changed. Review the destinations and retry.".to_owned()
-                })?,
-            );
-        }
-        current.sort();
-        current.dedup();
+        let roots: Vec<_> = self.roots.iter().map(|(root, _)| root.clone()).collect();
+        let current = crate::core::api::check_contracts::linked_targets_for_write_roots(
+            &roots,
+            self.write_scope
+                .as_ref()
+                .map(|scope| scope.roots.as_slice()),
+        )
+        .map_err(|_| {
+            "Linked write targets changed. Review the destinations and retry.".to_owned()
+        })?;
         if current.len() != self.links.len()
             || current.iter().zip(&self.links).any(
                 |((link, target), (approved_link, approved_target))| {
@@ -135,6 +193,7 @@ impl PinnedDownloadTargets {
     }
 
     pub(crate) fn resolve(&self, path: &Path) -> Result<PathBuf, String> {
+        self.check_write_scope(path)?;
         let path_text = path.to_string_lossy();
         let normalized_path = normalize_path(&path_text);
         let Some((link, target)) = self
@@ -174,6 +233,7 @@ impl PinnedDownloadTargets {
                         "Linked write target resolves outside its approved destination".to_owned(),
                     );
                 }
+                self.check_write_scope(&resolved)?;
                 return Ok(resolved);
             }
 
@@ -212,6 +272,7 @@ impl PinnedDownloadTargets {
             {
                 return Err("Download target changed before it could be pinned".to_owned());
             }
+            self.check_write_scope(&pinned)?;
             return Ok(pinned);
         };
 
@@ -245,6 +306,7 @@ impl PinnedDownloadTargets {
                 "Linked write target changed. Review the destination and retry.".to_owned(),
             );
         }
+        self.check_write_scope(&expected)?;
         Ok(expected)
     }
 }
@@ -294,6 +356,105 @@ fn canonicalize_existing_ancestor(path: &Path) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scoped_targets_reject_unselected_siblings_and_parent_traversal() {
+        let root = tempfile::tempdir().unwrap();
+        let selected = root.path().join("@mod_01");
+        let unselected = root.path().join("@mod_02");
+        std::fs::create_dir(&selected).unwrap();
+        std::fs::create_dir(&unselected).unwrap();
+        let pinned = PinnedDownloadTargets::from_links(root.path().to_owned(), Vec::new())
+            .unwrap()
+            .with_write_roots(Some(vec![selected.clone()]))
+            .unwrap();
+        assert!(pinned.validate_current().is_ok());
+        assert_eq!(
+            pinned.resolve(&selected.join("file.bin")).unwrap(),
+            selected.canonicalize().unwrap().join("file.bin")
+        );
+        assert!(pinned.resolve(&unselected.join("file.bin")).is_err());
+        assert!(
+            pinned
+                .resolve(&selected.join("../@mod_02/file.bin"))
+                .is_err()
+        );
+        assert!(pinned.resolve(root.path()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scoped_validation_ignores_unrelated_links_but_detects_new_selected_links() {
+        let root = tempfile::tempdir().unwrap();
+        let selected = root.path().join("@mod_01");
+        let target = tempfile::tempdir().unwrap();
+        std::fs::create_dir(&selected).unwrap();
+        let pinned = PinnedDownloadTargets::from_links(root.path().to_owned(), Vec::new())
+            .unwrap()
+            .with_write_roots(Some(vec![selected.clone()]))
+            .unwrap();
+        let unrelated = root.path().join("@mod_99");
+        std::os::unix::fs::symlink(target.path(), &unrelated).unwrap();
+        assert!(pinned.validate_current().is_ok());
+        assert!(pinned.resolve(&unrelated.join("file.bin")).is_err());
+        std::os::unix::fs::symlink(target.path(), selected.join("addons")).unwrap();
+        assert!(pinned.validate_current().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scoped_ancestor_link_does_not_authorize_other_addons_in_its_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let root = temp.path().join("repo");
+        std::fs::create_dir(target.path().join("@mod_01")).unwrap();
+        std::fs::create_dir(target.path().join("@mod_02")).unwrap();
+        std::os::unix::fs::symlink(target.path(), &root).unwrap();
+        let links = vec![(root.clone(), target.path().canonicalize().unwrap())];
+        let pinned = PinnedDownloadTargets::from_links(root.clone(), links)
+            .unwrap()
+            .with_write_roots(Some(vec![root.join("@mod_01")]))
+            .unwrap();
+        assert!(pinned.validate_current().is_ok());
+        assert!(pinned.resolve(&root.join("@mod_01/file.bin")).is_ok());
+        assert!(
+            pinned
+                .resolve(&target.path().join("@mod_01/file.bin"))
+                .is_ok()
+        );
+        assert!(pinned.resolve(&root.join("@mod_02/file.bin")).is_err());
+        assert!(
+            pinned
+                .resolve(&target.path().join("@mod_02/file.bin"))
+                .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scoped_descendant_link_allows_its_pinned_alias_and_detects_retargeting() {
+        let root = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let replacement = tempfile::tempdir().unwrap();
+        let selected = root.path().join("@mod_01");
+        std::fs::create_dir(&selected).unwrap();
+        let link = selected.join("addons");
+        std::os::unix::fs::symlink(target.path(), &link).unwrap();
+        let pinned = PinnedDownloadTargets::from_links(
+            root.path().to_owned(),
+            vec![(link.clone(), target.path().canonicalize().unwrap())],
+        )
+        .unwrap()
+        .with_write_roots(Some(vec![selected]))
+        .unwrap();
+        assert!(pinned.validate_current().is_ok());
+        let resolved = pinned.resolve(&link.join("file.bin")).unwrap();
+        assert!(pinned.resolve(&resolved).is_ok());
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(replacement.path(), &link).unwrap();
+        assert!(pinned.validate_current().is_err());
+        assert!(pinned.resolve(&link.join("file.bin")).is_err());
+    }
 
     #[test]
     fn ordinary_paths_are_pinned_to_the_canonical_root() {

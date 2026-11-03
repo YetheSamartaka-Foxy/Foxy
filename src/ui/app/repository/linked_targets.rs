@@ -9,7 +9,7 @@ impl Foxy {
     pub(crate) fn start_linked_target_preview(
         &mut self,
         repo: &Repository,
-        intent: PendingLinkedTargetSync,
+        mut intent: PendingLinkedTargetSync,
     ) {
         let address = repo.address.clone();
         let path = sanitize_user_path(&repo.path);
@@ -25,19 +25,36 @@ impl Foxy {
                 })
         });
         let space_dir = Self::get_game_space_directory();
+        let mut selected_mod_states =
+            Self::resolve_selected_mod_states(repo, intent.selected_mod_states.clone());
+        intent.selected_mod_states = Some(selected_mod_states.clone());
         self.pending_link_target_sync = Some(intent);
         self.pending_link_target_previews = None;
         let tx = self.link_target_preview_tx.clone();
         std::thread::spawn(move || {
             let result = crate::core::api::background_runtime()
                 .map(|runtime| {
-                    runtime.block_on(
+                    runtime.block_on(async {
+                        crate::core::api::check_contracts::exclude_accepted_empty_addons(
+                            &space_dir,
+                            &address,
+                            &path,
+                            &mut selected_mod_states,
+                        )?;
+                        let write_roots =
+                            crate::core::api::check_contracts::selected_mod_write_roots(
+                                &path,
+                                shared_root.as_deref(),
+                                &selected_mod_states,
+                            )?;
                         crate::core::api::check_contracts::preview_linked_targets_in_space(
                             &path,
                             shared_root.as_deref(),
                             &space_dir,
-                        ),
-                    )
+                            Some(&write_roots),
+                        )
+                        .await
+                    })
                 })
                 .unwrap_or_else(|| Err("Background runtime is unavailable".to_owned()));
             let _ = tx.send(LinkedTargetPreviewResult {

@@ -2,6 +2,10 @@ use super::*;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+mod write_scope;
+
+pub(crate) use write_scope::{linked_targets_for_write_roots, selected_mod_write_roots};
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct EmptyPublication {
     repository_empty: bool,
@@ -30,6 +34,23 @@ fn load_empty_publications(path: &Path) -> Result<BTreeMap<String, EmptyPublicat
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
         Err(_) => Err("Could not read accepted empty-publication state".into()),
     }
+}
+
+pub(crate) fn exclude_accepted_empty_addons(
+    space_dir: &Path,
+    url: &str,
+    root: &str,
+    selected: &mut [(String, bool)],
+) -> Result<(), String> {
+    let stored = load_empty_publications(&space_dir.join("empty_publications.json"))?;
+    if let Some(empty) = stored.get(&empty_publication_key(url, root)) {
+        for (name, enabled) in selected {
+            if empty.repository_empty || empty.addons.contains(&name.to_lowercase()) {
+                *enabled = false;
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn accepted_empty_scope(
@@ -338,21 +359,24 @@ pub async fn preview_linked_targets(
     shared_root: Option<&str>,
 ) -> Result<Vec<LinkedTargetPreview>, String> {
     let space_dir = crate::core::game::spaces::active_game_space_dir();
-    preview_linked_targets_in_space(root, shared_root, &space_dir).await
+    preview_linked_targets_in_space(root, shared_root, &space_dir, None).await
 }
 
 pub(crate) async fn preview_linked_targets_in_space(
     root: &str,
     shared_root: Option<&str>,
     space_dir: &Path,
+    write_roots: Option<&[PathBuf]>,
 ) -> Result<Vec<LinkedTargetPreview>, String> {
     let roots = owned_write_roots(root, shared_root);
     let inspect_roots = roots.clone();
     let records_space = space_dir.to_path_buf();
+    let write_roots = write_roots.map(<[PathBuf]>::to_vec);
     let (links, changed_roots) = tokio::task::spawn_blocking(move || {
-        let links = linked_targets_for_roots(&inspect_roots).map_err(|_| {
-            "Could not inspect linked folders. Restore access before updating.".to_owned()
-        })?;
+        let links = linked_targets_for_write_roots(&inspect_roots, write_roots.as_deref())
+            .map_err(|_| {
+                "Could not inspect linked folders. Restore access before updating.".to_owned()
+            })?;
         let changed_roots =
             crate::core::api::storage_targets::changed_targets(&records_space, &roots)?;
         Ok::<_, String>((links, changed_roots))
@@ -441,20 +465,27 @@ pub(crate) async fn bind_write_targets(
     shared_root: Option<&str>,
     enrolled: &[LinkedTargetPreview],
     space_dir: &Path,
+    write_roots: Option<&[PathBuf]>,
 ) -> Result<Arc<crate::core::tasks::download_files::PinnedDownloadTargets>, String> {
     let roots = owned_write_roots(root, shared_root);
     let inspect_roots = roots.clone();
-    let links = tokio::task::spawn_blocking(move || linked_targets_for_roots(&inspect_roots))
-        .await
-        .map_err(|_| "Linked-folder inspection stopped".to_owned())?
-        .map_err(|_| {
-            "Could not inspect linked folders. Restore access before updating.".to_owned()
-        })?;
+    let inspected_write_roots = write_roots.map(<[PathBuf]>::to_vec);
+    let links = tokio::task::spawn_blocking(move || {
+        linked_targets_for_write_roots(&inspect_roots, inspected_write_roots.as_deref())
+    })
+    .await
+    .map_err(|_| "Linked-folder inspection stopped".to_owned())?
+    .map_err(|_| {
+        "Could not inspect linked folders. Restore access before updating.".to_owned()
+    })?;
     let linked_enrollment: Vec<_> = enrolled
         .iter()
         .filter(|entry| {
             crate::core::utils::content_hash::normalize_path(&entry.link_path)
                 != crate::core::utils::content_hash::normalize_path(&entry.target_path)
+                && write_roots.is_none_or(|roots| {
+                    write_scope::link_overlaps_write_roots(Path::new(&entry.link_path), roots)
+                })
         })
         .collect();
     if links.len() != linked_enrollment.len()
@@ -494,14 +525,50 @@ pub(crate) async fn bind_write_targets(
     })
     .await
     .map_err(|_| "Target storage inspection stopped".to_string())??;
-    Ok(Arc::new(
-        crate::core::tasks::download_files::PinnedDownloadTargets::from_approved_roots(
+    let write_roots = write_roots.map(<[PathBuf]>::to_vec);
+    tokio::task::spawn_blocking(move || {
+        let targets = crate::core::tasks::download_files::PinnedDownloadTargets::from_approved_roots(
             roots,
             links,
             root_identities,
             linked_identities,
-        )?,
-    ))
+        )?;
+        Ok(Arc::new(targets.with_write_roots(write_roots)?))
+    })
+    .await
+    .map_err(|_| "Target storage inspection stopped".to_string())?
+}
+
+pub(super) async fn selected_addon_write_roots(
+    context: Arc<FoxyContext>,
+    url: &str,
+    overrides: &HashMap<String, bool>,
+) -> Result<Vec<PathBuf>, String> {
+    let repository = load_repository_by_remote_url(context.clone(), url)
+        .await
+        .map_err(|_| "Could not locate update ownership".to_owned())?;
+    let rows = context.db().query_all("SELECT a.name, a.local_path, a.enabled FROM repository_addons ra JOIN addons a ON a.id = ra.addon_id WHERE ra.repository_id = ?", crate::core::db::params![repository.id as i64])
+        .await.map_err(|_| "Could not inspect update ownership".to_owned())?;
+    let mut roots = Vec::new();
+    for row in &rows {
+        let name = row
+            .get_string("name")
+            .map_err(|_| "Could not inspect update ownership".to_owned())?;
+        let enabled = row
+            .get_bool("enabled")
+            .map_err(|_| "Could not inspect update ownership".to_owned())?;
+        if overrides
+            .get(&name.to_lowercase())
+            .copied()
+            .unwrap_or(enabled)
+        {
+            roots.push(PathBuf::from(
+                row.get_string("local_path")
+                    .map_err(|_| "Could not inspect update ownership".to_owned())?,
+            ));
+        }
+    }
+    Ok(roots)
 }
 
 pub(super) async fn claim_addon_writes(
@@ -510,28 +577,11 @@ pub(super) async fn claim_addon_writes(
     overrides: &HashMap<String, bool>,
     pinned_targets: Option<Arc<crate::core::tasks::download_files::PinnedDownloadTargets>>,
 ) -> Result<Vec<std::fs::File>, String> {
-    let repository = load_repository_by_remote_url(context.clone(), url)
-        .await
-        .map_err(|_| "Could not locate update ownership".to_owned())?;
-    let rows = context.db().query_all("SELECT a.name, a.local_path, a.enabled FROM repository_addons ra JOIN addons a ON a.id = ra.addon_id WHERE ra.repository_id = ?", crate::core::db::params![repository.id as i64])
-        .await.map_err(|_| "Could not inspect update ownership".to_owned())?;
-    let roots: Vec<String> = rows
-        .iter()
-        .filter_map(|row| {
-            let name = row.get_string("name").ok()?;
-            overrides
-                .get(&name.to_lowercase())
-                .copied()
-                .unwrap_or(row.get_bool("enabled").ok()?)
-                .then(|| row.get_string("local_path").ok())
-                .flatten()
-        })
-        .collect();
+    let roots = selected_addon_write_roots(context, url, overrides).await?;
     tokio::task::spawn_blocking(move || {
         let mut claimed = Vec::new();
         let mut seen = HashSet::new();
         for root in roots {
-            let root = PathBuf::from(root);
             let root = pinned_targets
                 .as_ref()
                 .map(|targets| targets.resolve(&root))
@@ -562,7 +612,7 @@ mod tests {
         let shared = shared.to_string_lossy().into_owned();
         let space = temp.path().join("space");
         std::fs::create_dir_all(&space).unwrap();
-        let bound = bind_write_targets(&primary, Some(&shared), &[], &space)
+        let bound = bind_write_targets(&primary, Some(&shared), &[], &space, None)
             .await
             .unwrap();
         assert!(
@@ -596,7 +646,7 @@ mod tests {
         let shared = shared.path().to_string_lossy().into_owned();
         let space = tempfile::tempdir().unwrap();
         assert!(
-            bind_write_targets(&primary, Some(&shared), &[], space.path())
+            bind_write_targets(&primary, Some(&shared), &[], space.path(), None)
                 .await
                 .is_err()
         );
@@ -614,7 +664,7 @@ mod tests {
             ),
             storage_changed: false,
         }];
-        let bound = bind_write_targets(&primary, Some(&shared), &approved, space.path())
+        let bound = bind_write_targets(&primary, Some(&shared), &approved, space.path(), None)
             .await
             .unwrap();
         assert!(bound.validate_current().is_ok());
