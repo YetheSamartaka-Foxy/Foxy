@@ -243,7 +243,7 @@ Foxy also checks that no other program holds the files it is about to replace. A
 
 A saved update plan is reused only after ordinary drift checks of selected files outside its download queue. Missing, resized or changed fingerprints rebuild the relevant scope, including same-size edits in previously clean addons.
 
-Checks and update previews preserve extra files. The update view lists files absent from the accepted manifest; an approved update removes them with the same rollback protection as replacements. Files owned by another known repository remain protected. Known local differences also offer backup before replacement, alongside the automatic-backup setting.
+Checks and update previews preserve extra files. The update view lists files absent from the accepted manifest; an approved update removes them with the same rollback protection as replacements. Files owned by another known addon or repository remain protected, including nested addon folders and Windows path aliases. A saved cleanup notice for these managed files clears after a complete check without downloading files or wiping the database. Known local differences also offer backup before replacement, alongside the automatic-backup setting.
 
 Explicit empty publications are supported and keep installed files and ownership records. Use **Review removal of retained files** for a separate confirmation of the exact previously managed files. Shared files cannot be removed through this action. A failed or omitted manifest is never treated as an empty publication.
 

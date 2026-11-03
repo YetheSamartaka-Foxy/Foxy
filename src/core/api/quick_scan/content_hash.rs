@@ -509,6 +509,9 @@ async fn refresh_content_hashes_for_tree_started(
         None,
     )
     .await;
+    if context.hash_evidence.is_incomplete() {
+        return false;
+    }
     let addon_hash_started = Instant::now();
     let mut addon_content_hash_by_idx: HashMap<usize, String> = HashMap::new();
     let mut addons_with_content_hash = 0usize;

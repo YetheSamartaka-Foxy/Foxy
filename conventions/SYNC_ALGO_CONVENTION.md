@@ -1650,6 +1650,19 @@ that guards it.
    `patch_files` and the per-file rows are what the user decides on. A change
    that leaves downloads correct but inflates the estimate (for example to
    the full size because a plan was skipped) is a regression.
+9. **Cleanup ownership follows normalized file paths.** Quick scans,
+   content-baseline refreshes and approved cleanup must use the same set of
+   files linked to known repository addons. An addon root string is not an
+   ownership key: Windows case/slash aliases and nested addon roots can refer
+   to files inside the folder being scanned. Protect those managed files,
+   including another addon in the same repository, without hiding genuine
+   unowned extras or managed-file mismatches. Load ownership once per scan
+   when cleanup detection is needed; clean folder-cache hits need no ownership
+   query. An ownership read or directory traversal failure leaves the check
+   incomplete and cannot replace a folder baseline. A saved false cleanup-only
+   update must clear through an ordinary complete check, repair
+   its folder baseline, and leave the next check clean without tree hashing,
+   downloads or a database wipe. Guarded by the `shared_cleanup` API tests.
 
 Diagnostic lines to grep first in a user log for these cases:
 `Carried local part state across manifest update`, `Delta plan skipped`,

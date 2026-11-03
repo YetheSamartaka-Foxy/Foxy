@@ -1,4 +1,3 @@
-use super::super::fs_watcher::normalize_path_for_match;
 use super::super::*;
 use super::content_hash::calculate_fast_file_content_hash;
 use super::db_helpers::{
@@ -8,7 +7,7 @@ use super::db_helpers::{
 use super::diff_addon_hash::AddonHashResult;
 use super::file_state::{LocalFileState, resolve_local_file_state};
 use super::shared_cache::QuickScanSharedCache;
-use super::unexpected_files::collect_unexpected_local_files_for_mod;
+use super::unexpected_files::{load_managed_local_paths, scan_unexpected_local_files_for_mod};
 use crate::core::api::FileDiffKind;
 use crate::core::db::{DbValue, FoxyDb};
 
@@ -306,6 +305,7 @@ pub(super) async fn compute_file_diffs(
     let mut files_needing_tree_verify: HashSet<u64> = HashSet::new();
     let mut clean_hash_updates: Vec<FoxyMod> = Vec::new();
     let mut file_fallback_elapsed = Duration::default();
+    let mut managed_local_paths = None;
 
     for m in mods {
         let is_enabled = mod_enabled_overrides
@@ -592,33 +592,25 @@ pub(super) async fn compute_file_diffs(
             }
         }
 
-        let unexpected_local_files = if addon_content_mismatch
-            && mod_files.is_empty()
-            && !addon_tree_mismatch
-        {
-            let mut expected_local_paths: HashSet<String> = files_by_mod
-                .get(&mod_id)
-                .map(|entries| {
-                    entries
-                        .iter()
-                        .map(|f| normalize_path_for_match(&f.local_path))
-                        .collect()
-                })
-                .unwrap_or_default();
-            match context.db().query_all("SELECT DISTINCT f.local_path FROM addon_files af JOIN files f ON f.id = af.file_id JOIN addons a ON a.id = af.addon_id WHERE a.local_path = ?", crate::core::db::params![m.local_path.clone()]).await {
-                    Ok(rows) => expected_local_paths.extend(rows.iter().filter_map(|row| row.get_string("local_path").ok()).map(|path| normalize_path_for_match(&path))),
-                    Err(error) => {
-                        context.hash_evidence.record_issue(crate::core::tasks::calculate_hashes::HashIssue { file_path: m.local_path.clone(), kind: crate::core::tasks::calculate_hashes::HashIssueKind::Unreadable, detail: Some(error.to_string()) });
+        let unexpected_local_files =
+            if addon_content_mismatch && mod_files.is_empty() && !addon_tree_mismatch {
+                let expected_local_paths = match &managed_local_paths {
+                    Some(paths) => Arc::clone(paths),
+                    None => {
+                        let paths = Arc::new(load_managed_local_paths(&context).await?);
+                        managed_local_paths = Some(paths.clone());
+                        paths
                     }
+                };
+                if expected_local_paths.is_empty() {
+                    Vec::new()
+                } else {
+                    scan_unexpected_local_files_for_mod(&context, mod_path, expected_local_paths)
+                        .await?
                 }
-            if expected_local_paths.is_empty() {
-                Vec::new()
             } else {
-                collect_unexpected_local_files_for_mod(mod_path, &expected_local_paths)
-            }
-        } else {
-            Vec::new()
-        };
+                Vec::new()
+            };
         if !unexpected_local_files.is_empty() {
             unexpected_files += unexpected_local_files.len();
             addons_with_unexpected_files += 1;
