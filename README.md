@@ -115,7 +115,7 @@ Pre-release build (release-optimized, version label and logs carry source commit
 cargo prerelease
 ```
 
-Pre-release installer (version comes from the changelog and the short commit hash is filled in automatically; output lands in `dist/`, needs Inno Setup `iscc` in `PATH`):
+Pre-release installer (version comes from the changelog and the short commit hash is filled in automatically; output lands in `dist/`, needs Inno Setup 6.7 or later with `iscc` in `PATH`):
 ```bash
 scripts\build-windows-prerelease-installer.bat
 ```

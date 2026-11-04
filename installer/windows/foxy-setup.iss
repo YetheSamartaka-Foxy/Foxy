@@ -1,5 +1,6 @@
 ; Foxy Installer - Inno Setup Script
 ; Build with: iscc /DAppVersion="0.6.0" /DSourceDir="..\..\target\x86_64-pc-windows-msvc\release" foxy-setup.iss
+; Needs Inno Setup 6.7 or later. Regenerate the art folder with tools/installer-art.
 
 #ifndef AppVersion
   #define AppVersion "0.0.0"
@@ -33,7 +34,16 @@ ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 SetupIconFile=..\..\foxy.ico
-WizardStyle=modern
+WizardStyle=modern dynamic windows11 hidebevels includetitlebar
+WizardBackColor=#f7f4f0
+WizardBackColorDynamicDark=#232323
+WizardBackImageFile=art\back-light.png
+WizardBackImageFileDynamicDark=art\back-dark.png
+WizardImageFile=art\side-light-100.png,art\side-light-150.png,art\side-light-200.png
+WizardImageFileDynamicDark=art\side-dark-100.png,art\side-dark-150.png,art\side-dark-200.png
+WizardSmallImageFile=art\small-100.png,art\small-150.png,art\small-200.png
+WizardSmallImageFileDynamicDark=art\small-100.png,art\small-150.png,art\small-200.png
+DisableWelcomePage=no
 CloseApplications=force
 RestartApplications=no
 AllowNoIcons=yes
@@ -43,6 +53,9 @@ DisableProgramGroupPage=yes
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
+
+[Messages]
+WelcomeLabel2=This will install [name/ver], the multi-game mod updater, on your computer.%n%nUpdating keeps your saved repositories, settings, and databases.
 
 [Tasks]
 Name: "startmenu"; Description: "Create Start Menu shortcut"; GroupDescription: "{cm:AdditionalIcons}"
@@ -170,6 +183,7 @@ begin
     CheckBox.Left := ScaleX(16);
     CheckBox.Top := Info.Top + Info.Height + ScaleY(12);
     CheckBox.Width := Form.ClientWidth - ScaleX(32);
+    CheckBox.Height := ScaleY(20);
     CheckBox.Caption := 'Delete all Foxy user data';
     CheckBox.Checked := False;
 

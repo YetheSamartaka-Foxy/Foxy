@@ -38,6 +38,7 @@
 - A different Launch or Join request for an installation already waiting on an update asks whether to replace the queued action. Install and Restart waits for accepted work and saves to finish before handing off to the installer; a failed handoff keeps the verified installer available to retry.
 - Workshop Remove now unregisters an item from the active space without silently unsubscribing from Steam or deleting shared Workshop files. Bundle Match disables unlisted selections while retaining their payloads, and importing a clipboard profile no longer switches the active profile.
 - Scheduled shutdown asks for confirmation again if Foxy detects new gameplay during its countdown. When an addon changes between required and optional, profiles adopt the new published default selection while preserving overrides within an unchanged category.
+- The Windows installer now matches Foxy, with the Foxy logo and colors, a Welcome page, and light and dark appearance that follows your Windows setting. Silent updates are unchanged.
 
 ## Fixed
 - A second operational Foxy process now refuses the same configuration directory even when targeting a different game space. Recovery blocks only affected storage targets, while a changed device at the same path requires review before updates write to it.
@@ -94,6 +95,7 @@
 - Automatic memory pressure no longer reports severe pressure on a computer with plenty of free memory. It counted memory reserved beyond RAM on Windows, and swap left over from earlier on Linux and macOS, as pressure, which limited checks and downloads to one or a few files at a time and could make an update many times slower.
 - Cancel now stops a check or update promptly while it hashes the files of added or changed addons. Foxy used to finish hashing those files first, which could take minutes on a hard drive.
 - Checks and updates no longer spend a fraction of a second at their start and end listing every thread running on the computer just to log Foxy's own processor use.
+- The uninstaller's Delete all Foxy user data checkbox no longer has its label cut off on high-DPI displays.
 
 # 1.2.1
 ## Added

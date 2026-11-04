@@ -170,7 +170,7 @@ jobs:
       - name: Install Inno Setup
         if: ${{ inputs.build_installers }}
         shell: pwsh
-        run: choco install innosetup -y --no-progress
+        run: choco install innosetup --version=6.7.1 -y --no-progress
 
       - name: Build Windows installer
         if: ${{ inputs.build_installers }}
