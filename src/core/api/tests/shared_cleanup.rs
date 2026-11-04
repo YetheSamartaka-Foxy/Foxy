@@ -349,7 +349,7 @@ async fn windows_path_alias_cleanup_recovery_clears_saved_pending_update() {
 }
 
 #[tokio::test]
-async fn genuine_extra_file_remains_on_disk_and_pending() {
+async fn extras_alone_do_not_create_or_restore_pending_updates() {
     let temp = tempfile::tempdir().expect("temp dir");
     let db = build_db().await;
     let fdb = FoxyDb::from_turso(db.clone());
@@ -405,6 +405,27 @@ async fn genuine_extra_file_remains_on_disk_and_pending() {
 
     let extra = addon_dir.join("user-extra.pbo");
     std::fs::write(&extra, b"user data").expect("write extra file");
+    for index in 1..456 {
+        std::fs::write(
+            addon_dir.join(format!("old_{index:03}.pbo.key_01_v1.bisign")),
+            b"old signature",
+        )
+        .unwrap();
+    }
+    let stale_payload = serde_json::to_string(&[ModDiffSummary {
+        name: "@mod_01".into(),
+        needs_update: true,
+        total_bytes: 0,
+        files: Vec::new(),
+    }])
+    .unwrap();
+    crate::core::models::pending_update::save_pending_update_for_context(
+        context.clone(),
+        repo_url,
+        &stale_payload,
+    )
+    .await
+    .unwrap();
     let diff = quick_local_change_diff(
         context.clone(),
         repo_url,
@@ -418,8 +439,8 @@ async fn genuine_extra_file_remains_on_disk_and_pending() {
     )
     .await;
     assert!(
-        diff.iter().any(|addon| addon.needs_update),
-        "an unowned file must remain represented as pending cleanup work"
+        diff.is_empty(),
+        "matching managed files must not prompt for an update because extras exist"
     );
     super::super::quick_scan::persist_pending_updates(context.clone(), repo_url, &diff).await;
     assert!(
@@ -429,9 +450,60 @@ async fn genuine_extra_file_remains_on_disk_and_pending() {
     let pending_local_path =
         crate::core::utils::content_hash::normalize_path(&repo_root.to_string_lossy());
     assert!(
-        pending_update_exists(&fdb, repo_url, &pending_local_path).await,
-        "the pending payload must retain the approved-cleanup candidate"
+        !pending_update_exists(&fdb, repo_url, &pending_local_path).await,
+        "a complete check must clear the legacy cleanup-only pending payload"
     );
+    assert!(refresh_content_hashes_for_repository(context.clone(), repo_url, None).await);
+    let folder_hash =
+        crate::core::utils::content_hash::calculate_addon_folder_content_hash(&addon_dir).unwrap();
+    assert_eq!(checksums(&fdb, "addons", 11).await.2, folder_hash);
+    for _ in 0..2 {
+        let (tx, mut rx) = tokio::sync::broadcast::channel(256);
+        let next = quick_local_change_diff(
+            context.clone(),
+            repo_url,
+            None,
+            None,
+            Some(&tx),
+            false,
+            true,
+            false,
+            None,
+        )
+        .await;
+        assert!(next.is_empty());
+        assert!(!context.hash_evidence.is_incomplete());
+        while let Ok(event) = rx.try_recv() {
+            if let ProgressEvent::RecheckHashProgress { checked_files, .. } = event {
+                assert_eq!(
+                    checked_files, 0,
+                    "unchanged extras must not cause repeated file checks"
+                );
+            }
+        }
+    }
+    assert_eq!(std::fs::read(&extra).unwrap(), b"user data");
+    std::fs::write(&file, b"changed file bytes").unwrap();
+    let changed = quick_local_change_diff(
+        context.clone(),
+        repo_url,
+        None,
+        None,
+        None,
+        false,
+        true,
+        false,
+        None,
+    )
+    .await;
+    assert!(
+        changed
+            .iter()
+            .any(|addon| addon.needs_update
+                && addon.files.iter().any(|file| file.name == "data.pbo"))
+    );
+    std::fs::write(&file, b"managed file bytes").unwrap();
+    assert!(refresh_content_hashes_for_repository(context.clone(), repo_url, None).await);
     let tree = Tree::load(context.clone(), repo_url).await.unwrap();
     let baseline = checksums(&fdb, "addons", 11).await.2;
     fdb.execute("DROP TABLE repository_addons", params![])
@@ -440,7 +512,7 @@ async fn genuine_extra_file_remains_on_disk_and_pending() {
     assert!(!refresh_content_hashes_for_repository(context.clone(), repo_url, Some(tree)).await);
     assert!(context.hash_evidence.is_incomplete());
     assert_eq!(checksums(&fdb, "addons", 11).await.2, baseline);
-    assert!(pending_update_exists(&fdb, repo_url, &pending_local_path).await);
+    assert!(!pending_update_exists(&fdb, repo_url, &pending_local_path).await);
 }
 
 #[tokio::test]

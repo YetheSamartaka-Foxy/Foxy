@@ -54,13 +54,6 @@ fn inferred_patch_bytes_from_part_stats(
     }
 }
 
-fn addon_needs_update_from_file_diff(
-    has_expected_file_diffs: bool,
-    has_unexpected_files: bool,
-) -> bool {
-    has_expected_file_diffs || has_unexpected_files
-}
-
 /// Whether a mismatched file must be tree-hashed again before it is reported.
 /// Only disk drift (the stored content fingerprint no longer matches, or was
 /// never recorded), a tree hash that never ran, or a part layout no hash ever
@@ -622,10 +615,7 @@ pub(super) async fn compute_file_diffs(
             );
         }
 
-        let addon_needs_update = addon_needs_update_from_file_diff(
-            !mod_files.is_empty(),
-            !unexpected_local_files.is_empty(),
-        );
+        let addon_needs_update = !mod_files.is_empty();
         if addon_needs_update && total_bytes == 0 && addon_tree_mismatch {
             total_bytes = expected_bytes;
         }
@@ -876,17 +866,6 @@ mod tests {
     }
 
     #[test]
-    fn addon_update_decision_includes_cleanup_only_work() {
-        assert!(addon_needs_update_from_file_diff(false, true));
-        assert!(!addon_needs_update_from_file_diff(false, false));
-    }
-
-    #[test]
-    fn addon_update_decision_keeps_expected_file_diffs() {
-        assert!(addon_needs_update_from_file_diff(true, false));
-    }
-
-    #[test]
     fn stale_tree_only_file_diff_requires_no_transfer() {
         assert!(is_stale_tree_only_file_diff(
             true, true, false, true, 0, 100
@@ -953,16 +932,6 @@ mod tests {
             missing_local_checksums: 0,
         };
         assert_eq!(inferred_patch_bytes_from_part_stats(stats, 100, false), 100);
-    }
-
-    // ── addon_needs_update_from_file_diff: full truth table ─────────────
-
-    #[test]
-    fn addon_update_decision_full_truth_table() {
-        assert!(!addon_needs_update_from_file_diff(false, false));
-        assert!(addon_needs_update_from_file_diff(true, false));
-        assert!(addon_needs_update_from_file_diff(false, true));
-        assert!(addon_needs_update_from_file_diff(true, true));
     }
 
     // ── is_stale_tree_only_file_diff: additional ────────────────────────

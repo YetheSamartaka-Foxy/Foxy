@@ -569,7 +569,8 @@ Quick scan outputs:
 - clean result: no pending updates, clear pending cache
 - suspicious addons/files: pending update summary, optional targeted tree verify
 - missing addon folder: pending full addon update
-- unexpected files: pending cleanup before download
+- unexpected files alone: preserve them, normalize the complete folder baseline,
+  and report no update when managed files match
 
 Quick scan must use the cheapest available cache:
 
@@ -839,8 +840,9 @@ Algorithm:
    - part target rows for diagnostics and future partial support
    - patch plan rows for files where delta planning is valid and beneficial
 7. If no pending updates remain, clear queue and early exit.
-8. If pending updates exist but neither download targets nor approved cleanup
-   work exists, fail loudly. A cleanup-only plan is valid.
+8. If pending managed-file updates exist but neither download targets nor
+   approved cleanup work exists, fail loudly. A zero-transfer managed-file
+   repair remains valid; extras alone never create pending work.
 9. Optionally back up affected addons before modifying files.
 10. After update approval, validate enrolled linked targets, claim shared write
     ownership and open the rollback session. Remove planned extras through that
@@ -1565,9 +1567,16 @@ The logs should make it possible to answer:
 
 ## Diagnosing False Redownloads
 
-A zero-transfer pending update with matching expected-file checksums can be
-cleanup-only work. Identify the actual candidates before calling the state
-stale or changing verification rules. The diagnostic ZIP includes the cached
+Extra unmanifested files alone do not require an update when managed files match.
+Older builds could save a zero-file, zero-byte cleanup-only notice. Startup must
+hold that ambiguous hint as Unknown and run an ordinary local-only check rather
+than restore an Update prompt or infer a clean verdict. Missing addons with no
+known files have the same legacy shape, so a complete new check stamps cached
+payloads with `update_basis=managed_files`; do not reinterpret those again. Real
+per-file zero-byte repairs remain pending. Incomplete checks preserve durable
+work and unconfirmed selection state. Resume saved unchecked selections after
+restart, and locally revalidate historical pending preset evidence when its
+payload is absent. The diagnostic ZIP includes the cached
 last prepared cleanup plan as `cleanup_plan.json`; a count alone cannot prove
 that the candidates are managed files, internal artifacts, or genuine extras.
 `Cleanup candidate evidence` records the normalized-path ownership decision,
@@ -1579,10 +1588,10 @@ Remote refresh and integrity checks preserve candidates until cleanup is approve
 For versioned `.bisign` and `.bikey` candidates, compare the sampled names with
 the accepted manifest before diagnosing ownership failure. A current published
 signature can verify successfully while an older, differently named signature
-remains unowned beside it. Do not ignore these extensions or replace the folder
-baseline to conceal genuine cleanup work. An approved cleanup-only update must
-preserve published bytes, clear pending state and leave subsequent checks clean
-without tree hashing. Installing a new Foxy build preserves these payload files.
+remains unowned beside it. Preserve those extras without marking the addon
+outdated. After complete managed-file verification, save the actual folder
+fingerprint including extras, so later checks stay clean without file reads or
+tree hashing. Installing a new Foxy build preserves these payload files.
 
 The UI's `Starting repository sync` line precedes linked-target inspection and
 does not prove an update worker started. Correlate it with the core `Starting
@@ -1684,8 +1693,8 @@ that guards it.
    files linked to known repository addons. An addon root string is not an
    ownership key: Windows case/slash aliases and nested addon roots can refer
    to files inside the folder being scanned. Protect those managed files,
-   including another addon in the same repository, without hiding genuine
-   unowned extras or managed-file mismatches. Load ownership once per scan
+   including another addon in the same repository. Extras remain diagnostic
+   evidence and do not hide managed-file mismatches. Load ownership once per scan
    when cleanup detection is needed; clean folder-cache hits need no ownership
    query. An ownership read or directory traversal failure leaves the check
    incomplete and cannot replace a folder baseline. A saved false cleanup-only

@@ -245,7 +245,9 @@ A saved update plan is reused only after ordinary drift checks of selected files
 
 Checks and update previews preserve extra files. The update view lists files absent from the accepted manifest; an approved update removes them with the same rollback protection as replacements. Files owned by another known addon or repository remain protected, including nested addon folders and Windows path aliases. A saved cleanup notice for these managed files clears after a complete check without downloading files or wiping the database. Known local differences also offer backup before replacement, alongside the automatic-backup setting.
 
-An update can show zero download bytes when published files already match and only extra files need removal. Older `.bisign` signatures and `.bikey` keys can remain beside their current versions after an addon update. Installing a new Foxy version preserves mod folders, so those leftovers remain pending until an approved cleanup finishes. Repeated checks preserve them too.
+Older `.bisign` signatures, `.bikey` keys, and other extra files can remain beside the current published files. These extras do not make the repository outdated when managed files match. Checks and app upgrades preserve them, and a complete local check clears an old cleanup-only notice without downloading or removing files. Required managed files, including empty files, still need repair when missing or changed.
+
+On the first launch after upgrading, an old zero-file, zero-byte update notice is held as unconfirmed while Foxy checks the managed files locally. This compatibility check can run once even when automatic launch checks are off. It never contacts the server or deletes content. A failed or incomplete check remains unresolved; a saved notice with actual managed-file differences stays an update.
 
 Explicit empty publications are supported and keep installed files and ownership records. Use **Review removal of retained files** for a separate confirmation of the exact previously managed files. Shared files cannot be removed through this action. A failed or omitted manifest is never treated as an empty publication.
 

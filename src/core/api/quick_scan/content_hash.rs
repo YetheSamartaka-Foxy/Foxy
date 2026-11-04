@@ -15,17 +15,6 @@ pub(super) fn calculate_fast_addon_folder_content_hash(
     crate::core::utils::content_hash::calculate_addon_folder_content_hash(Path::new(path))
 }
 
-fn addon_content_hash_excluding(path: &str, excluded: &HashSet<String>) -> std::io::Result<String> {
-    let root = Path::new(path);
-    let mut scan = crate::core::utils::content_hash::scan_addon_folder(root)?;
-    scan.file_entries.retain(|(relative, _, _)| {
-        !excluded.contains(&normalize_path_for_match(
-            &root.join(relative).to_string_lossy(),
-        ))
-    });
-    Ok(scan.content_hash(root))
-}
-
 fn calculate_compound_content_hash(ordered_hashes: &[(i64, String)]) -> String {
     if ordered_hashes.is_empty() {
         return String::new();
@@ -600,22 +589,16 @@ async fn refresh_content_hashes_for_tree_started(
         }
 
         let path_key = normalize_path_for_match(&addon_path);
-        let mut addon_content_hash = addon_hash_by_path
+        let addon_content_hash = addon_hash_by_path
             .get(&path_key)
             .cloned()
             .unwrap_or_default();
         if let Some(extras) = unexpected_by_mod.get(&addon.name) {
-            let excluded = extras
-                .iter()
-                .map(|path| normalize_path_for_match(path))
-                .collect();
-            let root = addon_path.clone();
-            addon_content_hash =
-                tokio::task::spawn_blocking(move || addon_content_hash_excluding(&root, &excluded))
-                    .await
-                    .ok()
-                    .and_then(Result::ok)
-                    .unwrap_or_default();
+            info!(
+                "Preserved extra files in folder baseline: files={} extras_require_update=false op_id={}",
+                extras.len(),
+                context.operation_id().unwrap_or("none"),
+            );
         }
 
         // A folder content hash computed over a folder that is *missing* manifest
@@ -781,26 +764,6 @@ async fn refresh_content_hashes_for_tree_started(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn managed_baseline_keeps_extra_files_pending_until_approved_cleanup() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().to_string_lossy().into_owned();
-        std::fs::write(directory.path().join("managed.bin"), b"managed").unwrap();
-        let baseline = calculate_fast_addon_folder_content_hash(&path).unwrap();
-        let extra = directory.path().join("local.cfg");
-        std::fs::write(&extra, b"preserve until approved").unwrap();
-        let excluded = HashSet::from([normalize_path_for_match(&extra.to_string_lossy())]);
-        assert_ne!(
-            calculate_fast_addon_folder_content_hash(&path).unwrap(),
-            baseline
-        );
-        assert_eq!(
-            addon_content_hash_excluding(&path, &excluded).unwrap(),
-            baseline
-        );
-        assert_eq!(std::fs::read(extra).unwrap(), b"preserve until approved");
-    }
 
     #[tokio::test]
     async fn file_content_persistence_reports_failed_writes() {

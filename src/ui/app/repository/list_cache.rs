@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
 use std::sync::mpsc::TryRecvError as StdTryRecvError;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -189,6 +189,11 @@ impl Foxy {
         }
 
         if let Some(state) = evidence_state {
+            if state == RepoState::PendingUpdate
+                && (!self.startup_tasks_started || self.startup_pending_restore_rx.is_some())
+            {
+                return RepoState::Unknown;
+            }
             return state;
         }
 
@@ -570,12 +575,15 @@ impl Foxy {
                                         request.repo_name,
                                         mods.iter().filter(|m| m.needs_update).count()
                                     );
+                                    let unconfirmed =
+                                        legacy_pending_requires_local_check(&payload, &mods);
                                     restored.push(StartupPendingUpdateRestoreRecord {
                                         repo_path: request.repo_path.clone(),
                                         repo_url: request.repo_url,
                                         state: RepoState::PendingUpdate,
-                                        mods: Some(mods),
-                                        verify_with_quick_scan: request.verify_with_quick_scan,
+                                        mods: if unconfirmed { None } else { Some(mods) },
+                                        verify_with_quick_scan: request.verify_with_quick_scan
+                                            || unconfirmed,
                                         is_foxy,
                                     });
                                 } else {
@@ -674,6 +682,19 @@ impl Foxy {
         }
 
         if let Some(records) = restored {
+            let saved_pending_instances: HashSet<_> = self
+                .repository_view_state
+                .repositories
+                .iter()
+                .filter_map(|repo| {
+                    let selected = Self::enabled_addon_names(
+                        Self::resolve_selected_mod_states(repo, None).into_iter(),
+                    );
+                    (preset_evidence_state(repo, repo.selected_profile.as_deref(), &selected)
+                        == Some(RepoState::PendingUpdate))
+                    .then(|| Self::repo_instance_key(&repo.address, &repo.path))
+                })
+                .collect();
             let mut verify_urls = Vec::new();
             let mut first_pending: Option<(usize, Vec<ModDiffSummary>)> = None;
             for record in records {
@@ -688,6 +709,16 @@ impl Foxy {
                     (repo.address.clone(), repo.path.clone())
                 };
                 let normalized_url = Self::normalize_repo_url(&repo_address);
+
+                let unconfirmed_saved_notice = record.mods.is_none()
+                    && (record.state == RepoState::PendingUpdate
+                        || (record.state == RepoState::Unknown
+                            && saved_pending_instances
+                                .contains(&Self::repo_instance_key(&repo_address, &repo_path))));
+                if unconfirmed_saved_notice {
+                    self.defer_unconfirmed_pending_update(repo_index);
+                    continue;
+                }
 
                 let path_key = Self::repo_instance_path_key(&repo_path);
                 // A saved update that startup will refresh must not also be
@@ -951,6 +982,9 @@ impl Foxy {
             };
 
             match outcome {
+                CachedUpdateLoadOutcome::NeedsLocalCheck => {
+                    self.defer_unconfirmed_pending_update(repo_index);
+                }
                 CachedUpdateLoadOutcome::Pending(mods) => {
                     self.cache_pending_updates_for_url(&repo_address, &repo_path, mods);
                     if self.apply_pending_update_cache_for_repo(repo_index) {
@@ -1010,6 +1044,27 @@ impl Foxy {
             self.needs_repaint = true;
         }
     }
+}
+
+fn legacy_pending_requires_local_check(payload: &str, mods: &[ModDiffSummary]) -> bool {
+    if !mods
+        .iter()
+        .any(|addon| addon.needs_update && addon.total_bytes == 0 && addon.files.is_empty())
+    {
+        return false;
+    }
+    let Ok(raw) = serde_json::from_str::<Vec<serde_json::Value>>(payload) else {
+        return false;
+    };
+    raw.iter().any(|addon| {
+        addon.get("needs_update").and_then(serde_json::Value::as_bool) == Some(true)
+            && addon.get("total_bytes").and_then(serde_json::Value::as_u64) == Some(0)
+            && addon
+                .get("files")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(Vec::is_empty)
+            && addon.get("update_basis").and_then(serde_json::Value::as_str) != Some("managed_files")
+    })
 }
 
 fn preset_evidence_state(
@@ -1134,7 +1189,9 @@ fn load_cached_update_outcome(normalized_url: &str, local_path: &str) -> CachedU
             return CachedUpdateLoadOutcome::Corrupt;
         }
     };
-    if mods.iter().any(|m| m.needs_update) {
+    if legacy_pending_requires_local_check(&payload, &mods) {
+        CachedUpdateLoadOutcome::NeedsLocalCheck
+    } else if mods.iter().any(|m| m.needs_update) {
         CachedUpdateLoadOutcome::Pending(mods)
     } else {
         // Stale "no updates" payload: clear the row here so the UI thread never has to.
@@ -1151,6 +1208,56 @@ mod tests {
     use super::*;
     use crate::core::api::{FileDiffSummary, ModDiffSummary};
     use crate::ui::types::{RepositoryPresetCheckEvidence, RepositoryPresetCheckOutcome};
+
+    #[test]
+    fn legacy_cleanup_hints_require_a_check_but_confirmed_missing_addons_do_not() {
+        let mods = vec![ModDiffSummary {
+            name: "@mod_01".into(),
+            needs_update: true,
+            total_bytes: 0,
+            files: Vec::new(),
+        }];
+        let payload = serde_json::to_string(&mods).unwrap();
+        assert!(legacy_pending_requires_local_check(&payload, &mods));
+        let mut confirmed = serde_json::to_value(&mods).unwrap();
+        confirmed[0]["update_basis"] = serde_json::json!("managed_files");
+        assert!(!legacy_pending_requires_local_check(
+            &confirmed.to_string(),
+            &mods
+        ));
+        assert!(!legacy_pending_requires_local_check("[]", &[]));
+    }
+
+    #[test]
+    fn cached_zero_byte_managed_file_repairs_remain_pending() {
+        let mods = vec![ModDiffSummary {
+            name: "@mod_01".into(),
+            needs_update: true,
+            total_bytes: 0,
+            files: vec![FileDiffSummary {
+                name: "empty.bin".into(),
+                needs_update: true,
+                total_bytes: 0,
+                changed_parts: 0,
+                change_kind: crate::core::api::FileDiffKind::Added,
+            }],
+        }];
+        assert!(!legacy_pending_requires_local_check(
+            &serde_json::to_string(&mods).unwrap(),
+            &mods
+        ));
+        let mut mixed = mods;
+        mixed.push(ModDiffSummary {
+            name: "@mod_02".into(),
+            needs_update: true,
+            total_bytes: 0,
+            files: Vec::new(),
+        });
+        assert!(legacy_pending_requires_local_check(
+            &serde_json::to_string(&mixed).unwrap(),
+            &mixed
+        ));
+    }
 
     #[test]
     fn url_fallback_only_resolves_a_single_copy() {

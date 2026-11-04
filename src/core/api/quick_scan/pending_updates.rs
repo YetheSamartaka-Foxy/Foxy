@@ -17,6 +17,13 @@ use crate::core::tasks::remote_file_parts::{
     remote_file_parts_batch,
 };
 
+#[derive(serde::Serialize)]
+struct PendingAddonPayload<'a> {
+    #[serde(flatten)]
+    summary: &'a ModDiffSummary,
+    update_basis: &'static str,
+}
+
 fn normalize_pending_file_name(name: &str) -> String {
     name.replace('\\', "/")
         .trim_start_matches('/')
@@ -60,7 +67,14 @@ pub(crate) async fn persist_pending_updates(
             "Caching pending updates for repo {}: mods={} files={} estimated_transfer_bytes={}",
             repo_url, update_mods, update_files, estimated_bytes
         );
-        match serde_json::to_string(mods) {
+        let payload: Vec<_> = mods
+            .iter()
+            .map(|summary| PendingAddonPayload {
+                summary,
+                update_basis: "managed_files",
+            })
+            .collect();
+        match serde_json::to_string(&payload) {
             Ok(payload) => {
                 if let Err(e) =
                     save_pending_update_for_context(context.clone(), repo_url, &payload).await
@@ -713,6 +727,48 @@ pub(crate) async fn pending_update_mod_scope(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn confirmed_pending_cache_has_a_basis_and_incomplete_checks_preserve_it() {
+        let database = crate::core::tasks::db_turso::build_test_database().await;
+        let context = Arc::new(
+            FoxyContext::new(database, reqwest::Client::new())
+                .with_target_local_path("R:/Mods/RepoAlpha"),
+        );
+        let url = "https://repo.example.invalid/MainRepo/";
+        let mods = [ModDiffSummary {
+            name: "@mod_01".into(),
+            needs_update: true,
+            total_bytes: 0,
+            files: Vec::new(),
+        }];
+        persist_pending_updates(context.clone(), url, &mods).await;
+        let payload = crate::core::models::pending_update::fetch_pending_update_for_context(
+            context.clone(),
+            url,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(value[0]["update_basis"], "managed_files");
+        let restored: Vec<ModDiffSummary> = serde_json::from_str(&payload).unwrap();
+        assert!(restored[0].needs_update);
+        context
+            .hash_evidence
+            .record_issue(crate::core::tasks::calculate_hashes::HashIssue {
+                file_path: String::new(),
+                kind: crate::core::tasks::calculate_hashes::HashIssueKind::Skipped,
+                detail: None,
+            });
+        persist_pending_updates(context.clone(), url, &[]).await;
+        assert_eq!(
+            crate::core::models::pending_update::fetch_pending_update_for_context(context, url)
+                .await
+                .unwrap(),
+            Some(payload)
+        );
+    }
     use crate::core::db::FoxyDb;
 
     fn file_summary(name: &str, total_bytes: u64) -> FileDiffSummary {

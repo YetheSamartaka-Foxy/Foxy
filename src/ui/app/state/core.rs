@@ -420,6 +420,7 @@ pub struct AddonForceRedownloadProbeResult {
 pub enum CachedUpdateLoadOutcome {
     /// Cached payload present and still has updates.
     Pending(Vec<ModDiffSummary>),
+    NeedsLocalCheck,
     /// Cached payload present but no updates remain (stale; the worker cleared
     /// the database row).
     Synced,

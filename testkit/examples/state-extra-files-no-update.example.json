@@ -1,7 +1,7 @@
 {
-  "id": "state-approved-cleanup-only-ssd",
+  "id": "state-extra-files-no-update-ssd",
   "kind": "perf",
-  "description": "Detect one unmanifested file during a clean published-content refresh, preserve it through review, then remove it only when the user starts Update.",
+  "description": "Preserve extra local files without an update notice when published files match, including checks, explicit no-change Update and restart.",
   "build": "release",
   "harness": "gui",
   "timeout_s": 600,
@@ -18,6 +18,7 @@
     "path": "${RUN_DIR}/repo-alpha",
     "space_id": null
   },
+  "settings": { "auto_recheck_on_launch": false, "auto_quick_scan_on_launch": false, "periodic_remote_check_enabled": false },
   "operations": [
     { "op": "download", "setup_once": true, "wait_timeout_s": 180 },
     { "op": "capture-file-state", "setup_once": true, "label": "published-content" },
@@ -25,18 +26,18 @@
       "op": "write-file",
       "setup_once": true,
       "path": "${RUN_DIR}/repo-alpha/@synthetic_000/personal-experiment.cfg",
-      "content": "remove this only after Update is approved\n"
+      "content": "preserve this local extra\n"
     },
     { "op": "capture-file-state", "setup_once": true, "label": "with-extra" },
     {
       "op": "remote-refresh",
-      "label": "cleanup-preview",
+      "label": "matching-files-refresh",
       "wait_timeout_s": 180,
       "expect": [
         { "path": "breakdown.run_metrics.failed_pipelines", "equals": 0 }
       ]
     },
-    { "op": "assert-pending-update-count", "minimum": 1, "maximum": 1, "addons": ["@synthetic_000"] },
+    { "op": "assert-pending-update-count", "minimum": 0, "maximum": 0 },
     { "op": "assert-file-exists", "path": "${RUN_DIR}/repo-alpha/@synthetic_000/personal-experiment.cfg" },
     { "op": "assert-file-state", "label": "with-extra", "comparison": "equal" },
     {
@@ -52,7 +53,7 @@
     { "op": "assert-file-state", "label": "with-extra", "comparison": "equal" },
     {
       "op": "download",
-      "label": "approved-cleanup-only-update",
+      "label": "no-managed-change-update",
       "inspect_cleanup": true,
       "wait_timeout_s": 180,
       "expect": [
@@ -61,8 +62,15 @@
         { "path": "summary.cleanup.residual_files", "equals": 0 }
       ]
     },
-    { "op": "assert-file-absent", "path": "${RUN_DIR}/repo-alpha/@synthetic_000/personal-experiment.cfg" },
+    { "op": "assert-file-exists", "path": "${RUN_DIR}/repo-alpha/@synthetic_000/personal-experiment.cfg" },
+    { "op": "assert-file-state", "label": "with-extra", "comparison": "equal" },
     { "op": "assert-file-state", "label": "published-content", "comparison": "contains" },
+    { "op": "assert-pending-update-count", "minimum": 0, "maximum": 0 },
+    { "op": "startup", "label": "restart-with-extra" },
+    { "op": "assert-pending-update-count", "minimum": 0, "maximum": 0 },
+    { "op": "quick-check", "label": "first-clean-check", "expect": [{ "path": "breakdown.run_metrics.hash_work_bytes", "equals": 0 }, { "path": "breakdown.run_metrics.tree_verify_runs", "equals": 0 }] },
+    { "op": "quick-check", "label": "second-clean-check", "expect": [{ "path": "breakdown.run_metrics.hash_work_bytes", "equals": 0 }, { "path": "breakdown.run_metrics.tree_verify_runs", "equals": 0 }] },
+    { "op": "assert-file-state", "label": "with-extra", "comparison": "equal" },
     { "op": "assert-pending-update-count", "minimum": 0, "maximum": 0 }
   ],
   "repetitions": 1,

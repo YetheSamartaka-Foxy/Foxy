@@ -8,6 +8,72 @@ use crate::ui::app::Foxy;
 use crate::ui::types::{Repository, RepositoryPresetCheckEvidence, RepositoryPresetCheckOutcome};
 
 impl Foxy {
+    pub(in crate::ui::app) fn defer_unconfirmed_pending_update(&mut self, repo_index: usize) {
+        let Some(repo) = self.repository_view_state.repositories.get(repo_index) else {
+            return;
+        };
+        let address = repo.address.clone();
+        let path = repo.path.clone();
+        let instance = Self::repo_instance_key(&address, &path);
+        if self.current_sync_mode == Some(SyncMode::Download)
+            && self
+                .syncing_repository
+                .and_then(|index| self.repository_view_state.repositories.get(index))
+                .is_some_and(|active| {
+                    Self::repo_instance_key(&active.address, &active.path) == instance
+                })
+        {
+            return;
+        }
+        let mut changed = false;
+        let mut queued = 0;
+        for (index, repo) in self
+            .repository_view_state
+            .repositories
+            .iter_mut()
+            .enumerate()
+        {
+            if Self::repo_instance_key(&repo.address, &repo.path) != instance {
+                continue;
+            }
+            changed |= !repo.preset_selection_unchecked;
+            repo.preset_selection_unchecked = true;
+            let covered_by_active = self.syncing_repository == Some(index)
+                && self.active_sync_selection.as_ref().is_some_and(|active| {
+                    Self::enabled_addon_names(active.iter().cloned())
+                        == Self::enabled_addon_names(
+                            Self::resolve_selected_mod_states(repo, None).into_iter(),
+                        )
+                });
+            if !covered_by_active
+                && self
+                    .pending_addon_selection_checks
+                    .insert(Self::selection_identity_key(repo, index))
+            {
+                queued += 1;
+            }
+        }
+        self.clear_pending_update_cache_for_url(&address, &path);
+        if self
+            .update_ready_repo
+            .and_then(|index| self.repository_view_state.repositories.get(index))
+            .is_some_and(|ready| Self::repo_instance_key(&ready.address, &ready.path) == instance)
+        {
+            self.update_ready_repo = None;
+            self.clear_mod_diff_cache();
+            self.update_modal_open = false;
+        }
+        self.set_repo_state_for_address(&address, &path, crate::ui::types::RepoState::Unknown);
+        if changed {
+            self.save_repositories();
+        }
+        info!(
+            "Saved update requires local verification: queued_selections={} preserved_pending_payload=true",
+            queued
+        );
+        self.needs_repaint = true;
+    }
+
     /// The addons a sync of `repo` treats as enabled, after its selected profile.
     pub(crate) fn addon_selection_fingerprint(repo: &Repository) -> u64 {
         let profile = repo
@@ -66,7 +132,9 @@ impl Foxy {
                 .collect();
     }
 
-    fn enabled_addon_names(selection: impl Iterator<Item = (String, bool)>) -> Vec<String> {
+    pub(super) fn enabled_addon_names(
+        selection: impl Iterator<Item = (String, bool)>,
+    ) -> Vec<String> {
         let mut names: Vec<String> = selection
             .filter(|(_, enabled)| *enabled)
             .map(|(name, _)| name.to_lowercase())
@@ -77,7 +145,14 @@ impl Foxy {
     }
 
     pub(in crate::ui::app) fn reset_addon_selection_baseline(&mut self) {
-        self.pending_addon_selection_checks.clear();
+        self.pending_addon_selection_checks = self
+            .repository_view_state
+            .repositories
+            .iter()
+            .enumerate()
+            .filter(|(_, repo)| repo.preset_selection_unchecked)
+            .map(|(index, repo)| Self::selection_identity_key(repo, index))
+            .collect();
         self.addon_selection_baseline = self
             .repository_view_state
             .repositories

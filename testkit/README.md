@@ -78,7 +78,7 @@ foxy-testkit run --case .\testkit\examples\state-h10-approved-extra-cleanup.exam
 foxy-testkit run --case .\testkit\examples\state-empty-publication-recovery.example.json --no-build
 foxy-testkit run --case .\testkit\examples\state-integrity-cancel-recovery.example.json --no-build
 foxy-testkit run --case .\testkit\examples\state-independent-copy-refresh.example.json --no-build
-foxy-testkit run --case .\testkit\examples\state-approved-cleanup-only.example.json --no-build
+foxy-testkit run --case .\testkit\examples\state-extra-files-no-update.example.json --no-build
 foxy-testkit run --case .\testkit\examples\state-unreadable-integrity-recovery.example.json --no-build
 ```
 
