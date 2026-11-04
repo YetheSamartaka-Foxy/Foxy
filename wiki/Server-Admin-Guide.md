@@ -1,6 +1,6 @@
 # Server Admin Guide
 
-This guide covers everything a server administrator needs to set up and maintain Foxy-compatible mod repositories for Arma 3 and Arma Reforger communities with `foxy-server-backend-cli`.
+This guide covers everything a server administrator needs to set up and maintain Foxy-compatible repositories for Arma 3 and Arma Reforger communities, and for custom games, with `foxy-server-backend-cli`.
 
 ---
 
@@ -957,7 +957,8 @@ nginx follows symlinks by default, so `pool` and `link` space layouts work as is
 - **HTTPS is recommended.** Foxy supports HTTP, but HTTPS protects file integrity in transit.
 - **Disable directory listings.** The manifests contain everything clients need.
 - **Set cache headers.** JSON manifests (`repo.json`, `foxy_addons.json`, `foxy_addon.json`, `repository_space.json`) should have short TTLs (5-15 minutes) so updates propagate quickly. Mod files can be cached longer because clients verify them by checksum.
-- **HTTP range requests** must work, because Foxy downloads large files in parallel ranges and patches individual parts.
+- **HTTP range requests** must work, because Foxy downloads large files in parallel ranges and patches individual parts. Foxy rejects a range response that is not `206 Partial Content` or whose `Content-Range` does not match the request, so check any proxy or CDN in front of the server.
+- **Busy responses.** Foxy retries `408`, `429`, and `5xx` responses a few times per request and honors `Retry-After` up to 30 seconds, so rate limiting slows a download instead of failing it straight away.
 - **Compression.** Enable gzip or brotli for `.json` files. Mod archives are already compressed and do not benefit from transport compression.
 - **Basic authentication.** If you set `repoBasicAuthentication`, enforce the same credentials in the web server.
 - **Bandwidth.** Large modsets can be tens of gigabytes. Delta patching reduces update sizes significantly, but plan hosting for full first downloads.
@@ -976,13 +977,15 @@ foxy-server-backend-cli create config.json ./output
 
 This re-discovers the files, recomputes checksums, regenerates the manifests, and rewrites any `modLineFiles`. Add `--incremental` to skip rehashing mods whose files did not change, `--report` to see what changed, and `--atomic --yes` so players never see a half-written output.
 
-Foxy clients detect changes through the repository checksum in `repo.json` and download only the files and file parts that differ.
+Foxy clients detect changes through the repository checksum in `repo.json` and download only the files and file parts that differ. Before an update starts, clients also reread the manifests of the addons they are about to update, even when the repository checksum is unchanged, so a publish that lands while a player has an update pending is picked up. A client that reads a half-published state retries once with fresh requests and then stops with an error instead of applying it.
 
 ### Adding or removing mods
 
 1. Edit `requiredMods` / `optionalMods` in `config.json`.
 2. Run `validate` to catch typos.
 3. Run `create` (or `create-space`) again. The generated manifests and the launch line reflect the new list.
+
+Publishing an empty repository (explicitly empty `requiredMods` and `optionalMods`) or an empty mod does not remove anything from players' disks. Foxy keeps the installed files and offers **Review removal of retained files** for a separate confirmation. A failed or omitted manifest is never treated as empty.
 
 ### Switching generation modes
 
@@ -1058,6 +1061,14 @@ Some actions remove published data or write into your sources: `--layout link`, 
 1. Check that `checksum` in `repo.json` changed. Identical mod files produce the same checksum.
 2. Check web server caching. A long cache on JSON files serves a stale `repo.json`.
 3. Make sure the client's repository URL points to the folder that contains `repo.json`.
+
+### Clients report inconsistent metadata
+
+Foxy checks that the file parts in a manifest cover each file's declared size. If they do not, it retries once with a fresh request and then stops before any cleanup. Regenerate the repository, preferably with `--atomic --yes`, check the output with `verify`, and clear any cache or CDN in front of it. Files that fail their checksum after download are rolled back on the client the same way.
+
+### Clients stop on a missing file (HTTP 404 or 410)
+
+The client rolls back the attempt and refreshes its file lists on the next try. If the fresh plan still requests a missing file, the published files and manifests disagree: run `verify` on the output and regenerate it. Check that the files were copied to the web root, and that the URL paths match their case on case-sensitive hosts.
 
 ### Clients cannot connect
 

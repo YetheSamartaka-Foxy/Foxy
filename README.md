@@ -14,15 +14,17 @@ It ships as a single binary with both a full desktop UI and a scriptable CLI, ru
 ## Why Foxy
 
 - **Fast, reliable synchronization** - Foxy keeps mod repositories up to date with remote refresh, quick checks, rechecks, filesystem drift detection, and tree-hash verification. FoxyMode uses BLAKE3 for fast local hashing while preserving MD5 compatibility for legacy Swifty repositories. Hashing adapts to SSDs and HDDs, and after a database rebuild, files Foxy already verified and that have not changed are restored from a verified-hash record instead of being read again.
-- **Safe storage handling** - Foxy checks the drives behind its paths (FAT32/exFAT limits, network shares, RAM disks, read-only volumes, Windows path length) and free space before writing, probes a repository before a force redownload deletes anything, scopes repository deletion to its address and local folder, and lets only one process own a game space's database at a time.
-- **Bandwidth-saving updates** - Delta patching downloads only changed file parts, validates the result, and automatically falls back to a full-file download if patching cannot be completed safely.
+- **Safe storage handling** - Foxy checks the drives behind its paths (FAT32/exFAT limits, network shares, RAM disks, read-only volumes, Windows path length) and free space before writing, probes a repository before a force redownload deletes anything, scopes repository deletion to its address and local folder, and lets only one operational Foxy process own a configuration directory, including all its game spaces, at a time.
+- **Checks that say what they did** - Quick local checks stay offline and use lightweight drift detection. Refresh checks server metadata and local drift, and full integrity checks read selected files and can diagnose them against cached metadata when offline. Periodic idle metadata checks default to 30 minutes and never start downloads.
+- **Bandwidth-saving updates** - Delta patching downloads only changed file parts, validates the result, and automatically falls back to a full-file download if patching cannot be completed safely. Temporary failures retry automatically, and interrupted transfers resume from the bytes already received.
+- **Resource and network controls** - A CPU usage limit, CPU thread count, work and disk priority, storage type and memory pressure overrides, a progress frame rate, and system, direct, or manual proxy settings keep Foxy out of a running game's way and working on restricted networks. They live in Application settings, and all but the frame rate are also available through `foxy settings set`.
 - **Repository and profile management** - Manage multiple repositories, repository spaces, visual folders for grouping/coloring/collapsing repositories, launch profiles, optional addons, external addons, backups, drag-and-drop ordering, and bulk sync operations with selective include/exclude filtering.
 - **Arma 3 integrations** - Detect Steam and the Arma 3 installation automatically, manage Arma 3 profiles (detect, rename, clone, delete), recognize Steam Workshop addons, validate TeamSpeak 3 and Steam before launch, and support server quick-join flows with repo-provided launch parameters, DLC metadata, and an offer to match the Creator DLCs the server runs.
 - **Daily workflow tools** - Repository filtering, addon file search, editor mission scanning, mission open/duplicate/delete actions, dependency cleanup, scheduled rechecks, automatic downloads, and optional post-job close or shutdown actions are available from the app.
 - **Clear update visibility** - Download screens show per-addon progress, update summaries, toast notifications, transfer history graphs, adaptive speed limits, and grouped download/disk/hash performance metrics. Work in progress stays visible and alive: checks draw a sparkling map of triangles for the data being hashed, progress bars fill the same blinking triangles with flowing, bubbling mana, and the sidebar shows a round cluster of triangles per repository. **Reduce motion** turns the animations off.
 - **Game spaces** - Each supported game gets its own workspace with separate settings, repositories, stores, benchmarks, and database, switchable at runtime and remembered across launches. Arma 3 is the reference module; Total War: WARHAMMER III (`.pack` repositories and the `used_mods.txt` manifest) and Arma Reforger (`-addons`/`-addonsDir` launch and server join) ship alongside it, and a Generic game module covers other games with a user-supplied executable, arguments, and mods manifest, and can download and delta-update the game build itself from a repository.
 - **Steam Workshop management** - Import Workshop items by id, URL, collection, or share code, set the load order, freeze mods against Steam updates, compare setups with a state checksum, and exchange `.foxyshare` bundles, from the game space settings or the CLI.
-- **Safer launches and setup changes** - Launch and Join wait for active updates to settle, report a successful command handoff without claiming the game connected, and restore prepared files after a failed handoff. Config-pack imports recover as a complete setup, and removing a game space lets you preserve its private frozen mods and extra files.
+- **Safer launches and setup changes** - Launch and Join wait for active updates to settle, report a successful command handoff without claiming the game connected, and restore prepared files after a failed handoff. Extra-file activation reviews edited destinations and ordered overlaps, with a CLI dry run that lists the required choices before writing. Space switches prepare the destination before leaving the current workspace, config-pack imports recover as a complete setup, and removing a game space lets you preserve its private frozen mods and extra files.
 - **Reviewed file and backup operations** - Direct downloads preview existing-file collisions and require `--overwrite --yes` to replace them. Backup restore prefers matching repository origins, while cleanup previews its deletion set and asks separately before deleting the final recovery copy.
 - **Addon Workshop pages** - Right-click required, optional, or external addons to open their Steam Workshop or Arma Reforger Workshop page in your browser.
 - **Benchmarks** - Save a recheck, update, or redownload as a benchmark with stage timings, transfer and disk charts, CPU and memory use, power source, and speed-of-light ratios, then compare two runs side by side or export one as a ZIP for support.
@@ -40,18 +42,8 @@ Current workspace status:
 
 ## Documentation
 
-Quick local checks stay offline and use lightweight drift detection. Refresh
-checks server metadata and local drift; full integrity checks read selected
-files and can diagnose them against cached metadata when offline. Periodic idle
-metadata checks default to 30 minutes and never start downloads.
-
-One operational Foxy process owns a configuration directory, including all its
-game spaces. Space switches prepare the destination before leaving the current
-workspace. Extra-file activation reviews edited destinations and ordered overlaps;
-use its CLI dry run to inspect the required choices before writing.
-
 - [User Guide](wiki/User-Guide.md) - game spaces, repositories, syncing, launching, Steam Workshop, benchmarks, settings, troubleshooting, and the CLI.
-- [Server Admin Guide](wiki/Server-Admin-Guide.md) - generating and hosting Arma 3 and Arma Reforger repositories and repository spaces with `foxy-server-backend-cli`, server launch lines and keys, and self-hosted app updates.
+- [Server Admin Guide](wiki/Server-Admin-Guide.md) - generating and hosting Arma 3, Arma Reforger, and custom game repositories and repository spaces with `foxy-server-backend-cli`, server launch lines and keys, and self-hosted app updates.
 - The in-app Help page (**F1**) covers the same ground in every bundled language, with search across topic titles and text.
 
 ## Future roadmap
@@ -169,10 +161,12 @@ Behavior:
 |------|-------------|
 | `--config-dir <path>` | Override config root directory |
 | `--json` | Emit machine-readable JSON output |
+| `--toon` | Emit machine-readable TOON output; implies `--json` behavior |
 | `--quiet` | Reduce informational output |
 | `--no-progress` | Disable live progress output |
 | `--yes` | Confirm destructive operations |
 | `--dry-run` | Preview behavior without writing changes |
+| `--wipe-db` | Wipe and rebuild the entire local database after a schema upgrade; requires `--yes` |
 
 ### Commands
 
@@ -182,6 +176,11 @@ Behavior:
 | `version` | Print Foxy version, build kind, and source commit (`--version` prints the same label) |
 | `settings show\|set\|reset` | Inspect/modify settings |
 | `settings set --retry-failed-downloads <true\|false>` | Control automatic retries of temporary desktop update failures (enabled by default) |
+| `settings set --periodic-remote-check-enabled <true\|false>`, `--periodic-remote-check-interval-minutes <5-1440>` | Control idle repository metadata checks (enabled every 30 minutes by default) |
+| `settings set --cpu-usage-limit <10-100>`, `--cpu-usage-unlimited`, `--cpu-threads <N>`, `--cpu-threads-auto`, `--cpu-safe-limits <true\|false>` | Limit how much processor time and how many threads Foxy's work uses |
+| `settings set --work-priority <normal\|below-normal\|lowest>`, `--low-disk-priority <true\|false>` | Lower Foxy's processor and disk priority on Windows |
+| `settings set --storage-type <auto\|ssd\|hdd\|removable>`, `--memory-pressure <auto\|normal\|constrained\|severe>` | Override drive detection or the measured memory level |
+| `settings set --proxy-mode <system\|none\|manual>`, `--proxy-url`, `--proxy-username`, `--proxy-password`, `--proxy-bypass` | Choose how Foxy reaches the network |
 | `repo list\|add\|remove\|clone\|sync\|wipe-db\|force-redownload` | Repository operations |
 | `sync` | Alias of `repo sync` |
 | `addon list\|set\|recalc-hashes\|force-redownload` | Addon operations |
@@ -193,10 +192,10 @@ Behavior:
 | `config extra-file list\|add\|remove\|set\|activate` | Managed extra files |
 | `server inspect-addons` | Inspect the addons an Arma 3 server reports |
 | `direct-download` | Download by URL without full sync; replacing existing files requires `--overwrite --yes` |
-| `launch` | Build or execute the game launch command for a repository and profile |
+| `launch` | Build or execute the game launch command for a repository and profile; `--allow-live-fallback` and `--allow-incomplete-preparation` consent to a degraded launch once |
 | `agent-gui ...` | Drive a running UI started with `ui --agent-gui` (developer tooling) |
 
-Exit codes: `0` success, `2` validation error, `3` not found, `4` operation failed, `5` partial success, `6` database busy (another Foxy process owns the game space).
+Exit codes: `0` success, `2` validation error, `3` not found, `4` operation failed, `5` partial success, `6` busy (another Foxy process owns the configuration directory or the game space database).
 
 Examples:
 ```bash
@@ -217,7 +216,7 @@ Foxy stores app-global data at the config root and everything that belongs to on
 
 | File/Dir | Purpose |
 |----------|---------|
-| `app_settings.json` | App-global settings (language, renderer, paths, backups, app updates) |
+| `app_settings.json` | App-global settings (language, renderer, resource limits, proxy, paths, backups, app updates) |
 | `games.json` | Game space registry and the active game space |
 | `window_state.json` | Window geometry/state |
 | `logs/` | Application logs |
@@ -227,6 +226,8 @@ Foxy stores app-global data at the config root and everything that belongs to on
 | `games/<space_id>/repository_spaces.json` | Repository space definitions |
 | `games/<space_id>/repository_visual_folders.json` | Sidebar folders |
 | `games/<space_id>/workshop.json`, `extra_files.json`, `reforger_addons.json` | Steam Workshop, extra-file, and Reforger addon stores |
+| `games/<space_id>/extra_file_activations.json` | Last activated extra-file destinations, used to review later edits |
+| `games/<space_id>/storage_targets.json` | Recorded storage devices of update targets, used to review a changed device |
 | `games/<space_id>/database.db` | Turso (SQLite-compatible) database state |
 | `games/<space_id>/paused_repositories.json` | Download pauses remembered per repository installation |
 | `games/<space_id>/empty_publications.json` | Accepted empty publications and retained-file removal scope |
