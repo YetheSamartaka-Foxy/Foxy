@@ -89,6 +89,9 @@ impl crate::ui::app::Foxy {
         let policy = self.settings_view_state.profile_backups.clone();
         let state = &mut self.profile_backup_state;
         let should_backup = state.automatic_requested(&root, &policy);
+        if should_backup || !state.recovery_checked {
+            ctx.request_repaint_after(std::time::Duration::from_secs(60));
+        }
         if (!should_backup && state.recovery_checked)
             || state
                 .last_automatic_check
