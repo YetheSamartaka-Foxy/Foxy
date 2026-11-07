@@ -537,6 +537,7 @@ impl Foxy {
             .repository_view_state
             .repositories
             .iter()
+            .filter(|repo| !repo.is_local())
             .map(|repo| StartupPendingUpdateRestoreRequest {
                 repo_name: repo.name.clone(),
                 repo_url: Self::normalize_repo_url(&repo.address),
@@ -879,6 +880,10 @@ impl Foxy {
             Some(r) => r,
             None => return,
         };
+
+        if repo.is_local() {
+            return;
+        }
 
         let normalized_url = Self::normalize_repo_url(&repo.address);
         let repo_path = repo.path.clone();

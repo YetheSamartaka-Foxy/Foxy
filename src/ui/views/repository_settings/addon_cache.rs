@@ -1742,6 +1742,9 @@ fn repository_external_addon_visible_for_repo(
     let Some(current_repo) = repositories.get(repo_index) else {
         return false;
     };
+    if current_repo.is_local() {
+        return true;
+    }
 
     let normalized_addon_path = Foxy::normalize_origin_lookup_path(addon_path);
     if normalized_addon_path.is_empty() {
@@ -1884,6 +1887,7 @@ mod tests {
         std::fs::write(root.path().join("@mod_01/addons/data.pbo"), b"addon").expect("addon file");
         let main = Repository {
             name: "MainRepo".to_string(),
+            address: "https://repo.example.invalid:8080/".to_string(),
             path: root.path().display().to_string(),
             repository_space_id: Some("space".to_string()),
             ..Repository::default()
@@ -2090,6 +2094,40 @@ mod tests {
             &repositories,
             0,
             "R:/Mods/MainRepo/@ace"
+        ));
+    }
+
+    #[test]
+    fn local_repository_can_select_mods_from_other_repository_instances() {
+        let repositories = vec![
+            repo("", "R:/Mods/Local", None),
+            repo(
+                "https://repo.example.invalid:8080/",
+                "R:/Mods/RepoAlpha",
+                None,
+            ),
+            repo(
+                "https://repo.example.invalid:8080/",
+                "R:/Mods/RepoBeta",
+                Some("space"),
+            ),
+        ];
+        for path in ["R:/Mods/RepoAlpha/@mod_01", "R:/Mods/RepoBeta/@mod_01"] {
+            assert!(repository_external_addon_visible_for_repo(
+                &repositories,
+                0,
+                path
+            ));
+        }
+        assert!(!repository_external_addon_visible_for_repo(
+            &repositories,
+            1,
+            "R:/Mods/RepoBeta/@mod_01",
+        ));
+        assert!(!repository_external_addon_visible_for_repo(
+            &repositories,
+            9,
+            "R:/Mods/Local/@mod_01"
         ));
     }
 

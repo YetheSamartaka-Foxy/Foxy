@@ -74,6 +74,13 @@ pub(super) fn visible_repository_settings_tabs(repo: &Repository) -> Vec<Reposit
     RepositorySettingsTab::all_tabs()
         .into_iter()
         .filter(|tab| {
+            if repo.is_local() {
+                return match tab {
+                    RepositorySettingsTab::Addons => !repo.addons.is_empty(),
+                    RepositorySettingsTab::OptionalAddons => !repo.optional_addons.is_empty(),
+                    _ => true,
+                };
+            }
             repo.game_build.is_none()
                 || match tab {
                     RepositorySettingsTab::Configuration => true,
@@ -315,20 +322,27 @@ impl Foxy {
                 let external_addons_help = tr("external_addons_quick_info_help");
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
-                    if shows_addons {
+                    if repo.is_local() {
+                        ui.label(RichText::new(tr("Local repository")).color(color_text_dim));
+                        ui.add_space(12.0);
+                        ui.label(RichText::new(external_addons_text).color(color_text_dim))
+                            .on_hover_text(external_addons_help);
+                    } else if shows_addons {
                         ui.label(RichText::new(summary_prefix_text).color(color_text_dim));
                         ui.label(RichText::new(external_addons_text).color(color_text_dim))
                             .on_hover_text(external_addons_help);
                     } else {
                         ui.label(RichText::new(total_size_text).color(color_text_dim));
                     }
-                    ui.add_space(12.0);
-                    let export_structure = ui.button(tr("Export Repository Structure"));
-                    if export_structure.hovered() {
-                        ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
-                    }
-                    if export_structure.clicked() {
-                        repository_structure_export_clicked = true;
+                    if !repo.is_local() {
+                        ui.add_space(12.0);
+                        let export_structure = ui.button(tr("Export Repository Structure"));
+                        if export_structure.hovered() {
+                            ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                        }
+                        if export_structure.clicked() {
+                            repository_structure_export_clicked = true;
+                        }
                     }
                 });
                 ui.separator();
@@ -617,6 +631,9 @@ impl Foxy {
                                 this.addon_state_filter = addon_state_filter;
                             }
                             RepositorySettingsTab::ExternalAddons => {
+                                if this.repository_view_state.repositories[repo_index].is_local() {
+                                    ui.label(tr("Select mods in External Addons. Enable Include Steam Addons for Steam Workshop mods. Add other mod folders in Game space settings."));
+                                }
                                 let mut external_addons_filter =
                                     this.external_addons_filter.clone();
                                 let mut external_addons_origin_filter =
@@ -1228,7 +1245,10 @@ mod tests {
 
     #[test]
     fn game_build_repositories_show_only_addon_tabs_with_content() {
-        let mut repo = Repository::default();
+        let mut repo = Repository {
+            address: "https://repo.example.invalid:8080/".into(),
+            ..Repository::default()
+        };
         assert_eq!(
             visible_repository_settings_tabs(&repo),
             RepositorySettingsTab::all_tabs().to_vec()
@@ -1250,6 +1270,30 @@ mod tests {
                 RepositorySettingsTab::Configuration,
                 RepositorySettingsTab::OptionalAddons
             ]
+        );
+    }
+
+    #[test]
+    fn local_repositories_show_configuration_and_external_addons() {
+        assert_eq!(
+            visible_repository_settings_tabs(&Repository::default()),
+            vec![
+                RepositorySettingsTab::Configuration,
+                RepositorySettingsTab::ExternalAddons
+            ]
+        );
+    }
+
+    #[test]
+    fn removing_a_server_address_keeps_existing_addon_selection_tabs() {
+        let repo = Repository {
+            addons: vec![("@mod_01".to_string(), true)],
+            optional_addons: vec![("@mod_02".to_string(), false)],
+            ..Repository::default()
+        };
+        assert_eq!(
+            visible_repository_settings_tabs(&repo),
+            RepositorySettingsTab::all_tabs()
         );
     }
 

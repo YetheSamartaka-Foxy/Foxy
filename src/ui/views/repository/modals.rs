@@ -1353,6 +1353,7 @@ impl Foxy {
         }
 
         let mut submit = false;
+        let mut create_blank = false;
         let mut close = false;
         egui::Window::new(self.t("Add repository"))
             .frame(self.modal_window_chrome(ctx))
@@ -1426,7 +1427,7 @@ impl Foxy {
                 }
 
                 ui.add_space(12.0);
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     let importing = self.repository_space_import_in_flight;
                     let add_button = ui.add_enabled(!importing, Button::new(self.t("Add")));
                     if add_button.hovered() && !importing {
@@ -1434,6 +1435,15 @@ impl Foxy {
                     }
                     if add_button.clicked() {
                         submit = true;
+                    }
+
+                    let blank_button =
+                        ui.add_enabled(!importing, Button::new(self.t("Create blank repository")));
+                    if blank_button.hovered() {
+                        ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                    }
+                    if blank_button.clicked() {
+                        create_blank = true;
                     }
 
                     let cancel_button = ui.button(self.t("Cancel"));
@@ -1457,6 +1467,17 @@ impl Foxy {
             self.add_repository_input_error = None;
             self.add_repository_input_name.clear();
             self.add_repository_input_path.clear();
+            self.pending_repository_duplicate_add = None;
+            return;
+        }
+
+        if create_blank && !self.repository_space_import_in_flight {
+            let name = std::mem::take(&mut self.add_repository_input_name);
+            let path = std::mem::take(&mut self.add_repository_input_path);
+            self.add_blank_repository(&name, &path);
+            self.show_add_repository_modal = false;
+            self.add_repository_input_address.clear();
+            self.add_repository_input_error = None;
             self.pending_repository_duplicate_add = None;
             return;
         }

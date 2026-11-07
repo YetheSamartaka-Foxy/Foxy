@@ -1,5 +1,6 @@
 # 1.2.2
 ## Added
+- Create blank repository in the Add repository dialog makes a local mod selection without a server. Combine installed mods from other repositories, additional search folders, and Steam Workshop through External Addons, save profiles, and launch as usual. Removing the collection keeps existing mod files. The new text is translated into all bundled languages.
 - Periodic repository metadata checks run while Foxy is idle, with a configurable interval that defaults to 30 minutes. They find updates without starting downloads.
 - Integrity rechecks can fall back to cached metadata when the server is unavailable, and repositories show the basis and time of their last checks. Empty publications keep installed files until a separate reviewed removal.
 - Temporary update failures can now retry automatically while Foxy stays open, with a countdown and Cancel retry control. This is enabled by default and can be disabled in Application settings or with `foxy settings set --retry-failed-downloads false`. Bulk runs retry a temporary failure once before continuing with other repositories.

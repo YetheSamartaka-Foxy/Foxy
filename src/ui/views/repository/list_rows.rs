@@ -599,6 +599,7 @@ impl Foxy {
             )
         };
         let can_go_to_space = repo_space_id.is_some();
+        let is_local = address.trim().is_empty();
         let can_remove_from_folder = self.repository_visual_folder_for_repo(repo_index).is_some();
         let db_wipe_pending = self.is_repository_db_wipe_pending(&address);
         let icon = self.cached_icons.get(&icon_checksum);
@@ -624,14 +625,24 @@ impl Foxy {
         let status_size = Vec2::splat(18.0);
         let text_color = self.color_text_normal();
         let font = TextStyle::Heading.resolve(ui.style());
-        let status_text = repository_status_galley(
-            ui,
-            &mut self.repository_list_galleys,
-            row_slot,
-            state,
-            font.clone(),
-            text_color,
-        );
+        let status_text = if is_local {
+            galley_cache::lazy_galley_colored(
+                ui,
+                self.repository_list_galleys.slot(row_slot, 5),
+                font.clone(),
+                text_color,
+                || " \u{1F4C1}".to_string(),
+            )
+        } else {
+            repository_status_galley(
+                ui,
+                &mut self.repository_list_galleys,
+                row_slot,
+                state,
+                font.clone(),
+                text_color,
+            )
+        };
         let status_width = if active_operation_tooltip.is_some() {
             status_size.x
         } else {
@@ -821,12 +832,12 @@ impl Foxy {
                     self.t("Quick local check"),
                 )
                 .separator_before()
-                .disabled_if(self.current_sync_mode == Some(SyncMode::QuickCheckOnly)),
+                .disabled_if(is_local || self.current_sync_mode == Some(SyncMode::QuickCheckOnly)),
                 ContextMenuItem::new(
                     RepositoryListContextAction::RemoteRecheck,
                     self.t("Remote data recheck"),
                 )
-                .disabled_if(self.syncing_repository.is_some()),
+                .disabled_if(is_local || self.syncing_repository.is_some()),
                 ContextMenuItem::new(
                     RepositoryListContextAction::OpenLocalPath,
                     self.t("Open repository local path"),
@@ -842,14 +853,14 @@ impl Foxy {
                     self.t("Force redownload repository"),
                 )
                 .separator_before()
-                .disabled_if(db_wipe_pending)
+                .disabled_if(is_local || db_wipe_pending)
                 .danger(),
                 ContextMenuItem::new(
                     RepositoryListContextAction::WipeRepositoryDb,
                     self.t("Wipe repository database entries"),
                 )
                 .separator_before()
-                .disabled_if(db_wipe_pending)
+                .disabled_if(is_local || db_wipe_pending)
                 .danger(),
                 ContextMenuItem::new(
                     RepositoryListContextAction::Delete,

@@ -68,6 +68,14 @@ impl Foxy {
         prepare_download_plan: bool,
         force_full_downloads: bool,
     ) {
+        if self
+            .repository_view_state
+            .repositories
+            .get(repo_idx)
+            .is_some_and(Repository::is_local)
+        {
+            return;
+        }
         if self.close_requested_at.is_some() {
             warn!("Sync request ignored: Foxy is closing");
             return;

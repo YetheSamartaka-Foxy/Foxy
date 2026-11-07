@@ -103,6 +103,10 @@ impl Foxy {
         let Some(repo) = self.repository_view_state.repositories.get(idx) else {
             return;
         };
+        if repo.is_local() {
+            ui.label(self.t("Local repository"));
+            return;
+        }
         let last_remote = repo
             .last_remote_check_at
             .and_then(|seconds| chrono::DateTime::from_timestamp(seconds as i64, 0))

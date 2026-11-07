@@ -90,12 +90,14 @@ impl Foxy {
                     &mut changed,
                 );
 
-                self.render_repository_configuration_sync(
-                    ui,
-                    repo_index,
-                    color_text_dim,
-                    &mut changed,
-                );
+                if !self.repository_view_state.repositories[repo_index].is_local() {
+                    self.render_repository_configuration_sync(
+                        ui,
+                        repo_index,
+                        color_text_dim,
+                        &mut changed,
+                    );
+                }
 
                 self.render_repository_configuration_actions(
                     ui,
@@ -295,6 +297,13 @@ impl Foxy {
             ) && !original_instance_still_configured;
             if changed {
                 self.save_repositories();
+            }
+            let repository = &self.repository_view_state.repositories[repo_index];
+            if original_repo_address.trim().is_empty() != repository.is_local()
+                || (repository.is_local() && original_repo_path_raw != repository.path)
+            {
+                self.invalidate_addon_inventory_cache();
+                self.preload_repository_settings_addon_caches(repo_index);
             }
             if should_wipe_cache {
                 info!(

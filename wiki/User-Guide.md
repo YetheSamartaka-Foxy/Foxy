@@ -139,6 +139,14 @@ To add a repository:
 
 If you pasted a repository space URL, Foxy shows the repositories in that space and lets you choose which ones to add and where they should be stored. A repository URL always ends in a trailing slash; Foxy adds it for you.
 
+### Blank local repositories
+
+To make your own mod selection without a repository server, click **+ Add repository**, optionally enter a **Name** and **Local Path**, then choose **Create blank repository**. The address is not used. Foxy opens **External Addons**, where you can enable mods already installed by other repositories or found in **Additional search folders** in Game space settings. Turn on **Include Steam Addons** to include installed Steam Workshop mods for games that support them.
+
+Use profiles to save different selections and launch the game as usual. This collection references existing files; it does not copy them or check for or download updates. Keep the source repositories or Workshop mods installed and update them through their original source. Removing the local repository keeps the mod files, even if **Delete files** is selected.
+
+A blank address identifies a local repository. If no local folder is chosen, Foxy assigns a separate path under the active game space's `local-repositories/` directory so collections have independent identities. You can choose an existing mod folder instead. Adding a server address later enables ordinary repository checks and downloads for that folder.
+
 ### Duplicate detection
 
 If you add a repository that already exists, Foxy asks whether you want to add it again. The same repository URL installed to two different folders is treated as two independent installs, each with its own state.

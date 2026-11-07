@@ -249,6 +249,9 @@ impl Foxy {
             .iter_mut()
             .enumerate()
         {
+            if repo.is_local() {
+                continue;
+            }
             let key = Self::selection_identity_key(repo, repo_idx);
             let fingerprint = Self::addon_selection_fingerprint(repo);
             if self

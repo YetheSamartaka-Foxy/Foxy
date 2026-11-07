@@ -238,6 +238,12 @@ fn default_last_check_remote_fresh() -> bool {
     true
 }
 
+impl Repository {
+    pub fn is_local(&self) -> bool {
+        self.address.trim().is_empty()
+    }
+}
+
 impl Default for Repository {
     fn default() -> Self {
         Self {
@@ -317,6 +323,29 @@ mod preset_check_tests {
     use super::{
         Repository, RepositoryPresetCheckEvidence, RepositoryPresetCheckOutcome, RepositoryProfile,
     };
+
+    #[test]
+    fn local_repository_survives_persistence_with_external_selections() {
+        let repository = Repository {
+            external_addons: vec![("@mod_01".into(), true, "R:/Mods/@mod_01".into())],
+            ..Repository::default()
+        };
+        let restored: Repository =
+            serde_json::from_str(&serde_json::to_string(&repository).unwrap()).unwrap();
+        assert!(restored.is_local());
+        assert_eq!(restored.external_addons, repository.external_addons);
+    }
+
+    #[test]
+    fn only_an_empty_address_is_local() {
+        let mut repository = Repository {
+            address: " \t".into(),
+            ..Repository::default()
+        };
+        assert!(repository.is_local());
+        repository.address = "https://repo.example.invalid:8080/".into();
+        assert!(!repository.is_local());
+    }
 
     #[test]
     fn repository_persistence_keeps_unchecked_selection_and_preset_evidence() {

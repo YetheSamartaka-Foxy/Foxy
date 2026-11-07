@@ -130,6 +130,7 @@ impl Foxy {
                     };
                     let hide_repo_image = hide_repo_image_override
                         .unwrap_or(self.settings_view_state.hide_repository_image);
+                    let is_local = repo_address.trim().is_empty();
                     let repo_state = self.repo_state_for_repository(
                         &self.repository_view_state.repositories[selected_idx],
                     );
@@ -176,7 +177,7 @@ impl Foxy {
                                     .toolbar_icons as f32;
                                 let toolbar_btn_width =
                                     Self::toolbar_icon_button_size(toolbar_icon_size).x;
-                                let toolbar_count = 4.0;
+                                let toolbar_count = if is_local { 2.0 } else { 4.0 };
                                 let toolbar_total = toolbar_count * toolbar_btn_width
                                     + (toolbar_count - 1.0) * ui.spacing().item_spacing.x;
                                 let heading_max_width = (ui.available_width()
@@ -395,70 +396,71 @@ impl Foxy {
                                         }));
                                     }
 
-                                    let is_syncing_anything = self.syncing_repository.is_some();
-                                    let recheck_disabled = is_syncing_anything;
-                                    let quick_check_disabled =
-                                        self.current_sync_mode == Some(SyncMode::QuickCheckOnly);
+                                    if !is_local {
+                                        let is_syncing_anything = self.syncing_repository.is_some();
+                                        let recheck_disabled = is_syncing_anything;
+                                        let quick_check_disabled =
+                                            self.current_sync_mode == Some(SyncMode::QuickCheckOnly);
 
-                                    let recheck_button = Self::repository_toolbar_icon_button(
-                                        ui,
-                                        "\u{21bb}",
-                                        toolbar_icon_size,
-                                        tr("Remote data recheck.\nIt checks for possible pending changes from a remote host and local changes to it.").as_str(),
-                                        !recheck_disabled,
-                                        None,
-                                    );
-                                    if recheck_button.hovered() && !recheck_disabled {
-                                        ui.ctx().output_mut(|o| {
-                                            Foxy::set_pointing_cursor_output(o)
-                                        });
-                                    }
-                                    if recheck_button.clicked() {
-                                        let idx = selected_idx;
-                                        info!(
-                                            "Manual remote data recheck requested for {}",
-                                            repo_name
-                                        );
-                                        recheck_action = Some(Box::new(move |app| {
-                                            app.arm_benchmark(
-                                                crate::core::benchmarks::BenchmarkKind::Recheck,
-                                                Vec::new(),
-                                            );
-                                            app.start_remote_recheck_with_plan(idx);
-                                        }));
-                                    }
-
-                                    let quick_check_button =
-                                        Self::repository_toolbar_icon_button(
+                                        let recheck_button = Self::repository_toolbar_icon_button(
                                             ui,
-                                            "\u{1F4DA}",
+                                            "\u{21bb}",
                                             toolbar_icon_size,
-                                            tr("Quick local check.\nA lightweight change detector; it does not read every file. Use Integrity recheck for a full verification.").as_str(),
-                                            !quick_check_disabled,
+                                            tr("Remote data recheck.\nIt checks for possible pending changes from a remote host and local changes to it.").as_str(),
+                                            !recheck_disabled,
                                             None,
                                         );
-                                    if quick_check_button.hovered()
-                                        && !quick_check_disabled
-                                    {
-                                        ui.ctx().output_mut(|o| {
-                                            Foxy::set_pointing_cursor_output(o)
-                                        });
-                                    }
-                                    if quick_check_button.clicked() {
-                                        let idx = selected_idx;
-                                        info!(
-                                            "Manual quick local check requested for {}",
-                                            repo_name
-                                        );
-                                        quick_check_action = Some(Box::new(move |app| {
-                                            app.arm_benchmark(
-                                                crate::core::benchmarks::BenchmarkKind::QuickCheck,
-                                                Vec::new(),
+                                        if recheck_button.hovered() && !recheck_disabled {
+                                            ui.ctx().output_mut(|o| {
+                                                Foxy::set_pointing_cursor_output(o)
+                                            });
+                                        }
+                                        if recheck_button.clicked() {
+                                            let idx = selected_idx;
+                                            info!(
+                                                "Manual remote data recheck requested for {}",
+                                                repo_name
                                             );
-                                            app.start_core_sync(idx, SyncMode::QuickCheckOnly);
-                                        }));
-                                    }
+                                            recheck_action = Some(Box::new(move |app| {
+                                                app.arm_benchmark(
+                                                    crate::core::benchmarks::BenchmarkKind::Recheck,
+                                                    Vec::new(),
+                                                );
+                                                app.start_remote_recheck_with_plan(idx);
+                                            }));
+                                        }
 
+                                        let quick_check_button =
+                                            Self::repository_toolbar_icon_button(
+                                                ui,
+                                                "\u{1F4DA}",
+                                                toolbar_icon_size,
+                                                tr("Quick local check.\nA lightweight change detector; it does not read every file. Use Integrity recheck for a full verification.").as_str(),
+                                                !quick_check_disabled,
+                                                None,
+                                            );
+                                        if quick_check_button.hovered()
+                                            && !quick_check_disabled
+                                        {
+                                            ui.ctx().output_mut(|o| {
+                                                Foxy::set_pointing_cursor_output(o)
+                                            });
+                                        }
+                                        if quick_check_button.clicked() {
+                                            let idx = selected_idx;
+                                            info!(
+                                                "Manual quick local check requested for {}",
+                                                repo_name
+                                            );
+                                            quick_check_action = Some(Box::new(move |app| {
+                                                app.arm_benchmark(
+                                                    crate::core::benchmarks::BenchmarkKind::QuickCheck,
+                                                    Vec::new(),
+                                                );
+                                                app.start_core_sync(idx, SyncMode::QuickCheckOnly);
+                                            }));
+                                        }
+                                    }
                                     let refresh_server_button = Self::repository_toolbar_icon_button(
                                         ui,
                                         "\u{1F4E1}",
@@ -480,7 +482,9 @@ impl Foxy {
                                         );
                                         refresh_servers_action = Some(Box::new(move |app| {
                                             // Re-fetch repo.json to update servers list first.
-                                            app.pending_repo_metadata_refresh.push(idx);
+                                            if !is_local {
+                                                app.pending_repo_metadata_refresh.push(idx);
+                                            }
                                             if let Some(repo) =
                                                 app.repository_view_state.repositories.get(idx)
                                             {
@@ -503,6 +507,25 @@ impl Foxy {
                     );
                     ui.separator();
                     ui.add_space(10.0);
+
+                    if is_local {
+                        ui.label(self.t("This local repository has no server. Checks and downloads are unavailable. Removing it keeps existing mod files."));
+                        ui.label(self.t("Select mods in External Addons. Enable Include Steam Addons for Steam Workshop mods. Add other mod folders in Game space settings."));
+                        let external_addons = ui.button(self.t("External Addons"));
+                        if external_addons.hovered() {
+                            ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                        }
+                        if external_addons.clicked() {
+                            settings_action = Some(Box::new(move |app| {
+                                app.selected_repository_for_settings = Some(selected_idx);
+                                app.current_repository_settings_tab = RepositorySettingsTab::ExternalAddons;
+                                app.last_view = app.current_view;
+                                app.current_view = FoxyView::RepositorySettings;
+                                app.preload_repository_settings_addon_caches(selected_idx);
+                            }));
+                        }
+                        ui.add_space(10.0);
+                    }
 
                     // Legacy protocol warning - shown for repos not using FoxyMode (BLAKE3).
                     if self

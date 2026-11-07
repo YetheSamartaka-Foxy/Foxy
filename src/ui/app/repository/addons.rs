@@ -221,10 +221,12 @@ impl Foxy {
                     return false;
                 }
 
-                repo.addons
-                    .iter()
-                    .chain(repo.optional_addons.iter())
-                    .any(|(name, _)| name.eq_ignore_ascii_case(addon_name))
+                repo.is_local()
+                    || repo
+                        .addons
+                        .iter()
+                        .chain(repo.optional_addons.iter())
+                        .any(|(name, _)| name.eq_ignore_ascii_case(addon_name))
             })
             .map(|repo| repo.name.clone())
             .collect();
@@ -1161,6 +1163,7 @@ mod tests {
     fn repository_at(name: &str, path: &Path, addons: &[&str]) -> Repository {
         Repository {
             name: name.to_string(),
+            address: "https://repo.example.invalid:8080/".to_string(),
             path: path.display().to_string(),
             addons: addons
                 .iter()
@@ -1168,6 +1171,46 @@ mod tests {
                 .collect(),
             ..Repository::default()
         }
+    }
+
+    #[test]
+    fn local_repository_inventory_includes_mods_without_a_remote_manifest() {
+        let root = tempfile::tempdir().expect("local root");
+        write_addon(root.path(), "@mod_01", &[("data.pbo", 10)]);
+        write_addon(root.path(), "@mod_02", &[("data.pbo", 20)]);
+        let mut repository = repository_at("RepoAlpha", root.path(), &[]);
+        let module = crate::core::game::arma3::Arma3Module;
+        let inventory = |repository: &Repository| {
+            Foxy::gather_all_addon_origins_from(
+                std::slice::from_ref(repository),
+                &[],
+                &HashMap::new(),
+                "",
+                "",
+                &module,
+            )
+        };
+        assert!(inventory(&repository).is_empty());
+
+        repository.address.clear();
+        let discovered = inventory(&repository);
+        assert_eq!(discovered.len(), 2);
+        assert_eq!(discovered[0].0, "@mod_01");
+        assert_eq!(discovered[1].0, "@mod_02");
+        assert!(discovered.iter().all(|addon| addon.2 == "RepoAlpha"));
+        assert!(
+            Foxy::addon_repo_origins_from(
+                &[repository],
+                "@mod_01",
+                &root
+                    .path()
+                    .with_extension("outside")
+                    .join("@mod_01")
+                    .display()
+                    .to_string(),
+            )
+            .is_empty()
+        );
     }
 
     #[test]

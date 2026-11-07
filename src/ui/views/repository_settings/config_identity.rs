@@ -55,6 +55,9 @@ impl Foxy {
                 ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
             }
         });
+        ui.label(tr(
+            "Leave the address empty to use existing mods without a server.",
+        ));
         ui.separator();
 
         ui.horizontal(|ui| {

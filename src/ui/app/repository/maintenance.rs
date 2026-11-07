@@ -14,6 +14,7 @@ use crate::ui::types::{Repository, sanitize_user_path};
 /// Why deleting a repository with "Delete files" keeps its files on disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DeleteFilesKept {
+    LocalRepository,
     SharedFolder,
     OverlappingPath,
 }
@@ -102,6 +103,9 @@ impl Foxy {
         repo_idx: usize,
     ) -> Option<DeleteFilesKept> {
         let repo = repositories.get(repo_idx)?;
+        if repo.is_local() {
+            return Some(DeleteFilesKept::LocalRepository);
+        }
         for (idx, other) in repositories.iter().enumerate() {
             if idx == repo_idx {
                 continue;
@@ -131,6 +135,9 @@ impl Foxy {
     pub fn delete_files_kept_note(&self, repo_idx: usize) -> Option<String> {
         Self::delete_files_kept_reason(&self.repository_view_state.repositories, repo_idx).map(
             |reason| match reason {
+                DeleteFilesKept::LocalRepository => self.t(
+                    "This local repository has no server. Checks and downloads are unavailable. Removing it keeps existing mod files.",
+                ),
                 DeleteFilesKept::SharedFolder => self.t(
                     "Files will not be deleted because another repository uses the same folder. Only this entry is removed.",
                 ),
@@ -314,6 +321,9 @@ impl Foxy {
         repo_name: &str,
         forget_hash_record: bool,
     ) {
+        if repository_url.trim().is_empty() {
+            return;
+        }
         let normalized_url = Self::normalize_repo_url(repository_url);
 
         if self.repo_db_reset_pending_recheck.remove(&normalized_url) {
@@ -835,6 +845,8 @@ impl Foxy {
                 &removed.name,
                 false,
             );
+        } else if files_kept == Some(DeleteFilesKept::LocalRepository) {
+            info!("Local repository removed; existing mod files are kept");
         } else {
             info!(
                 "Repository purge skipped for {}: another configured repository uses the same URL and folder",
@@ -1082,5 +1094,14 @@ mod tests {
             None
         );
         assert_eq!(Foxy::delete_files_kept_reason(&independent_copies, 9), None);
+    }
+
+    #[test]
+    fn deleting_a_local_repository_always_keeps_existing_mod_files() {
+        let local = repo("", "R:/Mods/Local");
+        assert_eq!(
+            Foxy::delete_files_kept_reason(&[local], 0),
+            Some(DeleteFilesKept::LocalRepository)
+        );
     }
 }

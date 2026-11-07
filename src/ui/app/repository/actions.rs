@@ -938,8 +938,7 @@ impl Foxy {
         }
 
         let repo = &self.repository_view_state.repositories[repo_index];
-        if repo.address.is_empty() {
-            log::error!("Repository address is empty");
+        if repo.is_local() {
             return;
         }
         let repo_address = repo.address.clone();
