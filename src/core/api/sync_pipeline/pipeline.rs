@@ -3073,6 +3073,12 @@ async fn run_repository_pipeline(
                     );
                     emit_progress!(ProgressEvent::Diff { mods: mods.clone() });
                     persist_pending_updates(context.clone(), &normalized_repo_url, &mods).await;
+                    emit_progress!(ProgressEvent::DownloadPlan {
+                        files_total: targets.len(),
+                        planned_bytes,
+                        full_bytes,
+                        patch_files: patchable_file_ids.len(),
+                    });
                     summary.push(
                         StageEntry::new("confirmation_download_plan", stage.elapsed())
                             .with("mods", mods.len())
@@ -3276,6 +3282,9 @@ async fn run_repository_pipeline(
         }
     }
     crate::core::utils::profiling::phase("download");
+    emit_progress!(ProgressEvent::UpdatePhase(
+        crate::core::utils::update_estimate::UpdatePhase::Transferring,
+    ));
     let download_start = std::time::Instant::now();
     let mut hashed_download_file_ids: HashSet<u64> = HashSet::new();
     let mut incremental_hash_duration = Duration::ZERO;
@@ -3806,6 +3815,9 @@ async fn run_repository_pipeline(
         "Download stage finished in {:.2?}",
         download_start.elapsed()
     );
+    emit_progress!(ProgressEvent::UpdatePhase(
+        crate::core::utils::update_estimate::UpdatePhase::Verifying,
+    ));
     emit_progress!(ProgressEvent::Stage {
         label: format!("Download {:.1}s", download_start.elapsed().as_secs_f32()),
         percent: 0.85,
@@ -4036,6 +4048,9 @@ async fn run_repository_pipeline(
         .await;
     }
 
+    emit_progress!(ProgressEvent::UpdatePhase(
+        crate::core::utils::update_estimate::UpdatePhase::Saving,
+    ));
     // Propagate checksums to sibling repositories sharing the same addon paths,
     // so subsequent syncs in the same space skip already-downloaded files.
     if shared_version_advisory {

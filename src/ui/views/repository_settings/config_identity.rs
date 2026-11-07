@@ -18,6 +18,7 @@ impl Foxy {
         changed: &mut bool,
         addr_changed: &mut bool,
     ) {
+        let original_instance = Self::repo_instance_key(&repo.address, &repo.path);
         ui.horizontal(|ui| {
             ui.label(tr("Name"));
         });
@@ -105,6 +106,9 @@ impl Foxy {
                 *changed = true;
             }
         });
+        if Self::repo_instance_key(&repo.address, &repo.path) != original_instance {
+            repo.update_timing = None;
+        }
         if identity_locked {
             ui.colored_label(
                 color_text_dim,

@@ -809,6 +809,7 @@ impl Foxy {
         self.total_downloaded_bytes = 0;
         self.download_eta_remaining = None;
         self.download_eta_updated_at = None;
+        self.completion_estimate = Default::default();
         self.download_pause_tx = None;
         self.download_paused = false;
         self.pending_update_launch = None;

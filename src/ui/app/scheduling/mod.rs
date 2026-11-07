@@ -165,6 +165,15 @@ enum SchedStep {
 }
 
 impl Foxy {
+    pub(in crate::ui::app) fn scheduled_update_estimate_targets(
+        &self,
+    ) -> Option<&VecDeque<RepoInstanceKey>> {
+        self.scheduler_active_run
+            .as_ref()
+            .filter(|run| run.stage == JobRunStage::Download)
+            .map(|run| &run.queue)
+    }
+
     pub(crate) fn request_scheduled_job_save(&mut self, job: crate::ui::types::ScheduledJob) {
         let id = job.id.clone();
         let name = job.name.clone();

@@ -167,18 +167,19 @@ impl Foxy {
                             .download_started_at
                             .map(|t| fmt_duration(t.elapsed()))
                             .unwrap_or_else(|| "0s".to_string());
+                        self.update_download_estimate(total_bytes);
                         let remaining_text = self
                             .download_eta_remaining
-                            .unwrap_or_else(|| Duration::from_secs(0));
-                        self.update_download_estimate(total_bytes);
+                            .map(fmt_duration)
+                            .unwrap_or_else(|| self.t("Unknown"));
                         self.t_fmt(
-                            "{stage} {percent}% - {speed} - {elapsed} elapsed / {remaining} remaining",
+                            "{stage} {percent}% - {speed} - {elapsed} elapsed / transfer estimate {remaining}",
                             &[
                                 ("stage", stage_text),
                                 ("percent", format!("{:.1}", progress_pct * 100.0)),
                                 ("speed", speed_text),
                                 ("elapsed", elapsed_text),
-                                ("remaining", fmt_duration(remaining_text)),
+                                ("remaining", remaining_text),
                             ],
                         )
                     } else if finished_successfully {

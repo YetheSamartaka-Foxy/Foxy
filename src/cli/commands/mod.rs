@@ -625,6 +625,7 @@ fn run_repository_sync(
                     latest_diff = mods;
                 }
                 ProgressEvent::DownloadPlan { .. } => {}
+                ProgressEvent::UpdatePhase(_) => {}
                 ProgressEvent::DownloadTelemetry { .. } => {}
                 ProgressEvent::HashTelemetry { .. } => {}
                 ProgressEvent::HashSummary { .. } => {}

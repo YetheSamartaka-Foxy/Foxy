@@ -391,6 +391,7 @@ impl Foxy {
             if let Some(shared_path) = space_paths.get(&space_id) {
                 if repo.path.trim().is_empty() && !shared_path.trim().is_empty() {
                     repo.path = shared_path.clone();
+                    repo.update_timing = None;
                     changed = true;
                 }
             } else {
@@ -429,6 +430,7 @@ impl Foxy {
                 && repo.path != path
             {
                 repo.path = path.clone();
+                repo.update_timing = None;
                 repo_changed = true;
             }
         }

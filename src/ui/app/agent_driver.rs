@@ -3719,6 +3719,8 @@ impl Foxy {
             "download_finished": self.download_finished,
             "download_speed_bps": self.download_speed_bps,
             "download_eta_secs": self.download_eta_remaining.map(|d| d.as_secs_f64()),
+            "update_completion_eta_secs": self.update_completion_forecast().remaining.map(|d| d.as_secs_f64()),
+            "update_completion_phase": self.update_completion_phase().map(|phase| format!("{phase:?}")),
             "total_downloaded_bytes": self.total_downloaded_bytes,
             "active_mod_downloads": self.mod_download_progress.len(),
             "recheck_stage_label": self.recheck_stage_label,

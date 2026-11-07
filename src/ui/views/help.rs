@@ -361,6 +361,7 @@ impl Foxy {
                     "Cancel stops the whole folder, repository space, or scheduled run. Closing Foxy during an update waits for the previous files to be restored first.",
                     "Active mod downloads bubble toward the top of the update list so the most advanced work remains visible during long syncs.",
                     "Download speed and ETA estimates use recent transfer history and are smoothed for slow disks or uneven networks.",
+                    "Includes preparation, transfer, patching, verification, saving, and queued updates. Estimates use timings from previous successful updates of each installation.",
                     "Foxy cleans temporary download parts after aborted or failed transfers so stale partial files do not accumulate.",
                     "If something looks wrong after an interrupted or unusual update, start with Quick local check, then Refresh, and only use Recheck repository integrity if the normal checks do not resolve it.",
                 ],

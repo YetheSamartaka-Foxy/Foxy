@@ -65,6 +65,7 @@ pub struct FsChangeEvent {
 
 #[derive(Clone, Debug)]
 pub enum ProgressEvent {
+    UpdatePhase(crate::core::utils::update_estimate::UpdatePhase),
     HashEvidence {
         state: Arc<crate::core::tasks::calculate_hashes::HashEvidenceState>,
     },

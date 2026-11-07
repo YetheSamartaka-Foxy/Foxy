@@ -534,6 +534,7 @@ pub struct Foxy {
     pub total_downloaded_bytes: u64,
     pub download_eta_remaining: Option<Duration>,
     pub download_eta_updated_at: Option<Instant>,
+    pub(crate) completion_estimate: downloads::CompletionEstimateState,
     pub download_pause_tx: Option<watch::Sender<bool>>,
     pub download_paused: bool,
     pub cancel_tx: Option<watch::Sender<bool>>,

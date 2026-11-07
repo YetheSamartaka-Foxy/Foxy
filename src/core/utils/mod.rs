@@ -25,4 +25,5 @@ pub mod runtime_settings;
 pub mod speed_of_light;
 pub mod storage_compat;
 pub mod thread_cpu;
+pub(crate) mod update_estimate;
 pub mod work_priority;

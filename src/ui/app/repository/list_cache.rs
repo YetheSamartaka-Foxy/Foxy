@@ -267,6 +267,9 @@ impl Foxy {
         let normalized_url = Self::normalize_repo_url(repository_url);
         let instance_key = Self::repo_instance_key(repository_url, local_path);
         let filtered: Vec<ModDiffSummary> = mods.into_iter().filter(|m| m.needs_update).collect();
+        if self.pending_update_cache.get(&instance_key) != Some(&filtered) {
+            self.completion_estimate.prepared.remove(&instance_key);
+        }
         if filtered.is_empty() {
             self.pending_update_cache.remove(&instance_key);
             self.clear_active_update_session_for_url(&normalized_url, local_path);
@@ -282,6 +285,7 @@ impl Foxy {
     ) {
         let instance_key = Self::repo_instance_key(repository_url, local_path);
         self.pending_update_cache.remove(&instance_key);
+        self.completion_estimate.prepared.remove(&instance_key);
     }
 
     pub(crate) fn active_update_session_mods_for_url(

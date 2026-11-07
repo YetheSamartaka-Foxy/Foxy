@@ -356,6 +356,7 @@ impl Foxy {
                     Ok(evt) => Some(evt),
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Closed) => {
+                        self.finish_update_completion_estimate(false);
                         let was_active =
                             self.syncing_repository.is_some() || self.current_sync_mode.is_some();
                         if was_active {
@@ -388,6 +389,7 @@ impl Foxy {
                         break;
                     }
                     Err(TryRecvError::Lagged(skipped)) => {
+                        self.invalidate_update_completion_estimate();
                         warn!("Core progress receiver lagged; skipped {} events", skipped);
                         continue;
                     }
@@ -397,6 +399,7 @@ impl Foxy {
             let Some(evt) = evt else { continue };
             processed_events += 1;
             self.benchmark_observe_event(&evt);
+            self.observe_update_completion_event(&evt);
 
             match &evt {
                 ProgressEvent::HashEvidence { state } => {
@@ -833,6 +836,7 @@ impl Foxy {
                     let was_cancelled = matches!(evt, ProgressEvent::Cancelled);
                     let last_repo = self.syncing_repository;
                     let last_mode = self.current_sync_mode;
+                    self.finish_update_completion_estimate(finished_successfully);
                     let retry_scheduled = matches!(evt, ProgressEvent::Failed(_))
                         && last_mode == Some(SyncMode::Download)
                         && self.sync_retryable_failure

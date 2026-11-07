@@ -445,6 +445,7 @@ impl Foxy {
             }
             if self.current_sync_mode == Some(SyncMode::Download) {
                 self.download_progress = Some((self.t("Cancelling..."), 0.84));
+                self.invalidate_update_completion_estimate();
                 self.download_paused = false;
                 self.needs_repaint = true;
             } else {
@@ -487,6 +488,7 @@ impl Foxy {
         }
 
         self.download_paused = paused;
+        self.pause_update_completion_estimate(paused);
         if let Some(repo_idx) = self.syncing_repository
             && let Some(repo) = self
                 .repository_view_state
@@ -569,10 +571,14 @@ impl Foxy {
     }
 
     pub fn update_download_estimate(&mut self, total_bytes: u64) {
-        if self.current_sync_mode != Some(SyncMode::Download) {
-            return;
-        }
-        if self.download_paused {
+        if self.download_paused
+            || (self.current_sync_mode != Some(SyncMode::Download)
+                && !self.is_direct_download_running())
+            || (self.current_sync_mode == Some(SyncMode::Download)
+                && self.update_completion_phase()
+                    != Some(crate::core::utils::update_estimate::UpdatePhase::Transferring))
+        {
+            self.download_eta_remaining = None;
             return;
         }
         let now = Instant::now();
@@ -581,13 +587,36 @@ impl Foxy {
         {
             return;
         }
-        if total_bytes == 0 || self.download_speed_bps <= 0.0 {
+        if total_bytes == 0
+            || !self.download_speed_bps.is_finite()
+            || self.download_speed_bps <= 0.0
+            || self
+                .download_speed_sample_at
+                .is_none_or(|sample| now.saturating_duration_since(sample) > Duration::from_secs(5))
+        {
+            self.download_eta_remaining = None;
             return;
         }
-        let downloaded = self.total_downloaded_bytes.min(total_bytes);
-        let remaining_bytes = total_bytes.saturating_sub(downloaded);
+        let (current_done, current_total) = self.mod_download_progress.values().fold(
+            (0u64, 0u64),
+            |(done, total), (_, _, _, bytes_done, bytes_total)| {
+                (
+                    done.saturating_add(*bytes_done),
+                    total.saturating_add(*bytes_total),
+                )
+            },
+        );
+        let downloaded = if self.is_direct_download_running() {
+            self.total_downloaded_bytes
+        } else {
+            current_done
+        };
+        let remaining_bytes = total_bytes.max(current_total).saturating_sub(downloaded);
         let remaining_secs = (remaining_bytes as f64 / self.download_speed_bps).max(0.0);
-        self.download_eta_remaining = Some(Duration::from_secs_f64(remaining_secs));
+        self.download_eta_remaining = (remaining_bytes > 0)
+            .then(|| Duration::try_from_secs_f64(remaining_secs).ok())
+            .flatten()
+            .map(|remaining| remaining.max(Duration::from_secs(1)));
         self.download_eta_updated_at = Some(now);
     }
 }

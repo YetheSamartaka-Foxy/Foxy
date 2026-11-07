@@ -549,6 +549,7 @@ impl Foxy {
             total_downloaded_bytes: 0,
             download_eta_remaining: None,
             download_eta_updated_at: None,
+            completion_estimate: Default::default(),
             download_pause_tx: None,
             download_paused: false,
             cancel_tx: None,

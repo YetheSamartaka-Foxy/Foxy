@@ -651,6 +651,7 @@ impl Foxy {
                 });
                 let swifty_path = swifty_repo.mod_folder.trim();
                 let repo = &mut self.repository_view_state.repositories[existing_idx];
+                let original_instance = Self::repo_instance_key(&repo.address, &repo.path);
                 Self::add_swifty_repo_as_profile(repo, swifty_repo);
                 if let Some((space_id, entry_address, shared_path)) = space_binding {
                     repo.repository_space_id = Some(space_id);
@@ -660,6 +661,9 @@ impl Foxy {
                     } else if repo.path.trim().is_empty() && !shared_path.trim().is_empty() {
                         repo.path = shared_path;
                     }
+                }
+                if Self::repo_instance_key(&repo.address, &repo.path) != original_instance {
+                    repo.update_timing = None;
                 }
                 imported_profiles += 1;
 

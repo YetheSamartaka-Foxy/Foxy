@@ -1,5 +1,6 @@
 # 1.2.2
 ## Added
+- Repository updates show an estimated completion time that includes preparation, transfer and patching, verification, saving, and queued repository updates. Estimates learn from successful updates of each installation; unmeasured work, pauses, retries, and expired estimates stay explicit instead of showing zero remaining time. All new text is translated into every bundled language.
 - Arma 3 profile backups in Game space settings > Profiles are enabled daily by default and keep the latest three versions per profile. Choose an interval in days or back up at each app start, create backups manually, restore missing or damaged profiles, export a ZIP, open the backup folder, or delete all profile backups. All new text is translated into every bundled language. Existing databases are preserved.
 - Create blank repository in the Add repository dialog makes a local mod selection without a server. Combine installed mods from other repositories, additional search folders, and Steam Workshop through External Addons, save profiles, and launch as usual. Removing the collection keeps existing mod files. The new text is translated into all bundled languages.
 - Periodic repository metadata checks run while Foxy is idle, with a configurable interval that defaults to 30 minutes. They find updates without starting downloads.

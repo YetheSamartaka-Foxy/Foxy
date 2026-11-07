@@ -175,6 +175,11 @@ impl Foxy {
                     ui.separator();
                 }
 
+                if downloading {
+                    self.update_download_estimate(total_bytes);
+                    self.render_update_completion_estimate(ui);
+                    ui.add_space(6.0);
+                }
                 if pending_mod_count == 0 {
                     ui.label(self.t("No updates needed."));
                 } else {
@@ -688,15 +693,16 @@ impl Foxy {
                             .unwrap_or_else(|| "00:00".to_string());
                         let remaining_text = self
                             .download_eta_remaining
-                            .unwrap_or_else(|| Duration::from_secs(0));
+                            .map(fmt_duration)
+                            .unwrap_or_else(|| self.t("Unknown"));
                         self.t_fmt(
-                            "{stage} {percent}% - {speed} - {elapsed} elapsed / {remaining} remaining",
+                            "{stage} {percent}% - {speed} - {elapsed} elapsed / transfer estimate {remaining}",
                             &[
                                 ("stage", stage_text),
                                 ("percent", format!("{:.1}", progress_pct * 100.0)),
                                 ("speed", speed_text),
                                 ("elapsed", elapsed_text),
-                                ("remaining", fmt_duration(remaining_text)),
+                                ("remaining", remaining_text),
                             ],
                         )
                     }

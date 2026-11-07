@@ -388,6 +388,7 @@ impl Foxy {
             let selected_mod_states =
                 Self::resolve_selected_mod_states(&repo, selected_mod_states_override);
             self.active_sync_selection = Some(selected_mod_states.clone());
+            self.begin_update_completion_estimate(repo_idx);
             self.active_sync_modifiers = Some((
                 force_redownload,
                 prepare_download_plan,

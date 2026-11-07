@@ -216,6 +216,8 @@ pub struct Repository {
     /// Unix seconds of the last game launch from this instance.
     #[serde(default)]
     pub last_launched_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_timing: Option<crate::core::utils::update_estimate::UpdateTiming>,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
@@ -306,6 +308,7 @@ impl Default for Repository {
             repository_space_membership_review: false,
             hash_algorithm_preference: HashAlgorithmPreference::default(),
             last_updated_at: None,
+            update_timing: None,
             last_remote_check_at: None,
             last_check_at: None,
             last_full_verification_at: None,
@@ -323,6 +326,33 @@ mod preset_check_tests {
     use super::{
         Repository, RepositoryPresetCheckEvidence, RepositoryPresetCheckOutcome, RepositoryProfile,
     };
+
+    #[test]
+    fn update_timing_round_trips_and_older_repositories_start_without_it() {
+        use crate::core::utils::update_estimate::{UpdateTiming, UpdateWork};
+        use std::time::Duration;
+
+        let mut repository = Repository::default();
+        let legacy = serde_json::to_value(&repository).unwrap();
+        assert!(legacy.get("update_timing").is_none());
+        assert!(
+            serde_json::from_value::<Repository>(legacy)
+                .unwrap()
+                .update_timing
+                .is_none()
+        );
+        repository.update_timing = Some(UpdateTiming {
+            work: UpdateWork {
+                files: 2,
+                transfer_bytes: 100,
+                full_bytes: Some(400),
+            },
+            phase_durations: [1, 4, 2, 1].map(Duration::from_secs),
+        });
+        let restored: Repository =
+            serde_json::from_value(serde_json::to_value(&repository).unwrap()).unwrap();
+        assert_eq!(restored.update_timing, repository.update_timing);
+    }
 
     #[test]
     fn local_repository_survives_persistence_with_external_selections() {

@@ -356,6 +356,7 @@ impl Foxy {
             | ProgressEvent::HashEvidence { .. }
             | ProgressEvent::VerificationBasis { .. }
             | ProgressEvent::DownloadPlan { .. }
+            | ProgressEvent::UpdatePhase(_)
             | ProgressEvent::DownloadTelemetry { .. }
             | ProgressEvent::HashTelemetry { .. }
             | ProgressEvent::HashSummary { .. }

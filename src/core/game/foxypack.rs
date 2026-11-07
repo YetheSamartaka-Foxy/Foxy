@@ -444,6 +444,7 @@ fn build_repositories_file(
                 .map(|profile| module.repository_profile_to_profile(profile, &repository.address))
                 .collect();
             let mut repository = repository.clone();
+            repository.update_timing = None;
             repository.address = normalize_repo_url(&repository.address);
             repository.profiles.clear();
             PackRepositoryEntry {
@@ -707,6 +708,7 @@ fn import_repositories(
     let mut updated = 0;
     for entry in incoming {
         let mut repository = entry.repository;
+        repository.update_timing = None;
         repository.address = normalize_repo_url(&repository.address);
         repository.profiles = entry
             .profiles
@@ -992,6 +994,37 @@ fn unix_timestamp_now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_packs_do_not_transfer_installation_timing_samples() {
+        use crate::core::utils::update_estimate::{UpdateTiming, UpdateWork};
+        use std::time::Duration;
+
+        let repository = Repository {
+            update_timing: Some(UpdateTiming {
+                work: UpdateWork {
+                    files: 1,
+                    transfer_bytes: 10,
+                    full_bytes: Some(20),
+                },
+                phase_durations: [1, 4, 2, 1].map(Duration::from_secs),
+            }),
+            ..Repository::default()
+        };
+        let exported =
+            build_repositories_file(&Arma3Module, std::slice::from_ref(&repository), &[]);
+        assert!(exported.repositories[0].repository.update_timing.is_none());
+        let mut target = Vec::new();
+        import_repositories(
+            &Arma3Module,
+            &mut target,
+            vec![PackRepositoryEntry {
+                repository,
+                profiles: Vec::new(),
+            }],
+        );
+        assert!(target[0].update_timing.is_none());
+    }
     use crate::core::game::arma3::Arma3Module;
     use crate::core::game::reforger::{self, ReforgerModule};
     use crate::ui::types::RepositoryProfile;
