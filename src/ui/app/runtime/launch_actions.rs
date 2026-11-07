@@ -120,6 +120,10 @@ impl Foxy {
         ctx.request_repaint_after(std::time::Duration::from_millis(250));
     }
     pub(crate) fn start_launch_action(&mut self, request: LaunchRequest) {
+        if self.profile_backup_work_in_flight() || self.profile_backup_recovery_pending() {
+            self.show_error_toast(self.t("Wait for profile backup work to finish."));
+            return;
+        }
         if self.launch_action.is_pending()
             || self.close_requested_at.is_some()
             || self.pending_game_space_switch.is_some()

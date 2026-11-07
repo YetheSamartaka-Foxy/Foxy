@@ -105,6 +105,8 @@ pub struct SettingsViewState {
     #[serde(default)]
     pub arma3_profiles_directory: String,
     #[serde(default)]
+    pub profile_backups: crate::core::profile_backups::BackupPolicy,
+    #[serde(default)]
     pub steam_directory: String,
     #[serde(default)]
     pub teamspeak3_directory: String,
@@ -394,6 +396,7 @@ impl Default for SettingsViewState {
             generic_launch_template: String::new(),
             generic_mods_manifest: String::new(),
             arma3_profiles_directory: String::new(),
+            profile_backups: crate::core::profile_backups::BackupPolicy::default(),
             steam_directory: String::new(),
             teamspeak3_directory: String::new(),
             temp_directory: String::new(),

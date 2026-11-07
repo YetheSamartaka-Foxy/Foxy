@@ -400,6 +400,7 @@ impl Foxy {
             info!("Close requested by viewport event");
         }
         self.poll_launch_action(&ctx);
+        self.poll_profile_backups(&ctx);
         self.poll_game_space_removal(&ctx);
         self.poll_scheduled_gameplay(&ctx);
         self.service_proxy_change_prompt(&ctx);
@@ -419,6 +420,7 @@ impl Foxy {
                 || self.hash_evidence_retry_in_flight
                 || self.launch_action.is_busy()
                 || self.game_space_removal_in_flight()
+                || self.profile_backup_work_in_flight()
                 || self
                     .workshop_task_worker
                     .as_ref()
@@ -577,6 +579,9 @@ impl Foxy {
             return;
         }
         self.poll_backend_progress();
+        if self.startup_tasks_started {
+            self.start_automatic_profile_backups(&ctx);
+        }
         self.poll_linked_target_preview_results();
         self.poll_hash_evidence_retry();
         self.poll_retained_file_task_results();

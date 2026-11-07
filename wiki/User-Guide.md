@@ -387,6 +387,10 @@ Profile names support UTF-8 text, so non-English names display and launch correc
 
 The **Profiles** tab in Game space settings manages your Arma 3 player profiles: clone, rename, or delete them. Deleted profiles are moved to the Foxy backup directory, default profiles are protected, and changes are blocked while Arma 3 is running.
 
+**Profile backups** are enabled by default. Foxy keeps the latest three backups of each player profile's settings, keybinds, variables, and editor preferences. Missions and saved games are excluded. The daily schedule runs while Foxy is open, including the next time you open the game space when a backup is overdue. Days when Foxy is closed do not create backups. Choose a different **Interval (days)**, select **Each app start**, or turn automatic backups off. **Back up now** works independently of the automatic schedule.
+
+With the game space open, the backup list remains available even if a profile has been deleted or damaged. Use **Restore** and confirm replacement of its profile files, **Export ZIP** to save a portable copy, or **Open backup folder** to inspect it on disk. Restore preserves the overwritten files in a separate recovery folder; an interrupted restore is rolled back when you next open the game space. **Delete all backups** requires confirmation and removes this game space's profile backups and recovery copies. Backups are stored under `games/<space_id>/profile_backups/`, separately from addon backups and deleted profiles. Installing this feature preserves existing databases and needs no database reset. Arma Reforger does not currently support player profile management or these backups.
+
 ---
 
 ## Managing Addons

@@ -311,6 +311,10 @@ impl Foxy {
             return;
         };
 
+        if !module.capabilities().profiles {
+            return;
+        }
+
         ScrollArea::vertical().show(ui, |ui| {
             ui.vertical(|ui| {
                 self.render_game_space_directory_setting(
@@ -324,7 +328,9 @@ impl Foxy {
                 ui.separator();
 
                 if is_active_space {
-                    self.render_arma3_profile_management(ui, horizontal_padding);
+                    ui.add_enabled_ui(!self.profile_backup_work_in_flight(), |ui| {
+                        self.render_arma3_profile_management(ui, horizontal_padding);
+                    });
                 } else {
                     render_wrapped_info_row(
                         ui,
@@ -334,6 +340,8 @@ impl Foxy {
                             .color(self.color_text_dim()),
                     );
                 }
+                ui.separator();
+                self.render_profile_backups(ui, horizontal_padding);
             });
         });
 

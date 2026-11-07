@@ -15,6 +15,15 @@ use std::time::Duration;
 use crate::ui::theme::Theme;
 
 #[test]
+fn older_settings_enable_daily_profile_backups_without_database_changes() {
+    let mut saved = serde_json::to_value(SettingsViewState::default()).unwrap();
+    saved.as_object_mut().unwrap().remove("profile_backups");
+    let restored: SettingsViewState = serde_json::from_value(saved).unwrap();
+    assert!(restored.profile_backups.enabled);
+    assert_eq!(restored.profile_backups.interval_days, 1);
+}
+
+#[test]
 fn download_summary_planned_or_downloaded_falls_back_to_downloaded() {
     let summary = DownloadSummary {
         mods_updated: 1,

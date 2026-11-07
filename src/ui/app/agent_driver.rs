@@ -3076,6 +3076,7 @@ impl Foxy {
         push(self.direct_download_worker.is_some(), "direct-download");
         push(self.launch_action.is_busy(), "launch-preparation");
         push(self.game_space_removal_in_flight(), "game-space-removal");
+        push(self.profile_backup_work_in_flight(), "profile-backups");
         push(self.pending_installer_path.is_some(), "installer-queued");
         push(
             self.repository_space_import_in_flight,

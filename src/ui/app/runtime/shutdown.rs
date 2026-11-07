@@ -12,7 +12,9 @@ impl Foxy {
         egui::Modal::new(egui::Id::unique("close_cleanup_wait")).show(ctx, |ui| {
             ui.set_max_width(480.0);
             ui.heading(self.t("Closing Foxy"));
-            ui.label(self.t(if saving {
+            ui.label(self.t(if self.profile_backup_work_in_flight() {
+                "Waiting for profile backup work to finish before closing."
+            } else if saving {
                 "Waiting for your changes to be saved before closing."
             } else {
                 "Cancelling the update and restoring previous files before closing."

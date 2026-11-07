@@ -12,6 +12,10 @@
   "cleanup_folders": [],
   "enable_editor_mission_list": true,
   "enable_server_list": true,
+  "profile_backups": {
+    "enabled": true,
+    "interval_days": 1
+  },
   "swifty_migration_offered": false,
   "teamspeak3_directory": "C:\\Program Files\\TeamSpeak 3 Client",
   "ts3_installed_plugin_hashes": {},

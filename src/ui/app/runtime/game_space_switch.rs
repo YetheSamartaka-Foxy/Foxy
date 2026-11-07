@@ -28,6 +28,9 @@ impl Foxy {
         if self.settings_view_state.debug_mode {
             return Some("Leave debug mode before switching game spaces.");
         }
+        if self.profile_backup_work_in_flight() {
+            return Some("Wait for profile backup work to finish.");
+        }
         if self.hash_evidence_retry_in_flight
             || self.retained_files_cleanup_in_flight
             || self.pending_retained_file_removal.is_some()
@@ -536,6 +539,7 @@ impl Foxy {
     /// log, app updates, backups, tray) is deliberately left alone.
     fn reset_space_scoped_state(&mut self) {
         self.interrupted_update_instances.clear();
+        self.profile_backup_state.reset_for_space();
         self.startup_recovery_rx = None;
         // Mount table snapshot behind hash IO tuning: the incoming space may sit
         // on a drive attached after the last refresh.

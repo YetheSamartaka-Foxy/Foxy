@@ -227,6 +227,17 @@ group or Keep standalone choice without moving or deleting payloads.
 
 ---
 
+## Player profile backups
+
+Arma 3 player profile backups use the `profiles` capability and the space's
+`profile_backups` settings object (`enabled`, `interval_days`; zero means each
+application start). The default is enabled daily with three retained snapshots
+per profile path and name. Store snapshots and restore recovery journals under
+the captured game-space directory's `profile_backups/`, independently of the
+repository database and addon backups. Run file operations off the UI thread,
+validate restore roots independently of backup manifests, and finish or recover
+profile writes before switching spaces or launching the game.
+
 ## Sharing a Workshop selection
 
 `workshop.json` entries carry an optional `load_order`; `workshop::launch_order_key`

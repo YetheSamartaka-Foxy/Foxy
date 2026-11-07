@@ -314,6 +314,7 @@ impl Foxy {
             repository_addon_size_bytes_by_repo_and_addon: HashMap::new(),
             repository_selection: None,
             detected_arma3_profiles: Vec::new(),
+            profile_backup_state: Default::default(),
             detected_active_arma3_profile: None,
             pending_arma3_profile_action: None,
             cached_missions: None,

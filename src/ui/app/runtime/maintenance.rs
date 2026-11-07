@@ -10,6 +10,7 @@ impl Foxy {
             || self.launch_action.is_pending()
             || self.game_space_removal_in_flight()
             || self.backup_manager_work_in_flight()
+            || self.profile_backup_work_in_flight()
             || !self.active_quick_scan_instance_keys.is_empty()
             || self.hash_evidence_retry_in_flight
             || self.retained_files_cleanup_in_flight

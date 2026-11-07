@@ -8,6 +8,7 @@ mod diagnostics;
 mod downloads;
 mod init;
 mod persistence;
+pub(crate) mod profile_backups;
 mod repository;
 mod runtime;
 mod scheduling;
@@ -191,6 +192,7 @@ pub struct Foxy {
     pub repository_selection: Option<RepositorySelection>,
     /// Cached list of detected Arma 3 profiles.
     pub detected_arma3_profiles: Vec<crate::core::arma3_profiles::Arma3Profile>,
+    pub(crate) profile_backup_state: profile_backups::ProfileBackupState,
     /// The auto-detected "currently active" Arma 3 profile name.
     pub detected_active_arma3_profile: Option<String>,
     /// Pending rename/clone/delete action from the Arma 3 profile manager

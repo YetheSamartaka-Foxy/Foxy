@@ -8,6 +8,7 @@ mod backup;
 mod benchmarks;
 mod customization;
 mod game_space;
+mod profile_backups;
 mod profile_manager;
 mod scheduling;
 mod tools;
