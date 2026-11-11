@@ -17,7 +17,16 @@ file is the working contract.
   `reforger`, `generic`). `generic` is the user-configured module: the player
   supplies the executable, optional Steam app id, argument template, and mods
   manifest name through its game settings, so one module covers any Steam
-  Workshop game Foxy has no dedicated module for.
+  Workshop game Foxy has no dedicated module for. It also syncs repositories.
+  A custom game repository names its build in `repo.json` `gameBuild`
+  (`{ modName, executable }`, `foxy-server-backend-cli new --game generic`);
+  the client stores it on `Repository::game_build`, strips that folder from
+  every addon list and profile (`apply_repo_game_build`, also on load), and
+  never renders it as an addon. Because sync skips disabled addons, keeping it
+  out of the lists is also what guarantees it is always downloaded. Its launch
+  plan carries a `GameBuildTarget`: the downloaded executable starts directly,
+  never through Steam, ignoring the Game Directory and Executable settings.
+  Other enabled addon folders are offered only as `{mods}`.
 - **Game module**: the Rust implementation of one game's behavior (detection,
   launch, settings schema, capabilities). Implements `GameModule`, registered in
   the static `GameRegistry`.
@@ -158,17 +167,37 @@ warning and is for read-only use (labels, capability queries) only.
 
 ---
 
+## Addon Workshop links
+
+Addon browser links dispatch through `GameModule::addon_workshop`: Steam Workshop
+capability plus the settings-aware App ID selects Steam; Reforger overrides the
+provider. `game/addon_workshop.rs` resolves bounded local metadata, then bounded
+repository metadata requests on a worker. Browser URLs use validated nonzero
+Steam IDs or exactly 16 hexadecimal Reforger GUID digits, never metadata URLs or
+launch-only fallback IDs. Pending UI lookups are cleared on a game-space switch.
+
 ## Runtime space switching
+
+The [accepted behavior contracts](BEHAVIOR_CONTRACTS.md) define backup provenance,
+private-payload preservation, Workshop removal/bundle selection and launch
+preparation ownership. These choices are settled for future gap reviews.
 
 Switching happens in-process (`src/ui/app/runtime/game_space_switch.rs`):
 
 1. Refuse while mutating background work runs or debug mode shadows state;
    `game_space_switch_block_reason` returns the message shown in both the
-   disabled-button hover text and the toast.
+   disabled-button hover text and the toast. A worker that resolves its space
+   folder once (a Workshop task) counts as mutating work. Results that arrive
+   after the switch are dropped when their pending entry was cleared by it.
+   Per-space artifacts outside the space folder (delta-patch plans) live in a
+   folder keyed by the space directory.
 2. Drain the persistence queue so queued writes land in the space they belong to.
-3. Release the outgoing database handle (`close_active_database_sync`), activate
-   the target, honor a pending wipe marker, stop the filesystem watcher.
-4. Reset every space-scoped `Foxy` field, then reload the space the way startup
+3. Prepare the destination on a worker while the outgoing workspace stays active:
+   reserve its database claim, recover configuration/launch journals, and validate
+   its settings, repositories, spaces and folders. Failure offers Retry or Cancel.
+4. Release the outgoing database handle (`close_active_database_sync`), promote the
+   reservation, activate the target, honor a pending wipe marker and stop the watcher.
+5. Reset every space-scoped `Foxy` field, then reload the space the way startup
    would.
 
 Consequences for new code:
@@ -182,7 +211,32 @@ Consequences for new code:
   otherwise. A space-scoped field left out of the reset leaks the previous space's
   data into the next one.
 
+### Accepted game-space and queued-work contracts
+
+R01-R24 in [reviewed contracts](REVIEWED_BEHAVIOR_CONTRACTS.md) also apply.
+Configuration ownership is root-wide. Ordinary partial settings saves preserve
+the successfully saved half; opaque valid values stay in their original file.
+Divergent readable legacy/current copies remain preserved with a persistent
+review notice. A remotely removed space member requires an explicit Keep in
+group or Keep standalone choice without moving or deleting payloads.
+
+- A space switch drains saves into the outgoing space before activation. While it waits, freeze new edits and show a Switching state with a cancel action. On save failure, stay in the outgoing space and offer Retry, explicit Discard changes and switch, or Cancel switching. Discard waits for in-flight writes to settle; no queued save may be retargeted to the destination.
+- A manual bulk request freezes its target set and each target's normalized `(remote_url, local_path)` identity at enqueue time. If a queued row is removed or its identity changes, skip that target and explain why. Do not add repositories that join the group later. Resolve that repository's current profile when its unchanged identity actually starts.
+- If a requested update through a repository space would put incompatible versions in that space's shared root, block it and report the conflicting members. For ordinary repositories sharing a folder outside that space contract, warn about affected instances and let the requested repository proceed; keep their current states independent.
+- An edit, disable, or delete of a scheduled job that has an active run must ask whether it affects future runs only or also stops the current run and its post-action. Keep the active run snapshot unless the user explicitly revokes it.
+
 ---
+
+## Player profile backups
+
+Arma 3 player profile backups use the `profiles` capability and the space's
+`profile_backups` settings object (`enabled`, `interval_days`; zero means each
+application start). The default is enabled daily with three retained snapshots
+per profile path and name. Store snapshots and restore recovery journals under
+the captured game-space directory's `profile_backups/`, independently of the
+repository database and addon backups. Run file operations off the UI thread,
+validate restore roots independently of backup manifests, and finish or recover
+profile writes before switching spaces or launching the game.
 
 ## Sharing a Workshop selection
 

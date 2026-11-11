@@ -1,0 +1,4 @@
+interface:
+  display_name: "Release readiness"
+  short_description: "Review Foxy release artifacts and metadata"
+  default_prompt: "Use $foxy-release-readiness to review a Foxy release candidate and its packaging."

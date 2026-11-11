@@ -168,6 +168,7 @@ pub fn build_row(
     metadata["memory"] = summary["memory"].clone();
     if let Some(block) = metadata["memory"].as_object_mut() {
         block.remove("series");
+        block.remove("cpu_series");
     }
     let samples: Vec<&Value> = summary["telemetry_samples"]
         .as_array()

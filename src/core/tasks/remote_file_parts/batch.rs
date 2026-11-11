@@ -353,26 +353,63 @@ fn carried_part_local_state(
             .push(idx);
     }
     rekeyed.sort_by_key(|part| part.data_order);
+    let mut unmatched = Vec::new();
     for current in rekeyed {
         if has_local(current) {
             continue;
         }
-        let Some(candidates) = unclaimed_by_display_path.get_mut(part_display_path(&current.path))
+        let Some(candidates) = unclaimed_by_display_path
+            .get_mut(part_display_path(&current.path))
+            .filter(|candidates| !candidates.is_empty())
         else {
+            unmatched.push(current);
             continue;
         };
-        if candidates.is_empty() {
+        let idx = candidates.remove(0);
+        claimed[idx] = true;
+        carried.push(carried_from(current, &old_parts[idx]));
+    }
+
+    // Plain-file parts are named after their end offset, so content that moved
+    // keeps its checksum but not its name. Its bytes are still in the local
+    // file at the old offset, which is what a delta copy reads.
+    let mut unclaimed_by_content: HashMap<(String, u64), Vec<usize>> = HashMap::new();
+    for idx in (0..old_parts.len()).filter(|idx| !claimed[*idx] && has_local(&old_parts[*idx])) {
+        let old = &old_parts[idx];
+        unclaimed_by_content
+            .entry((
+                old.local_checksum.trim().to_ascii_uppercase(),
+                old.local_length,
+            ))
+            .or_default()
+            .push(idx);
+    }
+    for current in unmatched {
+        let key = (
+            current.remote_checksum.trim().to_ascii_uppercase(),
+            current.remote_length,
+        );
+        if key.0.is_empty() || current.remote_length == 0 {
             continue;
         }
-        let old = &old_parts[candidates.remove(0)];
-        carried.push(CarriedPartLocalState {
-            id: current.id,
-            local_checksum: old.local_checksum.clone(),
-            local_length: old.local_length,
-            local_start: old.local_start,
-        });
+        if let Some(candidates) = unclaimed_by_content
+            .get_mut(&key)
+            .filter(|candidates| !candidates.is_empty())
+        {
+            let idx = candidates.remove(0);
+            carried.push(carried_from(current, &old_parts[idx]));
+        }
     }
     carried
+}
+
+fn carried_from(current: &FoxyModFilePart, old: &FoxyModFilePart) -> CarriedPartLocalState {
+    CarriedPartLocalState {
+        id: current.id,
+        local_checksum: old.local_checksum.clone(),
+        local_length: old.local_length,
+        local_start: old.local_start,
+    }
 }
 
 async fn persist_carried_part_local_state(db: &FoxyDb, states: Vec<CarriedPartLocalState>) {
@@ -2357,6 +2394,36 @@ mod tests {
         let plan = plan_file_patch(&file, &parts, &parts).unwrap().unwrap();
         assert_eq!(plan.planned_copy_bytes, 1000);
         assert_eq!(plan.planned_download_bytes, 32);
+    }
+
+    #[test]
+    fn carried_state_follows_content_when_plain_file_parts_shift() {
+        let old = clean_old_parts(vec![
+            manifest_part(1, "game.exe_100", 0, 0, 100, "A"),
+            manifest_part(2, "game.exe_250", 1, 100, 150, "B"),
+            manifest_part(3, "game.exe_300", 2, 250, 50, "C"),
+        ]);
+        let first = manifest_part(4, "game.exe_100", 0, 0, 100, "A");
+        let inserted = manifest_part(5, "game.exe_130", 1, 100, 30, "N");
+        let moved = manifest_part(6, "game.exe_280", 2, 130, 150, "B");
+        let changed = manifest_part(7, "game.exe_330", 3, 280, 50, "D");
+
+        let carried = carried_part_local_state(&old, &[&first, &inserted, &moved, &changed], false);
+
+        let by_id: HashMap<u64, (&str, u64, u64)> = carried
+            .iter()
+            .map(|state| {
+                (
+                    state.id,
+                    (
+                        state.local_checksum.as_str(),
+                        state.local_start,
+                        state.local_length,
+                    ),
+                )
+            })
+            .collect();
+        assert_eq!(by_id, HashMap::from([(6, ("B", 100, 150))]));
     }
 
     #[test]

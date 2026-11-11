@@ -30,6 +30,19 @@ pub enum RepositoryContextConfirmAction {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct ProxyChangePrompt {
+    pub repository_url: String,
+    pub repository_path: String,
+    pub mode: crate::core::api::SyncMode,
+    pub selected_mod_states: Vec<(String, bool)>,
+    pub force_redownload: bool,
+    pub prepare_download_plan: bool,
+    pub force_full_downloads: bool,
+    pub backup_local_drift: bool,
+    pub restart_requested: bool,
+}
+
+#[derive(Clone, Debug)]
 pub struct RepositoryVisualFolderEditState {
     pub folder_id: Option<String>,
     pub repository_space_id: Option<String>,
@@ -168,6 +181,52 @@ pub struct RepositoryCheckCompletionState {
     pub error_message: Option<String>,
 }
 
+#[derive(Debug)]
+pub(crate) struct PendingLinkedTargetSync {
+    pub repo_address: String,
+    pub repo_path: String,
+    pub mode: crate::core::api::SyncMode,
+    pub selected_mod_states: Option<Vec<(String, bool)>>,
+    pub force_redownload: bool,
+    pub prepare_download_plan: bool,
+    pub force_full_downloads: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct LinkedTargetPreviewResult {
+    pub repo_address: String,
+    pub repo_path: String,
+    pub result: Result<Vec<crate::core::api::LinkedTargetPreview>, String>,
+}
+
+#[derive(Debug)]
+pub(crate) struct RetainedFilePreviewResult {
+    pub repo_url: String,
+    pub local_path: String,
+    pub result: Result<
+        (
+            Vec<crate::core::api::RetainedFilePreview>,
+            Vec<crate::core::api::LinkedTargetPreview>,
+        ),
+        String,
+    >,
+}
+
+#[derive(Debug)]
+pub(crate) struct RetainedFileRemovalResult {
+    pub repo_url: String,
+    pub local_path: String,
+    pub result: Result<usize, String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PendingRetainedFileRemoval {
+    pub repo_url: String,
+    pub local_path: String,
+    pub files: Vec<crate::core::api::RetainedFilePreview>,
+    pub linked_targets: Vec<crate::core::api::LinkedTargetPreview>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UiToastKind {
     Success,
@@ -219,11 +278,12 @@ pub struct StartupQuickScanFilterResult {
     pub eligible_repositories: Vec<crate::core::api::StartupRepositoryInstance>,
     pub prevalidated_repositories: Vec<crate::core::api::StartupRepositoryInstance>,
     pub remote_changed_repositories: Vec<crate::core::api::StartupRepositoryInstance>,
+    pub pending_update_repositories: Vec<crate::core::api::StartupRepositoryInstance>,
+    pub remote_unknown_repositories: Vec<crate::core::api::StartupRepositoryInstance>,
 }
 
 #[derive(Debug)]
 pub struct StartupPendingUpdateRestoreRequest {
-    pub repo_index: usize,
     pub repo_name: String,
     pub repo_url: String,
     /// Download folder of this repository instance; the cached pending-update row
@@ -234,7 +294,9 @@ pub struct StartupPendingUpdateRestoreRequest {
 
 #[derive(Debug)]
 pub struct StartupPendingUpdateRestoreRecord {
-    pub repo_index: usize,
+    /// Download folder of the instance; with `repo_url` it re-resolves the
+    /// repository, whose list position may have moved while the restore ran.
+    pub repo_path: String,
     pub repo_url: String,
     pub state: RepoState,
     pub mods: Option<Vec<ModDiffSummary>>,
@@ -358,6 +420,7 @@ pub struct AddonForceRedownloadProbeResult {
 pub enum CachedUpdateLoadOutcome {
     /// Cached payload present and still has updates.
     Pending(Vec<ModDiffSummary>),
+    NeedsLocalCheck,
     /// Cached payload present but no updates remain (stale; the worker cleared
     /// the database row).
     Synced,

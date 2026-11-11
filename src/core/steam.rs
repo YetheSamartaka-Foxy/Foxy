@@ -647,16 +647,7 @@ pub fn is_steam_running(steam_directory: &str) -> bool {
         if wine::is_wine() && wine::steam_launch_command(steam_directory).is_some() {
             return wine::steam_running();
         }
-        let output = Command::new("tasklist")
-            .args(["/FI", "IMAGENAME eq steam.exe", "/FO", "CSV", "/NH"])
-            .output();
-        match output {
-            Ok(out) if out.status.success() => {
-                let stdout = String::from_utf8_lossy(&out.stdout).to_lowercase();
-                stdout.contains("steam.exe")
-            }
-            _ => false,
-        }
+        crate::core::utils::process::any_process_running(&["steam.exe"]).unwrap_or(false)
     }
     #[cfg(target_os = "linux")]
     {
@@ -712,8 +703,11 @@ fn linux_steam_running_pgrep() -> bool {
 
 #[cfg(target_os = "windows")]
 fn query_reg_value_for_path(key_path: &str, value_name: &str) -> Option<PathBuf> {
+    use std::os::windows::process::CommandExt;
+
     let output = Command::new("reg")
         .args(["query", key_path, "/v", value_name])
+        .creation_flags(winapi::um::winbase::CREATE_NO_WINDOW)
         .output()
         .ok()?;
 

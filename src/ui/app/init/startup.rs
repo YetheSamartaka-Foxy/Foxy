@@ -1,18 +1,19 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
-use eframe::egui::{self, Visuals};
+use eframe::egui;
 use log::info;
 
 use crate::core::api::{self, QuickScanProgressEvent, QuickScanResult};
 use crate::ui::app::{
     AddonBackupTaskResult, AddonDeleteResult, AddonForceRedownloadProbeResult,
-    AddonHashRecalcResult, AddonInventoryViewCache, CachedUpdateLoadResult, Foxy, ImageLoadResult,
-    JoinPreflightQueryResult, ListGalleyCache, MissionRowGalleyCache, PersistenceRequest,
+    AddonHashRecalcResult, AddonInventoryViewCache, BackupCleanupTaskResult,
+    CachedUpdateLoadResult, Foxy, ImageLoadResult, JoinPreflightQueryResult,
+    LinkedTargetPreviewResult, ListGalleyCache, MissionRowGalleyCache, PersistenceRequest,
     PersistenceResult, RepoMetadataFetchResult, RepositoryAddonListCache,
     RepositoryAddonSizeLoadResult, RepositoryDbWipeResult, RepositoryExternalAddonsListCache,
     RepositoryListCache, RepositorySettingsAddonPreloadResult, RepositorySpaceImportResult,
-    agent_driver::AgentGuiLaunchConfig,
+    RetainedFilePreviewResult, RetainedFileRemovalResult, agent_driver::AgentGuiLaunchConfig,
 };
 use crate::ui::i18n::I18n;
 use crate::ui::palette;
@@ -32,7 +33,7 @@ impl Foxy {
         debug_modal_previews: Vec<crate::ui::app::debug_modals::DebugModal>,
     ) -> Self {
         info!("Initializing Foxy UI state");
-        let mut visuals = Visuals::dark();
+        let mut visuals = Self::base_visuals(true);
         visuals.override_text_color = Some(palette::TEXT_NORMAL);
         cc.egui_ctx.set_theme(egui::Theme::Dark);
         // egui 0.36 would otherwise push the theme into the native window after
@@ -168,6 +169,14 @@ impl Foxy {
         let (quick_scan_tx, quick_scan_rx) = std::sync::mpsc::channel::<QuickScanResult>();
         let (quick_scan_progress_tx, quick_scan_progress_rx) =
             std::sync::mpsc::channel::<QuickScanProgressEvent>();
+        let (hash_evidence_retry_tx, hash_evidence_retry_rx) =
+            std::sync::mpsc::channel::<Result<bool, String>>();
+        let (link_target_preview_tx, link_target_preview_rx) =
+            std::sync::mpsc::channel::<LinkedTargetPreviewResult>();
+        let (retained_file_preview_tx, retained_file_preview_rx) =
+            std::sync::mpsc::channel::<RetainedFilePreviewResult>();
+        let (retained_file_removal_tx, retained_file_removal_rx) =
+            std::sync::mpsc::channel::<RetainedFileRemovalResult>();
         let (fs_watch_tx, fs_watch_rx) = std::sync::mpsc::channel::<api::FsChangeEvent>();
         let fs_watch_suppressed_until_ms =
             std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -176,6 +185,8 @@ impl Foxy {
         let (database_wipe_tx, database_wipe_rx) = std::sync::mpsc::channel::<Result<(), String>>();
         let (addon_backup_task_tx, addon_backup_task_rx) =
             std::sync::mpsc::channel::<AddonBackupTaskResult>();
+        let (backup_cleanup_task_tx, backup_cleanup_task_rx) =
+            std::sync::mpsc::channel::<BackupCleanupTaskResult>();
         let (repository_settings_addon_preload_tx, repository_settings_addon_preload_rx) =
             std::sync::mpsc::channel::<RepositorySettingsAddonPreloadResult>();
         let (repository_addon_size_load_tx, repository_addon_size_load_rx) =
@@ -188,6 +199,20 @@ impl Foxy {
             Self::run_persistence_worker(persistence_request_rx, persistence_result_tx);
         });
         let mut app = Self {
+            interrupted_update_instances: HashSet::new(),
+            startup_recovery_rx: None,
+            pending_download_retry: None,
+            download_retry_attempts: HashMap::new(),
+            sync_retryable_failure: false,
+            sync_is_bulk: false,
+            sync_visual_folder_id: None,
+            paused_repository_instances: HashSet::new(),
+            pending_game_space_switch_save_error: None,
+            pending_game_space_switch_discard_save: false,
+            unreadable_config_replacements: HashMap::new(),
+            show_unreadable_config_replacement: false,
+            pending_update_launch: None,
+            scheduling_job_change_prompt: None,
             app_icon: None,
             tfr_logo: None,
             default_repo_image: None,
@@ -289,6 +314,7 @@ impl Foxy {
             repository_addon_size_bytes_by_repo_and_addon: HashMap::new(),
             repository_selection: None,
             detected_arma3_profiles: Vec::new(),
+            profile_backup_state: Default::default(),
             detected_active_arma3_profile: None,
             pending_arma3_profile_action: None,
             cached_missions: None,
@@ -301,12 +327,15 @@ impl Foxy {
             current_about_tab: AboutTab::About,
             addons_filter: String::new(),
             addons_search_files: false,
+            addons_bulk_filtered_only: false,
             optional_addons_filter: String::new(),
             external_addons_filter: String::new(),
             external_addons_origin_filter: "All".to_string(),
             external_addons_group_by_origin: false,
             optional_addons_search_files: false,
             external_addons_search_files: false,
+            optional_addons_bulk_filtered_only: false,
+            external_addons_bulk_filtered_only: false,
             addon_state_filter: String::new(),
             addon_favorites_only_filter: false,
             addon_client_side_only_filter: false,
@@ -316,7 +345,6 @@ impl Foxy {
             pending_queries: Vec::new(),
             server_updates,
             updates_sender,
-            join_preflight_cache: HashMap::new(),
             join_preflight_worker: None,
             join_preflight_result_rx,
             join_preflight_result_tx,
@@ -331,6 +359,8 @@ impl Foxy {
             repository_space_import_in_flight: false,
             repository_space_freshness_rx: None,
             repository_space_last_refresh: None,
+            periodic_remote_check_last_run: None,
+            dispatching_background_sync: false,
             repository_space_remote_changes: Default::default(),
             addon_hash_recalc_result_rx,
             addon_hash_recalc_result_tx,
@@ -351,6 +381,11 @@ impl Foxy {
             quick_scan_worker: None,
             startup_quick_scan_filter_rx: None,
             startup_quick_scan_filter_worker: None,
+            startup_probe_unknown: Vec::new(),
+            startup_probe_retry_armed_at: None,
+            startup_probe_retries_completed: 0,
+            startup_probe_retry_rx: None,
+            startup_probe_retry_worker: None,
             fs_watch_rx,
             fs_watch_tx,
             fs_watch_worker: None,
@@ -394,6 +429,10 @@ impl Foxy {
             backup_manager_view_cache: None,
             backup_manager_notice: None,
             backup_manager_confirm_action: None,
+            backup_cleanup_task_rx,
+            backup_cleanup_task_tx,
+            backup_cleanup_worker: None,
+            backup_cleanup_in_flight: false,
             cached_icons: HashMap::new(),
             cached_repo_images: HashMap::new(),
             new_profile_name: String::new(),
@@ -404,6 +443,7 @@ impl Foxy {
             show_direct_download_screen: false,
             direct_download_url_input: String::new(),
             direct_download_destination_input: String::new(),
+            pending_direct_download_collisions: None,
             direct_download_use_global_speed_limit: true,
             direct_download_override_speed_unlimited: true,
             direct_download_override_speed_limit_mbps: 1,
@@ -419,7 +459,12 @@ impl Foxy {
             ts3_running_cache: None,
             ts3_plugin_scan_prompt_on_update: false,
             ts3_plugin_scan_requeued: false,
-            prelaunch_recheck_at: None,
+            prelaunch_process_checks: Default::default(),
+            launch_action: Default::default(),
+            pending_installer_path: None,
+            pending_installer_error: None,
+            shutdown_after_close: false,
+            configuration_recovery_error: None,
             backend_progress_rx: None,
             backend_worker: None,
             startup_pending_restore_rx: None,
@@ -434,17 +479,56 @@ impl Foxy {
             addon_hash_recalc_queue: VecDeque::new(),
             scheduler_active_run: None,
             scheduler_pending_post_action: None,
+            scheduler_deferred_post_actions: Vec::new(),
+            scheduler_held_jobs: HashMap::new(),
+            scheduler_last_tick_at: None,
+            addon_selection_baseline: HashMap::new(),
+            pending_addon_selection_checks: HashSet::new(),
             scheduling_editor: None,
             syncing_repository: None,
             pending_repo_metadata_refresh: Vec::new(),
             pending_update_cache: HashMap::new(),
             mod_diff_cache: Vec::new(),
             progress_events: VecDeque::new(),
+            hash_evidence_state: None,
+            hash_evidence_retry_tx,
+            hash_evidence_retry_rx,
+            hash_evidence_retry_in_flight: false,
+            hash_evidence_notice_open: false,
+            hash_evidence_notice_seen: (0, 0, false),
+            hash_stall_acknowledged: HashSet::new(),
             update_modal_open: false,
             update_ready_repo: None,
+            local_drift_addons: Vec::new(),
+            backup_local_drift_requested: false,
+            empty_publication_status: None,
+            enrolled_link_targets: Vec::new(),
+            cleanup_plan_files: Vec::new(),
+            pending_link_target_sync: None,
+            pending_link_target_previews: None,
+            link_target_preview_bypass_once: false,
+            link_target_preview_tx,
+            link_target_preview_rx,
+            retained_file_preview_tx,
+            retained_file_preview_rx,
+            retained_file_removal_tx,
+            retained_file_removal_rx,
+            retained_files_cleanup_in_flight: false,
+            pending_retained_file_removal: None,
             current_sync_mode: None,
+            active_sync_selection: None,
+            active_sync_modifiers: None,
+            proxy_change_prompt: None,
+            game_space_switch_prepare_rx: None,
+            game_space_switch_prepare_worker: None,
+            game_space_switch_open_error: None,
+            legacy_migration_review_files: Vec::new(),
+            settings_save_error: None,
+            pending_integrity_recheck_prompt: None,
+            integrity_recheck_after_settlement: None,
             download_progress: None,
             download_finished: false,
+            download_transfer_attempt: 0,
             download_finished_repo: None,
             download_summary: None,
             download_disk_space_shortfall: None,
@@ -452,6 +536,7 @@ impl Foxy {
             open_update_after_sync: false,
             needs_repaint: false,
             mod_download_progress: HashMap::new(),
+            mod_download_attempts: HashMap::new(),
             download_started_at: None,
             download_stage_started_at: None,
             hash_stage_started_at: None,
@@ -464,6 +549,7 @@ impl Foxy {
             total_downloaded_bytes: 0,
             download_eta_remaining: None,
             download_eta_updated_at: None,
+            completion_estimate: Default::default(),
             download_pause_tx: None,
             download_paused: false,
             cancel_tx: None,
@@ -495,6 +581,7 @@ impl Foxy {
             startup_quick_scan_requested: 0,
             startup_sync: None,
             close_requested_at: None,
+            close_worker_wait_started_at: None,
             update_modal_sorted_mod_indices: Vec::new(),
             update_modal_mod_name_lowers: Vec::new(),
             update_modal_sort_generation: 0,
@@ -529,6 +616,7 @@ impl Foxy {
             last_applied_palette: None,
             cached_color32: None,
             last_font_image_size: [0, 0],
+            last_font_pixels_per_point: 0.0,
             last_saved_window_state: Self::load_window_state(),
             last_logged_display_metrics: None,
             tray_manager: None,
@@ -573,6 +661,7 @@ impl Foxy {
             game_space_switch_requested_at: None,
             // Steam Workshop
             workshop_view_state: crate::ui::views::workshop::WorkshopViewState::default(),
+            addon_workshop_lookups: Vec::new(),
             workshop_task_rx: None,
             workshop_task_worker: None,
         };
@@ -580,8 +669,24 @@ impl Foxy {
         if app.db_lock_conflict.is_some() {
             return app;
         }
+        if let Err(error) = crate::core::game::launch_preparation::recover(
+            &crate::core::game::spaces::active_game_space_dir(),
+        )
+        .and_then(|()| {
+            crate::core::game::foxypack::recover_pending_import(
+                &crate::core::game::spaces::active_game_space_dir(),
+            )
+        }) {
+            app.configuration_recovery_error = Some(error);
+            return app;
+        }
         crate::core::tasks::init_database::check_and_wipe_database();
         app.load_settings();
+        app.legacy_migration_review_files =
+            crate::core::game::spaces::pending_legacy_migration_review(
+                &Self::get_game_space_directory(),
+            )
+            .unwrap_or_default();
         app.pending_renderer_fallback_notice =
             crate::core::utils::renderer_fallback::renderer_fallback_notice_path().exists();
         let _ = crate::core::tasks::db_schema_version::evaluate_and_bootstrap();
@@ -596,6 +701,9 @@ impl Foxy {
         }
         app.direct_download_destination_input = app.effective_temp_directory();
         let rollback_cleanup_root = std::path::PathBuf::from(app.effective_temp_directory());
+        let recovery_space = Self::get_game_space_directory();
+        let (recovery_tx, recovery_rx) = std::sync::mpsc::channel();
+        app.startup_recovery_rx = Some(recovery_rx);
         std::thread::spawn(move || {
             let runtime = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -614,7 +722,14 @@ impl Foxy {
                 ),
             ) {
                 log::warn!("Rollback startup cleanup failed: {}", err);
+                let _ = recovery_tx.send(Err(err.to_string()));
+                return;
             }
+            let _ = recovery_tx.send(Ok(
+                crate::core::tasks::download_files::UpdateRollbackSession::recovery_notices(
+                    &recovery_space,
+                ),
+            ));
         });
         app.apply_runtime_palette_visuals(&cc.egui_ctx);
         app.apply_runtime_ui_scale(&cc.egui_ctx);
@@ -633,8 +748,9 @@ impl Foxy {
         app.initialize_agent_gui(&cc.egui_ctx, &agent_gui, active_renderer);
         app.i18n.set_language(&app.settings_view_state.locale);
         app.load_repositories();
-        app.load_repository_spaces();
-        app.reconcile_repository_space_paths();
+        if app.load_repository_spaces() {
+            app.reconcile_repository_space_paths();
+        }
         app.load_repository_visual_folders();
         let storage_paths = app.startup_storage_paths();
         let storage_check_repositories = app.storage_check_repositories();
@@ -897,6 +1013,8 @@ impl Foxy {
         crate::core::api::set_extended_diagnostics(
             self.settings_view_state.extended_diagnostics_logging,
         );
+        crate::core::utils::runtime_settings::apply_runtime_settings(&self.settings_view_state);
+        crate::ui::app::set_progress_frame_rate(self.settings_view_state.progress_frame_rate);
         if !self.settings_view_state.show_memory_diagnostics_icon {
             self.show_memory_diagnostics_window = false;
         }

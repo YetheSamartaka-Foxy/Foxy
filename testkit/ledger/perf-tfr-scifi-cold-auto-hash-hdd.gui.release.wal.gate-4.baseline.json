@@ -1,13 +1,13 @@
 {
   "format_version": 2,
-  "accepted_utc": "2026-09-19T16:57:54.407603900+00:00",
-  "git_sha": "11924bd5393c9b9c606fed3bbad9d80245614adc",
-  "case_hash": "07b52672129352ecc39ba7f35456719ce6c1af48cc8b5969a734d52d087c59dd",
-  "origin_checksum": "EDD71A28091BA95A9A11AF5718810136BF9D91F0A884F6D1AD8718EE89090DE5",
+  "accepted_utc": "2026-10-27T17:41:30.846970800+00:00",
+  "git_sha": "9308ac0444c729ecd0fd491fe587e3dd092a9e13",
+  "case_hash": "a11139a68f2f1dd9e9907e185fe8d12258eb0a20865bd3fded7ea7ad44196164",
+  "origin_checksum": "60EB6ED48373FD03DA82A33F5E53460CE4D41C596065974FC4E41DDD7DBDE8D5",
   "references": {
     "network": "network-20260916-3bc06636",
     "latency": "latency-20260916-26ed4275",
-    "disk": "disk-20260916-d8f5366c",
+    "disk": "disk-20260920-eaba5a35",
     "metadata": "metadata-20260916-7ac03780",
     "db": "db-20260916-cdb8dc4e",
     "hash": "hash-20260916-0ba11d4e"
@@ -39,11 +39,11 @@
         "cache_state": "evicted",
         "mutation_profile": null,
         "mutation_seed": null,
-        "origin_checksum": "EDD71A28091BA95A9A11AF5718810136BF9D91F0A884F6D1AD8718EE89090DE5",
+        "origin_checksum": "60EB6ED48373FD03DA82A33F5E53460CE4D41C596065974FC4E41DDD7DBDE8D5",
         "references": {
           "network": "network-20260916-3bc06636",
           "latency": "latency-20260916-26ed4275",
-          "disk": "disk-20260916-d8f5366c",
+          "disk": "disk-20260920-eaba5a35",
           "metadata": "metadata-20260916-7ac03780",
           "db": "db-20260916-cdb8dc4e",
           "hash": "hash-20260916-0ba11d4e"
@@ -51,20 +51,21 @@
         "diagnostics": "none"
       },
       "metrics": {
-        "elapsed_s": 30.704615,
-        "hash.sol_calibrated": 1.0262,
-        "quick_scan.sol_calibrated": 0.4713,
-        "breakdown.run_metrics.hash_total_s": 30.306,
+        "elapsed_s": 25.211025,
+        "hash.sol_calibrated": 1.3305,
+        "quick_scan.sol_calibrated": 0.4602,
+        "breakdown.run_metrics.hash_total_s": 24.86,
         "quick_scan.actual_s": 0.003,
-        "remote_refresh.actual_s": 0.147,
-        "sync_action.actual_s": 30.532,
+        "remote_refresh.actual_s": 0.142,
+        "sync_action.actual_s": 25.075,
         "summary.delta_savings_percent": 0.0,
-        "database.write_time_ms": 28.4,
+        "database.write_time_ms": 27.2,
         "database.permit_wait_ms": 0.0,
         "database.write_retries": 0.0,
-        "memory.peak_private_bytes": 347430912.0,
-        "memory.retained_private_bytes": 332836864.0,
-        "memory.growth_private_bytes": 802816.0,
+        "memory.peak_private_bytes": 594583552.0,
+        "memory.retained_private_bytes": 467021824.0,
+        "memory.growth_private_bytes": 0.0,
+        "memory.cpu_s": 2.734375,
         "summary.downloaded_bytes": 0.0,
         "summary.files_updated": 0.0,
         "summary.parts_updated": 0.0,
@@ -72,39 +73,39 @@
       },
       "spread": {
         "elapsed_s": {
-          "min": 30.558869,
-          "max": 34.169292,
-          "absolute_range": 3.6104229999999973
+          "min": 25.189236,
+          "max": 25.591812,
+          "absolute_range": 0.4025759999999998
         },
         "hash.sol_calibrated": {
-          "min": 0.9204,
-          "max": 1.0306,
-          "absolute_range": 0.11019999999999996
+          "min": 1.3105,
+          "max": 1.3318,
+          "absolute_range": 0.021300000000000097
         },
         "quick_scan.sol_calibrated": {
-          "min": 0.4713,
-          "max": 0.7069,
-          "absolute_range": 0.23559999999999998
+          "min": 0.4602,
+          "max": 0.4602,
+          "absolute_range": 0.0
         },
         "breakdown.run_metrics.hash_total_s": {
-          "min": 30.177,
-          "max": 33.791,
-          "absolute_range": 3.613999999999997
+          "min": 24.835,
+          "max": 25.239,
+          "absolute_range": 0.4039999999999999
         },
         "quick_scan.actual_s": {
-          "min": 0.002,
+          "min": 0.003,
           "max": 0.003,
-          "absolute_range": 0.001
+          "absolute_range": 0.0
         },
         "remote_refresh.actual_s": {
-          "min": 0.144,
-          "max": 0.422,
-          "absolute_range": 0.278
+          "min": 0.141,
+          "max": 0.147,
+          "absolute_range": 0.006000000000000005
         },
         "sync_action.actual_s": {
-          "min": 30.399,
-          "max": 34.016,
-          "absolute_range": 3.6169999999999973
+          "min": 25.045,
+          "max": 25.456,
+          "absolute_range": 0.4109999999999978
         },
         "summary.delta_savings_percent": {
           "min": 0.0,
@@ -112,9 +113,9 @@
           "absolute_range": 0.0
         },
         "database.write_time_ms": {
-          "min": 27.9,
-          "max": 36.2,
-          "absolute_range": 8.300000000000004
+          "min": 26.6,
+          "max": 35.0,
+          "absolute_range": 8.399999999999999
         },
         "database.permit_wait_ms": {
           "min": 0.0,
@@ -127,19 +128,24 @@
           "absolute_range": 0.0
         },
         "memory.peak_private_bytes": {
-          "min": 341819392.0,
-          "max": 348741632.0,
-          "absolute_range": 6922240.0
+          "min": 592703488.0,
+          "max": 598102016.0,
+          "absolute_range": 5398528.0
         },
         "memory.retained_private_bytes": {
-          "min": 330010624.0,
-          "max": 334635008.0,
-          "absolute_range": 4624384.0
+          "min": 449060864.0,
+          "max": 469557248.0,
+          "absolute_range": 20496384.0
         },
         "memory.growth_private_bytes": {
           "min": 0.0,
-          "max": 1531904.0,
-          "absolute_range": 1531904.0
+          "max": 20496384.0,
+          "absolute_range": 20496384.0
+        },
+        "memory.cpu_s": {
+          "min": 2.5625,
+          "max": 2.9375,
+          "absolute_range": 0.375
         },
         "summary.downloaded_bytes": {
           "min": 0.0,
@@ -170,6 +176,7 @@
       }
     }
   },
+  "unbaselined_operations": {},
   "tolerances": {
     "sol": 0.08,
     "duration": 0.12,

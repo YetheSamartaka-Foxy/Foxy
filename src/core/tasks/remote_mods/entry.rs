@@ -9,6 +9,20 @@ use log::{info, warn};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+pub(crate) async fn stage_manifests_for_publication(
+    context: Arc<FoxyContext>,
+    repository: &FoxyRepository,
+    data: &serde_json::Value,
+    enabled_overrides: Option<&HashMap<String, bool>>,
+) -> Result<(), String> {
+    super::upsert::stage_manifests_for_publication(context, repository, data, enabled_overrides)
+        .await
+}
+
+fn addon_lists_complete(data: &serde_json::Value) -> bool {
+    crate::core::tasks::remote_repository::publishes_complete_addon_lists(data)
+}
+
 /// Whether this repository instance has no linked subfile rows yet. This is the
 /// conflict-free case for plain/deferred part inserts even when a repository
 /// space has already populated `subfiles` for another repository in the same DB.
@@ -79,6 +93,7 @@ pub(crate) async fn remote_mods_with_data(
     repository: Arc<FoxyRepository>,
     data: serde_json::Value,
     enabled_overrides: Option<HashMap<String, bool>>,
+    verify_publication_snapshot: bool,
 ) -> RemoteRebuildWork {
     let rebuild_start = std::time::Instant::now();
 
@@ -94,6 +109,10 @@ pub(crate) async fn remote_mods_with_data(
         );
         context.set_fresh_subfiles_load(true);
     }
+    // Links outlive lost part rows, so only a repository without links is fresh here.
+    let fresh_file_links =
+        fresh_bulk_load && !repository_has_file_links(&context.db(), repository.id as i64).await;
+    context.set_fresh_addon_file_links(fresh_file_links);
     let record_may_restore = match context.verified_hash_record.as_ref() {
         Some(record) if fresh_bulk_load && context.should_defer_part_inserts() => {
             let folder = context
@@ -108,10 +127,10 @@ pub(crate) async fn remote_mods_with_data(
     // fresh deferred load that the verified-hash record may restore without
     // hashing. Existing links would let a partly streamed graph pass the
     // completeness probe after a crash.
-    let stream_parts = fresh_bulk_load
+    let stream_parts = !verify_publication_snapshot
+        && fresh_file_links
         && context.should_defer_part_inserts()
-        && record_may_restore
-        && !repository_has_file_links(&context.db(), repository.id as i64).await;
+        && record_may_restore;
     if stream_parts {
         info!(
             "Metadata rebuild: streaming part rows as manifests arrive (repo {})",
@@ -124,6 +143,10 @@ pub(crate) async fn remote_mods_with_data(
     let enabled_overrides = enabled_overrides.map(Arc::new);
     let mut desired_mod_pairs: Vec<(String, String)> = Vec::new();
     let mut desired_mod_pairs_dedupe: HashSet<String> = HashSet::new();
+
+    // A missing list is an incomplete publication. In particular, do not let
+    // an omitted list turn into an empty desired set that prunes prior links.
+    let lists_complete = addon_lists_complete(&data);
 
     if let Some(required_mods_data) = data.get("requiredMods") {
         collect_desired_mod_pairs(
@@ -207,15 +230,18 @@ pub(crate) async fn remote_mods_with_data(
     if fresh_bulk_load {
         context.set_fresh_subfiles_load(false);
     }
+    context.set_fresh_addon_file_links(false);
     context.set_stream_part_inserts(false);
 
-    reconcile_repository_addon_links(
-        context.clone(),
-        repository.clone(),
-        all_resolved_ids,
-        desired_mod_pairs.len(),
-    )
-    .await;
+    if lists_complete {
+        reconcile_repository_addon_links(
+            context.clone(),
+            repository.clone(),
+            all_resolved_ids,
+            desired_mod_pairs.len(),
+        )
+        .await;
+    }
 
     let work = RemoteRebuildWork {
         mods: all_stats.len(),
@@ -340,6 +366,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_rebuild_without_part_rows_still_drops_links_the_manifest_no_longer_lists() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let remote_url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                let read = stream.read(&mut request).await.unwrap();
+                let request = String::from_utf8_lossy(&request[..read]);
+                let body = if request.starts_with("GET /@mod_01/mod.srf ") {
+                    r#"{"files":[{"path":"keep.bin","checksum":"KEEP","length":4,"parts":[{"path":"keep.bin","checksum":"KEEP_PART","start":0,"length":4}]}]}"#
+                } else {
+                    ""
+                };
+                let status = if body.is_empty() {
+                    "404 Not Found"
+                } else {
+                    "200 OK"
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let local_path = format!("{}/", directory.path().to_string_lossy().replace('\\', "/"));
+        let context = Arc::new(FoxyContext::new(
+            build_test_database().await,
+            reqwest::Client::new(),
+        ));
+        let db = context.db();
+        db.execute(
+            "INSERT INTO repositories (id, name, remote_url, local_path) VALUES (1, 'MainRepo', ?, ?)",
+            params![remote_url.clone(), local_path.clone()],
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO addons (id, name, remote_path, local_path, enabled, required, remote_checksum, local_checksum, local_content_hash) \
+             VALUES (10, '@mod_01', ?, ?, 1, 1, 'OLD_ADDON', 'OLD_ADDON', 'CONTENT')",
+            params![format!("{remote_url}@mod_01"), format!("{local_path}@mod_01")],
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO files (id, name, remote_path, local_path, local_checksum, remote_checksum, length, data_order) \
+             VALUES (100, 'obsolete.bin', ?, ?, 'OBSOLETE', 'OBSOLETE', 4, 0)",
+            params![
+                format!("{remote_url}@mod_01/obsolete.bin"),
+                format!("{local_path}@mod_01/obsolete.bin")
+            ],
+        )
+        .await
+        .unwrap();
+        for sql in [
+            "INSERT INTO repository_addons (repository_id, addon_id) VALUES (1, 10)",
+            "INSERT INTO addon_files (addon_id, file_id) VALUES (10, 100)",
+        ] {
+            db.execute(sql, Vec::new()).await.unwrap();
+        }
+        assert!(repository_subfiles_empty(&db, 1).await);
+        let repository = Arc::new(FoxyRepository {
+            id: 1,
+            name: "MainRepo".to_string(),
+            remote_url: remote_url.clone(),
+            local_path: local_path.clone(),
+            image: String::new(),
+            local_checksum: String::new(),
+            local_content_hash: String::new(),
+            remote_checksum: String::new(),
+            foxy_mode: crate::core::models::repository::FoxyMode::None,
+        });
+
+        remote_mods_with_data(
+            context.clone(),
+            repository,
+            serde_json::json!({"requiredMods": [{"modName": "@mod_01", "checkSum": "ADDON"}], "optionalMods": []}),
+            None,
+            false,
+        )
+        .await;
+        server.abort();
+
+        let linked: Vec<String> = db
+            .query_all(
+                "SELECT f.name FROM addon_files af JOIN files f ON f.id = af.file_id WHERE af.addon_id = 10",
+                Vec::new(),
+            )
+            .await
+            .unwrap()
+            .iter()
+            .filter_map(|row| row.get_string("name").ok())
+            .collect();
+        assert_eq!(linked, vec!["keep.bin".to_string()]);
+    }
+
+    #[tokio::test]
     async fn repository_file_links_are_scoped_to_repository_instance() {
         let db = test_db().await;
         for sql in [
@@ -356,5 +483,53 @@ mod tests {
 
         assert!(repository_has_file_links(&db, 1).await);
         assert!(!repository_has_file_links(&db, 2).await);
+    }
+
+    #[tokio::test]
+    async fn omitted_addon_list_does_not_delete_existing_repository_links() {
+        let database = build_test_database().await;
+        let context = Arc::new(FoxyContext::new(database, reqwest::Client::new()));
+        let db = context.db();
+        db.execute(
+            "INSERT INTO repositories (id, name, remote_url, local_path) VALUES (1, 'MainRepo', 'https://repo.example.invalid/', 'R:/Mods/MainRepo/')",
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO addons (id, name, remote_path, local_path, required) VALUES (10, '@mod_01', 'https://repo.example.invalid/@mod_01', 'R:/Mods/MainRepo/@mod_01', 1)",
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO repository_addons (repository_id, addon_id) VALUES (1, 10)",
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let repository = Arc::new(FoxyRepository {
+            id: 1,
+            name: "MainRepo".to_string(),
+            remote_url: "https://repo.example.invalid/".to_string(),
+            local_path: "R:/Mods/MainRepo/".to_string(),
+            image: String::new(),
+            local_checksum: String::new(),
+            local_content_hash: String::new(),
+            remote_checksum: String::new(),
+            foxy_mode: crate::core::models::repository::FoxyMode::None,
+        });
+
+        remote_mods_with_data(context, repository, serde_json::json!({}), None, false).await;
+
+        let links = db
+            .query_all(
+                "SELECT addon_id FROM repository_addons WHERE repository_id = 1",
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].get_i64("addon_id").unwrap(), 10);
     }
 }

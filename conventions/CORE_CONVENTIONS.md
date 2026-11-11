@@ -8,9 +8,11 @@
 
 \- Game-space isolation is by directory, not by a `game_id` column. Do **not** add one to `repositories`; the `(remote_url, local_path)` identity rules stay exactly as they are.
 
+\- **One operational process per configuration root.** Claim `tasks/config_process_lock.rs` before loading, migrating or saving shared configuration, including commands that target another game space. A second owner exits `DATABASE_BUSY`; no cross-process queue is offered. Explicit integration helpers and standalone server tools remain exempt. The database and physical-target claims below remain defense in depth for independent roots and external interference. Do not delete lock files to bypass a claim.
+
 \- **One process per game space database.** Turso has no multi-process access - two processes on one file is undefined behavior, not concurrent-writer WAL. `tasks/db_process_lock.rs` holds an advisory whole-file lock on `database.lock` for the life of the process; the GUI claims it in `Foxy::new` (and again on a space switch), the CLI claims it in `cli::run_from_env` for every command that opens the database, and `open_and_prepare_database` claims it as a backstop. A contended claim retries for 5s (the installer's `/CLOSEAPPLICATIONS` handoff) and then refuses: the GUI shows a close-only prompt, the CLI exits `DATABASE_BUSY`. Commands that deliberately run beside a live GUI (`agent-gui`, `steam-helper`, `server`, `version`, `ui`) are exempt in `command_uses_database`.
 
-\- **The sidecar is not the schema.** `db_schema_version.rs` records the intended generation, but the bootstrap is applied with `CREATE TABLE IF NOT EXISTS`, so it no-ops on an older database and leaves the old tables. `tasks/db_schema_check.rs` probes the live database on every open: column coverage parsed from `sql/turso_schema.sql`, parse-only production upserts, and unique-index column sets for repository, pending-update, addon, and file identities. A composite UNIQUE does not make an obsolete URL-only UNIQUE safe: both must be checked. Keep upsert constants shared between the production write and the probe so they cannot drift. A successful live wipe removes legacy `file_subfiles`, validates the rebuilt schema, then records the current generation. Schema generation remains 25 for 1.2.1; a healthy 1.2.0 database needs no new wipe.
+\- **The sidecar is not the schema.** `db_schema_version.rs` records the intended generation, but the bootstrap is applied with `CREATE TABLE IF NOT EXISTS`, so it no-ops on an older database and leaves the old tables. `tasks/db_schema_check.rs` probes the live database on every open: column coverage parsed from `sql/turso_schema.sql`, parse-only production upserts, and unique-index column sets for repository, pending-update, addon, and file identities. A composite UNIQUE does not make an obsolete URL-only UNIQUE safe: both must be checked. Keep upsert constants shared between the production write and the probe so they cannot drift. A successful live wipe removes legacy `file_subfiles`, validates the rebuilt schema, then records the current generation. Schema generation remains 25 for 1.2.1; a healthy 1.2.0 database needs no new wipe. A fresh install's generation is recorded by the database opener itself (`bootstrap_if_fresh` in `open_and_prepare_database`) before it creates the file, because any CLI command can be the first to open it, and a populated database without a sidecar reads as one built before versioning.
 
 \- **Postponing repair does not clear it.** An outdated or incompatible database remains repair-required for its game space until a wipe succeeds. The startup warning can be dismissed so Foxy and game Launch/Join remain usable, but repository/mod checks and updates, including background startup scans and CLI checks/updates, stay blocked. Gate those operations before database-dependent work or download side effects. CLI game launches remain allowed. A failed wipe keeps the repair requirement; dismissing a prompt or continuing one launch without wiping must not record the current generation or clear that requirement. Launch addon matching must remain usable without reading the incompatible database. See `conventions/UI_CONVENTIONS.md` for the separate final-action reminder and continuation rules.
 
@@ -26,7 +28,7 @@
 
 \- Only the PRAGMAs Turso honors are set, per-connection, in `db_turso::connect\_tuned` (`foreign\_keys`, `synchronous`, `temp\_store`, `cache\_size`, `journal\_mode`; `busy\_timeout` via the `Connection` method). The WAL-tuning PRAGMAs (`wal\_autocheckpoint`, `journal\_size\_limit`, `mmap\_size`) are no-ops in Turso and intentionally dropped. Add new PRAGMAs there.
 
-\- Writes run on **single-writer WAL by default; MVCC is OFF**. `connect\_tuned` sets `journal\_mode='wal'` (and migrates files persisted as mvcc from the old default-on era; the wal -> mvcc -> wal round trip is a test). The seam keeps `BEGIN CONCURRENT` + conflict-retry so `FOXY\_DB\_MVCC=1` can opt in for experiments. Do not flip the default; the measured record is **WAL vs MVCC** below. Prefer plain `INTEGER PRIMARY KEY` over `AUTOINCREMENT` (rowid reuse is harmless for Foxy's keyed tables). Turso 0.7 allows only one in-flight write per connection: await writes sequentially on `OwnedDbTxn` / `copy\_table` / purge, and do not retry `SQL statements in progress` as lock Busy.
+\- Writes run on **single-writer WAL by default; MVCC is OFF**. `connect\_tuned` sets `journal\_mode='wal'` (and migrates files persisted as mvcc from the old default-on era; the wal -> mvcc -> wal round trip is a test). The seam keeps `BEGIN CONCURRENT` + conflict-retry so `FOXY\_DB\_MVCC=1` can opt in for experiments. Do not flip the default; the measured record is **WAL vs MVCC** below. Prefer plain `INTEGER PRIMARY KEY` over `AUTOINCREMENT` (rowid reuse is harmless for Foxy's keyed tables). Turso 0.7 allows only one in-flight write per connection: await writes sequentially on `OwnedDbTxn` / `copy\_table` / purge, and do not retry `SQL statements in progress` as lock Busy. A transaction that reads before its first write fails with `BusySnapshot` when another connection commits in between; the seam retries it like Busy (`DbErr` keeps it as `busy snapshot`, since Turso's text names neither), so such work must stay idempotent. Work that runs in parallel and often finds something to write should read outside a write transaction and write in single statements instead: the per-addon stale-link prune of the metadata rebuild did read-then-write, kept invalidating its siblings' snapshots, and failed silently before the retry existed.
 
 \### WAL vs MVCC (Turso 0.7.2)
 
@@ -46,6 +48,11 @@
 
 \### Schema changes
 
+Startup rebuild after an engine initialization failure is limited to structured
+`turso::Error::Corrupt` and `NotAdb` errors. Other errors preserve the database
+and propagate to the startup failure path; a failed bootstrap, file-access
+error, or engine API change is not evidence that stored data should be reset.
+
 \- Never edit `database.db` directly unless explicitly instructed.
 
 \- The schema is a single folded bootstrap file, `sql/turso_schema.sql`, applied to a fresh database (no incremental migration replay; the legacy `migrations/*.sql` files are historical only). Edit that file for schema changes and keep its `ON DELETE CASCADE` chains and `(remote_url, local_path)` identity intact.
@@ -64,7 +71,7 @@ younger than 30 days; replacing the database file loses it.
 
 \- A repository row is identified by the composite `(remote_url, local_path)`, not by URL alone (migration 21, `upsert_repository_entry` `on_conflict`). The same URL downloaded to two folders is two independent rows. `addons`/`files` are per-instance too: conflict-keyed on `(Name, RemotePath, LocalPath)`; `remote_files.rs` separates "matching remote paths but different local paths".
 
-\- Any DELETE/purge/wipe must be scoped by `local_path` unless it is intentionally URL-wide. `purge_repository_internal` takes `scope_local_path: Option<&str>`; `purge_repository_db_only_by_url_and_path` and `Foxy::wipe_repository_database_entries_by_url_and_path` exist for the scoped path. A `WHERE remote_url = ?` wipe will destroy a same-URL sibling in another folder (this caused real data loss). Only delete-repo uses URL-wide, and only when no other UI repo uses the URL.
+\- DELETE, purge and wipe operations target `(remote_url, local_path)`. Use `purge_repository_by_url_and_path`, `purge_repository_db_only_by_url_and_path` and `Foxy::wipe_repository_database_entries_by_url_and_path`. A `WHERE remote_url = ?` wipe destroys independent same-URL installations. Deleting an entry keeps shared or physically overlapping files and removes only its own database rows; an independent folder may have its managed files removed after confirmation. Changing a folder in Repository Settings scopes the old folder's rows the same way.
 
 \- `pending_updates` is composite-keyed `(repository_url, local_path)`; read/write through `context.target_local_path`. Quick-scan expands each input URL to its DB instances (`load_repository_instance_paths`) and scans each with a path-scoped `FoxyContext`.
 
@@ -87,7 +94,82 @@ younger than 30 days; replacing the database file loses it.
 
 \- A force redownload (repository or addon, GUI and CLI) first probes the repository's `repo.json` with a bounded request and aborts with local files intact when it cannot be reached. Never purge or delete before that probe succeeds, and keep the addon probe off the UI thread.
 
+\### Interrupted work and replaced files
+
+\- Every replace of a repository file goes through the update rollback session. A target another process holds open without delete sharing (a running game keeps its PBOs open that way) refuses the rename aside, so the download orchestrator probes existing targets with delete access before the first transfer (`download_files::failure::find_targets_in_use`, re-probed once to skip brief antivirus holds) and refuses with `TargetsInUse`; a promote that still fails that way mid-transfer stops the run through `DownloadStop::target_held_open` and reports the same error after the rollback. Never retry such a file in place.
+
+\- A rollback entry that was restored (a patch that failed verification, a promote retried after a failure) has consumed its `.foxy.bak` sidecar. The next replace of the same target registers it again with a fresh sidecar, and the journal's `Register` replaces the restored entry, so a later revert still has the original. Keep that guarded by `a_replace_after_a_restore_keeps_a_sidecar_for_the_final_revert`.
+
+\- Delta-patch artifacts are named by database file id, so they live in a folder per game-space directory (`app_paths::foxy_patch_artifacts_dir`), and the pre-download cleanup keeps every artifact a `download_patch_file` row of this database still references; when the rows cannot be read it removes nothing. A shared folder let one space's download delete or reuse another space's plans, and a testkit run delete the live install's.
+
+\- Startup recovery must leave the user's data where it was: a compaction swap interrupted between moving `database.db` aside and installing the compacted copy is undone from `database.db.bak` (`sweep_stale_db_artifacts`), and a live whole-database wipe writes the wipe marker before dropping tables and removes it on success, so a kill part-way finishes the wipe on the next start instead of opening a half-wiped database as healthy.
+
+\- A configuration file that exists but cannot be read or parsed is copied to `<file>.unreadable` before anything can save over it (`fs_safety::preserve_unreadable_file`, `Foxy::report_unreadable_config`), and an unreadable `repository_spaces.json` skips the space-binding reconcile that would otherwise strip every repository's membership.
+
+\- Closing the window while a sync worker runs cancels it and keeps the window open (`ViewportCommand::CancelClose`) until rollback and persistence finish. After 15 seconds offer explicit force quit with recovery information preserved; never force exit solely because that interval elapsed. No sync starts once close is requested.
+
+#### Accepted recovery and retry contracts
+
+- An ordinary close waits for the active sync to finish rollback before closing. If a force-quit choice is offered after a prolonged wait, it must say recovery is incomplete and retain enough journal state to finish recovery on the next start. Report unresolved recovery before treating that repository as ready.
+- An unavoidable process loss recovers forward: keep promoted files, identify the interrupted repository instance, verify it, and offer to finish the current update. Do not report success or readiness until verification completes. A recorded user cancellation during ordinary close follows the restore contract above.
+- Download Pause is durable intent scoped to the normalized `(remote_url, local_path)` instance within its game space. Closing cancels and restores active writes while retaining that paused intent. Startup shows pending work as paused; explicit Resume refreshes and validates the current plan before any transfer. Explicit CLI Download is also Resume for that instance; checks and dry runs retain the pause. Automatic, scheduled, queued, and bulk starts must not bypass the pause.
+- A retryable terminal transfer failure may retry automatically while Foxy remains open when the app-global `retry_failed_downloads` option is enabled (default `true`). Show a countdown and Stop control, revalidate the plan each attempt, and retain the pending update on exhaustion. Explicit cancellation is terminal and never auto-retries. The option only controls retries after a terminal failure; it does not replace per-request retries.
+- An update approval permits reaching the latest publication for the selected addons. Refresh and rebuild stale plans without a second confirmation solely because the byte estimate grew. Never use a stale plan or include addons outside the approved selection.
+- A configuration file that cannot be read or parsed is preserved as `<file>.unreadable` before replacement. When preservation succeeds, ask for confirmation before the first save replaces that source. When it fails, block only writes that would overwrite that source until recovery is chosen. A backup is recovery evidence, not a repair.
+- A corrupt database whose backup cannot be created may be discarded only after an explicit user choice that explains database metadata loss and distinguishes downloaded files and JSON configuration, which remain separate.
+- An update that would install incompatible versions into a repository-space shared root is a conflict: block the update and identify the affected member repositories. For ordinary repository entries configured to share a folder, warn about affected repositories and let the requested update proceed; never mark incompatible siblings current.
+- Launching while an update owns files needed by that installation queues a cancellable launch for that exact instance. Recheck readiness after the update completes. An update failure never launches automatically. Work in unrelated folders does not block the launch.
+
+#### Accepted product contracts
+
+The [additional reviewed contracts](REVIEWED_BEHAVIOR_CONTRACTS.md) settle
+R01-R24, including configuration-root process ownership, selection-specific
+readiness, device changes, recovery isolation and settings preservation. Apply
+these before selecting new questions for future gap reviews.
+
+The [accepted lifecycle, ownership and launch contracts](BEHAVIOR_CONTRACTS.md)
+settle N01-N18. Use them as acceptance criteria in future gap reviews and target
+different tradeoffs instead of repeating their questions.
+
+The [accepted hash-check contracts](HASH_CHECK_CONTRACTS.md) add settled H1-H18
+for local/remote verification, failure evidence, managed files and periodic
+checks. Use them as acceptance criteria in later gap reviews; do not reopen
+their product choices without a materially different tradeoff.
+
+These IDs are settled requirements from the design review. Future gap reviews must use them as acceptance criteria and investigate unreviewed cases; do not reopen a settled choice unless a materially different scenario creates a real conflict.
+
+| ID | Settled contract | Canonical detail |
+| --- | --- | --- |
+| Q1 | Close waits for rollback; force quit is explicit and recoverable. | [Recovery and retry](CORE_CONVENTIONS.md#accepted-recovery-and-retry-contracts) |
+| Q2 | Unexpected process loss recovers forward and reports interrupted state. | [Recovery and retry](CORE_CONVENTIONS.md#accepted-recovery-and-retry-contracts) |
+| Q3 | Pause is durable per repository instance and requires explicit revalidated Resume. | [Sync queue](SYNC_ALGO_CONVENTION.md#accepted-queue-pause-and-retry-contracts) |
+| Q4 | Failed outgoing saves offer Retry, Discard and switch, or Cancel; writes remain outgoing. | [Space switching](GAME_SPACES_CONVENTIONS.md#accepted-game-space-and-queued-work-contracts) |
+| Q5 | Freeze edits during a pending space switch and show cancellable Switching state. | [Space switching](GAME_SPACES_CONVENTIONS.md#accepted-game-space-and-queued-work-contracts) |
+| Q6 | Confirm replacement after a successful unreadable-file backup; failed preservation blocks its overwrite. | [Recovery and retry](CORE_CONVENTIONS.md#accepted-recovery-and-retry-contracts) |
+| Q7 | Corrupt database discard and rebuild requires explicit choice when backup fails. | [Recovery and retry](CORE_CONVENTIONS.md#accepted-recovery-and-retry-contracts) |
+| Q8 | Freeze queued identities and skip a changed or removed instance. | [Queued work](GAME_SPACES_CONVENTIONS.md#accepted-game-space-and-queued-work-contracts) |
+| Q9 | Use the current profile when an unchanged queued instance starts. | [Queued work](SYNC_ALGO_CONVENTION.md#accepted-queue-pause-and-retry-contracts) |
+| Q10 | Freeze bulk membership when the request is accepted. | [Queued work](SYNC_ALGO_CONVENTION.md#accepted-queue-pause-and-retry-contracts) |
+| Q11 | Block incompatible versions in repository-space shared roots; warn and proceed for ordinary shared folders. | [Shared-version conflicts](CORE_CONVENTIONS.md#accepted-recovery-and-retry-contracts) |
+| Q12 | An update approval reaches the latest publication for the selected addons without a growth-only reconfirmation. | [Queued work](SYNC_ALGO_CONVENTION.md#accepted-queue-pause-and-retry-contracts) |
+| Q13 | Unknown remote freshness is persistent inline status and does not block launch. | [UI status](UI_CONVENTIONS.md#accepted-status-queue-and-launch-contracts) |
+| Q14 | Retry retryable terminal failures by default while Foxy is open; expose an app-global off switch. | [Recovery and retry](CORE_CONVENTIONS.md#accepted-recovery-and-retry-contracts) |
+| Q15 | Retry a transient bulk target once, continue unaffected targets, and report partial failure. | [UI status](UI_CONVENTIONS.md#accepted-status-queue-and-launch-contracts) |
+| Q16 | Ask whether a scheduled-job edit also stops its active run and post-action. | [Queued work](GAME_SPACES_CONVENTIONS.md#accepted-game-space-and-queued-work-contracts) |
+| Q17 | Queue a cancellable launch behind writes to that instance and recheck readiness afterward. | [UI status](UI_CONVENTIONS.md#accepted-status-queue-and-launch-contracts) |
+| Q18 | Refresh Join requirements before dispatch and reconfirm changed facts. | [UI status](UI_CONVENTIONS.md#accepted-status-queue-and-launch-contracts) |
+
+\### Processor use
+
+\- Three app-global settings shape Foxy's CPU use and stay separate: **CPU Threads** (`utils/cpu_threads.rs`) is how wide CPU-bound fan-out and the sync runtime's tokio workers are planned, **Work priority** (`utils/work_priority.rs`) is who wins under contention, and the **CPU usage limit** (`utils/cpu_governor.rs`, default 90% of every detected thread, `None` for no limit) is how much of the computer Foxy may use on average. The limit is enforced in-process: the work threads measure process CPU (`thread_cpu::process_cpu`) every 100 ms, or 250 ms while pacing, and once the process reaches three quarters of the budget, each checkpoint books the CPU time its thread used since the last one (`thread_cpu::current_thread_cpu`) on one schedule shared by every work thread. The schedule advances at the budget minus the CPU the process spends outside checkpoints, and a thread waits until it catches up. Pacing the total, not each thread, is what holds hash pools far wider than the processor count, whose threads mostly wait on the disk: pausing one of them only lets another run. Both clocks come from `GetProcessTimes`/`GetThreadTimes` on Windows and `clock_gettime` with `CLOCK_PROCESS_CPUTIME_ID`/`CLOCK_THREAD_CPUTIME_ID` on Linux and macOS, so the limit holds on every platform; `cpu_governor`'s ignored `a_busy_process_settles_near_the_limit` and `a_wide_mostly_waiting_pool_settles_near_the_limit` tests prove it on the machine they run on. It is never a Windows job-object cap, which would also stall the UI thread at each quota interval and, without breakaway flags, cap the game Foxy launches.
+
+\- `cpu_governor::checkpoint()` belongs between chunks of CPU-heavy work on a blocking thread (`spawn_blocking`, std threads): part hashing, whole-file hashing, BLAKE3 content hashing, patch copy runs and apply batches. Never call it on a tokio worker, and never while holding a lock, the Turso write gate or a transaction that other tasks wait on: it may sleep up to 1 s, in 50 ms slices that end early when the limit is lifted or pacing stops. With no limit it is one atomic load, and well under the limit it reads no thread clock. Each pipeline reports the limit and the time paused for it (`Pipeline CPU usage limit:` and `cpu_limit_percent` / `cpu_limit_paused_s` on `SOL op=sync_action`), so a slower run is attributable to the limit rather than to a regression.
+
+\- Auto memory pressure (`utils/resource_profile.rs`), which narrows hashing and download concurrency, is classified from total and available physical memory only. Swap is logged (`swap_used=`) but never raises the tier: on Windows sysinfo reports commit charge beyond physical memory there, not pagefile use, and elsewhere swapped pages stay counted long after the pressure that pushed them out. A healthy 94 GiB Windows machine with 40 GiB free read 5 GiB of it and fell to the severe limits.
+
 \### Process launching
+
+On native Windows, Steam, TeamSpeak and Arma 3 running checks share the Toolhelp process snapshot helper in `utils/process.rs`, matching executable names exactly without case. Do not spawn `tasklist` for these probes. Steam registry queries use `CREATE_NO_WINDOW` so automatic detection cannot flash a console or steal focus. Wine keeps its native-host Steam detection path.
 
 Windows in-app installers always receive `/MERGETASKS=!deleteuserdata`, including interactive and elevated launches, to clear a previous reset task while keeping shortcut preferences. The setup task uses `unchecked checkedonce`, and `CurPageChanged` explicitly deselects it whenever the task page opens, after Inno has restored prior choices and applied task presets. Deleting user data always requires ticking the checkbox in the current wizard. Its deletion handler refuses silent mode and requires a fresh confirmation with No as the default. An app update must never remove the Foxy data root or request a database wipe just to apply an installer fix.
 

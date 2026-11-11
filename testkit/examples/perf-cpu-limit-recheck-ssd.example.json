@@ -1,0 +1,49 @@
+{
+  "id": "perf-cpu-limit-recheck-ssd",
+  "kind": "perf",
+  "description": "CPU usage limit conformance: an MD5 integrity recheck of a 32 GiB legacy Swifty synthetic payload on NVMe, with the widest hash profile, at a 10% limit. Unlimited, this lane uses about a fifth of a 32-thread machine through a pool of about 100 threads that mostly wait on the disk, so the limit has to pace the total rather than each thread. The average must stay at the limit; the busiest 1 s window may exceed it by the start-up burst Windows' 15.6 ms CPU accounting allows before the first bookings land. Copy it with \"cpu_usage_limit_percent\": null for the unlimited arm and compare the hash time and memory.cpu_machine_* between the two.",
+  "build": "release",
+  "harness": "gui",
+  "timeout_s": 7200,
+  "tags": ["checker", "hash", "cpu-limit"],
+  "origin": {
+    "root": "${REPO_ROOT}/testkit/origin/data/synthetic-md5-32g",
+    "port": 8160
+  },
+  "repository": {
+    "name": "TestKit Synthetic MD5 32G",
+    "address": "http://127.0.0.1:8160/",
+    "path": "D:\\Foxy-TestKit\\synthetic-md5-32g",
+    "space_id": null
+  },
+  "settings": {
+    "memory_pressure_override": "Normal",
+    "hash_io_profile": "Aggressive",
+    "cpu_usage_limit_percent": 10
+  },
+  "operations": [
+    { "op": "download", "setup_once": true, "wait_timeout_s": 5400 },
+    {
+      "op": "recheck-integrity",
+      "wait_timeout_s": 3600,
+      "expect_outcome": "completed",
+      "expect": [
+        { "path": "breakdown.run_metrics.failed_pipelines", "equals": 0 },
+        { "path": "summary.memory.cpu_machine_percent", "max": 11 },
+        { "path": "summary.memory.cpu_machine_peak_percent", "max": 20 }
+      ]
+    }
+  ],
+  "repetitions": 3,
+  "warmup": false,
+  "thresholds": {},
+  "guards": {
+    "require_storage_class": "ssd",
+    "require_no_other_foxy": true,
+    "require_clean_worktree": false,
+    "fail_on_db_wipe": true,
+    "max_run_gb": 40,
+    "expected_files": 4112
+  },
+  "notes": "Origin: foxy-testkit synthetic --output testkit/origin/data/synthetic-md5-32g --mods 16 --files-per-mod 256 --file-bytes 8388608 --mode swifty --repo-name \"TestKit Synthetic MD5 32G\" (4112 files, 34 361 166 570 bytes). Memory pressure is pinned to Normal so a busy machine's sampled pressure cannot narrow the hash pool and leave nothing to pace. A BLAKE3 recheck of a real repository on NVMe is disk-bound at a few percent of the machine and never reaches a limit."
+}

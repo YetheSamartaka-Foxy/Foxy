@@ -302,7 +302,9 @@ impl SolOpSummary {
             "hash" => ("O3", "Tree hash verification"),
             "quick_scan" => ("O4", "Quick scan"),
             "remote_refresh" => ("O5", "Remote metadata refresh"),
-            "startup" | "startup_probe" => ("O8", "Startup to first sync verdict"),
+            "startup" | "startup_probe" | "startup_probe_retry" => {
+                ("O8", "Startup to first sync verdict")
+            }
             "app_update_check" => ("O5", "App update check"),
             "db_persist" => ("O7", "Turso persistence"),
             "sync_action" => ("A", "Complete sync action"),
@@ -318,7 +320,11 @@ impl SolOpSummary {
             "download" => "network",
             "hash" => "disk and CPU",
             "quick_scan" => "directory walk",
-            "startup" | "startup_probe" | "remote_refresh" | "app_update_check" => "round trips",
+            "startup"
+            | "startup_probe"
+            | "startup_probe_retry"
+            | "remote_refresh"
+            | "app_update_check" => "round trips",
             "db_persist" | "db_purge" => "writer",
             _ => "overall",
         }
@@ -431,6 +437,7 @@ fn detail_specs(op: &str) -> &'static [(&'static str, &'static str, Kind, Fold)]
             ("eligible", "Eligible", Kind::Count, Fold::Sum),
             ("prevalidated", "Prevalidated", Kind::Count, Fold::Sum),
             ("remote_changed", "Remote changed", Kind::Count, Fold::Sum),
+            ("pending_update", "Pending update", Kind::Count, Fold::Sum),
             ("rechecks", "Rechecks queued", Kind::Count, Fold::Sum),
             ("first_frame_s", "First frame", Kind::Secs, Fold::Max),
             ("dispatch_s", "Dispatch", Kind::Secs, Fold::Max),
@@ -455,6 +462,14 @@ fn detail_specs(op: &str) -> &'static [(&'static str, &'static str, Kind, Fold)]
             ("answered", "Answered", Kind::Count, Fold::Sum),
             ("changed", "Changed", Kind::Count, Fold::Sum),
             ("unknown", "Unknown", Kind::Count, Fold::Sum),
+            ("pending", "Pending update", Kind::Count, Fold::Sum),
+        ],
+        "startup_probe_retry" => &[
+            ("repos", "Repositories", Kind::Count, Fold::Sum),
+            ("answered", "Answered", Kind::Count, Fold::Sum),
+            ("changed", "Changed", Kind::Count, Fold::Sum),
+            ("pending", "Pending update", Kind::Count, Fold::Sum),
+            ("still_unknown", "Still unknown", Kind::Count, Fold::Sum),
         ],
         "app_update_check" => &[
             ("mode", "Mode", Kind::Text, Fold::Distinct),

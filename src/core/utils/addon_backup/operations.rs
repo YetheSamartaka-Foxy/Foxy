@@ -1,12 +1,20 @@
 use super::helpers::*;
 use super::types::*;
 use anyhow::{Context, Result, anyhow, bail};
-use log::{debug, info};
+use log::{debug, info, warn};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn backup_addon(backup_root: &Path, addon_path: &Path) -> Result<AddonBackupRecord> {
+    backup_addon_with_origin(backup_root, addon_path, None)
+}
+
+pub fn backup_addon_with_origin(
+    backup_root: &Path,
+    addon_path: &Path,
+    origin: Option<&AddonBackupOrigin>,
+) -> Result<AddonBackupRecord> {
     let addon_name = addon_directory_name(addon_path)?;
     let content_hash = calculate_addon_folder_content_hash(addon_path)
         .with_context(|| format!("failed to hash addon {}", addon_path.display()))?;
@@ -29,6 +37,9 @@ pub fn backup_addon(backup_root: &Path, addon_path: &Path) -> Result<AddonBackup
                 final_path.display()
             );
         }
+        if let Some(origin) = origin {
+            add_origin(backup_root, &folder_name, origin)?;
+        }
         return build_backup_record(final_path, folder_name, addon_name, content_hash);
     }
 
@@ -49,7 +60,24 @@ pub fn backup_addon(backup_root: &Path, addon_path: &Path) -> Result<AddonBackup
         });
     }
 
+    if let Some(origin) = origin {
+        add_origin(backup_root, &folder_name, origin)?;
+    }
     build_backup_record(final_path, folder_name, addon_name, content_hash)
+}
+
+#[cfg(test)]
+pub fn list_addon_backups_for_origin(
+    backup_root: &Path,
+    addon_name: &str,
+    origin: &AddonBackupOrigin,
+) -> Result<Vec<AddonBackupRecord>> {
+    let mut backups = list_addon_backups(backup_root, addon_name)?;
+    let matching = backups.iter().any(|record| record.origins.contains(origin));
+    if matching {
+        backups.retain(|record| record.origins.contains(origin));
+    }
+    Ok(backups)
 }
 
 pub fn list_addon_backups(backup_root: &Path, addon_name: &str) -> Result<Vec<AddonBackupRecord>> {
@@ -60,8 +88,8 @@ pub fn list_addon_backups(backup_root: &Path, addon_name: &str) -> Result<Vec<Ad
         .collect();
 
     records.sort_by(|a, b| {
-        b.created_at_unix_secs
-            .cmp(&a.created_at_unix_secs)
+        b.created_at_unix_nanos
+            .cmp(&a.created_at_unix_nanos)
             .then_with(|| a.folder_name.cmp(&b.folder_name))
     });
     Ok(records)
@@ -104,7 +132,7 @@ pub fn list_all_addon_backups(backup_root: &Path) -> Result<Vec<AddonBackupRecor
         a.addon_name
             .to_lowercase()
             .cmp(&b.addon_name.to_lowercase())
-            .then_with(|| b.created_at_unix_secs.cmp(&a.created_at_unix_secs))
+            .then_with(|| b.created_at_unix_nanos.cmp(&a.created_at_unix_nanos))
             .then_with(|| a.folder_name.cmp(&b.folder_name))
     });
     Ok(records)
@@ -114,7 +142,6 @@ pub fn restore_addon_backup(backup: &AddonBackupRecord, destination: &Path) -> R
     if !backup.path.exists() || !backup.path.is_dir() {
         bail!("backup path does not exist: {}", backup.path.display());
     }
-
     let parent = destination.parent().ok_or_else(|| {
         anyhow!(
             "destination has no parent directory: {}",
@@ -141,7 +168,6 @@ pub fn restore_addon_backup(backup: &AddonBackupRecord, destination: &Path) -> R
         let _ = fs::remove_dir_all(&staging_path);
         return Err(err);
     }
-
     if destination.exists() {
         if destination.is_dir() {
             fs::remove_dir_all(destination).with_context(|| {
@@ -182,7 +208,13 @@ pub fn delete_addon_backup(backup: &AddonBackupRecord) -> Result<()> {
     }
 
     fs::remove_dir_all(&backup.path)
-        .with_context(|| format!("failed to delete backup {}", backup.path.display()))
+        .with_context(|| format!("failed to delete backup {}", backup.path.display()))?;
+    if let Some(root) = backup.path.parent()
+        && let Err(err) = remove_origins(root, &backup.folder_name)
+    {
+        warn!("Failed to remove addon backup origin metadata: {}", err);
+    }
+    Ok(())
 }
 
 pub fn delete_addon_backups(backup_root: &Path, addon_name: &str) -> Result<usize> {
@@ -195,67 +227,71 @@ pub fn delete_addon_backups(backup_root: &Path, addon_name: &str) -> Result<usiz
     Ok(deleted)
 }
 
+#[cfg(test)]
 pub fn cleanup_addon_backups(
     backup_root: &Path,
     policy: BackupCleanupPolicy,
 ) -> Result<BackupCleanupReport> {
-    let records = list_all_addon_backups(backup_root)?;
+    cleanup_addon_backups_confirmed(backup_root, policy, false)
+}
+
+#[cfg(test)]
+pub fn cleanup_addon_backups_confirmed(
+    backup_root: &Path,
+    policy: BackupCleanupPolicy,
+    allow_final_recovery_copy: bool,
+) -> Result<BackupCleanupReport> {
+    let preview = preview_addon_backup_cleanup(backup_root, policy)?;
+    cleanup_addon_backup_preview_confirmed(backup_root, &preview, allow_final_recovery_copy)
+}
+
+pub fn cleanup_addon_backup_preview_confirmed(
+    backup_root: &Path,
+    preview: &BackupCleanupPreview,
+    allow_final_recovery_copy: bool,
+) -> Result<BackupCleanupReport> {
+    let current = preview_addon_backup_cleanup(backup_root, preview.policy)?;
+    if current.inventory != preview.inventory
+        || current.deletions != preview.deletions
+        || current.final_recovery_copies != preview.final_recovery_copies
+    {
+        bail!("addon backup inventory or cleanup eligibility changed; create a new preview");
+    }
+
     let mut report = BackupCleanupReport::default();
-
-    if records.is_empty() {
-        return Ok(report);
-    }
-
-    let max_age_cutoff_secs = policy.max_age_days.map(|days| {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
-            .saturating_sub(days.saturating_mul(24 * 60 * 60))
-    });
-
-    let mut by_addon: std::collections::HashMap<String, Vec<AddonBackupRecord>> =
-        std::collections::HashMap::new();
-    for record in records {
-        by_addon
-            .entry(record.addon_name.to_lowercase())
-            .or_default()
-            .push(record);
-    }
-
-    let mut to_delete: Vec<AddonBackupRecord> = Vec::new();
-    for backups in by_addon.values_mut() {
-        backups.sort_by(|a, b| {
-            b.created_at_unix_secs
-                .cmp(&a.created_at_unix_secs)
-                .then_with(|| a.folder_name.cmp(&b.folder_name))
-        });
-
-        for (index, backup) in backups.iter().enumerate() {
-            let exceeds_keep_latest = policy
-                .keep_latest_per_addon
-                .map(|keep| index >= keep)
-                .unwrap_or(false);
-            let exceeds_max_age = max_age_cutoff_secs
-                .map(|cutoff| backup.created_at_unix_secs <= cutoff)
-                .unwrap_or(false);
-            if exceeds_keep_latest || exceeds_max_age {
-                to_delete.push(backup.clone());
-            }
+    let deletions = preview.deletions.iter().chain(
+        allow_final_recovery_copy
+            .then_some(preview.final_recovery_copies.iter())
+            .into_iter()
+            .flatten(),
+    );
+    for backup in deletions {
+        if backup.path.parent() != Some(backup_root) {
+            report.failed_folders.push(backup.folder_name.clone());
+            continue;
         }
-    }
-
-    to_delete.sort_by(|a, b| a.path.cmp(&b.path));
-    to_delete.dedup_by(|a, b| a.path == b.path);
-
-    for backup in &to_delete {
+        if !backup.path.exists() {
+            report.failed_folders.push(backup.folder_name.clone());
+            continue;
+        }
         debug!(
             "Deleting addon backup: {} ({} bytes, created={})",
             backup.folder_name, backup.size_bytes, backup.created_at_unix_secs
         );
-        delete_addon_backup(backup)?;
-        report.deleted_backups += 1;
-        report.freed_bytes = report.freed_bytes.saturating_add(backup.size_bytes);
+        match delete_addon_backup(backup) {
+            Ok(()) => {
+                report.deleted_backups += 1;
+                report.freed_bytes = report.freed_bytes.saturating_add(backup.size_bytes);
+                report.deleted_folders.push(backup.folder_name.clone());
+            }
+            Err(err) => {
+                warn!(
+                    "Failed to delete addon backup {}: {}",
+                    backup.folder_name, err
+                );
+                report.failed_folders.push(backup.folder_name.clone());
+            }
+        }
     }
 
     if report.deleted_backups > 0 {
@@ -267,4 +303,95 @@ pub fn cleanup_addon_backups(
     }
 
     Ok(report)
+}
+
+pub fn preview_addon_backup_cleanup(
+    backup_root: &Path,
+    policy: BackupCleanupPolicy,
+) -> Result<BackupCleanupPreview> {
+    let records = list_all_addon_backups(backup_root)?;
+    let inventory = records.clone();
+    let cutoff = policy.max_age_days.map(|days| {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .saturating_sub(days.saturating_mul(24 * 60 * 60))
+    });
+    let mut groups: std::collections::HashMap<
+        (String, Option<AddonBackupOrigin>),
+        Vec<AddonBackupRecord>,
+    > = std::collections::HashMap::new();
+    for record in &records {
+        let origins: Vec<Option<AddonBackupOrigin>> = if record.origins.is_empty() {
+            vec![None]
+        } else {
+            record.origins.iter().cloned().map(Some).collect()
+        };
+        for origin in origins {
+            groups
+                .entry((record.addon_name.to_lowercase(), origin))
+                .or_default()
+                .push(record.clone());
+        }
+    }
+    let mut count_eligible: std::collections::HashMap<PathBuf, bool> = records
+        .iter()
+        .map(|record| (record.path.clone(), true))
+        .collect();
+    for backups in groups.values_mut() {
+        backups.sort_by(|a, b| {
+            b.created_at_unix_nanos
+                .cmp(&a.created_at_unix_nanos)
+                .then_with(|| a.folder_name.cmp(&b.folder_name))
+        });
+        for (index, backup) in backups.iter().enumerate() {
+            if policy
+                .keep_latest_per_addon
+                .is_some_and(|keep| index < keep)
+            {
+                count_eligible.insert(backup.path.clone(), false);
+            }
+        }
+    }
+    let candidate_paths: std::collections::HashSet<PathBuf> = records
+        .iter()
+        .filter(|record| {
+            cutoff.is_some_and(|age| record.created_at_unix_secs <= age)
+                || policy.keep_latest_per_addon.is_some() && count_eligible[&record.path]
+        })
+        .map(|record| record.path.clone())
+        .collect();
+    let mut final_paths = std::collections::HashSet::new();
+    for backups in groups.values() {
+        if let Some(last) = backups.last()
+            && backups
+                .iter()
+                .all(|backup| candidate_paths.contains(&backup.path))
+        {
+            final_paths.insert(last.path.clone());
+        }
+    }
+    let mut deletions = Vec::new();
+    let mut final_recovery_copies = Vec::new();
+    for backup in records {
+        if !candidate_paths.contains(&backup.path) {
+            continue;
+        }
+        if final_paths.contains(&backup.path) {
+            final_recovery_copies.push(backup);
+        } else {
+            deletions.push(backup);
+        }
+    }
+    deletions.sort_by(|a, b| a.path.cmp(&b.path));
+    deletions.dedup_by(|a, b| a.path == b.path);
+    final_recovery_copies.sort_by(|a, b| a.path.cmp(&b.path));
+    final_recovery_copies.dedup_by(|a, b| a.path == b.path);
+    Ok(BackupCleanupPreview {
+        policy,
+        inventory,
+        deletions,
+        final_recovery_copies,
+    })
 }

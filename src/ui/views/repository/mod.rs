@@ -1,6 +1,8 @@
 mod banner_translations;
 mod banners;
+mod game_build;
 mod launch;
+mod launch_policy;
 mod list;
 mod list_rows;
 mod mission_cards;
@@ -14,8 +16,6 @@ mod view;
 
 use crate::ui::app::{ActivityBar, ActivityGlyph, Foxy};
 use eframe::egui::Color32;
-use std::ffi::OsString;
-use std::path::Path;
 use std::time::Duration;
 
 pub(super) const BANNER_CORNER_RADIUS: u8 = 10;
@@ -40,6 +40,7 @@ pub(super) struct RepositoryCheckCompletionBanner {
     pub(super) detail: String,
     pub(super) stroke_color: Color32,
     pub(super) show_pending_action: bool,
+    pub(super) failed: bool,
 }
 
 pub(super) struct RepositoryActionBanner {
@@ -65,6 +66,7 @@ pub(super) enum RepositoryBannerResponse {
     None,
     ActionClicked,
     DismissClicked,
+    ExportLogsClicked,
 }
 
 pub(super) type RepositoryUiAction = Box<dyn FnOnce(&mut Foxy)>;
@@ -117,19 +119,6 @@ pub(super) enum RepositoryMissionContextAction {
     RemoveDependencies,
     Duplicate,
     Delete,
-}
-
-pub(super) fn spawn_launch_process(
-    executable: &OsString,
-    args: &[OsString],
-    cwd: Option<&Path>,
-    steam_required: bool,
-    steam_directory: &str,
-) -> std::io::Result<u32> {
-    if steam_required && !crate::core::steam::is_steam_running(steam_directory) {
-        return Err(std::io::Error::other("Steam is not running"));
-    }
-    crate::core::utils::deelevate::spawn_unelevated(executable, args, cwd)
 }
 
 pub(super) fn arma3_editor_display_name(raw: &str) -> String {

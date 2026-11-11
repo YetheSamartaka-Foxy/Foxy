@@ -11,7 +11,7 @@ pub(super) struct ActivityTextures {
 
 impl ActivityTextures {
     pub(super) fn of(ctx: &Context) -> Self {
-        let id = Id::new("foxy_activity_textures");
+        let id = Id::unique("foxy_activity_textures");
         if let Some(textures) = ctx.data(|data| data.get_temp::<Self>(id)) {
             return textures;
         }

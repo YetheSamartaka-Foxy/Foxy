@@ -191,6 +191,7 @@ pub struct Origin {
     address: SocketAddr,
     root: Arc<RwLock<PathBuf>>,
     burst: Arc<BurstStats>,
+    requests: Arc<AtomicU64>,
     impairment: Impairment,
     shutdown: Option<oneshot::Sender<()>>,
     thread: Option<thread::JoinHandle<()>>,
@@ -253,6 +254,8 @@ impl Origin {
         let thread_root = Arc::clone(&root);
         let burst = Arc::new(BurstStats::default());
         let thread_burst = Arc::clone(&burst);
+        let requests = Arc::new(AtomicU64::new(0));
+        let thread_requests = Arc::clone(&requests);
         let configured_impairment = impairment.clone();
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
@@ -284,9 +287,11 @@ impl Origin {
                             let impairment = impairment.clone();
                             let truncated_responses = Arc::clone(&truncated_responses);
                             let burst_stats = Arc::clone(&thread_burst);
+                            let request_count = Arc::clone(&thread_requests);
                             let thread_root = Arc::clone(&thread_root);
                             connections.spawn(async move {
                                 let service = service_fn(move |mut request: hyper::Request<hyper::body::Incoming>| {
+                                    request_count.fetch_add(1, Ordering::Relaxed);
                                     let service = ServeDir::new(current_root(&thread_root));
                                     let impairment = impairment.clone();
                                     let truncated_responses = Arc::clone(&truncated_responses);
@@ -377,6 +382,7 @@ impl Origin {
             address,
             root,
             burst,
+            requests,
             impairment: configured_impairment,
             shutdown: Some(shutdown_tx),
             thread: Some(thread),
@@ -403,6 +409,10 @@ impl Origin {
 
     pub fn burst_snapshot(&self) -> [u64; 5] {
         self.burst.snapshot()
+    }
+
+    pub fn request_count(&self) -> u64 {
+        self.requests.load(Ordering::Relaxed)
     }
 
     pub fn burst_delta(&self, before: [u64; 5]) -> Value {

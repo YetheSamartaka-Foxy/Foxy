@@ -5,7 +5,7 @@ rem Builds the Foxy Windows pre-release installer (release-optimized, version la
 rem and logs carry the source commit).
 rem Requirements:
 rem   - Rust toolchain with x86_64-pc-windows-msvc target
-rem   - Inno Setup compiler (iscc.exe) available in PATH
+rem   - Inno Setup 6.7 or later, compiler (iscc.exe) available in PATH
 
 pushd "%~dp0\.." || exit /b 1
 

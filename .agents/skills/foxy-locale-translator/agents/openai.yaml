@@ -1,0 +1,5 @@
+interface:
+  display_name: "Foxy Locale Translator"
+  short_description: "Translate and validate Foxy locale JSON safely."
+  default_prompt: "Use $foxy-locale-translator to translate the requested Foxy locales from en.json and validate the changed keys."
+

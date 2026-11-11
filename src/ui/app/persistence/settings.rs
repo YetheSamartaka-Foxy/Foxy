@@ -38,6 +38,7 @@ impl Foxy {
                     Ok(settings) => settings,
                     Err(err) => {
                         log::error!("Failed to parse settings: {}", err);
+                        self.report_unreadable_settings();
                         return;
                     }
                 };
@@ -55,6 +56,13 @@ impl Foxy {
                 if self.settings_view_state.download_speed_limit_mbps == Some(0) {
                     self.settings_view_state.download_speed_limit_mbps = Some(1);
                 }
+                if self.settings_view_state.cpu_thread_limit == Some(0) {
+                    self.settings_view_state.cpu_thread_limit = Some(1);
+                }
+                self.settings_view_state.cpu_usage_limit_percent =
+                    crate::core::utils::cpu_governor::sanitize_cpu_usage_limit(
+                        self.settings_view_state.cpu_usage_limit_percent,
+                    );
                 if self.settings_view_state.backup_max_age_days == Some(0) {
                     self.settings_view_state.backup_max_age_days = None;
                 }
@@ -67,12 +75,14 @@ impl Foxy {
                 normalize_settings_launch_behavior(&mut self.settings_view_state);
                 for notice in &mut self.settings_view_state.update_summary_notices {
                     notice.repository_url = Self::normalize_repo_url(&notice.repository_url);
+                    notice.local_path = notice.local_path.trim().to_string();
                     if notice.pending_ack_count == 0 {
                         notice.pending_ack_count = 1;
                     }
                 }
                 for session in &mut self.settings_view_state.active_update_sessions {
                     session.repository_url = Self::normalize_repo_url(&session.repository_url);
+                    session.local_path = session.local_path.trim().to_string();
                 }
                 self.settings_view_state
                     .active_update_sessions
@@ -117,6 +127,7 @@ impl Foxy {
             }
             Err(err) => {
                 error!("Failed to load settings: {}", err);
+                self.report_unreadable_settings();
             }
         }
 

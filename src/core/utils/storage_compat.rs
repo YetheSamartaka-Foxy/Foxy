@@ -121,6 +121,97 @@ pub struct VolumeInfo {
     pub read_only: bool,
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct VolumeIdentity {
+    pub root: PathBuf,
+    pub identity: String,
+}
+
+impl PartialEq for VolumeIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        let same_root = if cfg!(windows) {
+            windows_volume_root_key(&self.root) == windows_volume_root_key(&other.root)
+        } else {
+            self.root == other.root
+        };
+        same_root && self.identity == other.identity
+    }
+}
+
+impl Eq for VolumeIdentity {}
+
+fn windows_volume_root_key(root: &Path) -> String {
+    let root = root.to_string_lossy().replace('\\', "/").to_lowercase();
+    let root = root
+        .strip_prefix("//?/unc/")
+        .map(|suffix| format!("//{suffix}"))
+        .or_else(|| root.strip_prefix("//?/").map(str::to_owned))
+        .unwrap_or(root);
+    root.trim_end_matches('/').to_owned()
+}
+
+pub fn volume_identity(path: &Path) -> Result<VolumeIdentity, String> {
+    let volume = VolumeProber::new()
+        .probe(path)
+        .ok_or_else(|| "Could not identify the target storage device".to_owned())?;
+    let identity = platform_volume_identity(path, &volume.root)
+        .ok_or_else(|| "Target storage does not expose a stable device identity".to_owned())?;
+    Ok(VolumeIdentity {
+        root: volume.root,
+        identity,
+    })
+}
+
+#[cfg(unix)]
+fn platform_volume_identity(path: &Path, _root: &Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let mut anchor = absolute_path(path);
+    while !anchor.exists() {
+        anchor = anchor.parent()?.to_path_buf();
+    }
+    Some(format!(
+        "unix-device:{}",
+        std::fs::metadata(anchor).ok()?.dev()
+    ))
+}
+
+#[cfg(windows)]
+fn platform_volume_identity(_path: &Path, root: &Path) -> Option<String> {
+    use std::os::windows::ffi::OsStrExt;
+    use winapi::um::fileapi::GetVolumeInformationW;
+    let wide: Vec<u16> = root.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut serial = 0u32;
+    let mut max_component = 0u32;
+    let mut flags = 0u32;
+    let mut filesystem = [0u16; 64];
+    let ok = unsafe {
+        GetVolumeInformationW(
+            wide.as_ptr(),
+            std::ptr::null_mut(),
+            0,
+            &mut serial,
+            &mut max_component,
+            &mut flags,
+            filesystem.as_mut_ptr(),
+            filesystem.len() as u32,
+        )
+    };
+    (ok != 0).then(|| format!("windows-volume-serial:{serial:08x}"))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn platform_volume_identity(_path: &Path, _root: &Path) -> Option<String> {
+    None
+}
+
+pub fn validate_volume_identity(path: &Path, approved: &VolumeIdentity) -> Result<(), String> {
+    let current = volume_identity(path)?;
+    if current != *approved {
+        return Err("Target storage changed. Review the destination before writing.".to_owned());
+    }
+    Ok(())
+}
+
 impl VolumeInfo {
     /// Largest single file the filesystem can hold, when it has a limit that a
     /// repository file could realistically hit.
@@ -839,6 +930,73 @@ mod tests {
         assert!(volume(FilesystemFamily::Ntfs).journaled());
         assert!(volume(FilesystemFamily::Btrfs).journaled());
         assert!(volume(FilesystemFamily::Unknown).journaled());
+    }
+
+    #[test]
+    fn windows_volume_root_keys_compare_canonical_spellings_stably() {
+        let verbatim_drive = Path::new(r"\\?\C:\");
+        let drive = Path::new("c:/");
+        assert_eq!(
+            windows_volume_root_key(verbatim_drive),
+            windows_volume_root_key(drive)
+        );
+        assert_eq!(
+            windows_volume_root_key(Path::new(r"\\?\UNC\Server\Share\")),
+            windows_volume_root_key(Path::new(r"\\server\share"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn volume_identity_compares_windows_root_spellings_stably() {
+        let approved = VolumeIdentity {
+            root: PathBuf::from(r"\\?\C:\"),
+            identity: "serial:one".to_owned(),
+        };
+        assert_eq!(
+            approved,
+            VolumeIdentity {
+                root: PathBuf::from("c:/"),
+                identity: "serial:one".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn volume_identity_still_rejects_another_root_or_device() {
+        let approved = VolumeIdentity {
+            root: PathBuf::from("R:/"),
+            identity: "serial:one".to_owned(),
+        };
+        assert_ne!(
+            approved,
+            VolumeIdentity {
+                root: PathBuf::from("S:/"),
+                identity: "serial:one".to_owned(),
+            }
+        );
+        assert_ne!(
+            approved,
+            VolumeIdentity {
+                root: PathBuf::from("R:/"),
+                identity: "serial:two".to_owned(),
+            }
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn volume_identity_keeps_unix_root_case_significant() {
+        assert_ne!(
+            VolumeIdentity {
+                root: PathBuf::from("/mnt/Mods"),
+                identity: "device-one".to_owned(),
+            },
+            VolumeIdentity {
+                root: PathBuf::from("/mnt/mods"),
+                identity: "device-one".to_owned(),
+            }
+        );
     }
 
     #[test]

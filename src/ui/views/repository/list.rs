@@ -8,7 +8,7 @@ use crate::ui::search_filter::MultiEntryFilter;
 use crate::ui::types::{FoxyView, RepositorySettingsTab};
 use crate::ui::views::galley_cache;
 use crate::ui::views::repository::RepositoryListSectionContextAction;
-use eframe::egui::{self, Align, Button, Margin, RichText, ScrollArea, TextEdit, Ui, Vec2};
+use eframe::egui::{self, Button, Margin, RichText, ScrollArea, TextEdit, Ui, Vec2};
 use log::{info, warn};
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
@@ -375,7 +375,7 @@ impl Foxy {
                                 )
                                 .id_salt("repository_filter_input")
                                 .hint_text(repository_filter_hint)
-                                .horizontal_align(Align::Center),
+                                .align(egui::Align2::CENTER_TOP),
                             );
                             ui.add_space(6.0);
                             self.filter_help_icon(ui, &repository_filter_help);
@@ -456,22 +456,14 @@ impl Foxy {
                                 .repository_view_state
                                 .repositories
                                 .get(*repo_idx)
-                                .map(|repo| {
-                                    (
-                                        3_u8,
-                                        *repo_idx,
-                                        self.repo_state_for_address(&repo.address, &repo.path) as u8,
-                                        *indented as u8,
-                                        [0, 0, 0],
-                                    )
-                                })
+                                .map(|_| (3_u8, *repo_idx, 0_u8, *indented as u8, [0, 0, 0]))
                                 .unwrap_or((3_u8, *repo_idx, 0_u8, 0_u8, [0, 0, 0])),
                         })
                         .collect::<Vec<_>>(),
                 ));
                 self.repository_list_galleys.ensure(
                     row_count,
-                    1,
+                    6,
                     repository_rows_generation,
                     galley_cache::fingerprint((
                         (self.settings_view_state.font_sizes.repository_view.status_banner as f32)

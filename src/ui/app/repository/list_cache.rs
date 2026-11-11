@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
 use std::sync::mpsc::TryRecvError as StdTryRecvError;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -15,7 +15,9 @@ use crate::ui::app::{
     CachedUpdateLoadOutcome, CachedUpdateLoadResult, Foxy, StartupPendingUpdateRestoreRecord,
     StartupPendingUpdateRestoreRequest,
 };
-use crate::ui::types::{RepoState, Repository, normalize_loaded_repositories};
+use crate::ui::types::{
+    RepoState, Repository, RepositoryPresetCheckOutcome, normalize_loaded_repositories,
+};
 
 impl Foxy {
     pub(in crate::ui::app) fn bump_repository_list_data_version(&mut self) {
@@ -41,6 +43,14 @@ impl Foxy {
     }
 
     pub fn load_repositories(&mut self) {
+        self.load_paused_repository_instances();
+        self.interrupted_update_instances =
+            crate::core::tasks::download_files::UpdateRollbackSession::recovery_notices(
+                &Self::get_game_space_directory(),
+            )
+            .into_iter()
+            .map(|(url, path)| Self::repo_instance_key(&url, &path))
+            .collect();
         let path = Self::get_repositories_path();
         match std::fs::read_to_string(&path) {
             Ok(json) => match serde_json::from_str::<Vec<Repository>>(&json) {
@@ -68,6 +78,7 @@ impl Foxy {
                 }
                 Err(err) => {
                     error!("Failed to parse repositories.json: {}", err);
+                    self.report_unreadable_config(&path);
                 }
             },
             Err(err) if err.kind() == ErrorKind::NotFound => {
@@ -77,8 +88,10 @@ impl Foxy {
             }
             Err(err) => {
                 error!("Failed to read repositories.json: {}", err);
+                self.report_unreadable_config(&path);
             }
         }
+        self.reset_addon_selection_baseline();
     }
 
     pub fn save_repositories(&mut self) {
@@ -141,6 +154,67 @@ impl Foxy {
             .unwrap_or(RepoState::Unknown)
     }
 
+    pub fn repo_state_for_repository(&self, repository: &Repository) -> RepoState {
+        let instance_key = Self::repo_instance_key(&repository.address, &repository.path);
+        let physical_state = self
+            .repo_states
+            .get(&instance_key)
+            .copied()
+            .unwrap_or(RepoState::Unknown);
+        if physical_state == RepoState::Updating {
+            return RepoState::Updating;
+        }
+
+        let profile = repository.selected_profile.as_deref();
+        let mut selected_addons: Vec<String> = Self::resolve_selected_mod_states(repository, None)
+            .into_iter()
+            .filter(|(_, enabled)| *enabled)
+            .map(|(name, _)| name.to_lowercase())
+            .collect();
+        selected_addons.sort_unstable();
+        selected_addons.dedup();
+
+        if repository.preset_selection_unchecked {
+            return RepoState::Unknown;
+        }
+
+        let evidence_state = preset_evidence_state(repository, profile, &selected_addons);
+
+        if self
+            .pending_update_cache
+            .get(&instance_key)
+            .is_some_and(|mods| pending_for_selection(mods, &selected_addons))
+        {
+            return RepoState::PendingUpdate;
+        }
+
+        if let Some(state) = evidence_state {
+            if state == RepoState::PendingUpdate
+                && (!self.startup_tasks_started || self.startup_pending_restore_rx.is_some())
+            {
+                return RepoState::Unknown;
+            }
+            return state;
+        }
+
+        let has_different_sibling_selection = self
+            .repository_view_state
+            .repositories
+            .iter()
+            .filter(|sibling| {
+                Self::repo_instance_key(&sibling.address, &sibling.path) == instance_key
+            })
+            .any(|sibling| {
+                Foxy::addon_selection_fingerprint(sibling)
+                    != Foxy::addon_selection_fingerprint(repository)
+            });
+        if has_different_sibling_selection {
+            RepoState::Unknown
+        } else {
+            physical_state
+        }
+    }
+
     /// State-filter tag describing whether the repository instance has been
     /// downloaded. A repository whose sync state is still
     /// [`RepoState::Unknown`] (never checked/downloaded) counts as "not
@@ -193,9 +267,12 @@ impl Foxy {
         let normalized_url = Self::normalize_repo_url(repository_url);
         let instance_key = Self::repo_instance_key(repository_url, local_path);
         let filtered: Vec<ModDiffSummary> = mods.into_iter().filter(|m| m.needs_update).collect();
+        if self.pending_update_cache.get(&instance_key) != Some(&filtered) {
+            self.completion_estimate.prepared.remove(&instance_key);
+        }
         if filtered.is_empty() {
             self.pending_update_cache.remove(&instance_key);
-            self.clear_active_update_session_for_url(&normalized_url);
+            self.clear_active_update_session_for_url(&normalized_url, local_path);
         } else {
             self.pending_update_cache.insert(instance_key, filtered);
         }
@@ -208,23 +285,33 @@ impl Foxy {
     ) {
         let instance_key = Self::repo_instance_key(repository_url, local_path);
         self.pending_update_cache.remove(&instance_key);
+        self.completion_estimate.prepared.remove(&instance_key);
     }
 
     pub(crate) fn active_update_session_mods_for_url(
         &self,
         repository_url: &str,
+        local_path: &str,
     ) -> Option<Vec<ModDiffSummary>> {
         let normalized_url = Self::normalize_repo_url(repository_url);
         self.settings_view_state
             .active_update_sessions
             .iter()
-            .find(|session| session.repository_url == normalized_url)
+            .find(|session| {
+                self.repository_record_matches_instance(
+                    &session.repository_url,
+                    &session.local_path,
+                    &normalized_url,
+                    local_path,
+                )
+            })
             .map(|session| session.mods.clone())
     }
 
     pub(crate) fn ensure_active_update_session_for_url(
         &mut self,
         repository_url: &str,
+        local_path: &str,
         mods: &[ModDiffSummary],
     ) {
         if mods.is_empty() {
@@ -236,7 +323,14 @@ impl Foxy {
             .settings_view_state
             .active_update_sessions
             .iter()
-            .any(|session| session.repository_url == normalized_url)
+            .any(|session| {
+                self.repository_record_matches_instance(
+                    &session.repository_url,
+                    &session.local_path,
+                    &normalized_url,
+                    local_path,
+                )
+            })
         {
             return;
         }
@@ -245,6 +339,7 @@ impl Foxy {
         self.settings_view_state.active_update_sessions.push(
             crate::ui::types::ActiveUpdateSession {
                 repository_url: normalized_url.clone(),
+                local_path: local_path.to_string(),
                 session_id: session_id.clone(),
                 mods: mods.to_vec(),
             },
@@ -258,15 +353,74 @@ impl Foxy {
         );
     }
 
-    pub(crate) fn clear_active_update_session_for_url(&mut self, repository_url: &str) {
+    pub(crate) fn clear_active_update_session_for_url(
+        &mut self,
+        repository_url: &str,
+        local_path: &str,
+    ) {
         let normalized_url = Self::normalize_repo_url(repository_url);
+        let url_is_unique = self
+            .repository_view_state
+            .repositories
+            .iter()
+            .filter(|repo| Self::normalize_repo_url(&repo.address) == normalized_url)
+            .count()
+            == 1;
         let previous_len = self.settings_view_state.active_update_sessions.len();
         self.settings_view_state
             .active_update_sessions
-            .retain(|session| session.repository_url != normalized_url);
+            .retain(|session| {
+                !Self::update_record_matches_instance(
+                    &session.repository_url,
+                    &session.local_path,
+                    &normalized_url,
+                    local_path,
+                    url_is_unique,
+                )
+            });
         if self.settings_view_state.active_update_sessions.len() != previous_len {
             self.save_settings();
         }
+    }
+
+    pub(crate) fn repository_record_matches_instance(
+        &self,
+        record_url: &str,
+        record_path: &str,
+        repository_url: &str,
+        local_path: &str,
+    ) -> bool {
+        let normalized_url = Self::normalize_repo_url(repository_url);
+        let url_is_unique = self
+            .repository_view_state
+            .repositories
+            .iter()
+            .filter(|repo| Self::normalize_repo_url(&repo.address) == normalized_url)
+            .count()
+            == 1;
+        Self::update_record_matches_instance(
+            record_url,
+            record_path,
+            &normalized_url,
+            local_path,
+            url_is_unique,
+        )
+    }
+
+    pub(crate) fn update_record_matches_instance(
+        record_url: &str,
+        record_path: &str,
+        normalized_url: &str,
+        local_path: &str,
+        url_is_unique: bool,
+    ) -> bool {
+        if Self::normalize_repo_url(record_url) != normalized_url {
+            return false;
+        }
+        if record_path.trim().is_empty() {
+            return url_is_unique;
+        }
+        Self::repo_instance_path_key(record_path) == Self::repo_instance_path_key(local_path)
     }
 
     pub fn pending_update_count_for_address(
@@ -297,7 +451,9 @@ impl Foxy {
         }
 
         self.update_ready_repo = Some(repo_index);
-        if let Some(session_mods) = self.active_update_session_mods_for_url(&normalized_url) {
+        if let Some(session_mods) =
+            self.active_update_session_mods_for_url(&normalized_url, &repo.path)
+        {
             self.mod_diff_cache = merge_download_mod_diffs_preserving_finished(
                 session_mods,
                 mods,
@@ -385,9 +541,8 @@ impl Foxy {
             .repository_view_state
             .repositories
             .iter()
-            .enumerate()
-            .map(|(repo_index, repo)| StartupPendingUpdateRestoreRequest {
-                repo_index,
+            .filter(|repo| !repo.is_local())
+            .map(|repo| StartupPendingUpdateRestoreRequest {
                 repo_name: repo.name.clone(),
                 repo_url: Self::normalize_repo_url(&repo.address),
                 repo_path: repo.path.clone(),
@@ -425,12 +580,15 @@ impl Foxy {
                                         request.repo_name,
                                         mods.iter().filter(|m| m.needs_update).count()
                                     );
+                                    let unconfirmed =
+                                        legacy_pending_requires_local_check(&payload, &mods);
                                     restored.push(StartupPendingUpdateRestoreRecord {
-                                        repo_index: request.repo_index,
+                                        repo_path: request.repo_path.clone(),
                                         repo_url: request.repo_url,
                                         state: RepoState::PendingUpdate,
-                                        mods: Some(mods),
-                                        verify_with_quick_scan: request.verify_with_quick_scan,
+                                        mods: if unconfirmed { None } else { Some(mods) },
+                                        verify_with_quick_scan: request.verify_with_quick_scan
+                                            || unconfirmed,
                                         is_foxy,
                                     });
                                 } else {
@@ -447,7 +605,7 @@ impl Foxy {
                                         );
                                     }
                                     restored.push(StartupPendingUpdateRestoreRecord {
-                                        repo_index: request.repo_index,
+                                        repo_path: request.repo_path.clone(),
                                         repo_url: request.repo_url,
                                         state: RepoState::Synced,
                                         mods: None,
@@ -475,7 +633,7 @@ impl Foxy {
                                     );
                                 }
                                 restored.push(StartupPendingUpdateRestoreRecord {
-                                    repo_index: request.repo_index,
+                                    repo_path: request.repo_path.clone(),
                                     repo_url: request.repo_url,
                                     state: RepoState::Unknown,
                                     mods: None,
@@ -486,7 +644,7 @@ impl Foxy {
                         }
                     }
                     Ok(None) => restored.push(StartupPendingUpdateRestoreRecord {
-                        repo_index: request.repo_index,
+                        repo_path: request.repo_path.clone(),
                         repo_url: request.repo_url,
                         state: RepoState::Unknown,
                         mods: None,
@@ -500,7 +658,7 @@ impl Foxy {
                             err
                         );
                         restored.push(StartupPendingUpdateRestoreRecord {
-                            repo_index: request.repo_index,
+                            repo_path: request.repo_path.clone(),
                             repo_url: request.repo_url,
                             state: RepoState::Unknown,
                             mods: None,
@@ -529,34 +687,67 @@ impl Foxy {
         }
 
         if let Some(records) = restored {
+            let saved_pending_instances: HashSet<_> = self
+                .repository_view_state
+                .repositories
+                .iter()
+                .filter_map(|repo| {
+                    let selected = Self::enabled_addon_names(
+                        Self::resolve_selected_mod_states(repo, None).into_iter(),
+                    );
+                    (preset_evidence_state(repo, repo.selected_profile.as_deref(), &selected)
+                        == Some(RepoState::PendingUpdate))
+                    .then(|| Self::repo_instance_key(&repo.address, &repo.path))
+                })
+                .collect();
             let mut verify_urls = Vec::new();
             let mut first_pending: Option<(usize, Vec<ModDiffSummary>)> = None;
             for record in records {
-                let Some((repo_address, repo_path)) = self
-                    .repository_view_state
-                    .repositories
-                    .get(record.repo_index)
-                    .map(|repo| (repo.address.clone(), repo.path.clone()))
-                else {
+                let Some(repo_index) = self.repo_index_by_instance(
+                    &record.repo_url,
+                    &Self::repo_instance_path_key(&record.repo_path),
+                ) else {
                     continue;
                 };
+                let (repo_address, repo_path) = {
+                    let repo = &self.repository_view_state.repositories[repo_index];
+                    (repo.address.clone(), repo.path.clone())
+                };
                 let normalized_url = Self::normalize_repo_url(&repo_address);
-                if normalized_url != record.repo_url {
+
+                let unconfirmed_saved_notice = record.mods.is_none()
+                    && (record.state == RepoState::PendingUpdate
+                        || (record.state == RepoState::Unknown
+                            && saved_pending_instances
+                                .contains(&Self::repo_instance_key(&repo_address, &repo_path))));
+                if unconfirmed_saved_notice {
+                    self.defer_unconfirmed_pending_update(repo_index);
                     continue;
                 }
 
-                let state =
-                    if record.state == RepoState::PendingUpdate && record.verify_with_quick_scan {
-                        RepoState::Unknown
-                    } else {
-                        record.state
-                    };
+                let path_key = Self::repo_instance_path_key(&repo_path);
+                // A saved update that startup will refresh must not also be
+                // quick-scanned. The scan's clean verdict would clear the
+                // pending row before the refresh re-applied its manifests.
+                let startup_refresh_queued =
+                    self.startup_recheck_queue.iter().any(|(address, path, _)| {
+                        Self::normalize_repo_url(address) == normalized_url
+                            && Self::repo_instance_path_key(path) == path_key
+                    });
+                let state = if record.state == RepoState::PendingUpdate
+                    && record.verify_with_quick_scan
+                    && !startup_refresh_queued
+                {
+                    RepoState::Unknown
+                } else {
+                    record.state
+                };
                 self.set_repo_state_for_address(&repo_address, &repo_path, state);
                 if let Some(is_foxy) = record.is_foxy {
                     self.set_repo_foxy_mode_for_address(&repo_address, is_foxy);
                 }
                 if record.state == RepoState::PendingUpdate {
-                    if record.verify_with_quick_scan {
+                    if record.verify_with_quick_scan && !startup_refresh_queued {
                         self.quick_scan_pending.insert(normalized_url.clone());
                         verify_urls.push(normalized_url);
                     } else {
@@ -571,7 +762,7 @@ impl Foxy {
                             && first_pending.is_none()
                             && let Some(mods) = record.mods
                         {
-                            first_pending = Some((record.repo_index, mods));
+                            first_pending = Some((repo_index, mods));
                         }
                     }
                 } else {
@@ -636,10 +827,8 @@ impl Foxy {
 
     /// Resolve a repository instance by both its normalized URL and download
     /// folder. `local_path_key` must already be normalized via
-    /// [`Self::repo_instance_path_key`]. Falls back to a URL-only match when no
-    /// instance shares the folder (e.g. a result that predates a folder change),
-    /// so a single-instance repository keeps working.
-    pub(crate) fn repo_index_by_url_and_path(
+    /// [`Self::repo_instance_path_key`].
+    pub(crate) fn repo_index_by_instance(
         &self,
         normalized_url: &str,
         local_path_key: &str,
@@ -651,7 +840,23 @@ impl Foxy {
                 Self::normalize_repo_url(&repo.address) == normalized_url
                     && Self::repo_instance_path_key(&repo.path) == local_path_key
             })
-            .or_else(|| self.repo_index_by_normalized_url(normalized_url))
+    }
+
+    /// [`Self::repo_index_by_instance`], falling back to a URL-only match when
+    /// no instance shares the folder (e.g. a result that predates a folder
+    /// change) and exactly one instance has the URL, so a single-instance
+    /// repository keeps working without a result landing on another folder's copy.
+    pub(crate) fn repo_index_by_url_and_path(
+        &self,
+        normalized_url: &str,
+        local_path_key: &str,
+    ) -> Option<usize> {
+        self.repo_index_by_instance(normalized_url, local_path_key)
+            .or_else(|| {
+                unique_position(self.repository_view_state.repositories.iter(), |repo| {
+                    Self::normalize_repo_url(&repo.address) == normalized_url
+                })
+            })
     }
 
     pub fn load_cached_updates_for_repo(&mut self, repo_index: usize) {
@@ -679,6 +884,10 @@ impl Foxy {
             Some(r) => r,
             None => return,
         };
+
+        if repo.is_local() {
+            return;
+        }
 
         let normalized_url = Self::normalize_repo_url(&repo.address);
         let repo_path = repo.path.clone();
@@ -759,7 +968,15 @@ impl Foxy {
                 open_modal_when_pending,
                 outcome,
             } = result;
-            self.pending_cached_update_loads.remove(&repo_url);
+            // A game-space switch clears the pending set; a load dispatched in
+            // the previous space must not open its diff in this one.
+            if !self.pending_cached_update_loads.remove(&repo_url) {
+                debug!(
+                    "Discarding a cached update load dispatched before a game space switch: {}",
+                    repo_url
+                );
+                continue;
+            }
 
             // The list may have changed while the load was in flight; re-resolve
             // by URL + folder and discard the result if the repository is gone.
@@ -774,6 +991,9 @@ impl Foxy {
             };
 
             match outcome {
+                CachedUpdateLoadOutcome::NeedsLocalCheck => {
+                    self.defer_unconfirmed_pending_update(repo_index);
+                }
                 CachedUpdateLoadOutcome::Pending(mods) => {
                     self.cache_pending_updates_for_url(&repo_address, &repo_path, mods);
                     if self.apply_pending_update_cache_for_repo(repo_index) {
@@ -833,6 +1053,71 @@ impl Foxy {
             self.needs_repaint = true;
         }
     }
+}
+
+fn legacy_pending_requires_local_check(payload: &str, mods: &[ModDiffSummary]) -> bool {
+    if !mods
+        .iter()
+        .any(|addon| addon.needs_update && addon.total_bytes == 0 && addon.files.is_empty())
+    {
+        return false;
+    }
+    let Ok(raw) = serde_json::from_str::<Vec<serde_json::Value>>(payload) else {
+        return false;
+    };
+    raw.iter().any(|addon| {
+        addon.get("needs_update").and_then(serde_json::Value::as_bool) == Some(true)
+            && addon.get("total_bytes").and_then(serde_json::Value::as_u64) == Some(0)
+            && addon
+                .get("files")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(Vec::is_empty)
+            && addon.get("update_basis").and_then(serde_json::Value::as_str) != Some("managed_files")
+    })
+}
+
+fn preset_evidence_state(
+    repository: &Repository,
+    profile: Option<&str>,
+    selected_addons: &[String],
+) -> Option<RepoState> {
+    repository
+        .preset_check_evidence
+        .iter()
+        .filter(|evidence| {
+            evidence.profile.as_deref() == profile && evidence.selected_addons == selected_addons
+        })
+        .max_by_key(|evidence| evidence.checked_at)
+        .map(|evidence| match evidence.outcome {
+            RepositoryPresetCheckOutcome::Synced => RepoState::Synced,
+            RepositoryPresetCheckOutcome::PendingUpdate => RepoState::PendingUpdate,
+        })
+}
+
+fn pending_for_selection(mods: &[ModDiffSummary], selected_addons: &[String]) -> bool {
+    mods.iter().any(|item| {
+        item.needs_update
+            && selected_addons
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(&item.name))
+    })
+}
+
+/// Position of the only item matching `predicate`; `None` when none or several match.
+fn unique_position<T>(
+    items: impl Iterator<Item = T>,
+    mut predicate: impl FnMut(&T) -> bool,
+) -> Option<usize> {
+    let mut found = None;
+    for (index, item) in items.enumerate() {
+        if predicate(&item) {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(index);
+        }
+    }
+    found
 }
 
 fn update_session_id() -> String {
@@ -913,7 +1198,9 @@ fn load_cached_update_outcome(normalized_url: &str, local_path: &str) -> CachedU
             return CachedUpdateLoadOutcome::Corrupt;
         }
     };
-    if mods.iter().any(|m| m.needs_update) {
+    if legacy_pending_requires_local_check(&payload, &mods) {
+        CachedUpdateLoadOutcome::NeedsLocalCheck
+    } else if mods.iter().any(|m| m.needs_update) {
         CachedUpdateLoadOutcome::Pending(mods)
     } else {
         // Stale "no updates" payload: clear the row here so the UI thread never has to.
@@ -929,6 +1216,130 @@ fn load_cached_update_outcome(normalized_url: &str, local_path: &str) -> CachedU
 mod tests {
     use super::*;
     use crate::core::api::{FileDiffSummary, ModDiffSummary};
+    use crate::ui::types::{RepositoryPresetCheckEvidence, RepositoryPresetCheckOutcome};
+
+    #[test]
+    fn legacy_cleanup_hints_require_a_check_but_confirmed_missing_addons_do_not() {
+        let mods = vec![ModDiffSummary {
+            name: "@mod_01".into(),
+            needs_update: true,
+            total_bytes: 0,
+            files: Vec::new(),
+        }];
+        let payload = serde_json::to_string(&mods).unwrap();
+        assert!(legacy_pending_requires_local_check(&payload, &mods));
+        let mut confirmed = serde_json::to_value(&mods).unwrap();
+        confirmed[0]["update_basis"] = serde_json::json!("managed_files");
+        assert!(!legacy_pending_requires_local_check(
+            &confirmed.to_string(),
+            &mods
+        ));
+        assert!(!legacy_pending_requires_local_check("[]", &[]));
+    }
+
+    #[test]
+    fn cached_zero_byte_managed_file_repairs_remain_pending() {
+        let mods = vec![ModDiffSummary {
+            name: "@mod_01".into(),
+            needs_update: true,
+            total_bytes: 0,
+            files: vec![FileDiffSummary {
+                name: "empty.bin".into(),
+                needs_update: true,
+                total_bytes: 0,
+                changed_parts: 0,
+                change_kind: crate::core::api::FileDiffKind::Added,
+            }],
+        }];
+        assert!(!legacy_pending_requires_local_check(
+            &serde_json::to_string(&mods).unwrap(),
+            &mods
+        ));
+        let mut mixed = mods;
+        mixed.push(ModDiffSummary {
+            name: "@mod_02".into(),
+            needs_update: true,
+            total_bytes: 0,
+            files: Vec::new(),
+        });
+        assert!(legacy_pending_requires_local_check(
+            &serde_json::to_string(&mixed).unwrap(),
+            &mixed
+        ));
+    }
+
+    #[test]
+    fn url_fallback_only_resolves_a_single_copy() {
+        let urls = ["a/", "b/", "a/"];
+        assert_eq!(unique_position(urls.iter(), |url| **url == "b/"), Some(1));
+        assert_eq!(unique_position(urls.iter(), |url| **url == "a/"), None);
+        assert_eq!(unique_position(urls.iter(), |url| **url == "c/"), None);
+    }
+
+    #[test]
+    fn update_records_are_scoped_to_repository_instances() {
+        let url = "https://repo.example.invalid/main/";
+        let path_a = "R:/Mods/RepoAlpha";
+        let path_b = "R:/Mods/RepoBeta";
+        let copies = [path_a, path_b];
+        let unique_url = copies.len() == 1;
+        let mut records = vec![(url, path_a), (url, path_b), (url, "")];
+
+        records.retain(|(record_url, record_path)| {
+            !Foxy::update_record_matches_instance(record_url, record_path, url, path_a, unique_url)
+        });
+
+        assert_eq!(records, vec![(url, path_b), (url, "")]);
+        assert!(Foxy::update_record_matches_instance(
+            url, "", url, path_b, true,
+        ));
+        assert!(!Foxy::update_record_matches_instance(
+            url, "", url, path_b, false,
+        ));
+    }
+
+    #[test]
+    fn preset_readiness_does_not_cross_clone_selections() {
+        let lean = Repository {
+            address: "https://repo.example.invalid/main/".to_string(),
+            path: "R:/Mods/RepoAlpha".to_string(),
+            addons: vec![("@mod_01".to_string(), true)],
+            ..Repository::default()
+        };
+        let mut expanded = lean.clone();
+        expanded.addons.push(("@mod_02".to_string(), true));
+        let mut lean = lean;
+        lean.preset_check_evidence
+            .push(RepositoryPresetCheckEvidence {
+                profile: None,
+                selected_addons: vec!["@mod_01".to_string()],
+                outcome: RepositoryPresetCheckOutcome::Synced,
+                checked_at: 1,
+            });
+
+        assert_eq!(
+            preset_evidence_state(&lean, None, &["@mod_01".to_string()]),
+            Some(RepoState::Synced)
+        );
+        assert_eq!(
+            preset_evidence_state(
+                &expanded,
+                None,
+                &["@mod_01".to_string(), "@mod_02".to_string()]
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn pending_extra_addons_do_not_mark_a_lean_selection_pending() {
+        let mods = vec![mod_summary("@mod_02", true, 1)];
+        assert!(!pending_for_selection(&mods, &["@mod_01".to_string()]));
+        assert!(pending_for_selection(
+            &mods,
+            &["@mod_01".to_string(), "@mod_02".to_string()]
+        ));
+    }
 
     fn mod_summary(name: &str, needs_update: bool, files: usize) -> ModDiffSummary {
         use crate::core::api::FileDiffKind;

@@ -133,6 +133,7 @@ mod tests {
                 is_required: true,
                 enabled: true,
                 client_side: false,
+                chunking: crate::types::Chunking::Fixed,
             }],
         )
         .unwrap();
@@ -149,6 +150,7 @@ mod tests {
             is_required: true,
             enabled: true,
             client_side: false,
+            chunking: crate::types::Chunking::Fixed,
         }
     }
 

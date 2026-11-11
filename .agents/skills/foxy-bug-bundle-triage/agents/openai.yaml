@@ -1,0 +1,4 @@
+interface:
+  display_name: "Bug Bundle Triage"
+  short_description: "Trace a reported failure through supplied Foxy evidence."
+  default_prompt: "Use $foxy-bug-bundle-triage to triage a Foxy bug bundle and separate evidence from hypotheses."

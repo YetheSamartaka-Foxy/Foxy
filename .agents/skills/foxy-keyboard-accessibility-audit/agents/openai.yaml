@@ -1,0 +1,4 @@
+interface:
+  display_name: "Foxy Keyboard Accessibility Audit"
+  short_description: "Audit keyboard flow, focus, and status clarity"
+  default_prompt: "Use $foxy-keyboard-accessibility-audit to verify keyboard traversal, focus, activation, and status clarity."

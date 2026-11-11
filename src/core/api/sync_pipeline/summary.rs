@@ -34,6 +34,7 @@ pub(crate) struct PipelineSummary {
     pub overall_start: Instant,
     pub stages: Vec<StageEntry>,
     thread_cpu_at_start: crate::core::utils::thread_cpu::ThreadCpuSnapshot,
+    governor_at_start: crate::core::utils::cpu_governor::GovernorCounters,
 }
 
 impl PipelineSummary {
@@ -50,7 +51,18 @@ impl PipelineSummary {
             overall_start: start,
             stages: Vec::new(),
             thread_cpu_at_start: crate::core::utils::thread_cpu::snapshot(),
+            governor_at_start: crate::core::utils::cpu_governor::counters(),
         }
+    }
+
+    /// The CPU usage limit in force and how long work paused for it during
+    /// this operation, `None` when no limit is set.
+    fn cpu_limit_pauses(&self) -> Option<(u8, crate::core::utils::cpu_governor::GovernorCounters)> {
+        let limit = crate::core::utils::cpu_governor::limit_percent()?;
+        Some((
+            limit,
+            crate::core::utils::cpu_governor::counters().since(self.governor_at_start),
+        ))
     }
 
     pub fn push(&mut self, entry: StageEntry) {
@@ -79,6 +91,15 @@ impl PipelineSummary {
             self.operation_id,
             crate::core::utils::thread_cpu::describe(&thread_groups, exited)
         );
+        if let Some((limit, paused)) = self.cpu_limit_pauses() {
+            info!(
+                "Pipeline CPU usage limit: op={} limit={}% paused_s={:.3} pauses={}",
+                self.operation_id,
+                limit,
+                paused.paused.as_secs_f64(),
+                paused.pauses
+            );
+        }
 
         // Calculate column widths based on actual content
         let name_w = self
@@ -167,6 +188,13 @@ impl PipelineSummary {
             extras.push((
                 name.as_str(),
                 format!("{:.3}", stage.duration.as_secs_f64()),
+            ));
+        }
+        if let Some((limit, paused)) = self.cpu_limit_pauses() {
+            extras.push(("cpu_limit_percent", limit.to_string()));
+            extras.push((
+                "cpu_limit_paused_s",
+                format!("{:.3}", paused.paused.as_secs_f64()),
             ));
         }
         sol_line(

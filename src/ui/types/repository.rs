@@ -14,6 +14,17 @@ pub struct RepositoryServer {
     pub battle_eye: bool,
 }
 
+/// The published folder that holds a custom game's build, named by the
+/// repository's `repo.json` `gameBuild`. It is synced like any addon but is
+/// never listed, toggled, or passed to the game as a mod.
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Default)]
+pub struct RepositoryGameBuild {
+    /// Published folder name, as in the repository's addon manifests.
+    pub addon: String,
+    /// Executable path relative to that folder, with `/` separators.
+    pub executable: String,
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct RepositoryProfile {
     pub name: String,
@@ -155,6 +166,8 @@ pub struct Repository {
     pub external_addon_client_side: Vec<String>,
     #[serde(default)]
     pub servers: Vec<RepositoryServer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game_build: Option<RepositoryGameBuild>,
 
     /// The Arma 3 player profile name to use for this repository.
     /// None = use the auto-detected active profile (or default).
@@ -176,13 +189,61 @@ pub struct Repository {
     #[serde(default)]
     pub repository_space_entry_address: Option<String>,
     #[serde(default)]
+    pub repository_space_membership_review: bool,
+    #[serde(default)]
     pub hash_algorithm_preference: HashAlgorithmPreference,
     /// Unix seconds of the last successful download for this instance.
     #[serde(default)]
     pub last_updated_at: Option<u64>,
+    #[serde(default)]
+    pub last_remote_check_at: Option<u64>,
+    /// Unix seconds of the last completed local or remote check.
+    #[serde(default)]
+    pub last_check_at: Option<u64>,
+    /// Unix seconds of the last completed full local integrity verification.
+    #[serde(default)]
+    pub last_full_verification_at: Option<u64>,
+    /// Whether the most recent local or remote check used fresh remote metadata.
+    #[serde(default = "default_last_check_remote_fresh")]
+    pub last_check_remote_fresh: bool,
+    /// Whether the most recent local verification read every selected file.
+    #[serde(default)]
+    pub last_check_full: bool,
+    #[serde(default)]
+    pub preset_check_evidence: Vec<RepositoryPresetCheckEvidence>,
+    #[serde(default)]
+    pub preset_selection_unchecked: bool,
     /// Unix seconds of the last game launch from this instance.
     #[serde(default)]
     pub last_launched_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_timing: Option<crate::core::utils::update_estimate::UpdateTiming>,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+pub struct RepositoryPresetCheckEvidence {
+    #[serde(default)]
+    pub profile: Option<String>,
+    #[serde(default)]
+    pub selected_addons: Vec<String>,
+    pub outcome: RepositoryPresetCheckOutcome,
+    pub checked_at: u64,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Serialize, Deserialize)]
+pub enum RepositoryPresetCheckOutcome {
+    Synced,
+    PendingUpdate,
+}
+
+fn default_last_check_remote_fresh() -> bool {
+    true
+}
+
+impl Repository {
+    pub fn is_local(&self) -> bool {
+        self.address.trim().is_empty()
+    }
 }
 
 impl Default for Repository {
@@ -234,6 +295,7 @@ impl Default for Repository {
             external_addon_favorites: Vec::new(),
             external_addon_client_side: Vec::new(),
             servers: Vec::new(),
+            game_build: None,
             arma3_profile: None,
 
             icon_image_path: String::new(),
@@ -243,10 +305,110 @@ impl Default for Repository {
             app_update_url: String::new(),
             repository_space_id: None,
             repository_space_entry_address: None,
+            repository_space_membership_review: false,
             hash_algorithm_preference: HashAlgorithmPreference::default(),
             last_updated_at: None,
+            update_timing: None,
+            last_remote_check_at: None,
+            last_check_at: None,
+            last_full_verification_at: None,
+            last_check_remote_fresh: true,
+            last_check_full: false,
+            preset_check_evidence: Vec::new(),
+            preset_selection_unchecked: false,
             last_launched_at: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod preset_check_tests {
+    use super::{
+        Repository, RepositoryPresetCheckEvidence, RepositoryPresetCheckOutcome, RepositoryProfile,
+    };
+
+    #[test]
+    fn update_timing_round_trips_and_older_repositories_start_without_it() {
+        use crate::core::utils::update_estimate::{UpdateTiming, UpdateWork};
+        use std::time::Duration;
+
+        let mut repository = Repository::default();
+        let legacy = serde_json::to_value(&repository).unwrap();
+        assert!(legacy.get("update_timing").is_none());
+        assert!(
+            serde_json::from_value::<Repository>(legacy)
+                .unwrap()
+                .update_timing
+                .is_none()
+        );
+        repository.update_timing = Some(UpdateTiming {
+            work: UpdateWork {
+                files: 2,
+                transfer_bytes: 100,
+                full_bytes: Some(400),
+            },
+            phase_durations: [1, 4, 2, 1].map(Duration::from_secs),
+        });
+        let restored: Repository =
+            serde_json::from_value(serde_json::to_value(&repository).unwrap()).unwrap();
+        assert_eq!(restored.update_timing, repository.update_timing);
+    }
+
+    #[test]
+    fn local_repository_survives_persistence_with_external_selections() {
+        let repository = Repository {
+            external_addons: vec![("@mod_01".into(), true, "R:/Mods/@mod_01".into())],
+            ..Repository::default()
+        };
+        let restored: Repository =
+            serde_json::from_str(&serde_json::to_string(&repository).unwrap()).unwrap();
+        assert!(restored.is_local());
+        assert_eq!(restored.external_addons, repository.external_addons);
+    }
+
+    #[test]
+    fn only_an_empty_address_is_local() {
+        let mut repository = Repository {
+            address: " \t".into(),
+            ..Repository::default()
+        };
+        assert!(repository.is_local());
+        repository.address = "https://repo.example.invalid:8080/".into();
+        assert!(!repository.is_local());
+    }
+
+    #[test]
+    fn repository_persistence_keeps_unchecked_selection_and_preset_evidence() {
+        let mut repository = Repository {
+            addons: vec![("@mod_01".to_string(), false)],
+            ..Repository::default()
+        };
+        let mut profile = RepositoryProfile {
+            name: "Lean".to_string(),
+            ..RepositoryProfile::default()
+        };
+        profile.addons = vec![("@mod_02".to_string(), false)];
+        repository.profiles.push(profile);
+        repository.selected_profile = Some("Lean".to_string());
+        repository.preset_check_evidence = vec![RepositoryPresetCheckEvidence {
+            profile: None,
+            selected_addons: Vec::new(),
+            outcome: RepositoryPresetCheckOutcome::Synced,
+            checked_at: 17,
+        }];
+
+        let json = serde_json::to_string(&repository).unwrap();
+        let restored: Repository = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.addons, vec![("@mod_01".to_string(), false)]);
+        assert_eq!(
+            restored.profiles[0].addons,
+            vec![("@mod_02".to_string(), false)]
+        );
+        assert_eq!(
+            restored.preset_check_evidence,
+            repository.preset_check_evidence
+        );
     }
 }
 
@@ -350,6 +512,8 @@ impl DownloadSummary {
 pub struct UpdateSummaryNotice {
     pub repository_url: String,
     #[serde(default)]
+    pub local_path: String,
+    #[serde(default)]
     pub pending_ack_count: u32,
     pub summary: DownloadSummary,
     // Snapshot of the per-mod diff at the time the download completed, so the
@@ -363,6 +527,8 @@ pub struct UpdateSummaryNotice {
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct ActiveUpdateSession {
     pub repository_url: String,
+    #[serde(default)]
+    pub local_path: String,
     pub session_id: String,
     pub mods: Vec<ModDiffSummary>,
 }

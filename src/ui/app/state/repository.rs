@@ -497,6 +497,30 @@ pub struct PendingJoinPreflightState {
     pub launch_only: bool,
     // Readiness confirmation must resume server checks before any game launch.
     pub query_server_before_join: bool,
+    /// These facts came from a successful server addon query, so Join refreshes
+    /// them before dispatch.
+    pub server_addons_checked: bool,
+    /// The server answered its status query but not the addon query; Join may
+    /// retry or continue without the addon check.
+    pub addon_query_error: Option<String>,
+    /// A fresh server/local facts query has been completed and changed facts
+    /// are awaiting the user's renewed confirmation.
+    pub final_facts_refreshed: bool,
+    /// The user's pending final choice: true keeps the selected suggestions.
+    pub final_confirmation_choice: Option<bool>,
+    pub final_query_error: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PendingUpdateLaunch {
+    pub repository: Repository,
+    pub server: Option<RepositoryServer>,
+    pub repo_name: String,
+    pub blocking_instance_key: String,
+    pub target_instance_key: String,
+    pub update_finished: bool,
+    pub update_succeeded: bool,
+    pub replacement: Option<Box<PendingUpdateLaunch>>,
 }
 
 impl PendingJoinPreflightState {
@@ -524,6 +548,11 @@ impl PendingJoinPreflightState {
             steam_running: false,
             launch_only,
             query_server_before_join: false,
+            server_addons_checked: false,
+            addon_query_error: None,
+            final_facts_refreshed: false,
+            final_confirmation_choice: None,
+            final_query_error: None,
         }
     }
 
@@ -544,6 +573,8 @@ impl PendingJoinPreflightState {
             steam_required,
             steam_running,
             query_server_before_join: true,
+            final_facts_refreshed: false,
+            final_confirmation_choice: None,
             ..Self::empty(repo_name, server, original_repository, false)
         })
     }
@@ -555,6 +586,10 @@ impl PendingJoinPreflightState {
     pub(crate) fn can_launch(&self) -> bool {
         !self.steam_required || self.steam_running
     }
+
+    pub(crate) fn refreshes_server_facts_before_join(&self) -> bool {
+        !self.launch_only && self.server_addons_checked
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -564,6 +599,7 @@ pub enum JoinPreflightMatchConfidence {
 
 #[derive(Clone, Debug)]
 pub struct PendingJoinPreflightQuery {
+    pub query_id: u64,
     pub repo_name: String,
     pub server: RepositoryServer,
     pub original_repository: Repository,
@@ -572,38 +608,99 @@ pub struct PendingJoinPreflightQuery {
 /// A Join request waiting on a background server-status (A2S) query. The status
 /// query does DNS resolution plus a UDP round-trip, so it runs off the UI
 /// thread; the join decision resumes once a fresh status arrives.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct PendingJoinStatusQuery {
     pub repo_name: String,
     pub server: RepositoryServer,
     pub effective_repository: Repository,
-    /// Server-status cache key `(address, port)` this query is keyed on.
-    pub key: (String, String),
+    pub query_id: u64,
     pub started_at: Instant,
+    pub result_rx: std::sync::mpsc::Receiver<JoinServerStatusResult>,
 }
 
-#[derive(Clone, Debug)]
-pub struct JoinPreflightCacheEntry {
-    pub result: ServerAddonQueryResult,
-    pub display_names: crate::core::addon_metadata::AddonDisplayNameSnapshot,
-    pub cached_at: Instant,
+#[derive(Clone, Copy, Debug)]
+pub struct JoinServerStatusResult {
+    pub query_id: u64,
+    pub dispatched_at: Instant,
+    pub status: crate::ui::types::ServerOnlineStatus,
+}
+
+impl JoinServerStatusResult {
+    pub(crate) fn matches_pending(&self, query_id: u64, dispatched_at: Instant) -> bool {
+        self.query_id == query_id && self.dispatched_at == dispatched_at
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct JoinPreflightQueryResult {
+    pub query_id: u64,
     pub address: String,
     pub port: u16,
     pub display_names: crate::core::addon_metadata::AddonDisplayNameSnapshot,
     pub result: Result<ServerAddonQueryResult, String>,
 }
 
+impl JoinPreflightQueryResult {
+    pub(crate) fn matches_pending(&self, pending: &PendingJoinPreflightQuery) -> bool {
+        self.query_id == pending.query_id
+            && self.address == pending.server.address
+            && pending.server.port.parse::<u16>().ok() == Some(self.port)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        JoinPreflightDlcChange, JoinPreflightUnavailableAddon, ListGalleyCache,
-        PendingJoinPreflightState,
+        JoinPreflightDlcChange, JoinPreflightQueryResult, JoinPreflightUnavailableAddon,
+        JoinServerStatusResult, ListGalleyCache, PendingJoinPreflightState,
     };
     use crate::ui::types::{Repository, RepositoryServer};
+
+    #[test]
+    fn join_status_results_must_match_the_dispatched_query() {
+        let dispatched_at = std::time::Instant::now();
+        let result = JoinServerStatusResult {
+            query_id: 7,
+            dispatched_at,
+            status: crate::ui::types::ServerOnlineStatus::Offline,
+        };
+
+        assert!(result.matches_pending(7, dispatched_at));
+        assert!(!result.matches_pending(8, dispatched_at));
+        assert!(!result.matches_pending(7, dispatched_at + std::time::Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn addon_preflight_results_require_the_matching_request_generation() {
+        let pending = super::PendingJoinPreflightQuery {
+            query_id: 11,
+            repo_name: "RepoAlpha".to_string(),
+            server: RepositoryServer {
+                address: "127.0.0.1".to_string(),
+                port: "2302".to_string(),
+                ..RepositoryServer::default()
+            },
+            original_repository: Repository::default(),
+        };
+        let result = JoinPreflightQueryResult {
+            query_id: 11,
+            address: "127.0.0.1".to_string(),
+            port: 2302,
+            display_names: Default::default(),
+            result: Err("offline".to_string()),
+        };
+
+        assert!(result.matches_pending(&pending));
+        let mut stale = result.clone();
+        stale.query_id = 12;
+        assert!(!stale.matches_pending(&pending));
+        stale = result.clone();
+        stale.address = "192.0.2.1".to_string();
+        assert!(!stale.matches_pending(&pending));
+        stale = result;
+        stale.port = 2303;
+        assert!(!stale.matches_pending(&pending));
+    }
 
     #[test]
     fn join_readiness_preserves_warnings_and_resumes_server_checks() {
@@ -636,6 +733,7 @@ mod tests {
             assert_eq!((pending.steam_required, pending.steam_running), steam_gate);
             assert_eq!(pending.can_launch(), !steam_gate.0 || steam_gate.1);
             assert!(pending.query_server_before_join);
+            assert!(!pending.refreshes_server_facts_before_join());
             assert!(!pending.launch_only);
             assert_eq!(pending.server, server);
             assert_eq!(pending.original_repository.path, repository.path);
@@ -674,6 +772,26 @@ mod tests {
             );
             assert!(!pending.query_server_before_join);
         }
+    }
+
+    #[test]
+    fn only_join_checklists_from_server_addons_refresh_before_dispatch() {
+        let pending = |launch_only, server_addons_checked, addon_query_error: Option<&str>| {
+            PendingJoinPreflightState {
+                server_addons_checked,
+                addon_query_error: addon_query_error.map(str::to_string),
+                ..PendingJoinPreflightState::empty(
+                    "MainRepo",
+                    RepositoryServer::default(),
+                    Repository::default(),
+                    launch_only,
+                )
+            }
+        };
+        assert!(pending(false, true, None).refreshes_server_facts_before_join());
+        assert!(!pending(false, false, None).refreshes_server_facts_before_join());
+        assert!(!pending(true, true, None).refreshes_server_facts_before_join());
+        assert!(!pending(false, false, Some("timed out")).refreshes_server_facts_before_join());
     }
 
     #[test]

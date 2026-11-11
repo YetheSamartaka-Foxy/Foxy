@@ -111,6 +111,22 @@ pub struct BenchmarkMachine {
     pub repository_storage_class: String,
     pub hash_io_profile: String,
     pub download_speed_limit_mbps: Option<u32>,
+    /// CPU Threads setting the run planned around; `None` is Auto, and on
+    /// records written before it was stored.
+    #[serde(default)]
+    pub cpu_thread_limit: Option<u32>,
+    /// CPU usage limit in percent; `None` is no limit, which is also what
+    /// records written before the setting existed ran with.
+    #[serde(default)]
+    pub cpu_usage_limit_percent: Option<u8>,
+    /// Work priority setting; empty on records written before it was stored.
+    #[serde(default)]
+    pub work_priority: String,
+    #[serde(default)]
+    pub low_disk_priority: bool,
+    /// Forced memory pressure level, or empty for Auto.
+    #[serde(default)]
+    pub memory_pressure_override: String,
     pub extended_diagnostics: bool,
     /// Power source and plan when the record was saved. Empty on records
     /// written before it was stored.
@@ -150,8 +166,8 @@ pub struct BenchmarkStage {
 }
 
 /// Summary rows the sync pipeline records with the whole action's elapsed
-/// time when it exits early. They enclose the other stages, so a stage chart
-/// must not draw them as peers.
+/// time when it exits early, including names retained for older saved records.
+/// They enclose the other stages, so a stage chart must not draw them as peers.
 pub const ACTION_TOTAL_STAGES: &[&str] = &[
     "download_skip_after_quick_verify",
     "prepare_download_total",
@@ -372,9 +388,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn action_total_stages_are_the_pipeline_early_exit_totals() {
+    fn current_action_total_stages_are_the_pipeline_early_exit_totals() {
         let pipeline = include_str!("../api/sync_pipeline/pipeline.rs");
         for name in ACTION_TOTAL_STAGES {
+            if matches!(*name, "quick_verify_only" | "remote_refresh_skip") {
+                continue;
+            }
             assert!(
                 pipeline.contains(&format!("\"{name}\"")),
                 "{name} is no longer a pipeline stage"

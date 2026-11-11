@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cross-platform launch"
+  short_description: "Trace and improve Foxy game launch behavior"
+  default_prompt: "Use $foxy-cross-platform-launch to trace or change Foxy launch behavior across platforms."

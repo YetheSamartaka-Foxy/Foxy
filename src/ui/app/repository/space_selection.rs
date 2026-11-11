@@ -109,6 +109,7 @@ impl Foxy {
             repo.repository_space_entry_address = entries_by_address.get(&normalized_repo).cloned();
             if repo.path.trim().is_empty() {
                 repo.path = space.shared_path.clone();
+                repo.update_timing = None;
             }
             moved += 1;
             changed = true;

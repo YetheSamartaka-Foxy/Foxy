@@ -42,6 +42,17 @@ that trade is the accepted one, in both directions:
   `advisory-regression` / `advisory-improvement` with a `memory-advisory`
   flag and never decides a verdict; the time and correctness metrics do.
 
+Processor time is the one resource Foxy deliberately leaves on the table:
+the CPU usage limit (default 90% of every detected thread, user-overridable,
+`conventions/CORE_CONVENTIONS.md` "Processor use") keeps headroom for a game
+or other programs. It binds only when Foxy would otherwise use more than the
+limit, so I/O-bound work is unaffected and CPU-bound work is at most
+`1 / limit` slower. Treat it like a bandwidth cap: a policy ceiling. A run
+whose `sync_action` shows `cpu_limit_paused_s` well above zero is limited by
+policy, and its ratio against a CPU-bound reference is read against
+`limit x capacity`; compare speed changes with the limit off
+(`cpu_usage_limit_percent: null` in the case settings) or at equal limits.
+
 Phase 5 candidate "memory attribution" is therefore low priority and
 pursued only for evidence of unbounded growth or a renderer or allocator
 cost that is paid without any speed in return.
@@ -488,17 +499,24 @@ correctness gates.
 3. **Comparisons**: the disputed 74% and the corrected arithmetic are in the
    measurements file.
 4. **Work**: launch/setup, renderer initialization, background eligibility and
-   probes, local validation, queued rechecks, UI presentation. An unknown or
-   timed-out repository is not a successful verdict; report answered, unknown,
-   changed and failed counts (`SOL op=startup_probe`).
+   probes, local validation, queued rechecks, UI presentation. A repository
+   with a saved pending update is verified with the server at startup when
+   auto quick scan or auto recheck is on, and that refresh is part of the
+   startup verdict. An unknown or timed-out repository is not a successful
+   remote verdict; it keeps the local quick scan and is probed again later in
+   the session. Report answered, unknown, changed, and pending counts
+   (`SOL op=startup_probe`). Retries emit `SOL op=startup_probe_retry` and are
+   not part of the launch verdict.
 5. **Timers**: `first_frame_s` and `dispatch_s` are offsets from launch;
    `eligibility_s` and `verdict_s` are durations from dispatch.
    `dependency_bound_s`, `join_s` and `dependency_coverage_percent` preserve
    those origins and expose any action time not explained by the two required
    completion branches.
 6. **Counters**: `SOL op=startup` (`repos`, `quick_scan_repos`, `eligible`,
-   `prevalidated`, `remote_changed`, `rechecks` and the four timers);
-   `Quick scan preflight timings:` per repository.
+   `prevalidated`, `remote_changed`, `pending_update`, `rechecks` and the four
+   timers); `SOL op=startup_probe` (`repos`, `answered`, `changed`, `unknown`,
+   `pending`); `SOL op=startup_probe_retry` (`repos`, `answered`, `changed`,
+   `pending`, `still_unknown`); `Quick scan preflight timings:` per repository.
 7. **Invariant**: startup work must not block first paint; a frame stall
    during probes is a regression regardless of ratios. One slow or offline
    host must not hold the others: the test kit's in-process origin takes a
@@ -578,7 +596,7 @@ appended keys; parsers treat them as `metric_kind` inferred from `light_src` and
 | `SOL op=storage_read_probe` (when an SSD sample is attempted) | `storage=ssd`, opaque `volume_id`, `method`, `measured_at_utc`, `timer_scope=sample_wall`, `outcome` (`measured`, `failed`, `cancelled`), `op_id`; `work_bytes` and `actual_bps` are present for a completed sample |
 | `SOL op=quick_scan` | `repo`, `addons_total`, `addons_hashed`, `cache_hits_shared`, `cache_hits_persistent`, `deep_scan_files`, `entries` (directory entries the fingerprint walks enumerated), `addons_per_s`, `outcome`, `op_id` (the owning sync action or quick-scan sweep) |
 | `SOL op=remote_refresh` (every remote metadata refresh) | `outcome` (`skipped_clean`, `graph_unchanged`, `rebuilt`, `failed`), `index_requests`, `manifest_requests`, `mods`, `files`, `parts`, `response_bytes`, `fetch_sum_s`, `parse_sum_s`, `persist_sum_s`, `fan_out_wall_s`, `timer_scope=action_wall`, `op_id` |
-| `SOL op=sync_action` (every pipeline exit) | `op_id`, `mode`, `outcome` (the `PIPELINE SUMMARY` outcome: `completed`, `early-exit-clean`, `early-exit-skip`, `cancelled`, `failed-*`, ...), `stages`, `timer_scope=action_wall`, one `stage_<name>_s` per stage |
+| `SOL op=sync_action` (every pipeline exit) | `op_id`, `mode`, `outcome` (the `PIPELINE SUMMARY` outcome: `completed`, `early-exit-clean`, `early-exit-skip`, `cancelled`, `failed-*`, ...), `stages`, `timer_scope=action_wall`, one `stage_<name>_s` per stage; with a CPU usage limit set, `cpu_limit_percent` and `cpu_limit_paused_s` (time work threads paused for the limit during the action) |
 | `SOL op=db_persist` (every sync action) | `op_id`, `mode`, `outcome` (`completed`, `early_exit`), `write_time_ms`, `rows_affected`, per-kind `insert_rows_affected`, `update_rows_affected`, `delete_rows_affected`, `other_rows_affected`, `permit_wait_ms`, `write_calls`, `write_committed`, `write_failed`, `lock_retries`, `backoff_ms`, `categories`, `write_gate`, `conn_opened`, `conn_reused`, `timer_scope=action_wall` |
 | `SOL op=db_purge` (every repository or addon purge) | `op_id`, `kind` (`repository`, `addon`), `outcome`, `steps` (timed statements), `rows_affected`, the same four per-kind affected-row counters, `txn_s`, `checkpoint_s`, `timer_scope=action_wall` |
 | `SOL op=space_switch` (every runtime game-space switch) | `op_id`, `outcome`, `drain_s` (queued saves landing in the old space), `reset_s`, `reload_s`, `repositories`, `timer_scope=action_wall` |
@@ -701,6 +719,19 @@ access model, and never classify every removable device as a 110 MB/s disk.
 8. Store outcome and oracle result with every row. Missing counters are
    unknown, never implicit zero; failed, partial, incompatible or unverified
    runs cannot become accepted baselines.
+9. For UI CPU attribution, hold the view, row/selection counts, motion, window
+   state and probe cadence fixed. Compare process and UI-thread CPU seconds,
+   frame count and per-frame cost. Repaint requests can coalesce; their count
+   alone does not establish extra frames. Label forced-FPS/settle workloads
+   separately from ordinary progress or idle use. Testkit `memory.cpu_s`
+   includes the settle tail; use `cpu_series` with an explicit action boundary
+   when excluding it, and report the sampling resolution.
+10. Compare memory at the same phase and terminal state, including whether an
+    update preview or recovery evidence is retained. A terminal sample is not
+    quiet-window retention. Use repeated cycles and a fixed settle window to
+    test saturation; compare the same renderer's empty-app state separately.
+    A bounded result on one fixture does not establish that all workloads are
+    leak-free or justify dropping verification/recovery state.
 
 Baseline acceptance keeps the clean-worktree guard. Old records remain
 readable and replayable. Each ledger row carries a derived schema version.
@@ -791,6 +822,14 @@ lists, filters, compares and exports them (ZIP with the record, `summary.txt`
 led by operation, SoL kind and best-measured comparison, the log slice and
 chart PNGs). When a benchmark feeds the measurements file, take its `SOL`
 rows from `benchmark.json`.
+
+Saved benchmark memory samples use `ProcessMemoryStats::baseline_bytes`, which
+prefers private working set on Windows and falls back to available counters.
+They are not interchangeable with testkit private-commit samples, and the saved
+record does not identify the fallback used. Saved `avg_cpu_percent` uses one
+logical processor as 100% and averages nonzero samples; prefer the bracketed
+user/kernel CPU seconds for work comparisons. The testkit machine-normalized
+CPU fields and the in-app transfer telemetry use a different percentage scale.
 
 ## Logging requirements for new code
 

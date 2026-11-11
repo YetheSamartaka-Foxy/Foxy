@@ -1,0 +1,4 @@
+interface:
+  display_name: "Foxy Storage Hash Profiling"
+  short_description: "Measure local hashing and storage work safely"
+  default_prompt: "Use $foxy-storage-hash-profiling to profile the local hash path with matching scope and correctness evidence."

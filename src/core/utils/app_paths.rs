@@ -155,6 +155,23 @@ pub fn foxy_patches_dir() -> PathBuf {
     std::env::temp_dir()
 }
 
+/// Delta-patch artifacts of the active game space. They are named by the space
+/// database's file ids, so each space folder (and each separate data root) gets
+/// its own directory; in a shared one a download in one space deleted or reused
+/// another space's prepared plans.
+pub fn foxy_patch_artifacts_dir() -> PathBuf {
+    let base = foxy_large_payload_dir();
+    let space_dir = crate::core::game::spaces::active_game_space_dir();
+    let key = crate::core::utils::content_hash::normalize_path(&space_dir.to_string_lossy());
+    let hash = blake3::hash(key.as_bytes()).to_hex();
+    let dir = base.join(format!("space-{}", &hash.as_str()[..16]));
+    if ensure_directory(&dir, "space patch artifacts") {
+        dir
+    } else {
+        base
+    }
+}
+
 pub fn foxy_large_payload_dir() -> PathBuf {
     if let Some(cache_dir) = dirs::cache_dir() {
         let patches_dir = cache_dir.join(APP_DIR_NAME).join("patches");

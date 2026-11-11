@@ -2,8 +2,8 @@ use std::f32::consts::{FRAC_PI_2, TAU};
 
 use egui::emath::lerp;
 use egui::{
-    Color32, Mesh, Painter, Pos2, Rect, Response, Sense, Shape, Stroke, Ui, Vec2, Widget,
-    WidgetInfo, WidgetType, pos2, vec2,
+    Color32, Mesh, Painter, Pos2, Rect, Response, Role, Sense, Shape, Stroke, Ui, Vec2, Widget,
+    WidgetInfo, pos2, vec2,
 };
 
 use super::{Motion, arc_points, bump, ease_in_out, fade, mix, point_at};
@@ -95,7 +95,7 @@ impl Widget for ActivityIcon {
             .size
             .unwrap_or_else(|| ui.style().spacing.interact_size.y);
         let (rect, response) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
-        response.widget_info(|| WidgetInfo::new(WidgetType::ProgressIndicator));
+        response.widget_info(|| WidgetInfo::new(Role::ProgressIndicator));
         self.paint_at(ui, rect);
         response
     }

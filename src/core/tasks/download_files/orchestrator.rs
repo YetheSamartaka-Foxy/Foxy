@@ -8,7 +8,7 @@ use crate::core::models::download_target_file::{
     attach_part_change_details, fetch_all_download_targets_with_mod_and_name,
     save_download_target_file, update_download_target_progress_batch,
 };
-use crate::core::utils::app_paths::foxy_large_payload_dir;
+use crate::core::utils::app_paths::{foxy_large_payload_dir, foxy_patch_artifacts_dir};
 use crate::core::utils::format::sanitize_log_path;
 use anyhow::anyhow;
 use futures::StreamExt;
@@ -27,12 +27,13 @@ use super::DownloadResourceLimits;
 use super::SharedRollbackSession;
 use super::bandwidth::AdaptiveBandwidthLimiter;
 use super::batching::{DownloadModCompletion, ModDownloadBatch, process_mod_batch};
-use super::failure::{DownloadStop, MissingRemoteFiles};
+use super::failure::{DownloadStop, MissingRemoteFiles, TargetsInUse, find_targets_in_use};
 use super::metrics::{
     DownloadMetrics, DownloadModOutcome, DownloadRunReport, DownloadSchedulerState,
 };
 use super::progress::{ModProgressEntry, download_progress_percent, start_progress_ticker};
 use super::range_scheduler::{RangePartMeta, range_part_meta_path};
+use super::target_binding::PinnedDownloadTargets;
 use super::transfer::cancellation_requested;
 use crate::core::tasks::calculate_hashes::{HashStorageClass, detect_storage_class_for_path};
 use crate::core::utils::disk_space::{
@@ -226,7 +227,45 @@ pub(crate) async fn apply_download_plan_bytes(
 
 /// Clean up stale temp files from previous delta patching crashes and validate
 /// that download target files on disk match the expected state in the database.
-async fn pre_download_cleanup(targets: &[DownloadTargetWithModName]) {
+/// Comparable form of a patch artifact path, as stored in a plan row or listed.
+fn patch_artifact_key(path: &Path) -> String {
+    crate::core::utils::content_hash::normalize_path(&path.to_string_lossy())
+}
+
+/// Artifact paths that saved patch plans of this space's database still use.
+async fn referenced_patch_artifacts(context: &FoxyContext) -> Option<HashSet<String>> {
+    match context
+        .db()
+        .query_all(
+            "SELECT patch_json_path, patch_blob_path FROM download_patch_file",
+            vec![],
+        )
+        .await
+    {
+        Ok(rows) => Some(
+            rows.iter()
+                .flat_map(|row| {
+                    ["patch_json_path", "patch_blob_path"]
+                        .into_iter()
+                        .filter_map(|column| row.get_opt_string(column).ok().flatten())
+                })
+                .map(|path| patch_artifact_key(Path::new(&path)))
+                .collect(),
+        ),
+        Err(err) => {
+            warn!(
+                "Could not read saved patch plans; leaving patch artifacts in place: {}",
+                err
+            );
+            None
+        }
+    }
+}
+
+async fn pre_download_cleanup(
+    targets: &[DownloadTargetWithModName],
+    referenced_patch_artifacts: Option<&HashSet<String>>,
+) {
     // Collect unique parent directories from download targets to scan for temp files
     let mut parent_dirs: HashSet<&Path> = HashSet::new();
     for target in targets {
@@ -305,12 +344,20 @@ async fn pre_download_cleanup(targets: &[DownloadTargetWithModName]) {
         }
     }
 
-    // Clean stale patch artifacts in the patches temp directory, but preserve
-    // artifacts for files that are about to be downloaded (they were just created
-    // by the delta patch planning step during manifest update).
+    // Clean stale patch artifacts, but preserve artifacts for files that are
+    // about to be downloaded and any a saved plan still references: another
+    // repository's prepared update would otherwise fall back to full downloads.
+    // The legacy shared folder is swept only for unreferenced files as well.
     let current_file_ids: HashSet<u64> = targets.iter().map(|t| t.download.file_id).collect();
-    let patches_dir = foxy_large_payload_dir();
-    if let Ok(mut entries) = tokio::fs::read_dir(&patches_dir).await {
+    let patch_dirs = if referenced_patch_artifacts.is_some() {
+        vec![foxy_patch_artifacts_dir(), foxy_large_payload_dir()]
+    } else {
+        Vec::new()
+    };
+    for patches_dir in patch_dirs {
+        let Ok(mut entries) = tokio::fs::read_dir(&patches_dir).await else {
+            continue;
+        };
         while let Ok(Some(entry)) = entries.next_entry().await {
             let file_name = entry.file_name();
             let name = file_name.to_string_lossy();
@@ -327,6 +374,11 @@ async fn pre_download_cleanup(targets: &[DownloadTargetWithModName]) {
                     continue;
                 }
                 let path = entry.path();
+                if referenced_patch_artifacts
+                    .is_some_and(|referenced| referenced.contains(&patch_artifact_key(&path)))
+                {
+                    continue;
+                }
                 match tokio::fs::remove_file(&path).await {
                     Ok(()) => {
                         info!("Cleaned stale patch artifact: {}", sanitize_log_path(&path));
@@ -645,6 +697,16 @@ fn format_disk_space_shortfall(shortfall: &DiskSpaceShortfall) -> String {
 ///
 /// Findings that are survivable (a path at the Windows `MAX_PATH` limit) are
 /// logged and do not block.
+async fn find_held_targets(targets: &[DownloadTargetWithModName]) -> Vec<PathBuf> {
+    let paths: Vec<PathBuf> = targets
+        .iter()
+        .map(|target| PathBuf::from(target.download.download_local_path.as_ref()))
+        .collect();
+    tokio::task::spawn_blocking(move || find_targets_in_use(&paths))
+        .await
+        .unwrap_or_default()
+}
+
 fn check_destination_filesystem(
     targets: &[DownloadTargetWithModName],
     metrics: &DownloadMetrics,
@@ -865,6 +927,7 @@ pub(crate) async fn download_files(
     allowed_file_ids: Option<HashSet<u64>>,
     operation_id: String,
     telemetry_epoch: Arc<std::sync::OnceLock<std::time::Instant>>,
+    pinned_targets: Option<Arc<PinnedDownloadTargets>>,
 ) -> anyhow::Result<DownloadRunReport> {
     info!("Download worker started: op={}", operation_id);
     let rate_limiter = Arc::new(AdaptiveBandwidthLimiter::from_mbps(
@@ -922,6 +985,25 @@ pub(crate) async fn download_files(
         }
     }
 
+    if let Some(pinned_targets) = pinned_targets {
+        let paths = targets
+            .iter()
+            .map(|target| PathBuf::from(target.download.download_local_path.as_ref()))
+            .collect::<Vec<_>>();
+        let pinned_paths = tokio::task::spawn_blocking(move || {
+            paths
+                .iter()
+                .map(|path| pinned_targets.resolve(path))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .await
+        .map_err(|_| anyhow!("download target binding stopped"))?
+        .map_err(anyhow::Error::msg)?;
+        for (target, path) in targets.iter_mut().zip(pinned_paths) {
+            target.download.download_local_path = Arc::from(path.to_string_lossy().into_owned());
+        }
+    }
+
     let download_stage_started = std::time::Instant::now();
 
     if targets.is_empty() {
@@ -932,7 +1014,8 @@ pub(crate) async fn download_files(
     // Startup cleanup: remove stale temp files and validate file state vs DB
     {
         let _phase = metrics.phase("pre_download_cleanup");
-        pre_download_cleanup(&targets).await;
+        let referenced = referenced_patch_artifacts(&context).await;
+        pre_download_cleanup(&targets, referenced.as_ref()).await;
     }
     {
         let _phase = metrics.phase("validate_targets");
@@ -1001,10 +1084,9 @@ pub(crate) async fn download_files(
             && let Err(net_err) = check_network_connectivity(&context, &first_url).await
         {
             error!("{}", net_err);
-            if let Some(tx) = progress_tx.as_ref() {
-                send_progress_event(tx, ProgressEvent::Failed(net_err.clone()), &operation_id);
-            }
-            return Err(anyhow!(net_err));
+            return Err(
+                anyhow::Error::new(super::failure::TransientDownloadFailure).context(net_err)
+            );
         }
     }
 
@@ -1033,16 +1115,24 @@ pub(crate) async fn download_files(
                     ProgressEvent::DiskSpaceShortfall(shortfall),
                     &operation_id,
                 );
-                send_progress_event(tx, ProgressEvent::Failed(space_err.clone()), &operation_id);
             }
             return Err(anyhow!(space_err));
         }
         if let Err(fs_err) = check_destination_filesystem(&targets, &metrics) {
             error!("{}", fs_err);
-            if let Some(tx) = progress_tx.as_ref() {
-                send_progress_event(tx, ProgressEvent::Failed(fs_err.clone()), &operation_id);
-            }
             return Err(anyhow!(fs_err));
+        }
+    }
+    {
+        let _phase = metrics.phase("targets_in_use_check");
+        let held = find_held_targets(&targets).await;
+        if !held.is_empty() {
+            let in_use = TargetsInUse::from_paths(&held);
+            error!(
+                "Download refused before transfer: {} target file(s) are held open by another process",
+                in_use.count
+            );
+            return Err(in_use.into());
         }
     }
     if cancellation_requested(&cancel_rx) {
@@ -1685,6 +1775,17 @@ pub(crate) async fn download_files(
 
     let report = metrics.build_report(&mod_outcomes);
 
+    if download_stop.has_target_in_use() {
+        let _ = cleanup_staged_temp_files(&all_download_refs).await;
+        let held_paths: Vec<PathBuf> = all_download_refs
+            .iter()
+            .map(|target| PathBuf::from(target.download_local_path.as_ref()))
+            .collect();
+        let held = tokio::task::spawn_blocking(move || find_targets_in_use(&held_paths))
+            .await
+            .unwrap_or_default();
+        return Err(TargetsInUse::from_paths(&held).into());
+    }
     if download_stop.has_missing_remote_file() {
         let _ = cleanup_staged_temp_files(&all_download_refs).await;
         return Err(MissingRemoteFiles.into());
@@ -1700,6 +1801,9 @@ pub(crate) async fn download_files(
     }
 
     if mods_failed > 0 {
+        if download_stop.only_transient_failures() {
+            return Err(super::failure::TransientDownloadFailure.into());
+        }
         return Err(anyhow!(
             "download failed for {} mod(s); {} mod(s) completed",
             mods_failed,

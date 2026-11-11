@@ -1,0 +1,4 @@
+interface:
+  display_name: "Foxy Benchmark Evidence Audit"
+  short_description: "Check performance claims against their evidence"
+  default_prompt: "Use $foxy-benchmark-evidence-audit to audit this benchmark claim and identify what its evidence supports."

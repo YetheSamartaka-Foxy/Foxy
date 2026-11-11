@@ -17,7 +17,7 @@ use std::time::Duration;
 ///   pool idle timeout prevents stale connections from accumulating.
 pub(crate) async fn create_web_client() -> Client {
     debug!("Creating HTTP client for core tasks");
-    let client = reqwest::Client::builder()
+    let client = crate::core::utils::proxy::client_builder()
         .tcp_nodelay(true)
         .connect_timeout(Duration::from_secs(15))
         .pool_idle_timeout(None)
@@ -34,7 +34,7 @@ pub(crate) async fn create_web_client() -> Client {
                 "Failed to build full HTTP client: {}, trying minimal fallback",
                 err
             );
-            reqwest::Client::builder()
+            crate::core::utils::proxy::client_builder()
                 .tcp_nodelay(true)
                 .connect_timeout(Duration::from_secs(15))
                 .build()

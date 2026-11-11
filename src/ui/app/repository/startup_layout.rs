@@ -113,7 +113,7 @@ impl Foxy {
     }
 
     fn repository_status_name(&self, repo: &Repository) -> &'static str {
-        match self.repo_state_for_address(&repo.address, &repo.path) {
+        match self.repo_state_for_repository(repo) {
             crate::ui::types::RepoState::Synced => "synced",
             crate::ui::types::RepoState::PendingUpdate => "pending-update",
             crate::ui::types::RepoState::Updating => "updating",

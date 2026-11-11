@@ -5,7 +5,7 @@ use std::path::Path;
 use std::time::UNIX_EPOCH;
 
 use crate::cli::GenerationMode;
-use crate::types::{DiscoveredFile, ProcessedMod, ResolvedMod};
+use crate::types::{Chunking, DiscoveredFile, ProcessedMod, ResolvedMod};
 
 const CACHE_FILE: &str = ".foxy-hash-cache.json";
 
@@ -118,6 +118,10 @@ pub fn fingerprint(
             .as_bytes(),
     );
     hasher.update(&[mode as u8, u8::from(prune)]);
+    // Fixed chunking adds nothing, so caches written before the setting existed stay valid.
+    if item.chunking == Chunking::Content {
+        hasher.update(b"chunking=content");
+    }
     for file in files {
         hasher.update(file.relative_path.as_bytes());
         hasher.update(&file.file_size.to_le_bytes());
@@ -148,6 +152,7 @@ mod tests {
             is_required: true,
             enabled: true,
             client_side: false,
+            chunking: crate::types::Chunking::Fixed,
         };
         let before = fingerprint(
             &item,
@@ -165,6 +170,18 @@ mod tests {
         )
         .unwrap();
         assert_ne!(before, after);
+        let content = ResolvedMod {
+            chunking: crate::types::Chunking::Content,
+            ..item
+        };
+        let chunked = fingerprint(
+            &content,
+            &crate::discover::discover_files(&source).unwrap(),
+            GenerationMode::Foxy,
+            false,
+        )
+        .unwrap();
+        assert_ne!(after, chunked);
     }
 
     #[test]
@@ -181,6 +198,7 @@ mod tests {
             is_required: true,
             enabled: true,
             client_side: false,
+            chunking: crate::types::Chunking::Fixed,
         };
         crate::hash::process_mods(
             std::slice::from_ref(&item),

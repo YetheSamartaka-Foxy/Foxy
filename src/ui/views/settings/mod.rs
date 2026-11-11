@@ -1,11 +1,14 @@
 mod app_backup;
 mod app_general;
 mod app_paths;
+mod app_proxy;
+mod app_resources;
 mod application;
 mod backup;
 mod benchmarks;
 mod customization;
 mod game_space;
+mod profile_backups;
 mod profile_manager;
 mod scheduling;
 mod tools;

@@ -4,7 +4,7 @@ use super::helpers::{
 use crate::core::addon_metadata::{
     extract_addon_display_name, regenerate_addon_display_names_for_ids,
 };
-use crate::core::db::{DbValue, FoxyDb};
+use crate::core::db::{DbValue, FoxyDb, params};
 use crate::core::models::context::FoxyContext;
 use crate::core::models::modification::{ADDON_COLUMNS, FoxyMod};
 use crate::core::models::recheck_level::RecheckLevel;
@@ -26,12 +26,31 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Semaphore;
 
+/// Checksum written by the addon upsert. An enabled addon's published value is
+/// stored only after its manifest is applied, so a crash leaves the previous
+/// checksum and the next refresh still fetches the addon.
+pub(crate) fn addon_remote_checksum_for_upsert(
+    previous: Option<&str>,
+    published: &str,
+    applies_manifest: bool,
+) -> String {
+    if !applies_manifest {
+        return published.to_string();
+    }
+    match previous.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(previous) if previous != published.trim() => previous.to_string(),
+        Some(previous) => previous.to_string(),
+        None => String::new(),
+    }
+}
+
 #[derive(Clone)]
 struct ParsedMod {
     mod_name: String,
     remote_path: String,
     local_path: String,
     enabled: bool,
+    required: bool,
     client_side: bool,
     checksum: String,
     data_order: i64,
@@ -234,6 +253,7 @@ pub(super) async fn process_mods_upsert(
                 remote_path,
                 local_path,
                 enabled,
+                required,
                 client_side,
                 checksum,
                 data_order: data_order as i64,
@@ -249,7 +269,7 @@ pub(super) async fn process_mods_upsert(
     let db = context.db();
 
     // Prefetch existing mods to preserve local checksums and reuse after upsert
-    let mut existing_mods: HashMap<String, FoxyMod> =
+    let existing_mods: HashMap<String, FoxyMod> =
         load_existing_mods_by_identity(&db, &parsed_mods).await;
 
     // Single batched upsert instead of per-row insert + fetch
@@ -275,7 +295,14 @@ pub(super) async fn process_mods_upsert(
                         .unwrap_or_default()
                         .into(),
                 );
-                values.push(m.checksum.clone().into());
+                values.push(
+                    addon_remote_checksum_for_upsert(
+                        existing.map(|entry| entry.remote_checksum.as_str()),
+                        &m.checksum,
+                        m.enabled,
+                    )
+                    .into(),
+                );
                 values.push(
                     existing
                         .map(|e| e.local_content_hash.clone())
@@ -318,21 +345,22 @@ pub(super) async fn process_mods_upsert(
         .iter()
         .any(|m| !existing_mods.contains_key(&m.key));
 
-    let mods_by_key: HashMap<String, FoxyMod> = if has_new_mods {
+    let mut mods_by_key: HashMap<String, FoxyMod> = if has_new_mods {
         load_existing_mods_by_identity(&db, &parsed_mods).await
     } else {
-        // Overlay fields updated by the upsert onto prefetched models
-        for m in &parsed_mods {
-            if let Some(existing) = existing_mods.get_mut(&m.key) {
-                existing.remote_checksum = m.checksum.clone();
-                existing.enabled = m.enabled;
-                existing.client_side = m.client_side;
-                existing.required = required;
-                existing.data_order = m.data_order;
-            }
-        }
         existing_mods
     };
+    // The database still holds the previous checksum. The in-memory model
+    // carries the published one so this refresh can tell that the addon changed.
+    for m in &parsed_mods {
+        if let Some(existing) = mods_by_key.get_mut(&m.key) {
+            existing.remote_checksum = m.checksum.clone();
+            existing.enabled = m.enabled;
+            existing.client_side = m.client_side;
+            existing.required = required;
+            existing.data_order = m.data_order;
+        }
+    }
 
     let mut all_mods: Vec<FoxyMod> = Vec::with_capacity(parsed_mods.len());
     for parsed in &parsed_mods {
@@ -452,9 +480,9 @@ pub(super) async fn process_mods_upsert(
                 })
             };
             let has_content_hash = !mod_entry.local_content_hash.trim().is_empty();
-            let force_mod_refresh = context_clone
-                .forced_mod_refreshes
-                .contains(&mod_entry.name.to_lowercase());
+            let mod_key = mod_entry.name.to_lowercase();
+            let force_mod_refresh = context_clone.forced_mod_refreshes.contains(&mod_key)
+                || context_clone.reapplied_mod_manifests.contains(&mod_key);
             let remote_graph_unchanged = previous_mod.as_ref().is_some_and(|previous| {
                 previous.remote_checksum == mod_entry.remote_checksum
                     && normalize_path_key(&previous.local_path)
@@ -464,6 +492,7 @@ pub(super) async fn process_mods_upsert(
                     && previous.required == mod_entry.required
             });
             if remote_graph_unchanged
+                && !force_mod_refresh
                 && graph_state.complete()
                 && has_content_hash
                 && context_clone.recheck_level < RecheckLevel::MOD
@@ -489,8 +518,17 @@ pub(super) async fn process_mods_upsert(
             }
 
             let mod_entry = Arc::new(mod_entry);
+            let remote_version_changed = previous_mod.as_ref().is_some_and(|previous| {
+                previous.remote_checksum != mod_entry.remote_checksum
+            });
             Some(
-                fetch_mod_file_manifest(context_clone, repository_parent_clone, mod_entry).await,
+                fetch_mod_file_manifest(
+                    context_clone,
+                    repository_parent_clone,
+                    mod_entry,
+                    remote_version_changed,
+                )
+                .await,
             )
         }))
     }
@@ -568,6 +606,156 @@ pub(super) async fn process_mods_upsert(
     (collected, resolved_mod_ids)
 }
 
+pub(super) async fn stage_manifests_for_publication(
+    context: Arc<FoxyContext>,
+    repository: &FoxyRepository,
+    data: &Value,
+    enabled_overrides: Option<&HashMap<String, bool>>,
+) -> Result<(), String> {
+    let mut parsed = Vec::new();
+    for (required, list_key) in [(true, "requiredMods"), (false, "optionalMods")] {
+        let Some(entries) = data.get(list_key).and_then(Value::as_array) else {
+            continue;
+        };
+        for (data_order, entry) in entries.iter().enumerate() {
+            let name = entry
+                .get("modName")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if name.is_empty() {
+                continue;
+            }
+            let enabled = enabled_overrides
+                .and_then(|overrides| overrides.get(&name.to_lowercase()).copied())
+                .unwrap_or_else(|| {
+                    entry
+                        .get("enabled")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true)
+                });
+            if !enabled {
+                continue;
+            }
+            let remote_path = join_path(&repository.remote_url, name);
+            let local_path = resolve_mod_local_path(
+                &repository.local_path,
+                context.repository_space_shared_path.as_deref(),
+                name,
+            );
+            parsed.push(ParsedMod {
+                mod_name: name.to_owned(),
+                remote_path: remote_path.clone(),
+                local_path: local_path.clone(),
+                enabled,
+                required,
+                client_side: entry
+                    .get("clientSide")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                checksum: entry
+                    .get("checkSum")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                data_order: data_order as i64,
+                key: format!("{remote_path}|{local_path}"),
+            });
+        }
+    }
+    if parsed.is_empty() {
+        return Ok(());
+    }
+    let db = context.db();
+    let existing = load_existing_mods_by_identity(&db, &parsed).await;
+    let repository_links = db
+        .query_all(
+            "SELECT addon_id FROM repository_addons WHERE repository_id = ?",
+            params![repository.id as i64],
+        )
+        .await
+        .map_err(|error| format!("Could not inspect existing addon graph: {error}"))?;
+    let linked_before: HashSet<i64> = repository_links
+        .iter()
+        .filter_map(|row| row.get_i64("addon_id").ok())
+        .collect();
+    let mod_ids: HashSet<i64> = parsed
+        .iter()
+        .filter_map(|entry| {
+            existing
+                .get(&entry.key)
+                .map(|mod_entry| mod_entry.id as i64)
+        })
+        .collect();
+    let graph_states = load_mod_remote_graph_states(&db, &mod_ids, &linked_before).await;
+
+    let mut manifests_to_stage = Vec::new();
+    for entry in parsed {
+        let previous = existing.get(&entry.key);
+        let forced = context
+            .forced_mod_refreshes
+            .contains(&entry.mod_name.to_lowercase())
+            || context
+                .reapplied_mod_manifests
+                .contains(&entry.mod_name.to_lowercase());
+        let graph_unchanged = previous.is_some_and(|previous| {
+            previous.remote_checksum == entry.checksum
+                && normalize_path_key(&previous.local_path) == normalize_path_key(&entry.local_path)
+                && previous.enabled == entry.enabled
+                && previous.client_side == entry.client_side
+                && previous.required == entry.required
+        });
+        let graph_complete = previous
+            .and_then(|previous| graph_states.get(&(previous.id as i64)))
+            .is_some_and(ModRemoteGraphState::complete);
+        let has_content_hash =
+            previous.is_some_and(|previous| !previous.local_content_hash.trim().is_empty());
+        let local_exists = crate::core::utils::profiling::fs::exists(entry.local_path.trim());
+        if graph_unchanged
+            && !forced
+            && graph_complete
+            && has_content_hash
+            && context.recheck_level < RecheckLevel::MOD
+            && local_exists
+        {
+            continue;
+        }
+        let remote_version_changed =
+            previous.is_some_and(|previous| previous.remote_checksum != entry.checksum);
+        let mut staged_mod = previous.cloned().unwrap_or_else(|| FoxyMod {
+            name: entry.mod_name.clone(),
+            remote_path: entry.remote_path.clone(),
+            local_path: entry.local_path.clone(),
+            ..Default::default()
+        });
+        staged_mod.remote_checksum = entry.checksum;
+        manifests_to_stage.push((staged_mod, remote_version_changed));
+    }
+    let fetch_semaphore = Arc::new(Semaphore::new(MANIFEST_FETCH_CONCURRENCY));
+    let mut fetches = FuturesUnordered::new();
+    for (staged_mod, remote_version_changed) in manifests_to_stage {
+        let context = context.clone();
+        let repository = repository.clone();
+        let fetch_semaphore = fetch_semaphore.clone();
+        fetches.push(async move {
+            let _permit = fetch_semaphore
+                .acquire_owned()
+                .await
+                .map_err(|_| "Manifest staging was interrupted".to_owned())?;
+            crate::core::tasks::remote_files::stage_mod_manifest_response(
+                context,
+                &repository,
+                &staged_mod,
+                remote_version_changed,
+            )
+            .await
+        });
+    }
+    while let Some(result) = fetches.next().await {
+        result?;
+    }
+    Ok(())
+}
+
 async fn apply_staged_mods(
     context: &Arc<FoxyContext>,
     staged: Vec<StagedModFiles>,
@@ -600,6 +788,23 @@ async fn apply_staged_mods(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn addon_upsert_keeps_the_previous_checksum_until_the_manifest_is_applied() {
+        assert_eq!(
+            addon_remote_checksum_for_upsert(Some("OLD"), "NEW", true),
+            "OLD"
+        );
+        assert_eq!(addon_remote_checksum_for_upsert(None, "NEW", true), "");
+        assert_eq!(
+            addon_remote_checksum_for_upsert(Some("SAME"), "SAME", true),
+            "SAME"
+        );
+        assert_eq!(
+            addon_remote_checksum_for_upsert(Some("OLD"), "NEW", false),
+            "NEW"
+        );
+    }
 
     #[test]
     fn mod_remote_graph_state_complete_requires_existing_link_files_and_parts() {

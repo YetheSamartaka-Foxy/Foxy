@@ -301,7 +301,12 @@ impl Foxy {
             self.render_compare_order_controls(ui);
             for (index, (id, name)) in selected.iter().enumerate() {
                 let letter = if index == 0 { "A" } else { "B" };
-                self.benchmark_letter_tag(ui, letter, palette::BENCHMARK_SERIES[index]);
+                let color = if index == 0 {
+                    palette::BENCHMARK_COMPARE_A
+                } else {
+                    palette::BENCHMARK_COMPARE_B
+                };
+                self.benchmark_letter_tag(ui, letter, color);
                 ui.scope(|ui| {
                     ui.set_max_width(SELECTION_CHIP_WIDTH.min(ui.available_width()));
                     ui.add(

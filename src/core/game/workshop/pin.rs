@@ -141,7 +141,33 @@ pub fn freeze_all(
     include_disabled: bool,
     refresh: bool,
 ) -> Result<FreezeAllSummary, String> {
-    let store = super::load_store(space_dir)?;
+    freeze_all_with(
+        space_dir,
+        app_id,
+        steam_directory,
+        include_disabled,
+        refresh,
+        stage_freeze,
+        super::save_store,
+    )
+}
+
+fn freeze_all_with(
+    space_dir: &Path,
+    app_id: u32,
+    steam_directory: &str,
+    include_disabled: bool,
+    refresh: bool,
+    mut stage: impl FnMut(
+        &Path,
+        &mut super::WorkshopFile,
+        u32,
+        &str,
+        &str,
+    ) -> Result<FreezeSummary, String>,
+    save: impl FnOnce(&Path, &super::WorkshopFile) -> Result<(), String>,
+) -> Result<FreezeAllSummary, String> {
+    let mut store = super::load_store(space_dir)?;
     let mut entries: Vec<SteamWorkshopItem> = store
         .entries
         .iter()
@@ -152,20 +178,91 @@ pub fn freeze_all(
     entries.sort_by_key(super::launch_order_key);
 
     let mut summary = FreezeAllSummary::default();
+    let mut staged = Vec::new();
     for entry in entries {
         if entry.frozen && !refresh {
             summary.skipped.push(entry.item_id.clone());
             continue;
         }
-        match super::freeze_item(space_dir, app_id, &entry.item_id, steam_directory) {
-            Ok(frozen) => summary.frozen.push(frozen),
+        match stage(
+            space_dir,
+            &mut store,
+            app_id,
+            &entry.item_id,
+            steam_directory,
+        ) {
+            Ok(frozen) => {
+                summary.frozen.push(frozen.clone());
+                staged.push(frozen.item_id);
+            }
             Err(error) => summary.failed.push(FreezeFailure {
                 item_id: entry.item_id.clone(),
                 error,
             }),
         }
     }
+    if refresh && !summary.failed.is_empty() {
+        summary.frozen.clear();
+        return Ok(summary);
+    }
+    if !staged.is_empty()
+        && let Err(error) = save(space_dir, &store)
+    {
+        summary.failed.push(FreezeFailure {
+            item_id: "store".to_string(),
+            error: format!("Failed to save refreshed pin selection: {error}"),
+        });
+        summary.frozen.clear();
+    }
     Ok(summary)
+}
+
+fn stage_freeze(
+    space_dir: &Path,
+    store: &mut super::WorkshopFile,
+    app_id: u32,
+    item_id: &str,
+    steam_directory: &str,
+) -> Result<FreezeSummary, String> {
+    let entry = store
+        .entry(app_id, item_id)
+        .cloned()
+        .ok_or_else(|| format!("Steam Workshop item {} is not managed", item_id))?;
+    let source = super::resolve_installed_path(&entry, steam_directory).ok_or_else(|| {
+        format!(
+            "Steam Workshop item {} is not installed under any known Steam library",
+            item_id
+        )
+    })?;
+    if !source.is_dir() {
+        return Err(format!(
+            "Steam Workshop item {} has no readable folder at {}",
+            item_id,
+            source.display()
+        ));
+    }
+    let backup_root = super::frozen_item_root(space_dir, item_id);
+    let record = crate::core::utils::addon_backup::backup_addon(&backup_root, &source)
+        .map_err(|err| format!("Failed to freeze Steam Workshop item {}: {}", item_id, err))?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let current = store
+        .entry_mut(app_id, item_id)
+        .ok_or_else(|| format!("Steam Workshop item {} is not managed", item_id))?;
+    current.frozen = true;
+    current.frozen_path = Some(record.path.display().to_string());
+    current.version = Some(record.content_hash.clone());
+    current.size_bytes = Some(record.size_bytes);
+    current.updated_at = now;
+    Ok(FreezeSummary {
+        item_id: item_id.to_string(),
+        source_path: source.display().to_string(),
+        frozen_path: record.path.display().to_string(),
+        content_hash: record.content_hash,
+        size_bytes: record.size_bytes,
+    })
 }
 
 #[cfg(test)]
@@ -250,5 +347,89 @@ mod tests {
 
         let refreshed = freeze_all(space.path(), app_id, &steam_dir, false, true).expect("refresh");
         assert_eq!(refreshed.frozen.len(), 2);
+    }
+
+    #[test]
+    fn failed_refresh_keeps_the_previous_pin_selection() {
+        let space = tempfile::tempdir().expect("space");
+        let steam = tempfile::tempdir().expect("steam");
+        let app_id = 1142710;
+        let steam_dir = steam.path().display().to_string();
+        for item_id in ["111", "222"] {
+            let dir = workshop_item_dir(steam.path(), app_id, item_id);
+            fs::write(dir.join("alpha.pack"), format!("old-{item_id}")).expect("pack");
+            super::super::upsert_item(space.path(), app_id, item_id, None, None, None, true)
+                .expect("upsert");
+        }
+        freeze_all(space.path(), app_id, &steam_dir, false, false).expect("initial freeze");
+        let before = super::super::load_store(space.path()).expect("store before");
+        let old = before.entry(app_id, "111").expect("old pin").clone();
+        let old_payload =
+            Path::new(old.frozen_path.as_deref().expect("frozen path")).join("alpha.pack");
+        assert_eq!(fs::read(&old_payload).expect("old payload"), b"old-111");
+
+        let changed = workshop_item_dir(steam.path(), app_id, "111");
+        fs::write(changed.join("alpha.pack"), b"new-111").expect("update");
+        fs::remove_dir_all(workshop_item_dir(steam.path(), app_id, "222")).expect("remove source");
+
+        let result = freeze_all(space.path(), app_id, &steam_dir, false, true).expect("refresh");
+        assert!(result.frozen.is_empty());
+        assert_eq!(result.failed.len(), 1);
+        let after = super::super::load_store(space.path()).expect("store after");
+        assert_eq!(
+            after.entry(app_id, "111").expect("pin").version,
+            old.version
+        );
+        assert_eq!(
+            after.entry(app_id, "111").expect("pin").frozen_path,
+            old.frozen_path
+        );
+        assert_eq!(
+            fs::read(old_payload).expect("old payload retained"),
+            b"old-111"
+        );
+    }
+
+    #[test]
+    fn failed_refresh_store_save_keeps_the_previous_pin_selection() {
+        let space = tempfile::tempdir().expect("space");
+        let steam = tempfile::tempdir().expect("steam");
+        let app_id = 1142710;
+        let source = workshop_item_dir(steam.path(), app_id, "111");
+        fs::write(source.join("alpha.pack"), b"old").expect("pack");
+        super::super::upsert_item(space.path(), app_id, "111", None, None, None, true)
+            .expect("upsert");
+        let steam_dir = steam.path().display().to_string();
+        freeze_all(space.path(), app_id, &steam_dir, false, false).expect("initial freeze");
+        let before = super::super::load_store(space.path()).expect("store before");
+        let old = before.entry(app_id, "111").expect("pin").clone();
+        fs::write(source.join("alpha.pack"), b"new").expect("update");
+
+        let result = freeze_all_with(
+            space.path(),
+            app_id,
+            &steam_dir,
+            false,
+            true,
+            stage_freeze,
+            |_, _| Err("injected final store failure".to_string()),
+        )
+        .expect("refresh result");
+
+        assert!(result.frozen.is_empty());
+        assert_eq!(result.failed.len(), 1);
+        let after = super::super::load_store(space.path()).expect("store after");
+        assert_eq!(
+            after.entry(app_id, "111").expect("pin").version,
+            old.version
+        );
+        assert_eq!(
+            after.entry(app_id, "111").expect("pin").frozen_path,
+            old.frozen_path
+        );
+        assert_eq!(
+            fs::read(Path::new(old.frozen_path.as_deref().unwrap()).join("alpha.pack")).unwrap(),
+            b"old"
+        );
     }
 }

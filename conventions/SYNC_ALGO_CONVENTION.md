@@ -1,6 +1,9 @@
 # Foxy Sync Algorithm Convention
 
 This document is the canonical convention for Foxy's repository update system.
+The settled [hash-check contracts](HASH_CHECK_CONTRACTS.md) define H1-H18 and
+are acceptance criteria for future gap reviews, which must investigate uncovered
+interactions rather than repeat those choices.
 Load it before changing quick scan, remote refresh, tree hashing, download
 queue construction, delta patching, full downloads, pending updates, or
 post-download finalization.
@@ -15,6 +18,15 @@ The goal is simple:
    user's update state.
 
 ## Source of Truth
+
+Bulk updates retain their exact pending repository instance through asynchronous
+linked-folder review; a deferred preview is not a failed start. Completion belongs
+to the captured active instance even if rows move. Write binding captures both the
+installation root and its repository-space shared root and still requires explicit
+approval for links used by selected managed addons below either root. Unrelated
+Workshop links and other repository members' addons do not join the write scope.
+Moving a queued member cannot retarget work
+already running under the previous roots.
 
 This convention owns the intended behavior for these current code areas:
 
@@ -59,6 +71,15 @@ For legacy Swifty-compatible tree checksums, parent checksums are MD5 rollups:
 FoxyMode may use BLAKE3 for part content checksums, but the tree relationship
 is still ordered and deterministic. The expected algorithm is chosen from the
 remote checksum length where needed.
+
+Part boundaries of files that are not PBO or PAC1 archives belong to the
+server. They are 5 MB fixed spans by default, or content-defined spans
+(`"chunking": "content"` in the server config, `foxy_formats::ContentChunker`)
+whose boundaries move with inserted or removed bytes. The client never
+re-derives these spans: it hashes local bytes at the published
+`remote_start`/`remote_length`, and delta planning matches moved content
+through the checksum-and-length copy pool. Never add client logic that assumes
+plain-file parts are 5 MB or that names them by size.
 
 ### Local Tree Checksum
 
@@ -165,6 +186,48 @@ Prepared queues require a complete enabled-addon file graph, including part rows
 for every nonempty file. Local checksums matching newly published checksums do
 not prove that the stored remote graph is unchanged or complete.
 
+A Download first fingerprints the verified files of enabled addons that the queue does
+not cover (`addons_with_changed_kept_files`). Any missing, resized or drifted file blocks
+prepared-queue reuse and adds its addon to the pending scope of the quick
+verify, so a file deleted or replaced after the check, which the watcher can
+miss, is repaired instead of ending as an up-to-date repository. A failed check
+counts as changed. Guarded by the `state-prepared-queue-local-delete-ssd` test
+kit lane (oracle) and `addons_whose_kept_files_are_missing_or_resized_are_reported`.
+
+Explicit pending-addon manifest refreshes bypass both repository skip gates and
+the selected addons' unchanged-graph gate, even when published checksums match.
+They also bypass conditional HTTP validators and the selected files' part-graph
+reuse gate. Integrity metadata reads bypass conditional HTTP validators too.
+Refresh those manifests before queue construction and unexpected-file cleanup;
+unselected clean addons and ordinary clean startup scans keep their fast paths.
+
+Repository index reads used by startup, refresh, and prepared-queue validation
+request HTTP revalidation with `Cache-Control: no-cache`. A changed stored addon
+version also forces an unconditional manifest read, even when that addon was
+absent from the earlier pending scope. A prepared queue requires fresh canonical
+repository and addon versions, matching addon membership, required/optional and
+client-side flags, ordering, checksum mode, and repository-space path layout.
+Both remote-refresh skip gates also compare those addon properties so a rejected
+queue converges after the rebuild. Missing addon versions or an unavailable FoxyMode
+index cannot authorize reuse. Local cleanliness alone cannot end a download
+preparation before the remote gate.
+
+After refreshing remote metadata, union the cached pending-addon hint with the
+current instance's enabled addon tree mismatches before scoped bootstrap, local
+verification, or queue construction. A server update can add pending addons
+outside the startup payload; that payload must never hide the new work. A
+repository whose part rows are staged as a fresh load (after a wipe, or a first
+check over existing files) has every addon pending and nothing for the scope to
+narrow, so its hash bootstrap still takes the whole-tree pass; the union keeps
+scoping verification and the queue. Guarded by
+`a_fresh_part_load_bootstraps_the_whole_tree_even_with_a_pending_scope`.
+
+Before applying an addon manifest, validate nonnegative file/part spans and
+contiguous ordered part coverage ending at the declared file length. Empty
+entries remain valid, and whole-file manifests may omit parts. Retry invalid
+metadata once without HTTP validators, including after a database wipe; reject
+an invalid fresh response before file-row upserts or unexpected-file cleanup.
+
 HTTP 404 and 410 during a file transfer stop the run without retrying the same
 URL or reporting user cancellation. After all transfer and hash workers settle
 and rollback finishes, invalidate the instance's enabled-addon remote checksums,
@@ -177,9 +240,9 @@ Content rollups do not include filenames, so unchanged published checksums
 cannot veto this recovery. A failed addon manifest fetch keeps its remote
 checksum empty, and an incomplete refresh must fail before downloading.
 
-1. `repo.json.checksum == repositories.local_checksum` means the local
-   repository tree is fully verified against the current remote repository.
-   Remote metadata fetches beyond `repo.json` must be skipped unless forced.
+1. `repo.json.checksum == repositories.local_checksum` describes the previously
+   verified local tree. Remote metadata can retain its fast path when the addon
+   index and graph agree, but manual Refresh still checks current local drift.
 2. `repo.json.checksum != repositories.local_checksum` means more work is
    needed, but it does not automatically mean full remote metadata is needed.
 3. If `repo.json.checksum == repositories.remote_checksum` and local tree differs,
@@ -221,8 +284,10 @@ checksum empty, and an incomplete refresh must fail before downloading.
 13. Patch-first execution is an optimization. Full-file download is always the
     correctness fallback.
 14. Pending update cache is derived state. It may speed UI startup, but it must
-    be invalidated by clean quick scan, clean tree verification, successful
-    download, repository removal, or local path changes.
+    be invalidated or recomputed by the startup check, a clean quick scan, clean
+    tree verification, a successful download, repository removal, or local path
+    changes. A saved pending update is provisional until that startup check
+    finishes.
 
 ### Addon Enabled State
 
@@ -234,6 +299,16 @@ remote manifest last published.
 Every sync run persists the caller's selection into `addons.enabled` before the
 pipeline reads it. A remote metadata rebuild is skipped whenever the remote
 checksum is unchanged, so the rebuild alone is not a sufficient write path.
+
+The background quick-scan worker does not persist a selection; it reads
+`addons.enabled` as the last sync left it. So the UI compares each instance's
+enabled-addon fingerprint (`Foxy::addon_selection_fingerprint`, after the
+selected profile) with the one the database last stored. A sync start records
+the fingerprint. A change found when `repositories.json` is saved queues a
+`QuickCheckOnly` sync for that instance, which persists the new selection and
+refreshes the status. It starts only when the sync slot and every queue that
+needs it are idle (`addon_selection_check_blocked`), and only for an instance
+whose status is already known.
 
 ## Layered Decision Model
 
@@ -261,7 +336,11 @@ Rules:
    keep enough addon/repository rows to recompute ordered parent checksums.
 4. Scoped content-hash refresh may persist file/addon content hashes for the
    scoped entities, but it must not rewrite repository `local_content_hash` from
-   a partial tree.
+   a partial tree. After an addon-scoped hash bootstrap, the pipeline reloads a
+   file-scoped tree with full addon headers instead, so the refresh rolls the
+   repository baseline up from the refreshed addons and the stored hashes of
+   the rest. Skipping the rollup leaves the repository baseline empty, and the
+   next quick scan re-samples every file to rebuild it.
 5. Full tree loading is acceptable only for full integrity modes, first-time
    full bootstrap, or explicit fallback when scoped mapping is impossible.
 
@@ -490,7 +569,8 @@ Quick scan outputs:
 - clean result: no pending updates, clear pending cache
 - suspicious addons/files: pending update summary, optional targeted tree verify
 - missing addon folder: pending full addon update
-- unexpected files: pending cleanup before download
+- unexpected files alone: preserve them, normalize the complete folder baseline,
+  and report no update when managed files match
 
 Quick scan must use the cheapest available cache:
 
@@ -571,17 +651,23 @@ For each configured repository:
 
 1. Normalize repository URL with trailing slash.
 2. Restore cached pending update payload if present, but treat it as provisional.
+   When auto quick scan or auto recheck is on for that repository, startup
+   confirms the saved update with the server even if `repo.json` is unchanged,
+   including a repository the quick scan cannot check. Both settings off leaves
+   the repository alone.
 3. If auto remote recheck is enabled:
    - run the remote repository gate
    - if `repo_json.checksum == local_checksum`, finish clean for remote state
    - if remote changed or DB incomplete, enqueue remote refresh
 4. If auto quick scan is enabled:
    - first run a cheap remote checksum probe against `repo.json`
-   - if remote checksum differs from local checksum, do not quick scan as the
-     final answer; enqueue remote refresh or mark remote update pending
-   - if remote checksum matches local checksum and baselines are ready, run quick
-     local content check
-   - if baselines are not ready, skip quick scan and leave a clear reason in logs
+   - if remote checksum differs from the stored remote checksum, or the
+     repository has a saved pending update, do not quick scan as the final
+     answer; enqueue a remote refresh
+   - if remote checksum matches, there is no saved pending update, and baselines
+     are ready, run quick local content check
+   - if baselines are not ready and there is no saved pending update, skip quick
+     scan and leave a clear reason in logs
 5. Persist only final results:
    - clean quick scan clears pending cache
    - dirty quick scan saves pending cache
@@ -604,7 +690,16 @@ against local state all mean the same thing - nothing was learned - and
 collapsing them into "unchanged" is how a real remote update goes unnoticed
 until the user rechecks by hand. An unknown repository still runs its local quick
 scan, but it is never *prevalidated*: prevalidation is the claim "nothing to
-check here", and an unanswered probe does not earn it.
+check here", and an unanswered probe does not earn it. Unknown keeps that local
+verdict at launch. The same repositories are probed again in the session, 60
+seconds after the startup checks settle and then every 15 minutes while they
+stay unknown, off the paint path and never beside a sync, download, quick scan,
+or queued startup recheck. A later answer uses the same routing as launch:
+changed, or unchanged with a saved pending update, queues a remote refresh;
+unchanged without one leaves the launch verdict in place. A repository leaves
+the retry set once it answers, the user rechecks or updates it, it is removed,
+or the game space changes. `SOL op=startup_probe_retry` records those retries
+separately from `SOL op=startup_probe`.
 
 Compare **remote against the last remote**, not remote against local. The
 `repositories.remote_checksum` column holds the value `repo.json` published the
@@ -668,9 +763,9 @@ Algorithm:
 
 1. Fetch `repo.json`.
 2. If checksum equals `repositories.local_checksum` and DB state is complete:
-   - emit clean state
+   - run quick local checking before deciding current local state
    - update cheap metadata fields if needed
-   - stop
+   - persist the resulting pending state, or report incomplete verification
 3. If checksum equals `repositories.remote_checksum` but differs from
    `local_checksum`:
    - remote did not change
@@ -701,8 +796,8 @@ Algorithm:
    suspicious files when the mode requests automatic verification.
 5. Persist pending update state.
 
-If remote metadata is not ready, quick check exits with no authoritative result
-and logs why.
+If remote metadata is not ready, quick check fails incomplete, preserves pending
+state and offers Refresh. It never fetches metadata to repair itself.
 
 ## Download Algorithm
 
@@ -725,7 +820,8 @@ Algorithm:
      when it needs tree state
    - if scoped check is clean but cached targets exist, fall back to full quick
      verify before trusting the clean result
-   - if final quick verify is clean, clear stale targets and early exit
+   - a clean local result still continues to the remote gate before clearing
+     stale targets or reporting the update complete
 3. Run remote repository gate:
    - if remote checksum equals local checksum, early exit clean
    - if remote checksum equals stored remote checksum but local differs, skip
@@ -737,17 +833,20 @@ Algorithm:
    - tree-verify suspicious files when required
    - reuse scoped tree state from bootstrap/hash repair where possible
    - persist pending updates
-5. Clean unexpected local files only for addons that are already pending update.
-   Then rerun quick verify for those addons.
+5. List unexpected local files only for pending addons, preserving any path
+   another known sibling manifest owns. Plan preparation does not delete files.
 6. Build download queue from tree mismatches:
    - file target for each mismatched file
    - part target rows for diagnostics and future partial support
    - patch plan rows for files where delta planning is valid and beneficial
 7. If no pending updates remain, clear queue and early exit.
-8. If pending updates exist but no download targets were built, fail loudly. Do
-   not silently mark clean.
+8. If pending managed-file updates exist but neither download targets nor
+   approved cleanup work exists, fail loudly. A zero-transfer managed-file
+   repair remains valid; extras alone never create pending work.
 9. Optionally back up affected addons before modifying files.
-10. Execute patch-first/full-download worker.
+10. After update approval, validate enrolled linked targets, claim shared write
+    ownership and open the rollback session. Remove planned extras through that
+    session, then execute patch-first/full-download workers.
 11. Hash final downloaded files incrementally using a tree loaded only when the
     first hash batch needs it.
 12. Roll up affected addon and repository checksums, reusing the loaded tree
@@ -761,8 +860,8 @@ Algorithm:
 
 Early exits:
 
-- Clean scoped and full quick verify before remote work: stop.
-- Remote gate clean before metadata fetch: stop.
+- Remote gate clean before metadata fetch: retain the metadata fast path and
+  finish local drift verification before reporting completion.
 - Post-remote quick verify clean: stop.
 - Empty download queue with no pending updates: stop.
 
@@ -791,10 +890,26 @@ Failure exits:
   session records its state as a header manifest plus an append-only
   `journal.jsonl` (one line per registered, promoted, restored or committed
   entry); crash recovery replays the journal and ignores a torn last line.
+  Once a managed update claims its targets, it owns them until rollback or
+  commit settles. If another process edits a promoted target before rollback,
+  restore the pre-update version anyway; a restore error remains unresolved
+  recovery and cannot be reported as successful cancellation or readiness.
   Completed mods are also rolled back. A force-redownload retry may refetch
   their full payload so cancellation does not leave a partly updated repository.
 - Integrity recheck: the hash pass takes the cancel receiver and exits with
   `outcome=cancelled` between batches.
+- Hash bootstrap: the whole-tree, addon-scoped and targeted passes take the
+  cancel receiver too. A cancel stops hashing between batches, waits for a
+  running background part insert so the staged remote rows persist, and saves
+  completed stable file results after identity/manifest validation. It never
+  accepts partial addon or repository rollups as clean.
+
+## Accepted queue, pause, and retry contracts
+
+- A queued manual bulk run freezes the original target set and each target's normalized `(remote_url, local_path)` identity. Skip and report a queued target whose row was removed or now names a different instance. Membership changes after enqueue do not add targets. Resolve the current profile selection only when the unchanged instance starts.
+- A paused repository instance is remembered per game space across close and restart. On explicit Resume, rebuild or validate current remote metadata and selected-addon coverage before transferring. Startup checks, scheduled jobs, manual queues, and bulk runs must honor the pause and leave the target pending.
+- An update approval authorizes the latest publication for the selected addons. If the server changes the plan or byte estimate before transfer, refresh and rebuild the queue under the same selected scope. A stale plan is never reused; do not stop only because the estimate grew.
+- After a retryable terminal failure, retry at most according to the app-global `retry_failed_downloads` option (default enabled) while the app stays open. Revalidate the plan before each attempt and show a countdown and Stop action. Exhaustion leaves pending work and a failure outcome. Explicit user cancellation does not enter this retry path.
 
 ## Remote Metadata Refresh Algorithm
 
@@ -808,7 +923,10 @@ Repository stage:
 
 1. Fetch `repo.json`.
 2. Normalize URL and local path.
-3. Upsert repository remote checksum and metadata.
+3. Upsert repository metadata. Keep the previous `remote_checksum`, or an empty
+   value for a new instance. The fetched checksum is stored only after the
+   addon data behind it has been applied, so a stored repository checksum means
+   that refresh finished.
 4. Check graph completeness without loading the entire tree.
 5. If remote checksum equals local checksum and graph is complete, early exit.
 6. If graph is incomplete or remote checksum changed, continue.
@@ -818,7 +936,10 @@ Addon stage:
 1. Fetch addon list from `repo.json` or `foxy_addons.json` depending on FoxyMode.
 2. Diff the remote addon list against stored DB addon/link state before
    fetching any per-addon file manifests.
-3. Upsert addons by stable remote/local identity.
+3. Upsert addons by stable remote/local identity. An enabled addon whose
+   published checksum changed keeps its previous `remote_checksum` until that
+   addon's manifest is applied and its links are reconciled. A disabled addon
+   has no manifest to apply, so its published checksum is stored in the upsert.
 4. Preserve addon `local_checksum` and `local_content_hash` only when local path
    identity is unchanged.
 5. Link addons to repository.
@@ -830,10 +951,17 @@ Addon stage:
    - addon content baseline exists
    - addon is not explicitly forced by recheck level
    - recheck level does not require addon refresh
-8. In download mode, pending local mismatches may scope local verification and
-   queue rebuilds to pending addon names, but they must not force a network
-   manifest fetch when that addon's remote checksum and stored graph are
-   unchanged.
+8. In download preparation, pending addon names force a fresh manifest fetch
+   even when their published checksums match the stored graph. A changed stored
+   addon version also bypasses cached HTTP validators, including for addons
+   outside the earlier pending scope. Other unchanged addons keep their graph.
+   A remote recheck without a download plan (Recheck all, `repo sync --mode
+   remote-refresh`) applies the manifests of the saved pending update's addons
+   again (`reapplied_mod_manifests`), so stored metadata that disagrees with
+   the server is rebuilt instead of keeping the update pending through every
+   recheck. Unlike a forced refresh it revalidates the cached manifest and
+   keeps each unchanged file's part graph, so a recheck after a wipe, whose
+   saved update lists every addon, fetches and hashes nothing extra.
 
 File stage:
 
@@ -850,7 +978,11 @@ File stage:
 2. Upsert file rows.
 3. Preserve file local tree and content hashes only when local path identity is
    unchanged.
-4. Reconcile `addon_files` links and prune stale links when safe.
+4. Reconcile `addon_files` links and prune stale links when safe. Skip the
+   prune only when the repository instance linked no file before the rebuild.
+   An empty `subfiles` does not prove that, because links outlive lost part
+   rows, and an unpruned link keeps a file the server no longer lists missing,
+   so its addon stays pending.
 5. Diff the fetched file list before part processing. Mark changed only when
    file checksum, length, path identity, link state, or DB completeness changed.
 6. Skip part metadata processing for a file when:
@@ -898,6 +1030,11 @@ Deferred part rows:
   one part row. The rows stay in the deferred buffer, marked as committed, so
   the tree still takes them from memory and every flush skips them. Other
   checks hash long enough to hide the insert and keep the single flush.
+- A hash pass that persists fresh staged rows, whole-tree or file-scoped,
+  starts their insert in the background before hashing (skipping streamed
+  rows) and afterwards writes local part state only for files whose parts do
+  not derive clean from the file checksum. Writing every row again with its
+  local state doubled the insert after a streamed rebuild.
 - Both insert through `FoxyDb::bulk_insert_transaction`: its own retired
   connection with a 256 MiB page cache (the flush's whole speed-up: a 433k-row
   transaction spills at the pooled 16 MiB) and foreign keys off, so the caller
@@ -1018,7 +1155,13 @@ Full download is the correctness fallback for every file.
    `max_active_range_requests / min_ranges_per_file` so the range budget is
    not oversubscribed. Oversubscription makes every file progress slowly and
    finish together, which is the worst possible shape for the tail.
-6. Validate `Content-Range` for ranged responses.
+6. Retry transient request/header failures and HTTP 408/429/5xx in place with
+   bounded backoff, including reconnects, before failing a file. Bound response
+   header waits and make header/body waits and retry delays cancellable.
+   Keep HTTP 404/410 terminal so the next update refreshes obsolete manifests.
+   Validate `Content-Range` on every initial and resumed range response, including
+   sequential resumes, and reject oversized bodies before writing outside the
+   requested span. Retry premature EOF from the received offset.
 7. Validate final byte count (resumed chunks count toward it).
 8. Remove the sidecar, then rename the live file aside to a sibling `*.foxy.bak`
    (same volume, no byte copy) and promote `*.foxy.part` onto the final path.
@@ -1051,6 +1194,12 @@ After patch or full download succeeds:
 5. Roll up repository checksum from ordered addons.
 6. Reuse the incremental hash tree for repository rollup, final content refresh,
    and final diff when it is already loaded.
+   Require every downloaded file to remain linked to the selected repository
+   instance and have matching nonempty local/remote checksums before refreshing
+   baselines, propagating state, committing rollback, or emitting success. On
+   verification or finalization failure, restore touched files, forget reverted
+   local hashes, invalidate remote metadata and manifest validators (even if
+   rollback fails), and report failure.
 7. If all affected tree checksums match remote, refresh content hashes for those
    files/addons/repository. Repository content hash may be refreshed only from a
    full tree or equivalent complete addon content state.
@@ -1072,7 +1221,9 @@ Before download:
 - remove stale `.foxy.tmp`, `.foxy.part`, `.foxy.part.meta`, and `.foxy.bak`
   files only in target directories for the current work scope; sidecars and
   part files of queued targets are kept for resume
-- remove stale patch artifacts not referenced by current scoped download targets
+- remove patch artifacts in the game space's own patch folder that no
+  `download_patch_file` row references; skip the sweep when the rows cannot be
+  read
 - validate persisted download progress against actual temp file sizes (and
   resume sidecars for ranged parts) only for files in the current queue
 - perform a session-level connectivity check
@@ -1131,16 +1282,14 @@ Keep or refresh pending cache when:
 - no remote metadata fetch
 - uses quick content layer first
 - targeted tree verification only when requested by mode
-- updates pending cache from final result
-- the one escalation (file rows without part rows) turns it into a
-  `RemoteRefreshOnly` that also prepares the download plan, so the following
-  `Download` reuses the queue instead of re-running the prepare pipeline; a
-  plain quick check never builds a plan
+- updates pending cache only from a complete result
+- missing remote metadata leaves the check incomplete, preserves pending state
+  and asks for Refresh; no network escalation or plan preparation is allowed
 
 ### `RemoteRefreshOnly`
 
 - fetches `repo.json`
-- early exits when remote repo checksum equals local repo checksum
+- performs a quick local drift check even when the remote checksum matches
 - fetches deeper remote metadata only when repo checksum or DB completeness
   requires it
 - does not download
@@ -1177,12 +1326,22 @@ Keep or refresh pending cache when:
   re-probes `repo.json` and requires that invalidated enabled files are already
   queued. Files outside the queue widen the pending-addon scope only to their
   owning addons before rebuilding the plan.
+- the download queue tables (`download_target_file*`, `download_patch_*`) are
+  per database, not per repository, so a game space holds one prepared plan at
+  a time: every sync that does not reuse its own prepared queue truncates them
+  (`truncate_all_download_tables`), including a check of another repository.
+  After a startup check of several repositories only the last one prepared
+  keeps its plan; updating any other one rebuilds its plan first. This is
+  intended. The pending-update record survives, so the repository still shows
+  its update, and the rebuild costs about one check, not a download.
 
 ### `RecheckIntegrity`
 
 - explicit expensive mode
-- fetches full remote metadata
-- recalculates local tree hashes
+- requests fresh metadata, then automatically falls back to accepted cached
+  metadata if the server is unavailable, clearly labeling that historical basis
+- reads every selected file and recalculates local tree hashes; incomplete
+  cached metadata or unresolved read/save errors cannot become a full verdict
 - refreshes content hashes only for clean tree state
 - persists final pending cache
 
@@ -1408,6 +1567,40 @@ The logs should make it possible to answer:
 
 ## Diagnosing False Redownloads
 
+Extra unmanifested files alone do not require an update when managed files match.
+Older builds could save a zero-file, zero-byte cleanup-only notice. Startup must
+hold that ambiguous hint as Unknown and run an ordinary local-only check rather
+than restore an Update prompt or infer a clean verdict. Missing addons with no
+known files have the same legacy shape, so a complete new check stamps cached
+payloads with `update_basis=managed_files`; do not reinterpret those again. Real
+per-file zero-byte repairs remain pending. Incomplete checks preserve durable
+work and unconfirmed selection state. Resume saved unchecked selections after
+restart, and locally revalidate historical pending preset evidence when its
+payload is absent. The diagnostic ZIP includes the cached
+last prepared cleanup plan as `cleanup_plan.json`; a count alone cannot prove
+that the candidates are managed files, internal artifacts, or genuine extras.
+`Cleanup candidate evidence` records the normalized-path ownership decision,
+known-path count, operation id and at most eight addon-relative samples. Keep
+absolute roots out of these samples and preserve the full list only in the
+explicit diagnostic export.
+Remote refresh and integrity checks preserve candidates until cleanup is approved.
+
+For versioned `.bisign` and `.bikey` candidates, compare the sampled names with
+the accepted manifest before diagnosing ownership failure. A current published
+signature can verify successfully while an older, differently named signature
+remains unowned beside it. Preserve those extras without marking the addon
+outdated. After complete managed-file verification, save the actual folder
+fingerprint including extras, so later checks stay clean without file reads or
+tree hashing. Installing a new Foxy build preserves these payload files.
+
+The UI's `Starting repository sync` line precedes linked-target inspection and
+does not prove an update worker started. Correlate it with the core `Starting
+sync` record and terminal action. Repeated Update clicks without a Download
+action can be waiting for `Review update targets`. That review can display a
+Workshop destination when a repository link resolves there; ordinary Workshop
+discovery alone does not make repository files shared. Confirm the displayed
+target before attributing cleanup candidates to Steam or approving shared writes.
+
 When a user reports "Foxy wants to redownload addons that are already present," it is one of these distinct causes - identify which before changing code:
 
 - **Partial install in a shared folder.** Missing-file and missing-addon ratios alone do not prove a wrong local path. For a partially present repository, the preflight requires saved local checksum or content-hash evidence on an unresolved file or an absent addon folder before pausing on the ratios. Present shared addons and a repository rollup can acquire local state through sibling propagation while the missing addons have never been installed. Missing-root and confirmed layout-mismatch checks remain independent. Guarded by `mostly_missing_shared_install_is_allowed_despite_present_local_state` and the `mostly_missing_install_with_prior_missing_*` tests.
@@ -1439,9 +1632,14 @@ that guards it.
    state across that re-key (Part stage step 2), including the state a clean
    file only has implicitly (`files.local_checksum == files.remote_checksum`).
    Losing it does not fail loudly: the next update silently becomes a full
-   download of every changed file. Guarded by
+   download of every changed file. Carry matches by storage path, then by
+   display path, then by checksum and length for anything left: plain-file
+   parts are named after their end offset, so content that moved inside a
+   file keeps only its checksum. Guarded by
    `manifest_update_of_a_clean_file_keeps_a_delta_plan_possible` and the
-   `carried_state_*` tests in `remote_file_parts/batch.rs`.
+   `carried_state_*` tests in `remote_file_parts/batch.rs`
+   (`carried_state_follows_content_when_plain_file_parts_shift` for moved
+   content).
 2. **Damaged part state must recover once, and only once.** A tree hash gives
    every part that fits inside the local file a local checksum (read at the
    entry's local span, else at the remote one); only parts past the end of
@@ -1490,6 +1688,29 @@ that guards it.
    `patch_files` and the per-file rows are what the user decides on. A change
    that leaves downloads correct but inflates the estimate (for example to
    the full size because a plan was skipped) is a regression.
+9. **Cleanup ownership follows normalized file paths.** Quick scans,
+   content-baseline refreshes and approved cleanup must use the same set of
+   files linked to known repository addons. An addon root string is not an
+   ownership key: Windows case/slash aliases and nested addon roots can refer
+   to files inside the folder being scanned. Protect those managed files,
+   including another addon in the same repository. Extras remain diagnostic
+   evidence and do not hide managed-file mismatches. Load ownership once per scan
+   when cleanup detection is needed; clean folder-cache hits need no ownership
+   query. An ownership read or directory traversal failure leaves the check
+   incomplete and cannot replace a folder baseline. A saved false cleanup-only
+   update must clear through an ordinary complete check, repair
+   its folder baseline, and leave the next check clean without tree hashing,
+   downloads or a database wipe. Guarded by the `shared_cleanup` API tests.
+10. **Target review follows selected addon ownership.** Inspect links along and
+    below selected managed addon roots, including ancestor links, without walking
+    unrelated folders in a repository-space shared root. Preview captures the
+    selection; dispatch resolves the exact instance's fresh manifest paths and
+    checks the same link/target identities. Accepted empty publications do not
+    authorize writes. Keep installation/shared-root storage identities separate
+    from addon write permission. Pinned resolution must reject excluded siblings,
+    even when their links resolve within an owned root, and validate only the
+    scoped link set. Selected links still require explicit approval and fail on
+    retargeting; broad retained-file maintenance keeps its separate review scope.
 
 Diagnostic lines to grep first in a user log for these cases:
 `Carried local part state across manifest update`, `Delta plan skipped`,
@@ -1518,8 +1739,8 @@ The current code already contains pieces of this design:
 
 - `models::model_tree::Tree` provides full, addon-scoped, and file-scoped load
   paths. Targeted update paths should use the scoped variants.
-- `quick_scan::content_hash` computes file and addon content hashes and avoids
-  refreshing content hashes for tree mismatches.
+- `quick_scan::content_hash` computes file and addon content hashes for stable
+  tree-hashed bytes, including files whose tree differs from remote.
 - `quick_scan::diff_addon_hash` uses shared and persistent addon folder hash
   caches.
 - `quick_scan::diff_file_resolution` escalates addon folder mismatches to
@@ -1543,7 +1764,8 @@ Known risk areas to keep aligned with this document:
 - Download mode must avoid `force_refresh` causing unnecessary full remote graph
   rebuilds when only local drift exists.
 - Quick scan must remain folder/file based and must not become part based.
-- Content baseline refresh must remain gated by clean tree state.
+- Content baseline refresh must describe the same stable bytes as its tree
+  evidence; an outdated but unchanged file keeps its fingerprint baseline.
 - Queue rebuild must be scoped to final pending addons/files, not stale target
   rows from previous runs.
 - Scoped content-hash refresh must not update repository content hash unless the

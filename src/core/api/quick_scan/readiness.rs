@@ -1,7 +1,6 @@
 use super::super::*;
 #[cfg(test)]
 use super::db_helpers::{content_hash_baseline_ready_joined, remote_checksum_state_ready_joined};
-#[cfg(test)]
 use crate::core::db::DbValue;
 use crate::core::db::{FoxyDb, params};
 use crate::core::models::repository::{REPOSITORY_COLUMNS, repository_from_row};
@@ -28,7 +27,7 @@ pub(super) async fn repo_has_cached_pending_update(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum QuickScanBootstrapPlan {
+pub(crate) enum QuickScanBootstrapPlan {
     None,
     RefreshContentBaseline,
     InitializeTreeAndRefreshContent,
@@ -36,7 +35,7 @@ pub(super) enum QuickScanBootstrapPlan {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(super) struct QuickScanPreflightResult {
+pub(crate) struct QuickScanPreflightResult {
     pub remote_ready: bool,
     pub bootstrap_plan: QuickScanBootstrapPlan,
 }
@@ -52,20 +51,19 @@ pub(super) async fn quick_scan_preflight_combined(
     context: Arc<FoxyContext>,
     repo_url: &str,
 ) -> Option<QuickScanPreflightResult> {
-    quick_scan_preflight_combined_inner(context, repo_url, false).await
+    quick_scan_preflight_combined_inner(context, repo_url).await
 }
 
-pub(super) async fn quick_scan_preflight_for_local_check(
+pub(crate) async fn quick_scan_preflight_for_local_check(
     context: Arc<FoxyContext>,
     repo_url: &str,
 ) -> Option<QuickScanPreflightResult> {
-    quick_scan_preflight_combined_inner(context, repo_url, true).await
+    quick_scan_preflight_combined_inner(context, repo_url).await
 }
 
 async fn quick_scan_preflight_combined_inner(
     context: Arc<FoxyContext>,
     repo_url: &str,
-    allow_addon_fast_path: bool,
 ) -> Option<QuickScanPreflightResult> {
     let preflight_started = Instant::now();
     let db = context.db();
@@ -128,6 +126,32 @@ async fn quick_scan_preflight_combined_inner(
         }
     };
     let repository_query_elapsed = repository_query_started.elapsed();
+    let (repository_empty, empty_addons) = crate::core::api::check_contracts::accepted_empty_scope(
+        &context,
+        repo_url,
+        &repository.local_path,
+    )
+    .ok()?;
+    if repository_empty {
+        return Some(QuickScanPreflightResult {
+            remote_ready: true,
+            bootstrap_plan: QuickScanBootstrapPlan::None,
+        });
+    }
+    if !empty_addons.is_empty() {
+        let names = db.query_all("SELECT a.name FROM repository_addons ra JOIN addons a ON a.id = ra.addon_id WHERE ra.repository_id = ? AND a.enabled = 1", params![repository.id as i64]).await.ok()?;
+        if !names.is_empty()
+            && names.iter().all(|row| {
+                row.get_string("name")
+                    .is_ok_and(|name| empty_addons.contains(&name.to_lowercase()))
+            })
+        {
+            return Some(QuickScanPreflightResult {
+                remote_ready: true,
+                bootstrap_plan: QuickScanBootstrapPlan::None,
+            });
+        }
+    }
 
     if repository.remote_checksum.trim().is_empty() {
         info!(
@@ -201,6 +225,16 @@ async fn quick_scan_preflight_combined_inner(
     let repo_missing_tree = repository.local_checksum.trim().is_empty();
     let repo_missing_content = repository.local_content_hash.trim().is_empty();
 
+    let parts_metadata_ready = context.deferred_part_count() > 0
+        || repository_parts_metadata_exists(&db, repository.id as i64, repo_url, &empty_addons)
+            .await?;
+    if !parts_metadata_ready {
+        return Some(QuickScanPreflightResult {
+            remote_ready: false,
+            bootstrap_plan: QuickScanBootstrapPlan::LoadTreeAndRepairMissingChecksums,
+        });
+    }
+
     // Populated repo/addon rollups are enough for the local folder fingerprint check.
     let addon_levels_complete = missing_mod_remote == 0
         && missing_mod_local == 0
@@ -209,10 +243,7 @@ async fn quick_scan_preflight_combined_inner(
         && !repo_missing_content;
     if addon_levels_complete {
         // Startup callers need a cheap proof that part metadata exists.
-        let fast_path_allowed = allow_addon_fast_path
-            || context.deferred_part_count() > 0
-            || repository_parts_metadata_exists(&db, repository.id as i64, repo_url).await
-                == Some(true);
+        let fast_path_allowed = parts_metadata_ready;
         if fast_path_allowed {
             info!(
                 "Quick scan preflight timings: repo={} outcome=addon_fast_path bootstrap_plan=None repository_query={:.2?} mod_stats={:.2?} file_stats=skipped part_stats=skipped total={:.2?} addons={}",
@@ -487,7 +518,28 @@ async fn repository_parts_metadata_exists(
     db: &FoxyDb,
     repository_id: i64,
     repo_url: &str,
+    empty_addons: &HashSet<String>,
 ) -> Option<bool> {
+    let mut values: Vec<DbValue> = vec![repository_id.into()];
+    let empty_filter = if empty_addons.is_empty() {
+        String::new()
+    } else {
+        values.extend(empty_addons.iter().cloned().map(DbValue::from));
+        format!(
+            " AND LOWER(a.name) NOT IN ({})",
+            vec!["?"; empty_addons.len()].join(",")
+        )
+    };
+    let missing_file = db.query_one(&format!(
+        "SELECT 1 FROM repository_addons ra JOIN addons a ON a.id = ra.addon_id JOIN addon_files af ON af.addon_id = a.id WHERE ra.repository_id = ? AND a.enabled = 1{empty_filter} AND NOT EXISTS (SELECT 1 FROM subfiles sf WHERE sf.file_id = af.file_id) LIMIT 1"), values).await;
+    match missing_file {
+        Ok(Some(_)) => return Some(false),
+        Ok(None) => {}
+        Err(error) => {
+            warn!("Could not validate local metadata coverage: {error}");
+            return None;
+        }
+    }
     match db
         .query_one(
             r#"SELECT 1 FROM subfiles
@@ -1025,6 +1077,41 @@ mod tests {
     use crate::core::models::model_tree::{FileNode, ModNode, RepositoryNode};
     use crate::core::models::modification_file_part::FoxyModFilePart;
     use crate::core::models::repository::{FoxyMode, FoxyRepository};
+
+    #[tokio::test]
+    async fn local_check_rejects_partial_metadata_despite_complete_parent_checksums() {
+        let context = Arc::new(
+            FoxyContext::new(
+                crate::core::tasks::db_turso::build_test_database().await,
+                reqwest::Client::new(),
+            )
+            .with_target_local_path("R:/Mods/RepoAlpha"),
+        );
+        let db = context.db();
+        for sql in [
+            "INSERT INTO repositories (id, name, remote_url, local_path, remote_checksum, local_checksum, local_content_hash) VALUES (1, 'RepoAlpha', 'https://repo.example.invalid/', 'R:/Mods/RepoAlpha', 'R', 'R', 'BASE')",
+            "INSERT INTO addons (id, name, remote_path, local_path, remote_checksum, local_checksum, local_content_hash, enabled, required) VALUES (1, '@mod_01', 'https://repo.example.invalid/@mod_01', 'R:/Mods/RepoAlpha/@mod_01', 'A', 'A', 'BASE', 1, 1)",
+            "INSERT INTO repository_addons (repository_id, addon_id) VALUES (1, 1)",
+            "INSERT INTO files (id, name, remote_path, local_path, remote_checksum, local_checksum, local_content_hash, length) VALUES (1, 'a.bin', 'ra', 'R:/Mods/RepoAlpha/@mod_01/a.bin', 'F', 'F', 'BASE', 4), (2, 'b.bin', 'rb', 'R:/Mods/RepoAlpha/@mod_01/b.bin', 'F', 'F', 'BASE', 4)",
+            "INSERT INTO addon_files (addon_id, file_id) VALUES (1, 1), (1, 2)",
+            "INSERT INTO subfiles (file_id, path, remote_checksum, remote_length) VALUES (1, 'a.bin', 'P', 4)",
+        ] {
+            db.execute(sql, params![]).await.unwrap();
+        }
+        assert!(
+            !quick_scan_preflight_for_local_check(context.clone(), "https://repo.example.invalid/")
+                .await
+                .unwrap()
+                .remote_ready
+        );
+        db.execute("INSERT INTO subfiles (file_id, path, remote_checksum, remote_length) VALUES (2, 'b.bin', 'P', 4)", params![]).await.unwrap();
+        assert!(
+            quick_scan_preflight_for_local_check(context, "https://repo.example.invalid/")
+                .await
+                .unwrap()
+                .remote_ready
+        );
+    }
 
     fn tree_with_one_file(local_path: String, file_length: u64, part_extent: u64) -> Tree {
         let mut file_id_to_index = HashMap::new();

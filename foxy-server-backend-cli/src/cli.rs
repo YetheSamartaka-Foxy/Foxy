@@ -36,7 +36,7 @@ impl SpaceLayout {
 #[derive(Parser)]
 #[command(name = "foxy-server-backend-cli")]
 #[command(
-    about = "Generate Foxy-compatible repository structures for Arma 3 and Arma Reforger mod hosting"
+    about = "Generate Foxy-compatible repository structures for Arma 3, Arma Reforger, and custom game hosting"
 )]
 #[command(version = crate::build_info::clap_version())]
 pub struct Cli {
@@ -109,7 +109,7 @@ pub enum Command {
         /// Output path for the config file
         #[arg(default_value = "config.json")]
         output: PathBuf,
-        /// Game the template is for: arma3 (default) or reforger
+        /// Game the template is for: arma3 (default), reforger, or generic (a custom game whose build is published as a mod, with content chunking)
         #[arg(long, value_enum, default_value_t = crate::types::RepoGame::Arma3)]
         game: crate::types::RepoGame,
     },

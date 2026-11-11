@@ -1,12 +1,10 @@
 use std::time::Duration;
 
-use std::sync::LazyLock;
-
 use log::{debug, info, warn};
-use reqwest::blocking::Client;
 use serde_json::Value;
 use sha1::{Digest, Sha1};
 
+use crate::core::utils::proxy::SharedBlockingClient;
 use crate::ui::app::repository::space_freshness::repository_space_manifest_checksum;
 use crate::ui::app::{
     FetchedRepositorySpace, Foxy, PendingRepositoryDuplicateAddAction,
@@ -16,20 +14,17 @@ use crate::ui::app::{
 use crate::ui::i18n::tr;
 use crate::ui::types::{
     Repository, RepositoryServer, RepositorySpace, RepositorySpaceEntry,
-    apply_repo_client_parameters, apply_repo_dlc_content_from_repo_json, merge_remote_addon_list,
-    repo_json_dlc_content_value, sanitize_user_path,
+    apply_repo_client_parameters, apply_repo_dlc_content_from_repo_json, apply_repo_game_build,
+    merge_remote_addon_categories, repo_json_dlc_content_value, repo_json_game_build,
+    sanitize_user_path,
 };
 
 /// Shared HTTP client for repository-metadata fetches. A bounded timeout keeps
 /// a slow or unreachable server from blocking the worker thread indefinitely
 /// (the previous default-`reqwest::blocking::get` had no timeout, which is what
 /// let a dead server hang for ~20s before erroring).
-static REPO_METADATA_HTTP_CLIENT: LazyLock<Client> = LazyLock::new(|| {
-    Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()
-        .expect("failed to build repository metadata HTTP client: check TLS/system configuration")
-});
+static REPO_METADATA_HTTP_CLIENT: SharedBlockingClient =
+    SharedBlockingClient::new(|builder| builder.timeout(Duration::from_secs(15)));
 
 const REPO_METADATA_MAX_ATTEMPTS: u32 = 3;
 const REPO_METADATA_RETRY_BACKOFF: Duration = Duration::from_millis(750);
@@ -41,6 +36,7 @@ fn fetch_json_with_retry(url: &str) -> Result<Value, String> {
     let mut last_error = String::new();
     for attempt in 1..=REPO_METADATA_MAX_ATTEMPTS {
         match REPO_METADATA_HTTP_CLIENT
+            .client()
             .get(url)
             .send()
             .and_then(reqwest::blocking::Response::error_for_status)
@@ -379,7 +375,7 @@ impl Foxy {
         let mut parse_error: Option<String> = None;
 
         for manifest_url in candidates {
-            let response = match REPO_METADATA_HTTP_CLIENT.get(&manifest_url).send() {
+            let response = match REPO_METADATA_HTTP_CLIENT.client().get(&manifest_url).send() {
                 Ok(response) => response,
                 Err(err) => {
                     debug!(
@@ -942,8 +938,7 @@ impl Foxy {
         }
 
         let repo = &self.repository_view_state.repositories[repo_index];
-        if repo.address.is_empty() {
-            log::error!("Repository address is empty");
+        if repo.is_local() {
             return;
         }
         let repo_address = repo.address.clone();
@@ -1016,7 +1011,15 @@ impl Foxy {
     /// Drain completed background metadata fetches and apply them on the UI thread.
     pub(in crate::ui::app) fn poll_repo_metadata_results(&mut self, ctx: &egui::Context) {
         while let Ok(result) = self.repo_metadata_result_rx.try_recv() {
-            self.pending_repo_metadata_jobs.remove(&result.repo_address);
+            // A game-space switch clears the pending set; a fetch dispatched in
+            // the previous space must not rewrite a same-address repository here.
+            if !self.pending_repo_metadata_jobs.remove(&result.repo_address) {
+                debug!(
+                    "Discarding repository metadata fetched before a game space switch: {}",
+                    result.repo_name
+                );
+                continue;
+            }
             self.apply_repository_metadata(result, ctx);
         }
     }
@@ -1069,21 +1072,37 @@ impl Foxy {
 
         {
             let mut remote_client_side_addons = Vec::new();
-            if let Some(required_mods) = addon_manifest["requiredMods"].as_array() {
-                let (addons, client_side_addons) =
-                    parse_remote_addon_list(Some(required_mods.as_slice()), true);
-                remote_client_side_addons.extend(client_side_addons);
-                let repo = &mut self.repository_view_state.repositories[repo_index];
-                repo.addons = merge_remote_addon_list(addons, &repo.addons);
-            }
-
-            if let Some(optional_mods) = addon_manifest["optionalMods"].as_array() {
-                let (optional_addons, client_side_addons) =
-                    parse_remote_addon_list(Some(optional_mods.as_slice()), false);
-                remote_client_side_addons.extend(client_side_addons);
-                let repo = &mut self.repository_view_state.repositories[repo_index];
-                repo.optional_addons =
-                    merge_remote_addon_list(optional_addons, &repo.optional_addons);
+            let required = addon_manifest["requiredMods"]
+                .as_array()
+                .map(|required_mods| {
+                    let (addons, client_side_addons) =
+                        parse_remote_addon_list(Some(required_mods.as_slice()), true);
+                    remote_client_side_addons.extend(client_side_addons);
+                    addons
+                });
+            let optional = addon_manifest["optionalMods"]
+                .as_array()
+                .map(|optional_mods| {
+                    let (optional_addons, client_side_addons) =
+                        parse_remote_addon_list(Some(optional_mods.as_slice()), false);
+                    remote_client_side_addons.extend(client_side_addons);
+                    optional_addons
+                });
+            let changed_selections = if required.is_some() || optional.is_some() {
+                merge_remote_addon_categories(
+                    &mut self.repository_view_state.repositories[repo_index],
+                    required,
+                    optional,
+                )
+            } else {
+                Vec::new()
+            };
+            if !changed_selections.is_empty() {
+                let message = self.t_fmt(
+                    "Repository category changes altered the effective selection for {addons} in Default or a saved profile.",
+                    &[("addons", changed_selections.join(", "))],
+                );
+                self.show_success_toast(message);
             }
             // A repository can mark an addon client-side, but the marking only
             // means something for a game whose servers tolerate addons they do
@@ -1159,6 +1178,10 @@ impl Foxy {
                     dlc_content,
                 );
             }
+            apply_repo_game_build(
+                &mut self.repository_view_state.repositories[repo_index],
+                repo_json_game_build(&json),
+            );
 
             let updated_repo = self.repository_view_state.repositories[repo_index].clone();
             if !updated_repo.icon_image_checksum.is_empty() {

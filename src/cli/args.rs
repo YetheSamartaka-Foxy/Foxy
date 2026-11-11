@@ -1132,9 +1132,24 @@ pub struct SettingsSetArgs {
     pub auto_recheck_on_launch: Option<bool>,
     #[arg(
         long,
+        help = "Refresh repository metadata while the desktop app is idle (true/false)"
+    )]
+    pub periodic_remote_check_enabled: Option<bool>,
+    #[arg(
+        long,
+        help = "Minutes between idle repository metadata refreshes (5-1440)"
+    )]
+    pub periodic_remote_check_interval_minutes: Option<u32>,
+    #[arg(
+        long,
         help = "Automatically run quick local scan on startup (true/false)"
     )]
     pub auto_quick_scan_on_launch: Option<bool>,
+    #[arg(
+        long,
+        help = "Automatically retry temporary download failures in the desktop app (true/false)"
+    )]
+    pub retry_failed_downloads: Option<bool>,
     #[arg(
         long,
         help = "Auto-apply launch parameters from repo.json metadata (true/false)"
@@ -1198,6 +1213,77 @@ pub struct SettingsSetArgs {
     pub download_speed_limit_mbps: Option<u32>,
     #[arg(long, help = "Disable global download speed limit")]
     pub download_speed_unlimited: bool,
+    #[arg(
+        long,
+        value_parser = clap::value_parser!(u8).range(10..=100),
+        help = "Most of the whole computer's processor time Foxy's work may use, in percent (10-100; default 90)"
+    )]
+    pub cpu_usage_limit: Option<u8>,
+    #[arg(
+        long,
+        help = "Let Foxy's work use every processor thread when nothing else needs it"
+    )]
+    pub cpu_usage_unlimited: bool,
+    #[arg(
+        long,
+        help = "Set the processor threads hashing, scanning and checking plan around (minimum 1; kept within the detected processors while safe limits are on)"
+    )]
+    pub cpu_threads: Option<u32>,
+    #[arg(
+        long,
+        help = "Plan around every processor thread the system reports (default)"
+    )]
+    pub cpu_threads_auto: bool,
+    #[arg(
+        long,
+        help = "Keep the CPU thread count within the detected processors; false accepts any count up to 1024 (true/false)"
+    )]
+    pub cpu_safe_limits: Option<bool>,
+    #[arg(
+        long,
+        value_enum,
+        help = "Processor priority of the threads that hash, scan, check and download (Windows)"
+    )]
+    pub work_priority: Option<WorkPriorityArg>,
+    #[arg(
+        long,
+        help = "Run work threads in Windows background mode, which lowers their disk and memory priority (true/false)"
+    )]
+    pub low_disk_priority: Option<bool>,
+    #[arg(
+        long,
+        value_enum,
+        help = "Storage type assumed for every drive instead of the detected one"
+    )]
+    pub storage_type: Option<StorageTypeArg>,
+    #[arg(
+        long,
+        value_enum,
+        help = "Memory pressure level assumed instead of the measured one"
+    )]
+    pub memory_pressure: Option<MemoryPressureArg>,
+    #[arg(long, value_enum, help = "How HTTP requests reach the network")]
+    pub proxy_mode: Option<ProxyModeArg>,
+    #[arg(
+        long,
+        help = "Set the manual proxy address, for example http://proxy.example:8080; credentials go in --proxy-username and --proxy-password, and an empty value clears it"
+    )]
+    pub proxy_url: Option<String>,
+    #[arg(
+        long,
+        help = "Set the manual proxy user name; an empty value clears it"
+    )]
+    pub proxy_username: Option<String>,
+    #[arg(
+        long,
+        help = "Set the manual proxy password, stored as plain text; other local programs can read command lines, so prefer the Settings view"
+    )]
+    pub proxy_password: Option<String>,
+    #[arg(
+        long,
+        help = "Comma-separated hosts, domains or IP ranges reached without the proxy"
+    )]
+    pub proxy_bypass: Option<String>,
     #[arg(long, help = "Set UI locale (for example: en, cs, system)")]
     pub locale: Option<String>,
     #[arg(long, help = "Add additional addon search folder (repeatable)")]
@@ -1281,6 +1367,44 @@ pub struct RepoSyncArgs {
     pub selector: RepoSelectorArgs,
     #[arg(long, help = "Synchronization mode")]
     pub mode: RepoSyncMode,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug)]
+pub enum WorkPriorityArg {
+    #[value(help = "Compete with other programs as usual")]
+    Normal,
+    #[value(help = "Let programs at normal priority, such as a running game, go first")]
+    BelowNormal,
+    #[value(help = "Run only when the processor has nothing else to do")]
+    Lowest,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug)]
+pub enum StorageTypeArg {
+    #[value(help = "Detect each drive's type")]
+    Auto,
+    Ssd,
+    Hdd,
+    Removable,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug)]
+pub enum MemoryPressureArg {
+    #[value(help = "Measure free memory before each check and download")]
+    Auto,
+    Normal,
+    Constrained,
+    Severe,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug)]
+pub enum ProxyModeArg {
+    #[value(help = "Windows proxy settings and the HTTP_PROXY/HTTPS_PROXY variables")]
+    System,
+    #[value(help = "Connect directly")]
+    None,
+    #[value(help = "The proxy set with --proxy-url")]
+    Manual,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug)]
@@ -1449,10 +1573,27 @@ pub struct GameCreateArgs {
 pub struct GameRemoveArgs {
     /// Game space id (see `foxy game list`).
     pub space_id: String,
+    #[arg(
+        long,
+        help = "Preserve private frozen mods and extra-file payloads before removal"
+    )]
+    pub preserve_payloads: bool,
+    #[arg(
+        long,
+        conflicts_with = "preserve_payloads",
+        help = "Explicitly discard private frozen mods and extra-file payloads"
+    )]
+    pub discard_payloads: bool,
 }
 
 #[derive(Args, Debug)]
 pub struct GameLaunchArgs {
+    #[arg(long, help = "Keep the changed destination for this extra-file id")]
+    pub keep_extra_file: Vec<String>,
+    #[arg(long, help = "Reapply the stored template for this extra-file id")]
+    pub reapply_extra_file: Vec<String>,
+    #[arg(long, help = "Approve the displayed ordered extra-file replacements")]
+    pub approve_extra_file_layers: bool,
     #[arg(
         long,
         help = "Execute launch immediately (without this flag, command prints launch spec)"
@@ -1462,6 +1603,16 @@ pub struct GameLaunchArgs {
     pub include_disabled: bool,
     #[arg(long, help = "Optional TW:WH3 save name for continue-campaign launch")]
     pub save_name: Option<String>,
+    #[arg(
+        long,
+        help = "Allow this launch to continue if extra files cannot be applied"
+    )]
+    pub allow_incomplete_preparation: bool,
+    #[arg(
+        long,
+        help = "Allow this launch to use live Workshop files when a frozen copy is missing"
+    )]
+    pub allow_live_fallback: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1586,11 +1737,23 @@ pub enum ConfigExtraFileCommand {
     /// Enable or disable one managed extra file.
     Set(ConfigExtraFileSetArgs),
     /// Copy enabled extra files to their configured destinations.
-    Activate,
+    Activate(ConfigExtraFileActivateArgs),
+}
+
+#[derive(Args, Debug, Default)]
+pub struct ConfigExtraFileActivateArgs {
+    #[arg(long, help = "Keep the changed destination for this extra-file id")]
+    pub keep_extra_file: Vec<String>,
+    #[arg(long, help = "Reapply the stored template for this extra-file id")]
+    pub reapply_extra_file: Vec<String>,
+    #[arg(long, help = "Approve the displayed ordered extra-file replacements")]
+    pub approve_extra_file_layers: bool,
 }
 
 #[derive(Args, Debug)]
 pub struct ConfigExtraFileAddArgs {
+    #[arg(long, help = "Insert at this zero-based layer position")]
+    pub order: Option<usize>,
     #[arg(long, help = "Display name")]
     pub name: String,
     #[arg(long, help = "Source file or folder to copy into the Foxy store")]
@@ -1612,10 +1775,12 @@ pub struct ConfigExtraFileRemoveArgs {
 
 #[derive(Args, Debug)]
 pub struct ConfigExtraFileSetArgs {
+    #[arg(long, help = "Move to this zero-based layer position")]
+    pub order: Option<usize>,
     /// Extra-file id from `foxy config extra-file list`.
     pub id: String,
-    #[arg(long, help = "Target enabled state (true/false)")]
-    pub enabled: bool,
+    #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true", help = "Target enabled state (true/false)")]
+    pub enabled: Option<bool>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1628,6 +1793,8 @@ pub enum WorkshopCommand {
     Import(WorkshopImportArgs),
     /// Remove one managed Steam Workshop item.
     Remove(WorkshopRemoveArgs),
+    /// Unsubscribe through Steam, optionally deleting its shared live copy.
+    Unsubscribe(WorkshopRemoveArgs),
     /// Enable or disable one managed Steam Workshop item.
     Set(WorkshopSetArgs),
     /// Freeze installed Workshop items into Foxy's managed snapshot store.
@@ -1743,13 +1910,16 @@ pub struct WorkshopDownloadArgs {
 pub struct WorkshopRemoveArgs {
     /// Steam Workshop item id or URL.
     pub item: String,
-    #[arg(long, help = "Delete Steam's content folder and Foxy's frozen copies")]
+    #[arg(
+        long,
+        help = "Delete private frozen copies on remove, or shared Steam content on unsubscribe"
+    )]
     pub delete_data: bool,
     #[arg(
         long,
         value_enum,
         default_value_t = WorkshopDownloadBackend::SteamHelper,
-        help = "Unsubscribe backend: steam-helper or none"
+        help = "Steam backend used only by unsubscribe: steam-helper or none"
     )]
     pub backend: WorkshopDownloadBackend,
     #[arg(long, default_value_t = 300, help = "Steam helper timeout in seconds")]
@@ -1760,7 +1930,7 @@ pub struct WorkshopRemoveArgs {
 pub struct WorkshopSetArgs {
     /// Steam Workshop item id or URL.
     pub item: String,
-    #[arg(long, help = "Target enabled state (true/false)")]
+    #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true", default_value_t = false, help = "Target enabled state (true/false)")]
     pub enabled: bool,
 }
 
@@ -1851,6 +2021,12 @@ pub struct WorkshopBundleInspectArgs {
 pub struct WorkshopBundleImportArgs {
     /// Bundle to import.
     pub input: PathBuf,
+    #[arg(
+        long,
+        value_enum,
+        help = "Merge incoming items or match the bundle's enabled selection"
+    )]
+    pub mode: Option<WorkshopBundleMode>,
     #[arg(long, help = "Record entries without restoring frozen payloads")]
     pub skip_payloads: bool,
     #[arg(
@@ -1866,6 +2042,12 @@ pub struct WorkshopBundleImportArgs {
 pub struct WorkshopResolveArgs {
     /// Steam Workshop item id or URL.
     pub item: String,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkshopBundleMode {
+    Merge,
+    Match,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1970,10 +2152,21 @@ pub struct DirectDownloadArgs {
     pub unlimited: bool,
     #[arg(long, help = "Set speed limit in Mbps for this command")]
     pub limit_mbps: Option<u32>,
+    #[arg(
+        long,
+        help = "Approve replacing existing targets (also requires --yes)"
+    )]
+    pub overwrite: bool,
 }
 
 #[derive(Args, Debug)]
 pub struct LaunchArgs {
+    #[arg(long, help = "Keep the changed destination for this extra-file id")]
+    pub keep_extra_file: Vec<String>,
+    #[arg(long, help = "Reapply the stored template for this extra-file id")]
+    pub reapply_extra_file: Vec<String>,
+    #[arg(long, help = "Approve the displayed ordered extra-file replacements")]
+    pub approve_extra_file_layers: bool,
     #[command(flatten)]
     pub selector: RepoSelectorArgs,
     #[arg(long, help = "Optional server name from repository server list")]
@@ -1983,4 +2176,103 @@ pub struct LaunchArgs {
         help = "Execute launch immediately (without this flag, command prints launch spec)"
     )]
     pub execute: bool,
+    #[arg(
+        long,
+        help = "Allow this launch to continue if extra files cannot be applied"
+    )]
+    pub allow_incomplete_preparation: bool,
+    #[arg(
+        long,
+        help = "Allow this launch to use live Workshop files when a frozen copy is missing"
+    )]
+    pub allow_live_fallback: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extra_file_order_can_change_without_changing_enablement() {
+        let parsed = CliArgs::try_parse_from([
+            "foxy",
+            "config",
+            "extra-file",
+            "set",
+            "alpha",
+            "--order",
+            "0",
+        ])
+        .unwrap();
+        let Some(CliCommand::Config {
+            command:
+                ConfigCommand::ExtraFile {
+                    command: ConfigExtraFileCommand::Set(args),
+                },
+        }) = parsed.command
+        else {
+            panic!("unexpected command");
+        };
+        assert_eq!(args.enabled, None);
+        assert_eq!(args.order, Some(0));
+        let parsed = CliArgs::try_parse_from([
+            "foxy",
+            "config",
+            "extra-file",
+            "set",
+            "alpha",
+            "--enabled",
+            "false",
+        ])
+        .unwrap();
+        let Some(CliCommand::Config {
+            command:
+                ConfigCommand::ExtraFile {
+                    command: ConfigExtraFileCommand::Set(args),
+                },
+        }) = parsed.command
+        else {
+            panic!("unexpected command");
+        };
+        assert_eq!(args.enabled, Some(false));
+    }
+
+    #[test]
+    fn workshop_selection_accepts_explicit_boolean_and_legacy_flag_forms() {
+        for (arguments, expected) in [
+            (
+                vec!["foxy", "workshop", "set", "123456789", "--enabled", "false"],
+                false,
+            ),
+            (
+                vec!["foxy", "workshop", "set", "123456789", "--enabled", "true"],
+                true,
+            ),
+            (
+                vec!["foxy", "workshop", "set", "123456789", "--enabled"],
+                true,
+            ),
+            (vec!["foxy", "workshop", "set", "123456789"], false),
+        ] {
+            let parsed = CliArgs::try_parse_from(arguments).unwrap();
+            let Some(CliCommand::Workshop {
+                command: WorkshopCommand::Set(args),
+            }) = parsed.command
+            else {
+                panic!("unexpected command");
+            };
+            assert_eq!(args.enabled, expected);
+        }
+        assert!(
+            CliArgs::try_parse_from([
+                "foxy",
+                "workshop",
+                "set",
+                "123456789",
+                "--enabled",
+                "invalid"
+            ])
+            .is_err()
+        );
+    }
 }

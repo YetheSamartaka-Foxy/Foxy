@@ -30,6 +30,13 @@ impl std::error::Error for DbErr {}
 
 impl From<turso::Error> for DbErr {
     fn from(err: turso::Error) -> Self {
-        DbErr::Custom(format!("turso: {err}"))
+        match err {
+            // Retries are classified by message, and this variant's text names
+            // neither busy nor a conflict.
+            turso::Error::BusySnapshot(msg) => {
+                DbErr::Custom(format!("turso: busy snapshot: {msg}"))
+            }
+            err => DbErr::Custom(format!("turso: {err}")),
+        }
     }
 }

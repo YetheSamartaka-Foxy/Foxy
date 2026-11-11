@@ -53,6 +53,134 @@ pub enum LockOutcome {
 /// previous space by replacing this slot.
 static HELD: Mutex<Option<(PathBuf, File)>> = Mutex::new(None);
 
+/// A target database claim prepared before the active database is closed.
+/// Dropping the value releases the target without changing `HELD`.
+pub(crate) struct ReservedClaim {
+    db_path: PathBuf,
+    file: File,
+}
+
+impl ReservedClaim {
+    /// Install this claim after the old database handle and claim have closed.
+    pub(crate) fn activate(self) -> LockOutcome {
+        let Ok(mut held) = HELD.lock() else {
+            return LockOutcome::Unavailable("lock slot poisoned".to_string());
+        };
+        if held
+            .as_ref()
+            .is_some_and(|(held_path, _)| held_path != &self.db_path)
+        {
+            return LockOutcome::Unavailable(
+                "current database claim must be released before activation".to_string(),
+            );
+        }
+        let owner_path = owner_path_for(&self.db_path);
+        if let Err(err) = File::create(&owner_path).and_then(|mut owner| {
+            write!(owner, "{}", std::process::id()).and_then(|()| owner.flush())
+        }) {
+            warn!(
+                "Could not record the database lock owner in {}: {}",
+                sanitize_log_path(&owner_path),
+                err
+            );
+        }
+        info!(
+            "Claimed exclusive access to database {}",
+            sanitize_log_path(&self.db_path)
+        );
+        *held = Some((self.db_path, self.file));
+        LockOutcome::Acquired
+    }
+}
+
+/// Reserve `db_path` without releasing or replacing the current claim.
+///
+/// The returned file keeps the target exclusively locked until it is activated
+/// or dropped. Owner metadata is published only when activation succeeds.
+pub(crate) fn reserve(db_path: &Path) -> Result<ReservedClaim, LockOutcome> {
+    let held = HELD
+        .lock()
+        .map_err(|_| LockOutcome::Unavailable("lock slot poisoned".to_string()))?;
+    if let Some((held_path, file)) = held.as_ref()
+        && held_path == db_path
+    {
+        let file = file.try_clone().map_err(|err| {
+            LockOutcome::Unavailable(format!(
+                "could not retain the database claim for {}: {err}",
+                sanitize_log_path(db_path)
+            ))
+        })?;
+        return Ok(ReservedClaim {
+            db_path: db_path.to_path_buf(),
+            file,
+        });
+    }
+
+    let lock_path = lock_path_for(db_path);
+    if let Some(parent) = lock_path.parent()
+        && let Err(err) = std::fs::create_dir_all(parent)
+    {
+        return Err(LockOutcome::Unavailable(format!(
+            "could not create {}: {err}",
+            sanitize_log_path(parent)
+        )));
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|err| {
+            LockOutcome::Unavailable(format!(
+                "could not open {}: {err}",
+                sanitize_log_path(&lock_path)
+            ))
+        })?;
+
+    let deadline = Instant::now() + ACQUIRE_TIMEOUT;
+    let mut waited = false;
+    loop {
+        match file.try_lock() {
+            Ok(()) => break,
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                if !waited {
+                    info!(
+                        "Database {} is claimed by another Foxy process; waiting up to {}s for it to exit",
+                        sanitize_log_path(db_path),
+                        ACQUIRE_TIMEOUT.as_secs()
+                    );
+                    waited = true;
+                }
+                std::thread::sleep(ACQUIRE_POLL);
+            }
+            Err(TryLockError::WouldBlock) => {
+                let holder_pid = read_holder_pid(db_path);
+                error!(
+                    "Database {} is already open in another Foxy process{}; this process will not reserve it",
+                    sanitize_log_path(db_path),
+                    holder_pid
+                        .map(|pid| format!(" (PID {pid})"))
+                        .unwrap_or_default()
+                );
+                return Err(LockOutcome::Busy { holder_pid });
+            }
+            Err(TryLockError::Error(err)) => {
+                return Err(LockOutcome::Unavailable(format!(
+                    "could not lock {}: {err}",
+                    sanitize_log_path(&lock_path)
+                )));
+            }
+        }
+    }
+
+    drop(held);
+    Ok(ReservedClaim {
+        db_path: db_path.to_path_buf(),
+        file,
+    })
+}
+
 fn lock_path_for(db_path: &Path) -> PathBuf {
     db_path.with_extension("lock")
 }
@@ -219,6 +347,25 @@ mod tests {
         SERIALIZE.lock().unwrap_or_else(|err| err.into_inner())
     }
 
+    fn assert_lock_busy(db_path: &Path) {
+        if let Ok(file) = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(lock_path_for(db_path))
+        {
+            assert!(matches!(file.try_lock(), Err(TryLockError::WouldBlock)));
+        }
+    }
+
+    fn assert_lock_free(db_path: &Path) {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(lock_path_for(db_path))
+            .unwrap();
+        assert!(file.try_lock().is_ok());
+    }
+
     /// A second claim on a path this process already owns is a no-op, so the
     /// lazy database funnel can call it on every open.
     #[test]
@@ -275,5 +422,80 @@ mod tests {
             owner_path_for(db),
             Path::new("C:/games/space/database.owner")
         );
+    }
+
+    #[test]
+    fn reservation_keeps_current_claim_and_holds_target_until_activation() {
+        let _guard = serialized();
+        let dir = tempfile::tempdir().unwrap();
+        let current = dir.path().join("current/database.db");
+        let target = dir.path().join("target/database.db");
+
+        assert_eq!(acquire(&current), LockOutcome::Acquired);
+        let reservation = reserve(&target).unwrap();
+        assert!(holds(&current));
+        assert!(!holds(&target));
+        assert_lock_busy(&current);
+        assert_lock_busy(&target);
+
+        release();
+        assert_lock_free(&current);
+        assert_lock_busy(&target);
+        assert_eq!(reservation.activate(), LockOutcome::Acquired);
+        assert!(!holds(&current));
+        assert!(holds(&target));
+        assert_lock_busy(&target);
+
+        release();
+        assert_lock_free(&target);
+    }
+
+    #[test]
+    fn dropping_unused_reservation_releases_target_claim() {
+        let _guard = serialized();
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target/database.db");
+
+        let reservation = reserve(&target).unwrap();
+        assert!(!holds(&target));
+        assert_lock_busy(&target);
+        drop(reservation);
+
+        assert_lock_free(&target);
+    }
+
+    #[test]
+    fn reserving_current_database_does_not_release_its_active_claim() {
+        let _guard = serialized();
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("current/database.db");
+
+        assert_eq!(acquire(&db_path), LockOutcome::Acquired);
+        let reservation = reserve(&db_path).unwrap();
+        drop(reservation);
+
+        assert!(holds(&db_path));
+        assert_lock_busy(&db_path);
+        release();
+        assert_lock_free(&db_path);
+    }
+
+    #[test]
+    fn activation_refuses_to_drop_an_unreleased_current_claim() {
+        let _guard = serialized();
+        let dir = tempfile::tempdir().unwrap();
+        let current = dir.path().join("current/database.db");
+        let target = dir.path().join("target/database.db");
+
+        assert_eq!(acquire(&current), LockOutcome::Acquired);
+        let reservation = reserve(&target).unwrap();
+        assert!(matches!(
+            reservation.activate(),
+            LockOutcome::Unavailable(_)
+        ));
+        assert!(holds(&current));
+        assert!(!holds(&target));
+        assert_lock_free(&target);
+        release();
     }
 }

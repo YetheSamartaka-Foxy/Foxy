@@ -1,0 +1,4 @@
+interface:
+  display_name: "Foxy Progress Correctness"
+  short_description: "Check progress values and terminal status"
+  default_prompt: "Use $foxy-progress-correctness to trace this progress display from task events to its terminal outcome."

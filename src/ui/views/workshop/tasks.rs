@@ -30,6 +30,9 @@ pub enum WorkshopTask {
         item_id: String,
         delete_data: bool,
     },
+    Unsubscribe {
+        item_id: String,
+    },
     ExportBundle {
         path: PathBuf,
         include_disabled: bool,
@@ -37,6 +40,7 @@ pub enum WorkshopTask {
     ImportBundle {
         path: PathBuf,
         download: bool,
+        mode: bundle::BundleImportMode,
     },
 }
 
@@ -47,6 +51,7 @@ impl WorkshopTask {
             WorkshopTask::RefreshMetadata => "Refreshing Workshop details",
             WorkshopTask::Freeze { .. } | WorkshopTask::FreezeAll { .. } => "Freezing mod versions",
             WorkshopTask::Remove { .. } => "Removing Workshop mod",
+            WorkshopTask::Unsubscribe { .. } => "Unsubscribing Workshop mod",
             WorkshopTask::ExportBundle { .. } => "Writing share bundle",
             WorkshopTask::ImportBundle { .. } => "Reading share bundle",
         }
@@ -214,11 +219,6 @@ fn execute(task: WorkshopTask, ctx: &WorkshopTaskContext) -> Result<String, Stri
             item_id,
             delete_data,
         } => {
-            if let Err(error) =
-                workshop::run_steam_helper_remove(ctx.app_id, &item_id, ctx.timeout_seconds)
-            {
-                warn!("Could not unsubscribe {} through Steam: {}", item_id, error);
-            }
             workshop::remove_item(
                 &space_dir,
                 ctx.app_id,
@@ -227,6 +227,10 @@ fn execute(task: WorkshopTask, ctx: &WorkshopTaskContext) -> Result<String, Stri
                 delete_data,
             )?;
             Ok(format!("Removed {}", item_id))
+        }
+        WorkshopTask::Unsubscribe { item_id } => {
+            workshop::run_steam_helper_remove(ctx.app_id, &item_id, ctx.timeout_seconds)?;
+            Ok(format!("Unsubscribed {} in Steam", item_id))
         }
         WorkshopTask::ExportBundle {
             path,
@@ -256,15 +260,37 @@ fn execute(task: WorkshopTask, ctx: &WorkshopTaskContext) -> Result<String, Stri
                 summary.item_count, summary.payload_count
             ))
         }
-        WorkshopTask::ImportBundle { path, download } => {
-            let summary = bundle::import_bundle(&space_dir, ctx.app_id, &path, true)?;
+        WorkshopTask::ImportBundle {
+            path,
+            download,
+            mode,
+        } => {
+            let summary =
+                bundle::import_bundle_with_mode(&space_dir, ctx.app_id, &path, true, mode)?;
             let mut failures = Vec::new();
             if download {
                 for item_id in &summary.needs_download {
-                    if let Err(error) =
-                        workshop::run_steam_helper_install(ctx.app_id, item_id, ctx.timeout_seconds)
-                    {
-                        failures.push(format!("{}: {}", item_id, error));
+                    match workshop::run_steam_helper_install(
+                        ctx.app_id,
+                        item_id,
+                        ctx.timeout_seconds,
+                    ) {
+                        Ok(helper) => {
+                            let enabled = workshop::load_store(&space_dir)?
+                                .entry(ctx.app_id, item_id)
+                                .map(|entry| entry.enabled)
+                                .unwrap_or(true);
+                            workshop::upsert_item(
+                                &space_dir,
+                                ctx.app_id,
+                                item_id,
+                                None,
+                                None,
+                                Some(&helper),
+                                enabled,
+                            )?;
+                        }
+                        Err(error) => failures.push(format!("{}: {}", item_id, error)),
                     }
                 }
             }

@@ -308,6 +308,10 @@ impl Foxy {
     }
 
     fn execute_arma3_profile_action(&mut self, action: &Arma3ProfileAction) {
+        if self.profile_backup_work_in_flight() {
+            self.show_error_toast(self.t("Wait for profile backup work to finish."));
+            return;
+        }
         if is_arma3_running() {
             warn!("Refusing Arma 3 profile management action while the game is running");
             self.show_error_toast(

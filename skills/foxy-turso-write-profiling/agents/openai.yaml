@@ -1,0 +1,4 @@
+interface:
+  display_name: "Foxy Turso Write Profiling"
+  short_description: "Measure Turso persistence by workload and phase"
+  default_prompt: "Use $foxy-turso-write-profiling to profile this Turso write path with statement and transaction evidence."

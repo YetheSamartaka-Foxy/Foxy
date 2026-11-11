@@ -10,23 +10,29 @@ use crate::core::tasks::init_database::{
 use crate::core::tasks::remote_file_parts::{
     FilePartData, FilePartsPayload, remote_file_parts_batch,
 };
-use crate::core::utils::fetch_json::{FetchJsonTiming, fetch_manifest_json_timed};
+use crate::core::utils::fetch_json::FetchJsonTiming;
 use log::{debug, error, info, warn};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Semaphore;
 
+mod manifest;
+use manifest::fetch_validated_manifest;
+pub(crate) const ADDON_PUBLICATION_CHANGED: &str = "Addon publication changed while checking";
+
 /// Typed manifest for both mod.srf (PascalCase) and foxy_addon.json (camelCase).
 /// Uses serde aliases so one struct deserializes either format.
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct ModManifest {
+    #[serde(alias = "Checksum", default, skip_serializing_if = "Option::is_none")]
+    checksum: Option<String>,
     #[serde(alias = "Files")]
     files: Vec<ManifestFile>,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
 struct ManifestFile {
     #[serde(alias = "Path")]
     path: String,
@@ -38,7 +44,7 @@ struct ManifestFile {
     parts: Vec<ManifestPart>,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
 struct ManifestPart {
     #[serde(alias = "Path")]
     path: String,
@@ -59,9 +65,7 @@ fn join_path(base: &str, child: &str) -> String {
 }
 
 fn part_task_limit() -> usize {
-    let cpu = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
+    let cpu = crate::core::utils::cpu_threads::cpu_threads().unwrap_or(4);
     // This path fans into DB writes in remote_file_parts_batch; keep it conservative.
     let lock_retries = sqlite_perf_snapshot().lock_retries;
     let pressure_divisor = if lock_retries >= 128 {
@@ -383,61 +387,60 @@ async fn reconcile_addon_file_links(
         );
     }
 
-    // Phase 2: Prune stale addon_file links. A whole-wipe force-redownload has
-    // no leftover links, so skip the per-mod SELECT/DELETE.
+    // Phase 2: Prune stale addon_file links. A repository that linked no file
+    // before this rebuild has no leftover links, so skip the per-mod SELECT/DELETE.
     if can_prune_stale
-        && !context.is_fresh_subfiles_load()
-        && let Err(e) = context
-            .db()
-            .transaction("prune addon_files", |txn| {
-                let desired_file_ids = desired_file_ids.clone();
-                Box::pin(async move {
-                    if desired_file_ids.is_empty() {
-                        txn.execute(
-                            "DELETE FROM addon_files WHERE addon_id = ?",
-                            params![mod_id],
-                        )
-                        .await?;
-                    } else {
-                        let existing_links = txn
-                            .query_all(
-                                "SELECT file_id FROM addon_files WHERE addon_id = ?",
-                                params![mod_id],
-                            )
-                            .await?;
-                        let stale_file_ids: Vec<i64> = existing_links
-                            .iter()
-                            .filter_map(|row| row.get_i64("file_id").ok())
-                            .filter(|id| !desired_file_ids.contains(id))
-                            .collect();
-
-                        if !stale_file_ids.is_empty() {
-                            let delete_chunk_size = SQLITE_MAX_VARIABLES.saturating_sub(4).max(1);
-                            for chunk in stale_file_ids.chunks(delete_chunk_size) {
-                                let placeholders = vec!["?"; chunk.len()].join(", ");
-                                let sql = format!(
-                                    "DELETE FROM addon_files \
-                                     WHERE addon_id = ? AND file_id IN ({placeholders})"
-                                );
-                                let mut values: Vec<DbValue> = Vec::with_capacity(chunk.len() + 1);
-                                values.push(mod_id.into());
-                                for id in chunk {
-                                    values.push((*id).into());
-                                }
-                                txn.execute(&sql, values).await?;
-                            }
-                        }
-                    }
-                    Ok(())
-                })
-            })
-            .await
+        && !context.has_fresh_addon_file_links()
+        && let Err(e) = prune_stale_addon_file_links(&context.db(), mod_id, &desired_file_ids).await
     {
         warn!(
             "Failed to prune stale addon_files for {}: {}",
             mod_parent.remote_path, e
         );
     }
+}
+
+/// Deletes the addon's links to files outside `desired_file_ids`. The read runs
+/// outside a write transaction and each delete is a single statement: the
+/// addons of a rebuild prune in parallel, and a read-then-write transaction
+/// lost its snapshot to every other addon's commit.
+async fn prune_stale_addon_file_links(
+    db: &FoxyDb,
+    mod_id: i64,
+    desired_file_ids: &HashSet<i64>,
+) -> Result<(), crate::core::db::DbErr> {
+    if desired_file_ids.is_empty() {
+        db.execute_retry(
+            "prune addon_files",
+            "DELETE FROM addon_files WHERE addon_id = ?",
+            params![mod_id],
+        )
+        .await?;
+        return Ok(());
+    }
+    let stale_file_ids: Vec<i64> = db
+        .query_all(
+            "SELECT file_id FROM addon_files WHERE addon_id = ?",
+            params![mod_id],
+        )
+        .await?
+        .iter()
+        .filter_map(|row| row.get_i64("file_id").ok())
+        .filter(|id| !desired_file_ids.contains(id))
+        .collect();
+    for chunk in stale_file_ids.chunks(SQLITE_MAX_VARIABLES.saturating_sub(4).max(1)) {
+        let placeholders = vec!["?"; chunk.len()].join(", ");
+        let mut values: Vec<DbValue> = Vec::with_capacity(chunk.len() + 1);
+        values.push(mod_id.into());
+        values.extend(chunk.iter().map(|id| DbValue::from(*id)));
+        db.execute_retry(
+            "prune addon_files",
+            &format!("DELETE FROM addon_files WHERE addon_id = ? AND file_id IN ({placeholders})"),
+            values,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 pub(crate) async fn flush_pending_addon_file_links(context: Arc<FoxyContext>) {
@@ -523,27 +526,40 @@ async fn failed_mod_fetch(
     mod_parent: &FoxyMod,
     duration: std::time::Duration,
 ) -> ModRecheckStats {
-    if let Err(error) = context
-        .db()
+    invalidate_failed_mod_manifest(context, mod_parent).await;
+    empty_recheck_stats(mod_parent, zero_fetch_timing(), duration)
+}
+
+pub(crate) async fn invalidate_failed_mod_manifest(context: &FoxyContext, mod_parent: &FoxyMod) {
+    let db = context.db();
+    if let Err(error) = db
         .execute_retry(
             "invalidate failed addon manifest",
-            "UPDATE addons SET remote_checksum = '' WHERE id = ?",
-            params![mod_parent.id as i64],
+            "UPDATE addons SET remote_checksum = '' WHERE remote_path = ? AND local_path = ?",
+            params![
+                mod_parent.remote_path.clone(),
+                mod_parent.local_path.clone()
+            ],
         )
         .await
     {
         error!("Could not invalidate failed addon manifest: {}", error);
     }
-    empty_recheck_stats(mod_parent, zero_fetch_timing(), duration)
 }
 
 pub(crate) async fn fetch_mod_file_manifest(
     context: Arc<FoxyContext>,
     repository_parent: Arc<FoxyRepository>,
     mod_parent: Arc<FoxyMod>,
+    remote_version_changed: bool,
 ) -> Result<StagedModFiles, ModRecheckStats> {
     let mod_start = Instant::now();
     let is_foxy_mode = repository_parent.foxy_mode.is_foxy();
+    let fresh = remote_version_changed
+        || context.recheck_level >= RecheckLevel::MOD
+        || context
+            .forced_mod_refreshes
+            .contains(&mod_parent.name.to_lowercase());
 
     let files_metadata_url = if is_foxy_mode {
         format!("{}/foxy_addon.json", mod_parent.remote_path)
@@ -552,8 +568,22 @@ pub(crate) async fn fetch_mod_file_manifest(
     };
     debug!("Loading mod files metadata from: {}", files_metadata_url);
 
-    let (manifest, http_timing): (ModManifest, FetchJsonTiming) =
-        match fetch_manifest_json_timed(context.clone(), &files_metadata_url).await {
+    let staged_response = context.staged_manifest_response(&files_metadata_url);
+    let (manifest, http_timing): (ModManifest, FetchJsonTiming) = if let Some(staged) =
+        staged_response
+    {
+        match serde_json::from_value(staged.value) {
+            Ok(manifest) => (manifest, staged.timing),
+            Err(error) => {
+                error!(
+                    "Staged addon manifest could not be decoded for {}: {}",
+                    files_metadata_url, error
+                );
+                return Err(failed_mod_fetch(&context, &mod_parent, mod_start.elapsed()).await);
+            }
+        }
+    } else {
+        match fetch_validated_manifest(context.clone(), &files_metadata_url, fresh).await {
             Ok(r) => r,
             Err(e) if is_foxy_mode => {
                 // FoxyMode failed - try falling back to mod.srf (HybridMode safety net)
@@ -562,7 +592,7 @@ pub(crate) async fn fetch_mod_file_manifest(
                     "foxy_addon.json fetch failed for {}, trying mod.srf fallback: {}",
                     mod_parent.remote_path, e
                 );
-                match fetch_manifest_json_timed(context.clone(), &fallback_url).await {
+                match fetch_validated_manifest(context.clone(), &fallback_url, fresh).await {
                     Ok(r) => r,
                     Err(e2) => {
                         error!(
@@ -582,8 +612,10 @@ pub(crate) async fn fetch_mod_file_manifest(
                 );
                 return Err(failed_mod_fetch(&context, &mod_parent, mod_start.elapsed()).await);
             }
-        };
+        }
+    };
 
+    context.record_remote_addon_empty(&mod_parent.name, manifest.files.is_empty());
     let file_keys: Vec<StagedFileKey> = manifest
         .files
         .into_iter()
@@ -615,6 +647,86 @@ pub(crate) async fn fetch_mod_file_manifest(
     })
 }
 
+pub(crate) async fn stage_mod_manifest_response(
+    context: Arc<FoxyContext>,
+    repository: &FoxyRepository,
+    mod_parent: &FoxyMod,
+    remote_version_changed: bool,
+) -> Result<(), String> {
+    let fresh = remote_version_changed
+        || context.recheck_level >= RecheckLevel::MOD
+        || context
+            .forced_mod_refreshes
+            .contains(&mod_parent.name.to_lowercase());
+    let primary_url = if repository.foxy_mode.is_foxy() {
+        format!("{}/foxy_addon.json", mod_parent.remote_path)
+    } else {
+        format!("{}/mod.srf", mod_parent.remote_path)
+    };
+    let mut accepted_url = primary_url.clone();
+    let result = match fetch_validated_manifest(context.clone(), &primary_url, fresh).await {
+        Ok(response) => response,
+        Err(error) if repository.foxy_mode.is_foxy() => {
+            let fallback_url = format!("{}/mod.srf", mod_parent.remote_path);
+            accepted_url = fallback_url.clone();
+            match fetch_validated_manifest(context.clone(), &fallback_url, fresh).await {
+                Ok(result) => result,
+                Err(fallback_error) => {
+                    invalidate_failed_mod_manifest(&context, mod_parent).await;
+                    return Err(format!(
+                        "Unable to stage addon manifest {} (Foxy: {}; fallback: {})",
+                        mod_parent.remote_path, error, fallback_error
+                    ));
+                }
+            }
+        }
+        Err(error) => {
+            invalidate_failed_mod_manifest(&context, mod_parent).await;
+            return Err(format!(
+                "Unable to stage addon manifest {}: {}",
+                mod_parent.remote_path, error
+            ));
+        }
+    };
+    let value = match serde_json::to_value(result.0) {
+        Ok(value) => value,
+        Err(error) => {
+            invalidate_failed_mod_manifest(&context, mod_parent).await;
+            return Err(format!(
+                "Could not stage addon manifest {}: {}",
+                mod_parent.remote_path, error
+            ));
+        }
+    };
+    if value
+        .get("checksum")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|checksum| {
+            !mod_parent.remote_checksum.is_empty()
+                && !checksum.eq_ignore_ascii_case(&mod_parent.remote_checksum)
+        })
+    {
+        return Err(ADDON_PUBLICATION_CHANGED.into());
+    }
+    let (confirmed, _) = fetch_validated_manifest(context.clone(), &accepted_url, true)
+        .await
+        .map_err(|_| "Addon publication could not be confirmed with fresh metadata".to_owned())?;
+    if serde_json::to_value(confirmed)
+        .map_err(|_| "Could not compare addon publication".to_owned())?
+        != value
+    {
+        return Err(ADDON_PUBLICATION_CHANGED.into());
+    }
+    context.stage_manifest_response(
+        primary_url,
+        crate::core::models::context::StagedManifestResponse {
+            value,
+            timing: result.1,
+        },
+    );
+    Ok(())
+}
+
 pub(crate) async fn apply_mod_file_rows(
     context: Arc<FoxyContext>,
     staged: StagedModFiles,
@@ -631,7 +743,9 @@ pub(crate) async fn apply_mod_file_rows(
     } = staged;
     let mut all_rows_with_json = Vec::new();
     let mut desired_file_ids: HashSet<i64> = HashSet::new();
-    let mut can_prune_file_links = true;
+    // An explicit empty file list is accepted metadata, but it cannot authorize
+    // automatic removal of files the user may still need.
+    let mut can_prune_file_links = !file_keys.is_empty();
     let mut total_bytes: u64 = 0;
     let mut total_parts: usize = 0;
 
@@ -668,6 +782,9 @@ pub(crate) async fn apply_mod_file_rows(
                 let local_file_ready =
                     file_present_with_expected_len(&file.local_path, file.length);
                 if remote_graph_unchanged
+                    && !context
+                        .forced_mod_refreshes
+                        .contains(&mod_parent.name.to_lowercase())
                     && graph_complete
                     && local_file_ready
                     && context.recheck_level < RecheckLevel::FILE
@@ -755,6 +872,20 @@ pub(crate) async fn apply_mod_file_rows(
     }
 
     let parts_persist_duration = parts_start.elapsed();
+    if let Err(error) = context
+        .db()
+        .execute_retry(
+            "store applied addon remote checksum",
+            "UPDATE addons SET remote_checksum = ? WHERE id = ?",
+            params![mod_parent.remote_checksum.clone(), mod_parent.id as i64],
+        )
+        .await
+    {
+        error!(
+            "Could not store applied addon remote checksum for addon_id={}: {}",
+            mod_parent.id, error
+        );
+    }
 
     ModRecheckStats {
         mod_path: mod_parent.remote_path.clone(),
@@ -1094,7 +1225,93 @@ mod tests {
         }
     }
 
-    async fn assert_clean_file_refreshes_parts(previous_remote: &str, seed_part: bool) {
+    #[tokio::test]
+    async fn explicit_empty_addon_manifest_retains_existing_file_ownership() {
+        use crate::core::tasks::db_turso::build_test_database;
+
+        let context = Arc::new(FoxyContext::new(
+            build_test_database().await,
+            reqwest::Client::new(),
+        ));
+        let db = context.db();
+        db.execute(
+            "INSERT INTO addons (id, name, remote_path, local_path, required, enabled, remote_checksum) VALUES (1, '@mod_01', 'https://repo.example.invalid/@mod_01', 'R:/Mods/MainRepo/@mod_01', 1, 1, 'OLD')",
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO files (id, name, remote_path, local_path, remote_checksum) VALUES (10, 'kept.bin', 'https://repo.example.invalid/@mod_01/kept.bin', 'R:/Mods/MainRepo/@mod_01/kept.bin', 'FILE')",
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO addon_files (addon_id, file_id) VALUES (1, 10)",
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let mut staged = staged_file("@mod_01", "unused.bin", "NEW");
+        staged.mod_parent = Arc::new(FoxyMod {
+            id: 1,
+            remote_checksum: "NEW".to_string(),
+            ..staged.mod_parent.as_ref().clone()
+        });
+        staged.file_keys.clear();
+
+        apply_mod_file_rows(
+            context,
+            staged,
+            &FileUpsertResult {
+                files: HashMap::new(),
+                previous: HashMap::new(),
+            },
+        )
+        .await;
+
+        let links = db
+            .query_all(
+                "SELECT file_id FROM addon_files WHERE addon_id = 1",
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].get_i64("file_id").unwrap(), 10);
+    }
+
+    #[tokio::test]
+    async fn changed_remote_manifest_keeps_prior_local_checksum_evidence() {
+        use crate::core::tasks::db_turso::build_test_database;
+
+        let db = FoxyDb::from_turso(build_test_database().await);
+        let staged = staged_file("@mod_01", "kept.bin", "NEW_REMOTE");
+        db.execute(
+            "INSERT INTO files (id, name, remote_path, local_path, local_checksum, remote_checksum, length, data_order) VALUES (10, 'kept.bin', ?, ?, 'OLD_LOCAL', 'OLD_REMOTE', 10, 0)",
+            params![staged.file_keys[0].remote_path.clone(), staged.file_keys[0].local_path.clone()],
+        )
+        .await
+        .unwrap();
+
+        upsert_file_rows_batch(&db, &[staged]).await;
+
+        let row = db
+            .query_all(
+                "SELECT local_checksum, remote_checksum FROM files WHERE id = 10",
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(row[0].get_string("local_checksum").unwrap(), "OLD_LOCAL");
+        assert_eq!(row[0].get_string("remote_checksum").unwrap(), "NEW_REMOTE");
+    }
+
+    async fn assert_clean_file_refreshes_parts(
+        previous_remote: &str,
+        seed_part: bool,
+        forced: bool,
+    ) {
         let directory = tempfile::tempdir().unwrap();
         let local_path = directory.path().join("file.bin");
         std::fs::write(&local_path, b"data").unwrap();
@@ -1103,6 +1320,9 @@ mod tests {
             reqwest::Client::new(),
         );
         context.queue_download_targets = false;
+        if forced {
+            context.forced_mod_refreshes.insert("@mod_01".to_string());
+        }
         let context = Arc::new(context);
         let db = context.db();
         db.execute(
@@ -1156,11 +1376,16 @@ mod tests {
 
     #[tokio::test]
     async fn matching_local_file_checksum_does_not_hide_missing_parts() {
-        assert_clean_file_refreshes_parts("NEW", false).await;
+        assert_clean_file_refreshes_parts("NEW", false, false).await;
     }
 
     #[tokio::test]
     async fn matching_local_file_checksum_does_not_hide_changed_remote_parts() {
-        assert_clean_file_refreshes_parts("OLD", true).await;
+        assert_clean_file_refreshes_parts("OLD", true, false).await;
+    }
+
+    #[tokio::test]
+    async fn forced_manifest_refresh_replaces_parts_with_unchanged_file_checksum() {
+        assert_clean_file_refreshes_parts("NEW", true, true).await;
     }
 }

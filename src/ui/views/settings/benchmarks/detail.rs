@@ -844,10 +844,46 @@ impl Foxy {
                     .unwrap_or_else(|| self.t("Unlimited")),
             ),
             (
+                self.t("CPU usage limit"),
+                record
+                    .machine
+                    .cpu_usage_limit_percent
+                    .map(|limit| format!("{limit}%"))
+                    .unwrap_or_else(|| self.t("No limit")),
+            ),
+            (
+                self.t("CPU Threads"),
+                record
+                    .machine
+                    .cpu_thread_limit
+                    .map(|limit| limit.to_string())
+                    .unwrap_or_else(|| self.t("Auto")),
+            ),
+            (
                 self.t("Extended diagnostics"),
                 yes_no(record.machine.extended_diagnostics),
             ),
         ];
+        if !record.machine.work_priority.is_empty() {
+            let priority = match record.machine.work_priority.as_str() {
+                "below_normal" => self.t("Below normal"),
+                "lowest" => self.t("Lowest"),
+                _ => self.t("Normal"),
+            };
+            machine_rows.push((self.t("Work priority"), priority));
+            machine_rows.push((
+                self.t("Low disk priority"),
+                yes_no(record.machine.low_disk_priority),
+            ));
+        }
+        if !record.machine.memory_pressure_override.is_empty() {
+            let pressure = match record.machine.memory_pressure_override.as_str() {
+                "constrained" => self.t("Constrained"),
+                "severe" => self.t("Severe"),
+                _ => self.t("Normal"),
+            };
+            machine_rows.push((self.t("Memory pressure"), pressure));
+        }
         if let Some(power) = self.benchmark_power_text(&record.machine.power) {
             machine_rows.push((self.t("Power"), power));
         }

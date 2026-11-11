@@ -35,6 +35,71 @@ foxy-testkit run --case .\testkit\cases\ux-boot-smoke.json
 foxy-testkit run --case .\testkit\cases\perf-repo.json
 ```
 
+The tracked `examples/state-*-ssd.example.json` cases generate their own local
+origins and repository folders under each run directory. They exercise file
+rollback on cancel and normal close, forward recovery after a process kill,
+paused state across restart, and queued repository identity and membership
+changes. Run one after building the app, runner, and oracle:
+
+```powershell
+foxy-testkit run --case .\testkit\examples\state-recovery-ssd.example.json --no-build
+foxy-testkit run --case .\testkit\examples\state-paused-restart-ssd.example.json --no-build
+foxy-testkit run --case .\testkit\examples\state-bulk-queue-identity-ssd.example.json --no-build
+foxy-testkit run --case .\testkit\examples\state-delta-clean-check-ssd.example.json --no-build
+foxy-testkit run --case .\testkit\examples\state-n01-external-edit-rollback.example.json --no-build
+foxy-testkit run --case .\testkit\examples\state-n05-foxypack-atomic-import.example.json --no-build
+foxy-testkit run --case .\testkit\examples\state-n03-n14-workshop-selection.example.json --no-build
+foxy-testkit run --case .\testkit\examples\state-r14-unknown-settings-roundtrip.example.json --no-build
+foxy-testkit run --case .\testkit\examples\state-r03-r18-single-config-process.example.json --no-build
+foxy-testkit run --case .\testkit\examples\state-r21-r22-extra-file-review-ssd.example.json --no-build
+```
+
+The R14 case saves a known setting through the running GUI, waits for the
+persisted JSON, restarts Foxy, then checks valid unknown fields in both split
+settings files. The R03/R18 case starts a second CLI command against the same
+isolated root while the GUI is open, targets a different space, and requires
+`DATABASE_BUSY=6` plus byte-identical registry and settings files. Both use
+generated loopback repositories and per-run configuration directories.
+The R21/R22 CLI case checks edited destinations, Keep versus Reapply, retained
+templates, and explicit approval of a changed later-layer winner, asserting
+file contents before and after each decision.
+
+The hash-check recovery examples use generated origins and repository paths
+under `${RUN_DIR}`. Run them sequentially after building the app, runner,
+oracle, mutator, and repository generator. The unreadable-file lock case is
+Windows-only:
+
+```powershell
+foxy-testkit run --case .\testkit\examples\state-h2-offline-local-check.example.json --no-build
+foxy-testkit run --case .\testkit\examples\state-h3-refresh-local-drift.example.json --no-build
+foxy-testkit run --case .\testkit\examples\state-h4-same-size-after-plan.example.json --no-build
+foxy-testkit run --case .\testkit\examples\state-h8-offline-integrity.example.json --no-build
+foxy-testkit run --case .\testkit\examples\state-h10-approved-extra-cleanup.example.json --no-build
+foxy-testkit run --case .\testkit\examples\state-empty-publication-recovery.example.json --no-build
+foxy-testkit run --case .\testkit\examples\state-integrity-cancel-recovery.example.json --no-build
+foxy-testkit run --case .\testkit\examples\state-independent-copy-refresh.example.json --no-build
+foxy-testkit run --case .\testkit\examples\state-extra-files-no-update.example.json --no-build
+foxy-testkit run --case .\testkit\examples\state-unreadable-integrity-recovery.example.json --no-build
+```
+
+These are correctness cases, not performance baselines. Their file-state
+assertions compare deterministic per-file BLAKE3 digests stored in the isolated
+run directory. The shared-path driver intent is accepted only when
+`FOXY_TESTKIT_RUN_DIR` and `FOXY_CONFIG_DIR` prove the app is inside that same
+synthetic run. To run the same cases against a preserved executable for a
+before/after comparison, pass `--foxy-binary` with an executable under the
+ignored repository `.local/` directory; e.g. `--foxy-binary
+.local/reference-build/Foxy.exe`. The override does not change any case fields.
+
+Record the overridden executable's version, source revision/diff and SHA-256
+beside its run IDs. Ledger `git_sha` and `git_dirty` currently describe the
+runner's checkout, including when `--foxy-binary` selects another build. The
+`compare` command compares database modes/write gates, not executable revisions.
+For manual build comparisons, preserve the exact case template and publication
+as well as the binary mapping; see [case hash limits](LEDGER_FORMAT.md#case-hashes)
+when the resolved case contains a unique run directory. Such evidence must not
+be accepted with a misleading build identity or incompatible profile.
+
 Run a whole suite (a failing case does not stop the rest):
 
 ```powershell
@@ -160,12 +225,21 @@ foxy-testkit run --case .\testkit\cases\perf-memory-arma3-live.json --no-build
 ```
 
 Read private commit, not working set: the OS trims resident pages under
-pressure, so only commit moves when an allocation regression lands. To separate
-Foxy's own state from the renderer floor, launch once against an empty
-`--config-dir` and subtract - that floor is not Foxy code and moves with eframe,
-wgpu and the graphics driver. `conventions/SPEED_OF_LIGHT.md` M1 has the
-equation; `conventions/SPEED_OF_LIGHT_MEASUREMENTS.md` has the levers and the
-recorded floor for this machine.
+pressure. Saved benchmark memory samples prefer private working set on Windows,
+so their endpoint/peak values cannot stand in for testkit quiet-window private
+commit. Compare the same phase and pending/preview state over repeated cycles.
+An empty isolated `--config-dir` with the same renderer gives a separate empirical
+base-state observation; it includes app/runtime costs and moves with eframe,
+wgpu and the graphics driver. Do not subtract separately observed peaks to
+invent an allocation minimum. `conventions/SPEED_OF_LIGHT.md` M1 owns the model;
+`conventions/SPEED_OF_LIGHT_MEASUREMENTS.md` holds dated observations.
+
+The memory watch continues through `memory_settle_ms`. `memory.cpu_s` includes
+that tail, while the operation's elapsed time excludes it. An `fps` probe can
+keep frames running briefly into the tail. Use the raw cumulative `cpu_series`
+and a declared operation boundary for action-only CPU; retain the original
+total and report the sampler's boundary precision. Keep renderer, view, frame
+work and probe cadence fixed, and label forced-frame attribution cases.
 
 ## Deep profiling
 
@@ -281,6 +355,10 @@ generator splits a PBO into one part per entry, so part rows scale with entries
 rather than with payload size. `--entry-bytes` sets the payload behind each
 entry.
 
+For a versioned multi-mod case that changes only selected addons, repeat
+`--mod-seed` once per mod; payload under each mod then depends on its own seed.
+Case `origin.synthetic` versions accept the corresponding `mod_seeds` array.
+
 ```powershell
 foxy-testkit synthetic --output .\testkit\origin\data\synthetic-parts --mods 96 --files-per-mod 8 --pbo-entries 562 --entry-bytes 64 --force
 ```
@@ -349,7 +427,7 @@ Its reproducible case template is
 `testkit/examples/perf-tfr-scifi-cold-auto-hash-hdd.example.json`; set
 `FOXY_TESTKIT_REPO_URL` and `FOXY_TESTKIT_HDD_PAYLOAD` to the matching origin
 and HDD payload path before running it. The baseline records seven evicted
-integrity rechecks at a 30.70 s median. Its calibrated hash ratio exceeds one,
+integrity rechecks at a 25.21 s median. Its calibrated hash ratio exceeds one,
 so use the elapsed time as the accepted comparison until the B2+B6 reference
 is reviewed.
 

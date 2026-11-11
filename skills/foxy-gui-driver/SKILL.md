@@ -1,6 +1,6 @@
 ---
 name: foxy-gui-driver
-description: "Design, implement, or use Foxy's agentic GUI driver for Codex, Claude Code, or similar coding agents. Use when adding or debugging a Playwright-like desktop automation path for the egui/eframe UI: launching Foxy in GUI mode, opening FoxyView screens, inspecting visible text and accessibility state, reading FPS/performance status, simulating clicks/scroll/keyboard input, taking screenshots, detecting egui multi-pass/relayout regressions, or writing agent-driven UI smoke tests with Foxy's local harness and egui_mcp."
+description: "Drive or debug Foxy's egui desktop UI through the local agent-gui harness and egui_mcp. Use for semantic snapshots, screenshots, input simulation, accessibility checks, and FPS or relayout investigations."
 ---
 
 # Foxy GUI Driver
@@ -178,7 +178,7 @@ cargo run -- agent-gui scenario scenarios\smoke.json --json                     
 cargo run -- agent-gui invoke list-actions --json                                   # enumerate the semantic-action registry
 cargo run -- agent-gui invoke start-sync --repo-index 0 --allow-destructive --json  # drive by intent (gated for core/disk mutations)
 cargo run -- agent-gui invoke start-sync-full-files --repo-index 0 --allow-destructive --json # mismatch-scoped full-file test control
-cargo run -- agent-gui invoke apply-profile --repo-index 0 --profile Main --json    # non-destructive intents need no flag
+cargo run -- agent-gui invoke apply-profile --repo-index 0 --profile Main --json    # non-destructive intents need no flag; saves like the profile combo, so a changed addon selection queues a quick local check
 echo '[{"command":"set-filter","name":"addons-filter","value":"ace"},{"command":"settle","frames":2},{"command":"addons","tab":"addons"}]' | cargo run -- agent-gui batch --stdin --json  # server-side pipeline, one round-trip
 cargo run -- agent-gui diff --baseline last --json                                  # field-level delta vs the last snapshot/diff; also --baseline frame:<n>
 cargo run -- agent-gui drag --from-id profile.row.0 --to-id profile.row.3 --json    # one-call drag (coords: --from-x/--from-y --to-x/--to-y --steps N)
@@ -203,7 +203,7 @@ cargo run -- agent-gui close --json
 - **`spaces`** lists repository spaces with `attached_repository_count` (repos pointing at the space), `selected_space`, `manifest_entry_count`/`required_entry_count`, plus `bulk_progress` (`{space_id, mode, total/completed/succeeded/failed/updates_available/up_to_date counts, current_repo_name}`) while a space bulk action runs. Filter with `--contains`/`--limit`.
 - **`download-summary`** returns the last completed `DownloadSummary` (`present:false` until one exists): `mods_updated`, `files_updated`, `parts_updated`, `downloaded_bytes`, `planned_transfer_bytes`, `full_download_bytes`, `patch_savings_bytes`, `patched_files`, stage durations (`download_stage_ms`, `hash_stage_ms`, `cumulative_hash_ms`, `after_download_hash_ms`, `total_ms`), `avg_speed_bps`, and `telemetry_sample_count`. Add `--include-telemetry` for the full per-sample series (`download_bps`/`disk_write_bps`/`hash_files_per_sec`/`cpu_percent`/`memory_bytes`). Structured assertion of "did the sync do what I expected?" instead of log parsing.
 - **`toasts`** surfaces the current user-feedback toast (`present`, `message`, `kind` = success/error, `age_ms`, `remaining_ms`, `duration_ms`), or `present:false` once it has timed out. Pairs with `wait --toast <text>`.
-- **`set-setting <key> <value>`** is the read/write complement to `settings`: mutate one live field and watch the UI react. Keys: `debug-mode`, `show-activity-log`, `show-fps-counter`, `reduce-motion` (bool: true/1/on/yes), `extended-diagnostics-logging` (bool; applies live), `ui-scale-percent` (int, reuses the `scale` clamp), `locale` (e.g. `en`, also reloads i18n), `download-speed-limit-mbps` (int ≥ 1, or `unlimited`). Clamps/validates like the offline `settings set` CLI and echoes the applied value at `.data.data.value`. Loopback + token-gated like every command.
+- **`set-setting <key> <value>`** is the read/write complement to `settings`: mutate one live field and watch the UI react. Keys: `debug-mode`, `show-activity-log`, `show-fps-counter`, `reduce-motion` (bool: true/1/on/yes), `extended-diagnostics-logging` (bool; applies live), `ui-scale-percent` (int, reuses the `scale` clamp), `locale` (e.g. `en`, also reloads i18n), `download-speed-limit-mbps` (int ≥ 1, or `unlimited`), `cpu-usage-limit` (percent 10-100, or `unlimited`; applies live), `cpu-threads` (int ≥ 1, kept within detected processors while safe limits are on, or `auto`; applies live), `cpu-safe-limits` (bool; applies live). Clamps/validates like the offline `settings set` CLI and echoes the applied value at `.data.data.value`. Loopback + token-gated like every command.
 - **More `wait` conditions** beyond text/view/idle/modal: `--toast <text>` (a feedback toast containing the text is showing), `--busy-reason-cleared <name>` (the named `busy_reasons` flag is gone - wait out one `core-sync` without going fully idle), `--download-complete`, `--download-transferring` (the running download has received bytes, past its check and planning stages), `--fps-above <n>`, `--node-visible <id>`. Each reuses the pending-wait machinery, so no agent-side polling loop.
 - **Benchmarks** (the `benchmarks_enabled` setting): `start-sync`, `remote-recheck`, `quick-check`, `recheck-integrity` and `download-addons` arm a benchmark capture exactly like the buttons do, so the run ends with the "Save benchmark" prompt (busy modal `benchmark-save`); answer it with `invoke save-benchmark --allow-destructive` or `invoke discard-benchmark`, then wait for the `Benchmark saved.` toast. In the Benchmarks settings tab, `expand-benchmark`/`select-benchmark` take `{"index":N}` over the *visible* (filtered, sorted) list, `compare-benchmarks` opens the two-way comparison, and `export-benchmark` (with `dialog expect --path x.zip` queued first) writes the ZIP with the chart PNGs (busy modal `benchmark-export` while the chart window is screenshotted). The saved folder is `games/<space>/benchmarks/<id>/`. Caveat: every agent-gui CLI call is a Foxy process that starts its own file logger in the same `logs/` folder, which truncates the GUI's `foxy_rCURRENT.log`; a benchmark's log slice is therefore only complete when no CLI calls ran during the action.
 - `open-view settings` accepts `--tab application|backup-manager|additional-search-folders|cleanup|direct-download|ts3-plugin|customization|benchmarks` to land directly on a Settings tab. Snapshot responses include `settings_tab` while the Settings view is active, so assert it directly after opening.
@@ -326,10 +326,10 @@ Remove-Item -Recurse -Force $dir
 Docs-only change to this skill:
 
 ```powershell
-py -3 "${env:USERPROFILE}\.codex\skills\.system\skill-creator\scripts\quick_validate.py" skills\foxy-gui-driver
+cargo agent-check
 ```
 
-Harness/CLI code change - follow `AGENTS.md`: targeted tests first, then `cargo fmt`, `cargo clippy --all-targets --all-features -- -D warnings`, then `cargo test`.
+Harness/CLI code change - follow `conventions/TESTING_CONVENTIONS.md`: targeted tests first, format changed code without unrelated churn, then workspace Clippy and tests. Validate the affected runtime flow in an isolated configuration.
 
 ## Example agent tasks
 

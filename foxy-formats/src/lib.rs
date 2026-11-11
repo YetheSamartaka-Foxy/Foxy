@@ -1,3 +1,4 @@
+mod chunking;
 mod pac1;
 mod pbo;
 
@@ -6,6 +7,9 @@ use std::fmt;
 use std::io::{BufRead, Seek};
 use std::path::Path;
 
+pub use chunking::{
+    CONTENT_CHUNK_AVG_SIZE, CONTENT_CHUNK_MAX_SIZE, CONTENT_CHUNK_MIN_SIZE, ContentChunker,
+};
 pub use pac1::{
     PAC1_END_PART, PAC1_FORMAT_ID, PAC1_GAP_PREFIX, PAC1_HEADER_PART, Pac1Format, is_pac1_gap_part,
 };
@@ -183,18 +187,13 @@ pub fn single_file_parts(relative_path: &str, file_size: u64) -> Vec<FilePart> {
         return Vec::new();
     }
 
-    let file_name = Path::new(relative_path)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(relative_path);
-
     let mut parts = Vec::new();
     let mut start = 0;
     while start < file_size {
         let length = (file_size - start).min(SINGLE_PART_SIZE);
         let end = start + length;
         parts.push(FilePart {
-            path: format!("{}_{}", file_name, end),
+            path: plain_part_path(relative_path, end),
             start,
             length,
         });
@@ -202,6 +201,16 @@ pub fn single_file_parts(relative_path: &str, file_size: u64) -> Vec<FilePart> {
     }
 
     parts
+}
+
+/// Display path of a part of a file no container format describes: the file
+/// name and the part's end offset.
+pub fn plain_part_path(relative_path: &str, end: u64) -> String {
+    let file_name = Path::new(relative_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(relative_path);
+    format!("{}_{}", file_name, end)
 }
 
 pub fn normalize_part_path(path: &str) -> String {

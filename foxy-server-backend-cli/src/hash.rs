@@ -8,7 +8,9 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cli::GenerationMode;
-use crate::types::{Checksums, DiscoveredFile, FilePart, ModFile, ProcessedMod, ResolvedMod};
+use crate::types::{
+    Checksums, Chunking, DiscoveredFile, FilePart, ModFile, ProcessedMod, ResolvedMod,
+};
 
 const BUF_SIZE_SWIFTY: usize = 256 * 1024;
 const BUF_SIZE_FOXY: usize = 1024 * 1024; // BLAKE3 benefits from larger buffers
@@ -151,6 +153,7 @@ pub fn process_mods(
                 &item.file,
                 item.file_data_order,
                 mode,
+                resolved_mods[item.mod_index].chunking,
             )
             .with_context(|| format!("Failed to process {}", item.file.absolute_path.display()))?;
             progress.inc(1);
@@ -271,29 +274,34 @@ fn copy_and_hash_file(
     discovered: &DiscoveredFile,
     data_order: usize,
     mode: GenerationMode,
+    chunking: Chunking,
 ) -> Result<ModFile> {
     let use_md5 = matches!(mode, GenerationMode::Swifty | GenerationMode::Hybrid);
     let use_blake3 = matches!(mode, GenerationMode::Foxy | GenerationMode::Hybrid);
     let buf_size = buf_size_for_mode(mode);
 
     let registry = foxy_formats::builtin_registry();
-    let mut parts = match registry.parse_parts_for_file(source) {
-        Ok(Some((_format_id, parts))) => format_parts_to_manifest_parts(parts),
-        Ok(None) => format_parts_to_manifest_parts(foxy_formats::single_file_parts(
-            &discovered.relative_path,
-            discovered.file_size,
-        )),
+    let container_parts = match registry.parse_parts_for_file(source) {
+        Ok(Some((_format_id, parts))) => Some(parts),
+        Ok(None) => None,
         Err(e) => {
             log::warn!(
                 "Content format parse failed for {}, treating as single file: {}",
                 source.display(),
                 e
             );
-            format_parts_to_manifest_parts(foxy_formats::single_file_parts(
-                &discovered.relative_path,
-                discovered.file_size,
-            ))
+            None
         }
+    };
+    let mut parts = match container_parts {
+        Some(parts) => format_parts_to_manifest_parts(parts),
+        None if chunking == Chunking::Content => {
+            return copy_and_hash_content_defined(source, dest, discovered, data_order, mode);
+        }
+        None => format_parts_to_manifest_parts(foxy_formats::single_file_parts(
+            &discovered.relative_path,
+            discovered.file_size,
+        )),
     };
 
     let mut src_file = std::fs::File::open(source)
@@ -366,6 +374,104 @@ fn copy_and_hash_file(
 
     let file_checksums = compute_file_checksums(&parts, mode);
 
+    Ok(ModFile {
+        relative_path: discovered.relative_path.clone(),
+        checksums: file_checksums,
+        length: discovered.file_size,
+        parts,
+        data_order,
+    })
+}
+
+/// Hash a file into content-defined parts while copying it, in one read: the
+/// boundaries are found in the same buffers the part hashers consume.
+fn copy_and_hash_content_defined(
+    source: &Path,
+    dest: Option<&Path>,
+    discovered: &DiscoveredFile,
+    data_order: usize,
+    mode: GenerationMode,
+) -> Result<ModFile> {
+    let use_md5 = matches!(mode, GenerationMode::Swifty | GenerationMode::Hybrid);
+    let use_blake3 = matches!(mode, GenerationMode::Foxy | GenerationMode::Hybrid);
+    let new_hashers = || {
+        (
+            use_md5.then(FlexHasher::new_md5),
+            use_blake3.then(FlexHasher::new_blake3),
+        )
+    };
+    let buf_size = buf_size_for_mode(mode);
+
+    let mut src_file = std::fs::File::open(source)
+        .with_context(|| format!("Failed to open source: {}", source.display()))?;
+    let mut writer = match dest {
+        Some(dest) => {
+            let dst_file = std::fs::File::create(dest)
+                .with_context(|| format!("Failed to create destination: {}", dest.display()))?;
+            Sink::File(BufWriter::with_capacity(buf_size, dst_file))
+        }
+        None => Sink::Discard,
+    };
+
+    let mut chunker = foxy_formats::ContentChunker::new();
+    let mut parts = Vec::new();
+    let mut part_start: u64 = 0;
+    let mut file_position: u64 = 0;
+    let (mut md5_hasher, mut b3_hasher) = new_hashers();
+    let mut buf = vec![0u8; buf_size];
+    let mut finish_part = |end: u64, md5: Option<FlexHasher>, b3: Option<FlexHasher>| {
+        parts.push(FilePart {
+            path: foxy_formats::plain_part_path(&discovered.relative_path, end),
+            checksums: finalize_checksums(md5, b3, mode),
+            start: part_start,
+            length: end - part_start,
+        });
+        part_start = end;
+    };
+
+    loop {
+        let n = src_file
+            .read(&mut buf)
+            .context("Failed to read source file")?;
+        if n == 0 {
+            break;
+        }
+        writer.write_all(&buf[..n]).context("Failed to write")?;
+        let mut rest = &buf[..n];
+        while !rest.is_empty() {
+            let take = chunker.find_boundary(rest);
+            let len = take.unwrap_or(rest.len());
+            if let Some(h) = md5_hasher.as_mut() {
+                h.update(&rest[..len]);
+            }
+            if let Some(h) = b3_hasher.as_mut() {
+                h.update(&rest[..len]);
+            }
+            file_position += len as u64;
+            rest = &rest[len..];
+            if take.is_some() {
+                let (next_md5, next_b3) = new_hashers();
+                let md5 = std::mem::replace(&mut md5_hasher, next_md5);
+                let b3 = std::mem::replace(&mut b3_hasher, next_b3);
+                finish_part(file_position, md5, b3);
+            }
+        }
+    }
+    if chunker.pending_len() > 0 {
+        finish_part(file_position, md5_hasher, b3_hasher);
+    }
+    writer.flush().context("Failed to flush output")?;
+
+    if file_position != discovered.file_size {
+        anyhow::bail!(
+            "{} changed while it was hashed ({} bytes expected, {} read)",
+            source.display(),
+            discovered.file_size,
+            file_position
+        );
+    }
+
+    let file_checksums = compute_file_checksums(&parts, mode);
     Ok(ModFile {
         relative_path: discovered.relative_path.clone(),
         checksums: file_checksums,
@@ -1018,8 +1124,15 @@ mod tests {
             file_size,
         };
 
-        let file = copy_and_hash_file(&source, Some(&dest), &discovered, 7, GenerationMode::Swifty)
-            .unwrap();
+        let file = copy_and_hash_file(
+            &source,
+            Some(&dest),
+            &discovered,
+            7,
+            GenerationMode::Swifty,
+            Chunking::Fixed,
+        )
+        .unwrap();
         let header_len = 22 + "Data\\Thing.bin".len() as u64 + 1 + 20 + 21;
 
         assert_eq!(file.data_order, 7);
@@ -1041,6 +1154,83 @@ mod tests {
     }
 
     #[test]
+    fn content_chunking_keeps_container_parts_and_splits_plain_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let pbo = dir.path().join("source.pbo");
+        write_fixture_pbo(&pbo);
+        let pbo_file = DiscoveredFile {
+            absolute_path: pbo.clone(),
+            relative_path: "addons/source.pbo".to_string(),
+            file_size: std::fs::metadata(&pbo).unwrap().len(),
+        };
+        let fixed = copy_and_hash_file(
+            &pbo,
+            None,
+            &pbo_file,
+            0,
+            GenerationMode::Foxy,
+            Chunking::Fixed,
+        )
+        .unwrap();
+        let content = copy_and_hash_file(
+            &pbo,
+            None,
+            &pbo_file,
+            0,
+            GenerationMode::Foxy,
+            Chunking::Content,
+        )
+        .unwrap();
+        assert_eq!(content.checksums, fixed.checksums);
+        assert_eq!(content.parts.len(), 3);
+
+        let exe = dir.path().join("game.exe");
+        let dest = dir.path().join("out.exe");
+        let mut state = 9u64;
+        let bytes: Vec<u8> = (0..(6 << 20))
+            .map(|_| {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                (state >> 33) as u8
+            })
+            .collect();
+        std::fs::write(&exe, &bytes).unwrap();
+        let exe_file = DiscoveredFile {
+            absolute_path: exe.clone(),
+            relative_path: "bin/game.exe".to_string(),
+            file_size: bytes.len() as u64,
+        };
+        let file = copy_and_hash_file(
+            &exe,
+            Some(&dest),
+            &exe_file,
+            0,
+            GenerationMode::Hybrid,
+            Chunking::Content,
+        )
+        .unwrap();
+
+        assert_eq!(std::fs::read(&dest).unwrap(), bytes);
+        assert!(file.parts.len() > 1);
+        let mut expected_start = 0;
+        for part in &file.parts {
+            assert_eq!(part.start, expected_start);
+            expected_start += part.length;
+            assert_eq!(part.path, format!("game.exe_{expected_start}"));
+            let range = part.start as usize..(part.start + part.length) as usize;
+            assert_eq!(
+                part.checksums.unwrap_blake3(),
+                blake3::hash(&bytes[range]).to_hex().to_uppercase()
+            );
+            assert!(!part.checksums.unwrap_md5().is_empty());
+        }
+        assert_eq!(expected_start, bytes.len() as u64);
+        assert_eq!(
+            file.checksums,
+            compute_file_checksums(&file.parts, GenerationMode::Hybrid)
+        );
+    }
+
+    #[test]
     fn copy_and_hash_file_uses_format_registry_for_pac1_parts() {
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("source.PAK");
@@ -1054,8 +1244,15 @@ mod tests {
             file_size,
         };
 
-        let file =
-            copy_and_hash_file(&source, Some(&dest), &discovered, 8, GenerationMode::Foxy).unwrap();
+        let file = copy_and_hash_file(
+            &source,
+            Some(&dest),
+            &discovered,
+            8,
+            GenerationMode::Foxy,
+            Chunking::Fixed,
+        )
+        .unwrap();
 
         assert_eq!(file.data_order, 8);
         assert_eq!(
@@ -1101,6 +1298,7 @@ mod tests {
             is_required: true,
             enabled: true,
             client_side: false,
+            chunking: crate::types::Chunking::Fixed,
         }];
         let processed = process_mods(
             &resolved,

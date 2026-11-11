@@ -9,9 +9,16 @@ use crate::core::tasks::db_turso::{
     DATABASE_ARTIFACT_FILE_NAMES, DATABASE_REBUILD_BACKUP_PREFIX, WIPE_MARKER_FILE_NAME,
 };
 use crate::core::utils::format::sanitize_log_path;
+use crate::core::utils::fs_safety::atomic_write;
 
 const LEGACY_SETTINGS_FILE: &str = "settings.json";
 const LEGACY_BACKUP_SUFFIX: &str = ".pre-gamespaces.bak";
+const LEGACY_REVIEW_FILE: &str = "legacy_migration_review.json";
+const REVIEWABLE_JSON_FILES: [&str; 3] = [
+    "repositories.json",
+    "repository_spaces.json",
+    "repository_visual_folders.json",
+];
 
 /// Data files that move into the game space dir with a small backup copy left
 /// at the legacy location so a rollback to an older build keeps working.
@@ -37,8 +44,14 @@ const MOVED_DIRECTORIES: [&str; 1] = ["images"];
 /// was migrated.
 pub(super) fn migrate_legacy_layout(root: &Path, space_dir: &Path) -> Result<bool, String> {
     let mut migrated = false;
+    let mut review_files = Vec::new();
 
     for name in MOVED_WITH_BACKUP {
+        if REVIEWABLE_JSON_FILES.contains(&name)
+            && has_divergent_valid_json(name, &root.join(name), &space_dir.join(name))?
+        {
+            review_files.push(name.to_string());
+        }
         migrated |= move_legacy_entry(&root.join(name), &space_dir.join(name), true)?;
     }
     for name in MOVED_WITHOUT_BACKUP {
@@ -52,8 +65,106 @@ pub(super) fn migrate_legacy_layout(root: &Path, space_dir: &Path) -> Result<boo
     }
     migrated |= move_rebuild_backups(root, space_dir)?;
     migrated |= migrate_legacy_settings(root, space_dir)?;
+    migrated |= persist_legacy_review(space_dir, review_files)?;
 
     Ok(migrated)
+}
+
+fn has_divergent_valid_json(name: &str, source: &Path, destination: &Path) -> Result<bool, String> {
+    if !source.is_file() || !destination.is_file() {
+        return Ok(false);
+    }
+    let (Ok(source_text), Ok(destination_text)) =
+        (fs::read_to_string(source), fs::read_to_string(destination))
+    else {
+        return Ok(false);
+    };
+    let source_value = serde_json::from_str::<Value>(&source_text).ok();
+    let destination_value = serde_json::from_str::<Value>(&destination_text).ok();
+    let required_strings: &[&str] = if name == "repositories.json" {
+        &["name", "address", "path"]
+    } else {
+        &["id", "name"]
+    };
+    let is_setup = |value: &Value| {
+        value.as_array().is_some_and(|entries| {
+            entries.iter().all(|entry| {
+                required_strings.iter().all(|field| {
+                    entry
+                        .get(*field)
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| !value.trim().is_empty())
+                })
+            })
+        })
+    };
+    Ok(
+        matches!((source_value, destination_value), (Some(source), Some(destination))
+        if is_setup(&source) && is_setup(&destination) && source != destination),
+    )
+}
+
+fn persist_legacy_review(space_dir: &Path, files: Vec<String>) -> Result<bool, String> {
+    if files.is_empty() {
+        return Ok(false);
+    }
+    let path = space_dir.join(LEGACY_REVIEW_FILE);
+    let mut existing = match fs::read(&path) {
+        Ok(bytes) => parse_legacy_review(&bytes)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => {
+            return Err(format!(
+                "Failed to read legacy migration review marker: {error}"
+            ));
+        }
+    };
+    let previous_len = existing.len();
+    for file in files {
+        if REVIEWABLE_JSON_FILES.contains(&file.as_str()) && !existing.contains(&file) {
+            existing.push(file);
+        }
+    }
+    if existing.len() == previous_len {
+        return Ok(false);
+    }
+    atomic_write(
+        &path,
+        &serde_json::to_vec_pretty(&existing).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| format!("Failed to save legacy migration review marker: {error}"))?;
+    Ok(true)
+}
+
+fn parse_legacy_review(bytes: &[u8]) -> Result<Vec<String>, String> {
+    let files: Vec<String> = serde_json::from_slice(bytes)
+        .map_err(|error| format!("Legacy migration review marker is invalid: {error}"))?;
+    if files
+        .iter()
+        .any(|file| !REVIEWABLE_JSON_FILES.contains(&file.as_str()))
+    {
+        return Err("Legacy migration review marker contains an unknown filename".to_string());
+    }
+    Ok(files)
+}
+
+pub(crate) fn pending_legacy_migration_review(space_dir: &Path) -> Result<Vec<String>, String> {
+    let path = space_dir.join(LEGACY_REVIEW_FILE);
+    match fs::read(&path) {
+        Ok(bytes) => parse_legacy_review(&bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(format!(
+            "Failed to read legacy migration review marker: {error}"
+        )),
+    }
+}
+
+pub(crate) fn acknowledge_legacy_migration_review(space_dir: &Path) -> Result<(), String> {
+    let files = pending_legacy_migration_review(space_dir)?;
+    if files.is_empty() {
+        return Ok(());
+    }
+    fs::remove_file(space_dir.join(LEGACY_REVIEW_FILE))
+        .map_err(|error| format!("Failed to clear legacy migration review marker: {error}"))
 }
 
 fn move_legacy_entry(src: &Path, dest: &Path, backup: bool) -> Result<bool, String> {
@@ -313,6 +424,58 @@ mod tests {
         assert_eq!(
             fs::read_to_string(root.join("repositories.json")).expect("src"),
             "legacy"
+        );
+    }
+
+    #[test]
+    fn divergent_valid_configs_are_preserved_and_marked_for_review() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+        let space = space_dir(root);
+        let legacy = r#"[{"name":"Legacy","address":"https://repo.example.invalid/legacy/","path":"R:/Mods/RepoAlpha"}]"#;
+        let current = r#"[{"name":"Current","address":"https://repo.example.invalid/current/","path":"R:/Mods/RepoBeta"}]"#;
+        write(&root.join("repositories.json"), legacy);
+        write(&space.join("repositories.json"), current);
+
+        migrate_legacy_layout(root, &space).expect("migration");
+
+        assert_eq!(
+            fs::read_to_string(root.join("repositories.json")).unwrap(),
+            legacy
+        );
+        assert_eq!(
+            fs::read_to_string(space.join("repositories.json")).unwrap(),
+            current
+        );
+        assert_eq!(
+            pending_legacy_migration_review(&space).expect("review marker"),
+            vec!["repositories.json"]
+        );
+
+        acknowledge_legacy_migration_review(&space).expect("acknowledge");
+        assert!(
+            pending_legacy_migration_review(&space)
+                .expect("review cleared")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn matching_or_invalid_config_sources_do_not_create_a_review_marker() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+        let space = space_dir(root);
+        write(&root.join("repositories.json"), "[]");
+        write(&space.join("repositories.json"), "[ ]");
+        write(&root.join("repository_spaces.json"), "{broken");
+        write(&space.join("repository_spaces.json"), "[]");
+
+        migrate_legacy_layout(root, &space).expect("migration");
+
+        assert!(
+            pending_legacy_migration_review(&space)
+                .expect("no review marker")
+                .is_empty()
         );
     }
 

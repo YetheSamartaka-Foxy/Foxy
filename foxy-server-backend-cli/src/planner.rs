@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::cli::{GenerationMode, SpaceLayout};
-use crate::types::ResolvedMod;
-use crate::{discover, incremental, keys, output, published, space};
+use crate::types::{RepoGame, ResolvedMod};
+use crate::{discover, incremental, keys, mod_line, output, published, space};
 
 #[derive(Serialize)]
 pub struct PlannedAction {
@@ -151,6 +151,7 @@ impl BuildPlan {
 pub fn create(
     mods: &[ResolvedMod],
     output_dir: &Path,
+    game: RepoGame,
     mode: GenerationMode,
     prune: bool,
     use_incremental: bool,
@@ -163,7 +164,9 @@ pub fn create(
     if mode != GenerationMode::Swifty {
         plan.add("write", &output_dir.join("foxy_addons.json"), 0);
     }
-    plan.add("write", &output_dir.join("server_mod_line.txt"), 0);
+    if mod_line::has_server_line(game) {
+        plan.add("write", &output_dir.join("server_mod_line.txt"), 0);
+    }
     Ok(plan)
 }
 
@@ -238,7 +241,9 @@ pub fn create_space(
         if mode != GenerationMode::Swifty {
             plan.add("write", &root.join("foxy_addons.json"), 0);
         }
-        plan.add("write", &root.join("server_mod_line.txt"), 0);
+        if mod_line::has_server_line(repo.config.game) {
+            plan.add("write", &root.join("server_mod_line.txt"), 0);
+        }
         let base = Path::new(&repo.config.base_path);
         plan.add_images(
             &[
@@ -278,8 +283,17 @@ mod tests {
             is_required: true,
             enabled: true,
             client_side: false,
+            chunking: crate::types::Chunking::Fixed,
         }];
-        let plan = create(&mods, &output, GenerationMode::Foxy, true, false).unwrap();
+        let plan = create(
+            &mods,
+            &output,
+            RepoGame::Arma3,
+            GenerationMode::Foxy,
+            true,
+            false,
+        )
+        .unwrap();
         assert!(plan.actions.iter().any(|action| action.action == "copy"));
         assert!(plan.actions.iter().any(|action| action.action == "remove"));
         assert!(!output.join("@mod").join("main.pbo").exists());

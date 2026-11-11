@@ -86,10 +86,10 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
       - name: Run tests
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
 
   build-windows:
     name: Windows Artifact
@@ -170,7 +170,7 @@ jobs:
       - name: Install Inno Setup
         if: ${{ inputs.build_installers }}
         shell: pwsh
-        run: choco install innosetup -y --no-progress
+        run: choco install innosetup --version=6.7.1 -y --no-progress
 
       - name: Build Windows installer
         if: ${{ inputs.build_installers }}

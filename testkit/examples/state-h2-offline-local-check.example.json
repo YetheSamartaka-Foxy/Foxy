@@ -1,0 +1,87 @@
+{
+  "id": "state-h2-offline-local-check-ssd",
+  "kind": "perf",
+  "description": "Remove selected part rows from an isolated synthetic install, then prove Quick local check stays offline and incomplete until explicit Refresh repairs the metadata.",
+  "build": "release",
+  "harness": "gui",
+  "timeout_s": 600,
+  "origin": {
+    "root": "${RUN_DIR}/origin",
+    "port": 18141,
+    "synthetic": [
+      { "root": "${RUN_DIR}/origin", "seed": 20261061, "mods": 1, "files_per_mod": 2, "file_bytes": 1048576, "pbo_entries": 32, "entry_bytes": 32768 }
+    ]
+  },
+  "repository": {
+    "name": "RepoAlpha",
+    "address": "http://127.0.0.1:18141/",
+    "path": "${RUN_DIR}/repo-alpha",
+    "space_id": null
+  },
+  "operations": [
+    { "op": "download", "setup_once": true, "wait_timeout_s": 180 },
+    { "op": "seed-startup-state", "setup_once": true, "incomplete_parts": true },
+    { "op": "startup", "setup_once": true, "wait_timeout_s": 120 },
+    { "op": "assert-pending-update-count", "setup_once": true, "minimum": 1, "maximum": 1 },
+    { "op": "capture-file-state", "setup_once": true, "label": "installed" },
+    { "op": "capture-origin-requests", "setup_once": true, "label": "before-check" },
+    { "op": "prepare-test-directory", "setup_once": true, "path": "${RUN_DIR}/offline-origin" },
+    { "op": "origin-switch", "setup_once": true, "root": "${RUN_DIR}/offline-origin" },
+    {
+      "op": "quick-check",
+      "label": "offline-incomplete",
+      "wait_timeout_s": 120,
+      "expect_outcome": "incomplete-local-metadata",
+      "expect": [
+        { "path": "breakdown.run_metrics.hash_work_bytes", "equals": 0 }
+      ]
+    },
+    { "op": "assert-pending-update-count", "minimum": 1, "maximum": 1 },
+    { "op": "assert-origin-requests-unchanged", "label": "before-check" },
+    { "op": "assert-file-state", "label": "installed", "comparison": "equal" },
+    {
+      "op": "recheck-integrity",
+      "label": "offline-partial-metadata-is-incomplete",
+      "wait_timeout_s": 180,
+      "expect_outcome": "incomplete-integrity"
+    },
+    { "op": "assert-pending-update-count", "minimum": 1, "maximum": 1 },
+    { "op": "assert-file-state", "label": "installed", "comparison": "equal" },
+    { "op": "origin-switch", "root": "${RUN_DIR}/origin" },
+    {
+      "op": "remote-refresh",
+      "label": "explicit-metadata-repair",
+      "wait_timeout_s": 180,
+      "expect": [
+        { "path": "breakdown.run_metrics.failed_pipelines", "equals": 0 }
+      ]
+    },
+    {
+      "op": "quick-check",
+      "label": "repaired-local-check",
+      "wait_timeout_s": 120,
+      "expect": [
+        { "path": "breakdown.run_metrics.failed_pipelines", "equals": 0 }
+      ]
+    },
+    {
+      "op": "download",
+      "label": "oracle-clean-install",
+      "wait_timeout_s": 180,
+      "expect": [
+        { "path": "breakdown.run_metrics.failed_pipelines", "equals": 0 }
+      ]
+    },
+    { "op": "assert-file-state", "label": "installed", "comparison": "equal" }
+  ],
+  "repetitions": 1,
+  "warmup": false,
+  "guards": {
+    "require_storage_class": "ssd",
+    "require_no_other_foxy": true,
+    "require_clean_worktree": false,
+    "fail_on_db_wipe": true,
+    "max_run_gb": 1,
+    "oracle_command": ["${REPO_ROOT}/target/release/foxy-testkit-oracle.exe", "--repository-path", "${REPOSITORY_PATH}"]
+  }
+}

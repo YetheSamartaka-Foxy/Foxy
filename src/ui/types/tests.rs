@@ -2,10 +2,10 @@ use super::{
     AppUpdateMode, DownloadSummary, DownloadTelemetrySample, Repository, RepositoryProfile,
     RepositorySpace, RepositorySpaceEntry, SettingsViewState, additional_folder_alias_key,
     apply_repo_client_parameters, apply_repo_dlc_content_from_repo_json, has_launch_param_token,
-    merge_remote_addon_list, normalize_loaded_repository, push_arma3_profile_launch_args,
-    repo_json_dlc_content_value, sanitize_external_addons, sanitize_repository_space_paths,
-    sanitize_settings_paths, selected_creator_dlc_codes, set_launch_param_token,
-    split_additional_launch_params,
+    merge_remote_addon_categories, merge_remote_addon_list, normalize_loaded_repository,
+    push_arma3_profile_launch_args, repo_json_dlc_content_value, sanitize_external_addons,
+    sanitize_repository_space_paths, sanitize_settings_paths, selected_creator_dlc_codes,
+    set_launch_param_token, split_additional_launch_params,
 };
 use crate::core::arma3_profiles::Arma3Profile;
 use serde_json::json;
@@ -13,6 +13,15 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::ui::theme::Theme;
+
+#[test]
+fn older_settings_enable_daily_profile_backups_without_database_changes() {
+    let mut saved = serde_json::to_value(SettingsViewState::default()).unwrap();
+    saved.as_object_mut().unwrap().remove("profile_backups");
+    let restored: SettingsViewState = serde_json::from_value(saved).unwrap();
+    assert!(restored.profile_backups.enabled);
+    assert_eq!(restored.profile_backups.interval_days, 1);
+}
 
 #[test]
 fn download_summary_planned_or_downloaded_falls_back_to_downloaded() {
@@ -176,6 +185,144 @@ fn merge_remote_addon_list_drops_addons_no_longer_remote() {
     let merged = merge_remote_addon_list(remote, &local);
 
     assert_eq!(merged, vec![("@kept".to_string(), false)]);
+}
+
+#[test]
+fn disabled_optional_moved_to_required_adopts_published_default_across_profiles() {
+    let mut repo = Repository {
+        addons: vec![("@stable".to_string(), true)],
+        optional_addons: vec![("@moved".to_string(), false)],
+        profiles: vec![
+            RepositoryProfile {
+                name: "Disabled profile".to_string(),
+                addons: vec![("@stable".to_string(), true)],
+                optional_addons: vec![("@moved".to_string(), false)],
+                ..RepositoryProfile::default()
+            },
+            RepositoryProfile {
+                name: "Enabled profile".to_string(),
+                addons: vec![("@stable".to_string(), false)],
+                optional_addons: vec![("@moved".to_string(), true)],
+                ..RepositoryProfile::default()
+            },
+        ],
+        ..Repository::default()
+    };
+
+    let changed = merge_remote_addon_categories(
+        &mut repo,
+        Some(vec![
+            ("@stable".to_string(), true),
+            ("@moved".to_string(), true),
+        ]),
+        Some(Vec::new()),
+    );
+
+    assert_eq!(
+        repo.addons,
+        vec![("@stable".to_string(), true), ("@moved".to_string(), true)]
+    );
+    assert!(repo.optional_addons.is_empty());
+    assert!(repo.profiles.iter().all(|profile| {
+        profile
+            .addons
+            .iter()
+            .any(|(name, enabled)| name == "@moved" && *enabled)
+            && profile.optional_addons.is_empty()
+    }));
+    assert!(
+        !repo.profiles[1]
+            .addons
+            .iter()
+            .find(|(name, _)| name == "@stable")
+            .expect("same-category override")
+            .1
+    );
+    assert_eq!(changed, vec!["@moved".to_string()]);
+
+    for profile in &mut repo.profiles {
+        profile.addons.retain(|(_, enabled)| !*enabled);
+        profile.optional_addons.retain(|(_, enabled)| *enabled);
+    }
+    normalize_loaded_repository(&mut repo);
+    assert!(repo.profiles.iter().all(|profile| {
+        profile
+            .addons
+            .iter()
+            .any(|(name, enabled)| name == "@moved" && *enabled)
+            && profile.optional_addons.is_empty()
+    }));
+    assert!(
+        !repo.profiles[1]
+            .addons
+            .iter()
+            .find(|(name, _)| name == "@stable")
+            .expect("same-category override after reload")
+            .1
+    );
+}
+
+#[test]
+fn enabled_required_moved_to_optional_adopts_published_default_across_profiles() {
+    let mut repo = Repository {
+        addons: vec![("@moved".to_string(), true), ("@stable".to_string(), true)],
+        optional_addons: Vec::new(),
+        profiles: vec![
+            RepositoryProfile {
+                name: "Enabled profile".to_string(),
+                addons: vec![("@moved".to_string(), true), ("@stable".to_string(), true)],
+                ..RepositoryProfile::default()
+            },
+            RepositoryProfile {
+                name: "Disabled profile".to_string(),
+                addons: vec![("@moved".to_string(), false), ("@stable".to_string(), true)],
+                ..RepositoryProfile::default()
+            },
+        ],
+        ..Repository::default()
+    };
+
+    let changed = merge_remote_addon_categories(
+        &mut repo,
+        Some(vec![("@stable".to_string(), true)]),
+        Some(vec![("@moved".to_string(), false)]),
+    );
+
+    assert_eq!(repo.addons, vec![("@stable".to_string(), true)]);
+    assert_eq!(repo.optional_addons, vec![("@moved".to_string(), false)]);
+    assert!(repo.profiles.iter().all(|profile| {
+        profile.addons.len() == 1
+            && profile.addons[0] == ("@stable".to_string(), true)
+            && profile.optional_addons == vec![("@moved".to_string(), false)]
+    }));
+    assert!(
+        repo.profiles[1]
+            .addons
+            .iter()
+            .find(|(name, _)| name == "@stable")
+            .expect("same-category override")
+            .1
+    );
+    assert_eq!(changed, vec!["@moved".to_string()]);
+
+    for profile in &mut repo.profiles {
+        profile.addons.retain(|(_, enabled)| !*enabled);
+        profile.optional_addons.retain(|(_, enabled)| *enabled);
+    }
+    normalize_loaded_repository(&mut repo);
+    assert!(repo.profiles.iter().all(|profile| {
+        profile.addons.len() == 1
+            && profile.addons[0] == ("@stable".to_string(), true)
+            && profile.optional_addons == vec![("@moved".to_string(), false)]
+    }));
+    assert!(
+        repo.profiles[1]
+            .addons
+            .iter()
+            .find(|(name, _)| name == "@stable")
+            .expect("same-category override after reload")
+            .1
+    );
 }
 
 #[test]
@@ -903,4 +1050,67 @@ fn sanitize_repository_space_paths_trims_entry_addresses() {
         space.entries[0].address,
         "http://example.invalid/mody/Entry"
     );
+}
+
+#[test]
+fn repo_json_game_build_requires_paths_inside_the_repository() {
+    assert_eq!(
+        super::repo_json_game_build(&json!({
+            "gameBuild": {"modName": "MyGame", "executable": r"bin\game.exe"}
+        })),
+        Some(super::RepositoryGameBuild {
+            addon: "MyGame".to_string(),
+            executable: "bin/game.exe".to_string(),
+        })
+    );
+    for (addon, executable) in [
+        ("../MyGame", "game.exe"),
+        ("Sub/MyGame", "game.exe"),
+        ("MyGame", "../game.exe"),
+        ("MyGame", "C:/game.exe"),
+        ("MyGame", "/game.exe"),
+        ("MyGame", "bin//game.exe"),
+        ("", "game.exe"),
+    ] {
+        assert_eq!(
+            super::repo_json_game_build(&json!({
+                "gameBuild": {"modName": addon, "executable": executable}
+            })),
+            None,
+            "{addon} {executable}"
+        );
+    }
+    assert_eq!(super::repo_json_game_build(&json!({})), None);
+}
+
+#[test]
+fn game_build_is_removed_from_every_addon_list() {
+    let mut repo = Repository {
+        addons: vec![("mygame".to_string(), false), ("@mod_01".to_string(), true)],
+        optional_addons: vec![("MyGame".to_string(), false)],
+        profiles: vec![RepositoryProfile {
+            addons: vec![("MyGame".to_string(), false), ("@mod_01".to_string(), true)],
+            ..RepositoryProfile::default()
+        }],
+        ..Repository::default()
+    };
+
+    super::apply_repo_game_build(
+        &mut repo,
+        Some(super::RepositoryGameBuild {
+            addon: "MyGame".to_string(),
+            executable: "MyGame.exe".to_string(),
+        }),
+    );
+
+    assert_eq!(repo.addons, vec![("@mod_01".to_string(), true)]);
+    assert!(repo.optional_addons.is_empty());
+    assert_eq!(repo.profiles[0].addons, vec![("@mod_01".to_string(), true)]);
+
+    repo.addons.push(("MyGame".to_string(), true));
+    normalize_loaded_repository(&mut repo);
+    assert_eq!(repo.addons, vec![("@mod_01".to_string(), true)]);
+
+    super::apply_repo_game_build(&mut repo, None);
+    assert!(repo.game_build.is_none());
 }

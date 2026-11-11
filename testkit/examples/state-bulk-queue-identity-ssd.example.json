@@ -1,0 +1,104 @@
+{
+  "id": "state-bulk-queue-identity-ssd",
+  "kind": "perf",
+  "description": "Move and detach compatible synthetic space members after each bulk queue starts, then attach a pending member. Assert the frozen target set, partial result, shared-root routing, and untouched queued or newly attached copies.",
+  "build": "release",
+  "harness": "gui",
+  "timeout_s": 900,
+  "origin": {
+    "root": "${RUN_DIR}/origin-v1",
+    "port": 18133,
+    "delay_ms": 800,
+    "synthetic": [
+      { "root": "${RUN_DIR}/origin-v1/alpha", "seed": 20261021, "repo_name": "Alpha", "mods": 1, "files_per_mod": 2, "file_bytes": 1048576 },
+      { "root": "${RUN_DIR}/origin-v1/beta", "seed": 20261021, "repo_name": "Beta", "mods": 1, "files_per_mod": 2, "file_bytes": 1048576 },
+      { "root": "${RUN_DIR}/origin-v1/gamma", "seed": 20261021, "repo_name": "Gamma", "mods": 1, "files_per_mod": 2, "file_bytes": 1048576 },
+      { "root": "${RUN_DIR}/origin-v2/alpha", "seed": 20261022, "repo_name": "Alpha", "mods": 1, "files_per_mod": 2, "file_bytes": 1048576 },
+      { "root": "${RUN_DIR}/origin-v2/beta", "seed": 20261022, "repo_name": "Beta", "mods": 1, "files_per_mod": 2, "file_bytes": 1048576 },
+      { "root": "${RUN_DIR}/origin-v2/gamma", "seed": 20261022, "repo_name": "Gamma", "mods": 1, "files_per_mod": 2, "file_bytes": 1048576 },
+      { "root": "${RUN_DIR}/origin-v3/alpha", "seed": 20261023, "repo_name": "Alpha", "mods": 1, "files_per_mod": 2, "file_bytes": 1048576 },
+      { "root": "${RUN_DIR}/origin-v3/beta", "seed": 20261023, "repo_name": "Beta", "mods": 1, "files_per_mod": 2, "file_bytes": 1048576 },
+      { "root": "${RUN_DIR}/origin-v3/gamma", "seed": 20261023, "repo_name": "Gamma", "mods": 1, "files_per_mod": 2, "file_bytes": 1048576 }
+    ]
+  },
+  "repository": {
+    "name": "RepoAlpha",
+    "address": "http://127.0.0.1:18133/alpha/",
+    "path": "${RUN_DIR}/repo-alpha",
+    "space_id": "space-alpha"
+  },
+  "extra_repositories": [
+    {
+      "name": "RepoBeta",
+      "address": "http://127.0.0.1:18133/beta/",
+      "path": "${RUN_DIR}/repo-beta",
+      "space_id": "space-alpha"
+    },
+    {
+      "name": "RepoGamma",
+      "address": "http://127.0.0.1:18133/gamma/",
+      "path": "${RUN_DIR}/repo-gamma",
+      "space_id": null
+    }
+  ],
+  "space": {
+    "id": "space-alpha",
+    "name": "Space Alpha",
+    "shared_path": "${RUN_DIR}/repo-beta",
+    "entries": [
+      { "name": "RepoAlpha", "address": "http://127.0.0.1:18133/alpha/", "required": true },
+      { "name": "RepoBeta", "address": "http://127.0.0.1:18133/beta/", "required": true },
+      { "name": "RepoGamma", "address": "http://127.0.0.1:18133/gamma/", "required": true }
+    ]
+  },
+  "operations": [
+    { "op": "download", "label": "seed-alpha", "repository": "RepoAlpha", "setup_once": true, "wait_timeout_s": 180 },
+    { "op": "download", "label": "seed-beta", "repository": "RepoBeta", "setup_once": true, "wait_timeout_s": 180 },
+    { "op": "download", "label": "seed-gamma", "repository": "RepoGamma", "setup_once": true, "wait_timeout_s": 180 },
+    { "op": "capture-file-state", "label": "standalone-alpha-v1", "path": "${RUN_DIR}/repo-alpha", "setup_once": true },
+    { "op": "capture-file-state", "label": "shared-v1", "path": "${RUN_DIR}/repo-beta", "setup_once": true },
+    { "op": "capture-file-state", "label": "gamma-v1", "path": "${RUN_DIR}/repo-gamma", "setup_once": true },
+    { "op": "prepare-test-directory", "path": "${RUN_DIR}/repo-beta-moved" },
+    { "op": "capture-file-state", "label": "beta-moved-empty", "path": "${RUN_DIR}/repo-beta-moved" },
+    { "op": "origin-switch", "root": "${RUN_DIR}/origin-v2" },
+    { "op": "remote-refresh", "label": "refresh-alpha-v2", "repository": "RepoAlpha", "wait_timeout_s": 180 },
+    { "op": "remote-refresh", "label": "refresh-beta-v2", "repository": "RepoBeta", "wait_timeout_s": 180 },
+    { "op": "remote-refresh", "label": "refresh-gamma-v2", "repository": "RepoGamma", "wait_timeout_s": 180 },
+    { "op": "invoke-driver", "action": "space-update-all", "params": { "space": "space-alpha" }, "allow_destructive": true },
+    { "op": "wait-for-busy", "reason": "core-sync", "timeout_s": 120 },
+    { "op": "invoke-driver", "action": "set-space-shared-path", "params": { "space": "space-alpha", "path": "${RUN_DIR}/repo-beta-moved" }, "allow_destructive": true },
+    { "op": "wait-for-space-bulk-target-count", "equals": 1, "timeout_s": 120 },
+    { "op": "wait-for-busy", "reason": "space-bulk", "cleared": true, "timeout_s": 240 },
+    { "op": "assert-space-bulk-failed-count", "equals": 1 },
+    { "op": "assert-file-state", "label": "standalone-alpha-v1", "path": "${RUN_DIR}/repo-alpha", "comparison": "equal" },
+    { "op": "assert-file-state", "label": "shared-v1", "path": "${RUN_DIR}/repo-beta", "comparison": "different" },
+    { "op": "assert-file-state", "label": "beta-moved-empty", "path": "${RUN_DIR}/repo-beta-moved", "comparison": "equal" },
+    { "op": "capture-file-state", "label": "shared-v2", "path": "${RUN_DIR}/repo-beta" },
+    { "op": "origin-switch", "root": "${RUN_DIR}/origin-v3" },
+    { "op": "remote-refresh", "label": "refresh-alpha-v3", "repository": "RepoAlpha", "wait_timeout_s": 180 },
+    { "op": "remote-refresh", "label": "refresh-beta-v3", "repository": "RepoBeta", "wait_timeout_s": 180 },
+    { "op": "remote-refresh", "label": "refresh-gamma-v3", "repository": "RepoGamma", "wait_timeout_s": 180 },
+    { "op": "invoke-driver", "action": "space-update-all", "params": { "space": "space-alpha" }, "allow_destructive": true },
+    { "op": "wait-for-busy", "reason": "core-sync", "timeout_s": 120 },
+    { "op": "invoke-driver", "action": "detach-space-repository", "params": { "repo-index": 1 }, "allow_destructive": true },
+    { "op": "wait-for-space-bulk-target-count", "equals": 1, "timeout_s": 120 },
+    { "op": "invoke-driver", "action": "attach-existing-space-repository", "params": { "space": "space-alpha", "repo-index": 2 }, "allow_destructive": true },
+    { "op": "assert-space-bulk-target-count", "equals": 1 },
+    { "op": "wait-for-busy", "reason": "space-bulk", "cleared": true, "timeout_s": 240 },
+    { "op": "assert-space-bulk-completed-count", "equals": 1 },
+    { "op": "assert-space-bulk-failed-count", "equals": 1 },
+    { "op": "assert-file-state", "label": "shared-v2", "path": "${RUN_DIR}/repo-beta", "comparison": "equal" },
+    { "op": "assert-file-state", "label": "standalone-alpha-v1", "path": "${RUN_DIR}/repo-alpha", "comparison": "different" },
+    { "op": "assert-file-state", "label": "beta-moved-empty", "path": "${RUN_DIR}/repo-beta-moved", "comparison": "equal" },
+    { "op": "assert-file-state", "label": "gamma-v1", "path": "${RUN_DIR}/repo-gamma", "comparison": "equal" }
+  ],
+  "repetitions": 1,
+  "warmup": false,
+  "guards": {
+    "require_storage_class": "ssd",
+    "require_no_other_foxy": true,
+    "require_clean_worktree": false,
+    "fail_on_db_wipe": true,
+    "max_run_gb": 1
+  }
+}

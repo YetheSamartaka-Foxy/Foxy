@@ -3,9 +3,9 @@
 
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Ui, Vec2};
 
-use super::charts::{bar_chart, line_chart};
+use super::charts::{SeriesStyle, bar_chart, line_chart};
 use super::detail::{fmt_metric, fmt_sol, metric_rows};
-use super::series::{charts_for, stage_rows};
+use super::series::{comparison_charts_for, stage_rows};
 use super::widgets::{panel, text_scale};
 use crate::core::benchmarks::BenchmarkRecord;
 use crate::ui::app::Foxy;
@@ -275,7 +275,7 @@ impl Foxy {
         let dim = self.color_text_dim();
         let scale = text_scale(ui);
         let panel_bg = self.color_main_bg();
-        let colors = [palette::BENCHMARK_SERIES[0], palette::BENCHMARK_SERIES[1]];
+        let colors = [palette::BENCHMARK_COMPARE_A, palette::BENCHMARK_COMPARE_B];
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new(self.t("Compare benchmarks"))
@@ -361,8 +361,8 @@ impl Foxy {
             );
             ui.add_space(6.0);
         }
-        let charts_a = charts_for(&a, "A: ", &palette::BENCHMARK_SERIES);
-        let charts_b = charts_for(&b, "B: ", &palette::BENCHMARK_SERIES_B);
+        let charts_a = comparison_charts_for(&a, SeriesStyle::ComparisonA);
+        let charts_b = comparison_charts_for(&b, SeriesStyle::ComparisonB);
         let mut keys: Vec<&str> = charts_a.iter().map(|def| def.key).collect();
         for def in &charts_b {
             if !keys.contains(&def.key) {

@@ -110,6 +110,13 @@ impl Foxy {
         if settings_to_save.download_speed_limit_mbps == Some(0) {
             settings_to_save.download_speed_limit_mbps = Some(1);
         }
+        if settings_to_save.cpu_thread_limit == Some(0) {
+            settings_to_save.cpu_thread_limit = Some(1);
+        }
+        settings_to_save.cpu_usage_limit_percent =
+            crate::core::utils::cpu_governor::sanitize_cpu_usage_limit(
+                settings_to_save.cpu_usage_limit_percent,
+            );
         settings_to_save.font_sizes.clamp_to_limits();
 
         settings_to_save
@@ -199,6 +206,7 @@ impl Foxy {
     }
 
     pub(crate) fn mark_settings_dirty(&mut self) {
+        self.show_replacement_confirmation_if_needed();
         self.settings_dirty = true;
         self.settings_revision = self.settings_revision.saturating_add(1);
         self.settings_last_mutated_at = Some(Instant::now());
@@ -206,6 +214,7 @@ impl Foxy {
     }
 
     pub(crate) fn mark_repositories_dirty(&mut self) {
+        self.show_replacement_confirmation_if_needed();
         self.repositories_dirty = true;
         self.repositories_revision = self.repositories_revision.saturating_add(1);
         self.repositories_last_mutated_at = Some(Instant::now());
@@ -248,6 +257,7 @@ impl Foxy {
     }
 
     fn queue_repositories_save(&mut self) {
+        self.queue_checks_for_changed_addon_selections();
         let revision = self.repositories_revision;
         let request = PersistenceRequest::SaveRepositories {
             revision,
@@ -267,11 +277,17 @@ impl Foxy {
     }
 
     pub(crate) fn maybe_dispatch_persistence_requests(&mut self, force: bool) {
-        if self.settings_save_ready(force) {
+        if self.pending_game_space_switch_save_error.is_some()
+            || self.pending_game_space_switch_discard_save
+        {
+            self.dispatch_backup_inventory_refresh_request();
+            return;
+        }
+        if self.settings_save_ready(force) && self.settings_persistence_is_confirmed() {
             self.queue_settings_save();
         }
 
-        if self.repositories_save_ready(force) {
+        if self.repositories_save_ready(force) && self.repositories_persistence_is_confirmed() {
             self.queue_repositories_save();
         }
 
@@ -288,6 +304,7 @@ impl Foxy {
 
                     match result {
                         Ok(()) => {
+                            self.settings_save_error = None;
                             self.settings_completed_revision =
                                 self.settings_completed_revision.max(revision);
                             self.settings_dirty =
@@ -298,8 +315,18 @@ impl Foxy {
                             debug!("Saved app_settings.json and game_settings.json");
                         }
                         Err(err) => {
+                            if self.settings_save_error.as_ref() != Some(&err) {
+                                self.show_error_toast(self.t_fmt(
+                                    "Some settings remain unsaved: {error}",
+                                    &[("error", err.clone())],
+                                ));
+                            }
+                            self.settings_save_error = Some(err.clone());
                             self.settings_dirty = true;
                             self.settings_last_mutated_at = Some(Instant::now());
+                            if self.pending_game_space_switch.is_some() {
+                                self.pending_game_space_switch_save_error = Some(err.clone());
+                            }
                             error!("{}", err);
                         }
                     }
@@ -345,6 +372,9 @@ impl Foxy {
                         Err(err) => {
                             self.repositories_dirty = true;
                             self.repositories_last_mutated_at = Some(Instant::now());
+                            if self.pending_game_space_switch.is_some() {
+                                self.pending_game_space_switch_save_error = Some(err.clone());
+                            }
                             error!("{}", err);
                         }
                     }

@@ -1,6 +1,6 @@
 ---
 name: foxy-locale-translator
-description: Translate and validate Foxy `src/ui/locales/*.json` files from `en.json`. Use when Codex is asked to add, update, review, or fix Foxy localization files, translate newly added English fallback strings, validate locale coverage, handle locale JSON keys containing escaped characters such as `\n`, or prevent duplicate keys and exact-English fallback mistakes.
+description: "Translate and validate requested Foxy locales against en.json, preserving escaped keys, placeholders, plural forms, and UTF-8. Use for localization, exact-English fallback cleanup, and locale-checker changes."
 ---
 
 # Foxy Locale Translator

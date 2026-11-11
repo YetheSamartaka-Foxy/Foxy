@@ -11,7 +11,6 @@ use log::{debug, error, info, warn};
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
-use tokio::runtime::Builder;
 use tokio::sync::Semaphore;
 use tokio::sync::broadcast::Sender;
 use tokio::sync::watch;
@@ -40,12 +39,18 @@ use flexi_logger::{
 };
 
 mod background_runtime;
+pub(crate) mod check_contracts;
 mod fs_watcher;
 mod logging;
 mod quick_scan;
 mod startup_diagnostics;
+mod storage_targets;
 mod sync_pipeline;
 mod types;
+pub use check_contracts::{LinkedTargetPreview, preview_linked_targets};
+pub use check_contracts::{
+    RetainedFilePreview, preview_retained_empty_files, remove_retained_empty_files,
+};
 
 pub(crate) use background_runtime::background_runtime;
 
@@ -57,8 +62,10 @@ pub use logging::{
 };
 pub(crate) use logging::{ensure_logger, ensure_logger_with_terminal};
 pub use quick_scan::{
-    StartupRepositoryInstance, filter_repo_instances_with_db_entry, plan_startup_quick_scan_repos,
-    recalculate_hashes_for_addon_by_name, spawn_quick_local_scan, spawn_quick_local_scan_instances,
+    StartupProbeRetryPlan, StartupRepositoryInstance, filter_repo_instances_with_db_entry,
+    plan_startup_probe_retry, plan_startup_quick_scan_repos, recalculate_hashes_for_addon_by_name,
+    spawn_quick_local_scan, spawn_quick_local_scan_instances, startup_probe_retry_delay,
+    startup_probe_retry_is_blocked,
 };
 pub use startup_diagnostics::{
     StartupDiagnosticsReport, StartupStoragePath, all_storage_devices_lines,

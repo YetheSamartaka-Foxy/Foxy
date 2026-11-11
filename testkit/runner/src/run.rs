@@ -1,5 +1,5 @@
 use crate::{
-    case,
+    case::{self, read_json},
     collect::{expect, logs, memory, metrics, profile, sol},
     driver,
     fixture::{self, write_json},
@@ -13,7 +13,8 @@ use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 use std::{
     cell::RefCell,
-    fs,
+    collections::HashMap,
+    fs::{self, File},
     path::{Path, PathBuf},
     process::Command,
     sync::Arc,
@@ -21,15 +22,103 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(windows)]
+use std::fs::OpenOptions;
+
 #[derive(Clone, Debug)]
 pub struct RunOptions {
     pub case: PathBuf,
+    pub foxy_binary: Option<PathBuf>,
     pub database_mode: String,
     pub db_write_gate: u32,
     pub accept: bool,
     pub validate_only: bool,
     pub no_build: bool,
     pub progress_probe_ms: u64,
+}
+
+fn ensure_run_path(run: &Path, path: &Path) -> Result<PathBuf> {
+    let run = fs::canonicalize(run)?;
+    ensure!(path.is_absolute(), "Test paths must be absolute");
+    ensure!(
+        path.components()
+            .all(|component| !matches!(component, std::path::Component::ParentDir)),
+        "Target cannot contain a parent-directory component"
+    );
+    let mut ancestor = path;
+    while !ancestor.exists() {
+        ancestor = ancestor
+            .parent()
+            .context("Test path has no existing parent directory")?;
+    }
+    ensure!(
+        fs::canonicalize(ancestor)?.starts_with(&run),
+        "Target must resolve under the case run directory"
+    );
+    Ok(path.to_owned())
+}
+
+fn is_download_sidecar(path: &Path) -> bool {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    name == ".foxy-write.lock"
+        || [".foxy.bak", ".foxy.part", ".foxy.part.meta", ".foxy.tmp"]
+            .iter()
+            .any(|suffix| name.ends_with(suffix))
+}
+
+fn move_origin_addon_category(root: &Path, addon_name: &str, from: &str, to: &str) -> Result<()> {
+    let repo_path = root.join("repo.json");
+    let index_path = root.join("foxy_addons.json");
+    let mut repo: Value = serde_json::from_slice(&fs::read(&repo_path)?)?;
+    let mut index: Value = serde_json::from_slice(&fs::read(&index_path)?)?;
+    let from_key = format!("{from}Mods");
+    let to_key = format!("{to}Mods");
+    let source = index[&from_key]
+        .as_array_mut()
+        .with_context(|| format!("{} must be an array", from_key))?;
+    let position = source
+        .iter()
+        .position(|entry| entry["modName"].as_str() == Some(addon_name))
+        .with_context(|| format!("Addon {addon_name:?} was not found in {from_key}"))?;
+    let entry = source.remove(position);
+    let target = index[&to_key]
+        .as_array_mut()
+        .with_context(|| format!("{} must be an array", to_key))?;
+    ensure!(
+        !target
+            .iter()
+            .any(|entry| entry["modName"].as_str() == Some(addon_name)),
+        "Addon {addon_name:?} already exists in {to_key}"
+    );
+    target.push(entry);
+
+    let mut checksum = blake3::Hasher::new();
+    for category in ["requiredMods", "optionalMods"] {
+        for entry in index[category]
+            .as_array()
+            .context("repository category is not an array")?
+        {
+            let value = entry["checkSum"]
+                .as_str()
+                .context("published addon has no checkSum")?;
+            checksum.update(value.as_bytes());
+        }
+    }
+    let checksum = checksum.finalize().to_hex().to_uppercase();
+    repo["checksum"] = json!(checksum);
+    index["checksum"] = json!(checksum);
+    write_json(&repo_path, &repo)?;
+    write_json(&index_path, &index)?;
+    Ok(())
+}
+
+fn file_state_contains(current: &Value, expected: &Value) -> bool {
+    match (current.as_object(), expected.as_object()) {
+        (Some(current), Some(expected)) => expected
+            .iter()
+            .all(|(path, state)| current.get(path) == Some(state)),
+        _ => false,
+    }
 }
 
 struct ContextRun<'a> {
@@ -45,6 +134,8 @@ struct ContextRun<'a> {
     /// The live GUI child, when the case runs on the GUI harness. The `startup`
     /// operation replaces it, so it cannot be owned by `execute` alone.
     gui: &'a RefCell<Option<launch::ManagedChild>>,
+    origin: Option<&'a crate::origin::server::Origin>,
+    test_file_locks: RefCell<HashMap<PathBuf, File>>,
     /// The pid the memory sampler follows, kept in step with `gui`.
     pid: &'a memory::Target,
 }
@@ -220,6 +311,852 @@ fn progress_probe_summary(samples: &[(f64, f64)], elapsed_s: f64) -> Value {
 }
 
 impl ContextRun<'_> {
+    fn config_file_path(&self, raw: &str) -> Result<PathBuf> {
+        let requested = PathBuf::from(raw);
+        ensure!(
+            requested.is_absolute(),
+            "Config assertion path must be absolute"
+        );
+        ensure!(
+            requested
+                .components()
+                .all(|component| !matches!(component, std::path::Component::ParentDir)),
+            "Config assertion path cannot contain parent-directory components"
+        );
+        let root = fs::canonicalize(self.config)?;
+        let metadata = fs::symlink_metadata(&requested)?;
+        ensure!(
+            metadata.file_type().is_file(),
+            "Config assertion target must be a regular file"
+        );
+        let canonical = fs::canonicalize(requested)?;
+        ensure!(
+            canonical.starts_with(root),
+            "Config assertion target must stay inside the run config directory"
+        );
+        Ok(canonical)
+    }
+
+    fn assert_config_json_value(&self, operation: &Value) -> Result<bool> {
+        let path = self.config_file_path(
+            operation["path"]
+                .as_str()
+                .context("Config JSON assertion requires path")?,
+        )?;
+        let document = read_json(&path)?;
+        let json_path = operation["json_path"]
+            .as_str()
+            .context("Config JSON assertion requires json_path")?;
+        let actual = json_path
+            .split('.')
+            .try_fold(&document, |value, part| match value {
+                Value::Object(object) => object.get(part),
+                Value::Array(array) => part
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|index| array.get(index)),
+                _ => None,
+            });
+        Ok(actual == operation.get("equals"))
+    }
+
+    fn second_process_game_use(&self, operation: &Value) -> Result<()> {
+        let mut snapshots = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for path in operation["unchanged_paths"]
+            .as_array()
+            .context("second-process-game-use requires unchanged_paths")?
+        {
+            let path = self.config_file_path(
+                path.as_str()
+                    .context("unchanged_paths values must be strings")?,
+            )?;
+            ensure!(
+                seen.insert(path.clone()),
+                "unchanged_paths cannot contain duplicates"
+            );
+            snapshots.push((path.clone(), fs::read(path)?));
+        }
+        let space_id = operation["space_id"]
+            .as_str()
+            .context("second-process-game-use requires space_id")?;
+        let mut command = Command::new(self.exe);
+        command
+            .arg("--config-dir")
+            .arg(self.config)
+            .arg("--json")
+            .args(["game", "use", space_id]);
+        launch::environment(&mut command, self.env);
+        let result = launch::process(
+            &mut command,
+            Duration::from_secs(operation["wait_timeout_s"].as_u64().unwrap_or(30)),
+        )?;
+        ensure!(
+            result.status.code() == Some(6),
+            "Second process exited {:?}; expected DATABASE_BUSY (6)",
+            result.status.code()
+        );
+        for (path, before) in snapshots {
+            ensure!(
+                fs::read(&path)? == before,
+                "Second process changed a protected configuration file"
+            );
+        }
+        Ok(())
+    }
+
+    fn repository_path(&self) -> Result<PathBuf> {
+        let path = PathBuf::from(
+            self.case["repository"]["path"]
+                .as_str()
+                .context("Missing repository path")?,
+        );
+        let path = fs::canonicalize(path)?;
+        let run = fs::canonicalize(self.run)?;
+        ensure!(
+            path.starts_with(run),
+            "State assertions are restricted to this run's repository directory"
+        );
+        Ok(path)
+    }
+
+    fn state_path(&self, operation: &Value) -> Result<PathBuf> {
+        let Some(path) = operation["path"].as_str() else {
+            return self.repository_path();
+        };
+        let path = fs::canonicalize(path)?;
+        let run = fs::canonicalize(self.run)?;
+        ensure!(
+            path.starts_with(run),
+            "State assertions are restricted to this run's directories"
+        );
+        Ok(path)
+    }
+
+    fn repository_file_state_at(&self, root: &Path) -> Result<Value> {
+        let mut files = serde_json::Map::new();
+        let mut paths = walkdir::WalkDir::new(root)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file())
+            .filter(|entry| !is_download_sidecar(entry.path()))
+            .map(|entry| entry.path().to_owned())
+            .collect::<Vec<_>>();
+        paths.sort();
+        for path in paths {
+            let relative = path
+                .strip_prefix(root)?
+                .to_string_lossy()
+                .replace('\\', "/");
+            let bytes = fs::read(path)?;
+            files.insert(
+                relative,
+                json!({"bytes":bytes.len(),"blake3":blake3::hash(&bytes).to_hex().to_string()}),
+            );
+        }
+        Ok(Value::Object(files))
+    }
+
+    fn repository_file_state(&self) -> Result<Value> {
+        self.repository_file_state_at(&self.repository_path()?)
+    }
+
+    fn test_file_lock_path(&self, operation: &Value, require_file: bool) -> Result<PathBuf> {
+        let raw_path = operation["path"]
+            .as_str()
+            .context("Test file lock requires path")?;
+        let requested = PathBuf::from(raw_path);
+        ensure!(
+            requested.is_absolute(),
+            "Test file lock path must be absolute"
+        );
+        ensure!(
+            requested
+                .components()
+                .all(|component| !matches!(component, std::path::Component::ParentDir)),
+            "Test file lock path cannot contain parent-directory components"
+        );
+        let file_name = requested
+            .file_name()
+            .context("Test file lock path must name a file")?;
+        let parent = fs::canonicalize(
+            requested
+                .parent()
+                .context("Test file lock path must have a parent")?,
+        )?;
+        let run = fs::canonicalize(self.run)?;
+        ensure!(
+            parent.starts_with(&run),
+            "Test file locks are restricted to the case run directory"
+        );
+        let path = parent.join(file_name);
+        let repository = fs::canonicalize(self.repository_path()?)?;
+        let config = fs::canonicalize(self.config)?;
+        let allow_read = operation["allow_read"].as_bool() == Some(true);
+        ensure!(
+            path.starts_with(&repository) || (allow_read && path.starts_with(&config)),
+            "Test file locks are restricted to the run's repository, or its config when allow_read is enabled"
+        );
+        if require_file {
+            let metadata =
+                fs::symlink_metadata(&path).context("Test file lock target must exist")?;
+            ensure!(
+                metadata.file_type().is_file(),
+                "Test file lock target must be a regular file, not a link"
+            );
+        }
+        Ok(path)
+    }
+
+    fn acquire_test_file_lock(&self, operation: &Value) -> Result<()> {
+        let path = self.test_file_lock_path(operation, true)?;
+        let target = fs::canonicalize(&path)?;
+        let repository = fs::canonicalize(self.repository_path()?)?;
+        let config = fs::canonicalize(self.config)?;
+        let allow_read = operation["allow_read"].as_bool() == Some(true);
+        ensure!(
+            target.starts_with(&repository) || (allow_read && target.starts_with(&config)),
+            "Test file locks cannot follow links outside the run's repository or allowed config"
+        );
+        ensure!(
+            !self.test_file_locks.borrow().contains_key(&path),
+            "Test file is already locked"
+        );
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            let file = OpenOptions::new()
+                .read(true)
+                .share_mode(if allow_read { 1 } else { 0 })
+                .open(&target)
+                .context("Acquiring test file lock")?;
+            self.test_file_locks.borrow_mut().insert(path, file);
+            Ok(())
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (path, allow_read);
+            bail!("Test file locks are available only on Windows")
+        }
+    }
+
+    fn release_test_file_lock(&self, operation: &Value) -> Result<()> {
+        let path = self.test_file_lock_path(operation, false)?;
+        ensure!(
+            self.test_file_locks.borrow_mut().remove(&path).is_some(),
+            "Test file is not locked"
+        );
+        Ok(())
+    }
+
+    fn state_operation(&self, operation: &Value) -> Result<bool> {
+        let Some(name) = operation["op"].as_str() else {
+            return Ok(false);
+        };
+        match name {
+            "ui-set-setting" => {
+                let key = operation["key"]
+                    .as_str()
+                    .context("ui-set-setting requires key")?;
+                let value = operation["value"]
+                    .as_str()
+                    .context("ui-set-setting requires value")?;
+                driver::call(
+                    self.exe,
+                    self.config,
+                    &["set-setting".into(), key.into(), value.into()],
+                    self.env,
+                    Duration::from_secs(30),
+                )?;
+                Ok(true)
+            }
+            "second-process-game-use" => {
+                self.second_process_game_use(operation)?;
+                Ok(true)
+            }
+            "assert-config-json" => {
+                ensure!(
+                    self.assert_config_json_value(operation)?,
+                    "Config JSON value did not match the expected value"
+                );
+                Ok(true)
+            }
+            "wait-for-config-json" => {
+                let timeout =
+                    Duration::from_secs(operation["wait_timeout_s"].as_u64().unwrap_or(30));
+                let deadline = Instant::now() + timeout;
+                loop {
+                    if self.assert_config_json_value(operation)? {
+                        break;
+                    }
+                    ensure!(
+                        Instant::now() < deadline,
+                        "Timed out waiting for a saved config JSON value"
+                    );
+                    thread::sleep(Duration::from_millis(100));
+                }
+                Ok(true)
+            }
+            "cli-command" => {
+                self.run_cli_scenario(operation)?;
+                Ok(true)
+            }
+            "replace-test-file-with-directory" => {
+                let path = operation["path"]
+                    .as_str()
+                    .context("replace-test-file-with-directory requires path")?;
+                let path = ensure_run_path(self.run, &PathBuf::from(path))?;
+                ensure!(
+                    path.is_file(),
+                    "replace-test-file-with-directory requires an existing regular file"
+                );
+                fs::remove_file(&path)?;
+                fs::create_dir(&path)?;
+                Ok(true)
+            }
+            "move-origin-addon-category" => {
+                let root = operation["root"]
+                    .as_str()
+                    .context("move-origin-addon-category requires root")?;
+                let root = ensure_run_path(self.run, &PathBuf::from(root))?;
+                ensure!(root.is_dir(), "Origin category root must be a directory");
+                move_origin_addon_category(
+                    &root,
+                    operation["addon"]
+                        .as_str()
+                        .context("move-origin-addon-category requires addon")?,
+                    operation["from"]
+                        .as_str()
+                        .context("move-origin-addon-category requires from")?,
+                    operation["to"]
+                        .as_str()
+                        .context("move-origin-addon-category requires to")?,
+                )?;
+                Ok(true)
+            }
+            "acquire-test-file-lock" => {
+                self.acquire_test_file_lock(operation)?;
+                Ok(true)
+            }
+            "release-test-file-lock" => {
+                self.release_test_file_lock(operation)?;
+                Ok(true)
+            }
+            "capture-file-state" => {
+                let label = operation["label"]
+                    .as_str()
+                    .context("capture-file-state requires label")?;
+                ensure!(
+                    label
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-'),
+                    "File-state labels must be ASCII letters, digits, or hyphens"
+                );
+                write_json(
+                    &self.run.join(format!("file-state-{label}.json")),
+                    &self.repository_file_state_at(&self.state_path(operation)?)?,
+                )?;
+                Ok(true)
+            }
+            "assert-file-state" => {
+                let label = operation["label"]
+                    .as_str()
+                    .context("assert-file-state requires label")?;
+                let expected = read_json(&self.run.join(format!("file-state-{label}.json")))?;
+                let current = self.repository_file_state_at(&self.state_path(operation)?)?;
+                match operation["comparison"].as_str().unwrap_or("equal") {
+                    "equal" => ensure!(
+                        current == expected,
+                        "Repository files differ from captured state '{label}'"
+                    ),
+                    "different" => ensure!(
+                        current != expected,
+                        "Repository files unexpectedly match captured state '{label}'"
+                    ),
+                    "contains" => ensure!(
+                        file_state_contains(&current, &expected),
+                        "Repository files no longer contain captured state '{label}'"
+                    ),
+                    other => anyhow::bail!(
+                        "Unknown file-state comparison '{other}'; use equal, different, or contains"
+                    ),
+                }
+                Ok(true)
+            }
+            "assert-download-paused" => {
+                let expected = operation["paused"]
+                    .as_bool()
+                    .context("assert-download-paused requires paused")?;
+                let progress = self.data(&["progress"])?;
+                ensure!(
+                    progress["download_paused"].as_bool() == Some(expected),
+                    "Expected download_paused={expected}, got {}",
+                    progress["download_paused"]
+                );
+                Ok(true)
+            }
+            "assert-repository-paused" => {
+                let index = operation["repository_index"]
+                    .as_u64()
+                    .context("assert-repository-paused requires repository_index")?;
+                let expected = operation["paused"]
+                    .as_bool()
+                    .context("assert-repository-paused requires paused")?;
+                let progress = self.data(&["progress"])?;
+                let paused = progress["paused_repositories"]
+                    .as_array()
+                    .is_some_and(|repos| {
+                        repos
+                            .iter()
+                            .any(|repo| repo["repo_index"].as_u64() == Some(index))
+                    });
+                ensure!(
+                    paused == expected,
+                    "Expected repository index {index} paused={expected}"
+                );
+                Ok(true)
+            }
+            "assert-space-bulk-target-count" => {
+                let expected = operation["equals"]
+                    .as_u64()
+                    .context("assert-space-bulk-target-count requires equals")?;
+                let progress = self.data(&["progress"])?;
+                ensure!(
+                    progress["repository_space_bulk_progress"]["total_count"].as_u64()
+                        == Some(expected),
+                    "Expected space bulk target count {expected}, got {}",
+                    progress["repository_space_bulk_progress"]["total_count"]
+                );
+                Ok(true)
+            }
+            "assert-space-bulk-completed-count" | "assert-space-bulk-failed-count" => {
+                let field = if name == "assert-space-bulk-failed-count" {
+                    "failed_count"
+                } else {
+                    "completed_count"
+                };
+                let expected = operation["equals"]
+                    .as_u64()
+                    .context("Space bulk count assertion requires equals")?;
+                let progress = self.data(&["progress"])?;
+                ensure!(
+                    progress["repository_space_bulk_progress"][field].as_u64() == Some(expected),
+                    "Expected space bulk {field} {expected}, got {}",
+                    progress["repository_space_bulk_progress"][field]
+                );
+                Ok(true)
+            }
+            "wait-for-space-bulk-target-count" => {
+                let expected = operation["equals"]
+                    .as_u64()
+                    .context("wait-for-space-bulk-target-count requires equals")?;
+                let deadline = Instant::now()
+                    + Duration::from_secs(operation["timeout_s"].as_u64().unwrap_or(120));
+                loop {
+                    let progress = self.data(&["progress"])?;
+                    if progress["repository_space_bulk_progress"]["total_count"].as_u64()
+                        == Some(expected)
+                    {
+                        return Ok(true);
+                    }
+                    ensure!(
+                        Instant::now() < deadline,
+                        "Space bulk target count did not reach {expected}"
+                    );
+                    thread::sleep(Duration::from_millis(50));
+                }
+            }
+            "seed-startup-state" => {
+                self.seed_startup_state(operation)?;
+                Ok(true)
+            }
+            "origin-switch" => {
+                let root = operation["root"]
+                    .as_str()
+                    .context("origin-switch requires a root directory")?;
+                self.origin
+                    .context("origin-switch requires a case origin")?
+                    .set_root(Path::new(root))?;
+                crate::origin::server::touch_manifests(Path::new(root))?;
+                Ok(true)
+            }
+            "prepare-test-directory" => {
+                let path = operation["path"]
+                    .as_str()
+                    .context("prepare-test-directory requires path")?;
+                let path = ensure_run_path(self.run, &PathBuf::from(path))?;
+                fs::create_dir_all(&path)?;
+                ensure_run_path(self.run, &path)?;
+                Ok(true)
+            }
+            "write-file" => {
+                let path = operation["path"]
+                    .as_str()
+                    .context("write-file requires path")?;
+                let path = ensure_run_path(self.run, &PathBuf::from(path))?;
+                let content = operation["content"]
+                    .as_str()
+                    .context("write-file requires string content")?;
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent)?;
+                    ensure_run_path(self.run, parent)?;
+                }
+                use std::fs::OpenOptions;
+                use std::io::Write;
+                let overwrite = operation["overwrite_existing"].as_bool().unwrap_or(false);
+                if overwrite {
+                    ensure!(
+                        fs::symlink_metadata(&path)?.file_type().is_file(),
+                        "write-file overwrite requires an existing regular file"
+                    );
+                }
+                let mut file = OpenOptions::new()
+                    .write(true)
+                    .create_new(!overwrite)
+                    .truncate(overwrite)
+                    .open(&path)?;
+                file.write_all(content.as_bytes())?;
+                Ok(true)
+            }
+            "assert-file-content" => {
+                let path = operation["path"]
+                    .as_str()
+                    .context("assert-file-content requires path")?;
+                let path = ensure_run_path(self.run, &PathBuf::from(path))?;
+                ensure!(
+                    fs::symlink_metadata(&path)?.file_type().is_file(),
+                    "Content assertion requires a regular file"
+                );
+                let expected = operation["content"]
+                    .as_str()
+                    .context("assert-file-content requires content")?;
+                ensure!(
+                    fs::read(&path)? == expected.as_bytes(),
+                    "File contents differ from the expected value"
+                );
+                Ok(true)
+            }
+            "assert-file-exists" | "assert-file-absent" => {
+                let path = operation["path"]
+                    .as_str()
+                    .context("File existence assertion requires path")?;
+                let path = ensure_run_path(self.run, &PathBuf::from(path))?;
+                let expected = operation["op"].as_str() == Some("assert-file-exists");
+                ensure!(
+                    path.is_file() == expected,
+                    "Expected file {} to {}",
+                    path.display(),
+                    if expected { "exist" } else { "be absent" }
+                );
+                Ok(true)
+            }
+            "assert-pending-update-count" => {
+                let repository = self.operation_repository(operation)?;
+                let minimum = operation["minimum"]
+                    .as_u64()
+                    .context("assert-pending-update-count requires minimum")?;
+                let pending = self.data(&["pending-updates"])?;
+                let pending_repo = pending["repositories"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|entry| entry["repository_name"].as_str() == Some(repository))
+                    .cloned();
+                let count = pending_repo
+                    .as_ref()
+                    .and_then(|entry| entry["needs_update_count"].as_u64())
+                    .unwrap_or(0);
+                let maximum = operation["maximum"].as_u64();
+                ensure!(
+                    count >= minimum,
+                    "Repository {repository:?} has {count} pending addon updates, expected at least {minimum}"
+                );
+                if let Some(maximum) = maximum {
+                    ensure!(
+                        count <= maximum,
+                        "Repository {repository:?} has {count} pending addon updates, expected at most {maximum}"
+                    );
+                }
+                for addon in operation["addons"].as_array().into_iter().flatten() {
+                    let addon = addon.as_str().context("Addon names must be strings")?;
+                    ensure!(
+                        pending_repo.as_ref().is_some_and(|entry| {
+                            entry["mods"].as_array().is_some_and(|mods| {
+                                mods.iter().any(|item| {
+                                    item["name"].as_str() == Some(addon)
+                                        && item["needs_update"].as_bool() == Some(true)
+                                })
+                            })
+                        }),
+                        "Repository {repository:?} does not have pending update for {addon:?}"
+                    );
+                }
+                Ok(true)
+            }
+            "capture-origin-requests" => {
+                let label = operation["label"]
+                    .as_str()
+                    .context("capture-origin-requests requires label")?;
+                let origin = self.origin.context("Case has no loopback origin")?;
+                write_json(
+                    &self.run.join(format!("origin-requests-{label}.json")),
+                    &json!({"requests": origin.request_count()}),
+                )?;
+                Ok(true)
+            }
+            "assert-origin-requests-unchanged" => {
+                let label = operation["label"]
+                    .as_str()
+                    .context("assert-origin-requests-unchanged requires label")?;
+                let origin = self.origin.context("Case has no loopback origin")?;
+                let captured = read_json(&self.run.join(format!("origin-requests-{label}.json")))?;
+                ensure!(
+                    origin.request_count() == captured["requests"].as_u64().unwrap_or(u64::MAX),
+                    "Loopback origin received a request during the offline operation"
+                );
+                Ok(true)
+            }
+            "invoke-driver" => {
+                let action = operation["action"]
+                    .as_str()
+                    .context("invoke-driver requires action")?;
+                let params = operation
+                    .get("params")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
+                let params = serde_json::to_string(&params)?;
+                let mut args = vec!["invoke", action, "--params", &params];
+                if operation["allow_destructive"].as_bool() == Some(true) {
+                    args.push("--allow-destructive");
+                }
+                self.data(&args)?;
+                Ok(true)
+            }
+            "wait-for-busy" => {
+                let reason = operation["reason"]
+                    .as_str()
+                    .context("wait-for-busy requires reason")?;
+                let expected_active = operation["cleared"].as_bool() != Some(true);
+                let deadline = Instant::now()
+                    + Duration::from_secs(operation["timeout_s"].as_u64().unwrap_or(120));
+                loop {
+                    let progress = self.data(&["progress"])?;
+                    let active = progress["busy_reasons"]
+                        .as_array()
+                        .is_some_and(|reasons| reasons.iter().any(|entry| entry == reason));
+                    if active == expected_active {
+                        return Ok(true);
+                    }
+                    ensure!(
+                        Instant::now() < deadline,
+                        "Timed out waiting for busy reason '{reason}' to {}",
+                        if expected_active { "start" } else { "clear" }
+                    );
+                    thread::sleep(Duration::from_millis(100));
+                }
+            }
+            _ => Ok(false),
+        }
+    }
+    fn run_cli_scenario(&self, operation: &Value) -> Result<()> {
+        let args = operation["args"]
+            .as_array()
+            .context("cli-command requires args")?
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .context("cli-command args must be strings")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let path_arguments = operation["path_arguments"]
+            .as_array()
+            .context("cli-command requires path_arguments")?;
+        for index in path_arguments {
+            let index = index
+                .as_u64()
+                .context("path argument indexes must be integers")?
+                as usize;
+            let path = args
+                .get(index)
+                .context("path argument index is out of bounds")?;
+            let path = PathBuf::from(path);
+            ensure_run_path(self.run, &path)?;
+        }
+        if args
+            .get(0..3)
+            .is_some_and(|prefix| prefix == ["config", "extra-file", "activate"])
+        {
+            for space in fs::read_dir(self.config.join("games"))? {
+                let space = space?.path();
+                let store = space.join("extra_files.json");
+                if !store.is_file() {
+                    continue;
+                }
+                let store: Value = serde_json::from_slice(&fs::read(store)?)?;
+                for entry in store["entries"]
+                    .as_array()
+                    .context("Extra-file scenario requires entries")?
+                {
+                    let destination = entry["destination"]
+                        .as_str()
+                        .context("Extra-file destination missing")?;
+                    ensure_run_path(self.run, Path::new(destination))?;
+                    let id = entry["id"].as_str().context("Extra-file id missing")?;
+                    let source = entry["source_name"]
+                        .as_str()
+                        .context("Extra-file source missing")?;
+                    ensure_run_path(self.run, &space.join("extra_files").join(id).join(source))?;
+                }
+            }
+        }
+        let mut command = Command::new(self.exe);
+        command
+            .arg("--config-dir")
+            .arg(self.config)
+            .arg("--json")
+            .args(&args);
+        launch::environment(&mut command, self.env);
+        let result = launch::tracked_process(
+            &mut command,
+            Duration::from_secs(
+                operation["wait_timeout_s"]
+                    .as_u64()
+                    .unwrap_or(self.timeout.as_secs()),
+            ),
+            Some(self.pid),
+        )?;
+        memory::set(self.pid, None);
+        let expected_exit = operation["expected_exit_code"]
+            .as_u64()
+            .context("cli-command requires expected_exit_code")? as i32;
+        ensure!(
+            result.status.code() == Some(expected_exit),
+            "cli-command exited {:?}, expected {}: {} {}",
+            result.status.code(),
+            expected_exit,
+            String::from_utf8_lossy(&result.stderr),
+            String::from_utf8_lossy(&result.stdout)
+        );
+        let response: Value =
+            serde_json::from_slice(&result.stdout).context("cli-command returned invalid JSON")?;
+        ensure!(
+            response.is_object(),
+            "cli-command JSON response must be an object"
+        );
+        for assertion in operation["expect"].as_array().into_iter().flatten() {
+            let path = assertion["path"]
+                .as_str()
+                .context("cli-command expect requires path")?;
+            let expected = assertion
+                .get("equals")
+                .context("cli-command expect requires equals")?;
+            let actual = path
+                .split('.')
+                .try_fold(&response, |value, part| match value {
+                    Value::Object(object) => object.get(part),
+                    Value::Array(array) => part
+                        .parse::<usize>()
+                        .ok()
+                        .and_then(|index| array.get(index)),
+                    _ => None,
+                })
+                .with_context(|| format!("cli-command JSON path {path:?} was not present"))?;
+            ensure!(
+                actual == expected,
+                "cli-command JSON assertion failed at {path}: expected {expected}, got {actual}"
+            );
+        }
+        let label = operation["label"].as_str().unwrap_or("cli-command");
+        ensure!(
+            label
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'),
+            "cli-command labels must be ASCII letters, digits, or hyphens"
+        );
+        write_json(
+            &self.run.join(format!("cli-scenario-{label}.json")),
+            &json!({"exit_code": expected_exit, "response": response}),
+        )?;
+        Ok(())
+    }
+
+    fn wait_for_promoted_file(&self, before: &Value, timeout: Duration) -> Result<String> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let current = match self.repository_file_state() {
+                Ok(current) => current,
+                Err(error)
+                    if error
+                        .root_cause()
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+                {
+                    ensure!(
+                        Instant::now() < deadline,
+                        "No previously published file was promoted before the timeout"
+                    );
+                    thread::sleep(Duration::from_millis(50));
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            if let Some(files) = before.as_object() {
+                for (path, previous) in files {
+                    if current.get(path).is_some_and(|now| now != previous) {
+                        return Ok(path.clone());
+                    }
+                }
+            }
+            ensure!(
+                Instant::now() < deadline,
+                "No previously published file was promoted before the timeout"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    fn close_gui_and_restart(&self, timeout: Duration) -> Result<u64> {
+        self.data(&["close"])?;
+        let started = Instant::now();
+        let deadline = started + timeout;
+        loop {
+            let exited = self
+                .gui
+                .borrow_mut()
+                .as_mut()
+                .context("The GUI process is not running")?
+                .child
+                .try_wait()?
+                .is_some();
+            if exited {
+                break;
+            }
+            ensure!(
+                Instant::now() < deadline,
+                "Foxy did not finish its normal close path before the timeout"
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
+        memory::set(self.pid, None);
+        drop(self.gui.borrow_mut().take());
+        let child =
+            launch::start_gui(self.exe, self.config, self.run, self.env, timeout, self.pid)?;
+        *self.gui.borrow_mut() = Some(child);
+        self.driver(
+            &[
+                "wait".into(),
+                "--busy-reason-cleared".into(),
+                "startup-sync".into(),
+                "--timeout-ms".into(),
+                timeout.as_millis().to_string(),
+            ],
+            timeout + Duration::from_secs(10),
+        )?;
+        Ok(started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64)
+    }
     fn driver(&self, args: &[String], timeout: Duration) -> Result<driver::Response> {
         driver::call(self.exe, self.config, args, self.env, timeout)
     }
@@ -237,6 +1174,27 @@ impl ContextRun<'_> {
     /// counters cost a handle open per tick, and a footprint regression that
     /// only shows up under a download is exactly the one no dedicated case
     /// would have caught.
+    fn seed_startup_state(&self, operation: &Value) -> Result<()> {
+        if let Some(gui) = self.gui.borrow_mut().as_mut() {
+            launch::stop_gui(gui, self.exe, self.config, self.env);
+        }
+        memory::set(self.pid, None);
+        drop(self.gui.borrow_mut().take());
+        let address = self.case["repository"]["address"]
+            .as_str()
+            .context("seed-startup-state requires the case repository address")?;
+        let path = self.case["repository"]["path"]
+            .as_str()
+            .context("seed-startup-state requires the case repository path")?;
+        crate::seed_state::apply(
+            self.config,
+            address,
+            path,
+            operation["stale_link"].as_bool().unwrap_or(false),
+            operation["incomplete_parts"].as_bool().unwrap_or(false),
+        )
+    }
+
     fn operation(&self, operation: &Value) -> Result<Value> {
         let settle = operation["memory_settle_ms"]
             .as_u64()
@@ -609,6 +1567,14 @@ impl ContextRun<'_> {
         if name == "wipe-db" && operation["keep_hash_record"].as_bool() == Some(true) {
             invoke.extend(["--params", r#"{"keep-hash-record":true}"#]);
         }
+        let watch_promotion = operation["cancel_after_promoted_file"].as_bool() == Some(true)
+            || operation["kill_after_promoted_file"].as_bool() == Some(true)
+            || operation["close_after_promoted_file"].as_bool() == Some(true);
+        let before_promotion = if watch_promotion {
+            Some(self.repository_file_state()?)
+        } else {
+            None
+        };
         self.data(&invoke)?;
         let busy_deadline = Instant::now() + Duration::from_secs(30);
         let mut observed_busy = false;
@@ -640,7 +1606,56 @@ impl ContextRun<'_> {
         // A cancellation lane: let the transfer run for `cancel_after_s`, then
         // cancel and measure cancel-to-quiescent (the busy reason clearing).
         let mut cancel_quiescent_ms = Value::Null;
-        if let Some(after) = operation["cancel_after_s"].as_f64()
+        let mut cancel_trigger_hash_progress = Value::Null;
+        let mut promoted_file = None;
+        let mut external_edit_after_promotion = None;
+        let mut close_wait_ms = Value::Null;
+        let mut paused = false;
+        if operation["close_after_promoted_file"].as_bool() == Some(true) && !finished_between_polls
+        {
+            let wait = operation["wait_timeout_s"].as_u64().unwrap_or(300);
+            promoted_file = Some(self.wait_for_promoted_file(
+                before_promotion.as_ref().expect("promotion watch snapshot"),
+                Duration::from_secs(wait),
+            )?);
+            close_wait_ms = self
+                .close_gui_and_restart(Duration::from_secs(wait))?
+                .into();
+            finished_between_polls = true;
+        } else if operation["cancel_after_promoted_file"].as_bool() == Some(true)
+            && !finished_between_polls
+        {
+            let wait = operation["wait_timeout_s"].as_u64().unwrap_or(300);
+            promoted_file = Some(self.wait_for_promoted_file(
+                before_promotion.as_ref().expect("promotion watch snapshot"),
+                Duration::from_secs(wait),
+            )?);
+            if let Some(content) = operation["external_edit_after_promoted_file"].as_str() {
+                let relative = Path::new(promoted_file.as_deref().expect("promoted file"));
+                let repository = self.repository_path()?;
+                let target = ensure_run_path(self.run, &repository.join(relative))?;
+                ensure!(target.is_file(), "Promoted file is not a regular file");
+                fs::write(&target, content.as_bytes())
+                    .with_context(|| format!("Writing test edit to {}", target.display()))?;
+                external_edit_after_promotion = Some(promoted_file.clone().unwrap());
+            }
+            let cancel_started = Instant::now();
+            self.data(&["invoke", "cancel-download"])?;
+            self.driver(
+                &[
+                    "wait".into(),
+                    "--busy-reason-cleared".into(),
+                    busy_reason.into(),
+                    "--timeout-ms".into(),
+                    (wait * 1000).to_string(),
+                ],
+                Duration::from_secs(wait + 10),
+            )?;
+            cancel_quiescent_ms = (cancel_started.elapsed().as_secs_f64() * 1000.0)
+                .round()
+                .into();
+            finished_between_polls = true;
+        } else if let Some(after) = operation["cancel_after_s"].as_f64()
             && !finished_between_polls
         {
             thread::sleep(Duration::from_secs_f64(after));
@@ -661,29 +1676,143 @@ impl ContextRun<'_> {
                 .round()
                 .into();
             finished_between_polls = true;
+        } else if let Some(threshold) = operation["cancel_after_hash_progress"].as_f64()
+            && !finished_between_polls
+        {
+            let wait = operation["wait_timeout_s"].as_u64().unwrap_or(300);
+            let deadline = Instant::now() + Duration::from_secs(wait);
+            let observed = loop {
+                let progress = self.data(&["progress"])?;
+                ensure!(
+                    progress["busy_reasons"]
+                        .as_array()
+                        .is_some_and(|reasons| reasons.iter().any(|v| v == busy_reason)),
+                    "Integrity sync stopped before hash progress reached cancellation threshold {threshold:.3}"
+                );
+                let fraction = progress["recheck_hash_progress"].as_f64().unwrap_or(0.0);
+                if fraction >= threshold && fraction < 1.0 {
+                    break fraction;
+                }
+                ensure!(
+                    fraction < 1.0,
+                    "Integrity hashing reached completion before the cancellation threshold {threshold:.3}"
+                );
+                ensure!(
+                    !self.logged_since(generation, "Pipeline summary: op=")?,
+                    "Sync finished before integrity hash progress reached cancellation threshold {threshold:.3}"
+                );
+                ensure!(
+                    Instant::now() < deadline,
+                    "Integrity hash progress did not reach cancellation threshold {threshold:.3}"
+                );
+                thread::sleep(Duration::from_millis(100));
+            };
+            cancel_trigger_hash_progress = observed.into();
+            let cancel_started = Instant::now();
+            self.data(&["invoke", "cancel-download"])?;
+            self.driver(
+                &[
+                    "wait".into(),
+                    "--busy-reason-cleared".into(),
+                    busy_reason.into(),
+                    "--timeout-ms".into(),
+                    (wait * 1000).to_string(),
+                ],
+                Duration::from_secs(wait + 10),
+            )?;
+            cancel_quiescent_ms = (cancel_started.elapsed().as_secs_f64() * 1000.0)
+                .round()
+                .into();
+            finished_between_polls = true;
+        }
+        if let Some(after) = operation["pause_after_s"].as_f64()
+            && !finished_between_polls
+        {
+            thread::sleep(Duration::from_secs_f64(after));
+            self.data(&["invoke", "pause-download"])?;
+            paused = true;
+            finished_between_polls = true;
+        }
+        // A killed process cannot finish the refresh, so the checksum commit
+        // inside it must not land. The next operation restarts the app.
+        let mut killed = false;
+        if operation["kill_after_promoted_file"].as_bool() == Some(true) && !finished_between_polls
+        {
+            let wait = operation["wait_timeout_s"].as_u64().unwrap_or(300);
+            promoted_file = Some(self.wait_for_promoted_file(
+                before_promotion.as_ref().expect("promotion watch snapshot"),
+                Duration::from_secs(wait),
+            )?);
+            if let Some(gui) = self.gui.borrow_mut().as_mut() {
+                let _ = gui.child.kill();
+                let _ = gui.wait(Duration::from_secs(15));
+            }
+            memory::set(self.pid, None);
+            drop(self.gui.borrow_mut().take());
+            killed = true;
+            finished_between_polls = true;
+        } else if let Some(after) = operation["kill_after_s"].as_f64()
+            && !finished_between_polls
+        {
+            thread::sleep(Duration::from_secs_f64(after));
+            if let Some(gui) = self.gui.borrow_mut().as_mut() {
+                let _ = gui.child.kill();
+                let _ = gui.wait(Duration::from_secs(15));
+            }
+            memory::set(self.pid, None);
+            drop(self.gui.borrow_mut().take());
+            killed = true;
+            finished_between_polls = true;
         }
         if !finished_between_polls {
             let wait = operation["wait_timeout_s"]
                 .as_u64()
                 .unwrap_or(self.timeout.as_secs());
-            let mut args: Vec<String> = vec!["wait".into()];
             if matches!(
                 name,
                 "download" | "download-full-files" | "force-redownload"
             ) {
-                args.push("--download-complete".into());
+                self.wait_for_download(busy_reason, Duration::from_secs(wait))?;
             } else {
-                args.extend(["--busy-reason-cleared".into(), busy_reason.into()]);
+                self.driver(
+                    &[
+                        "wait".into(),
+                        "--busy-reason-cleared".into(),
+                        busy_reason.into(),
+                        "--timeout-ms".into(),
+                        (wait * 1000).to_string(),
+                    ],
+                    Duration::from_secs(wait + 10),
+                )?;
             }
-            args.extend(["--timeout-ms".into(), (wait * 1000).to_string()]);
-            self.driver(&args, Duration::from_secs(wait + 10))?;
         }
         let elapsed = started.elapsed().as_secs_f64();
-        let ui_probe = probe.map(UiProbe::finish);
-        let progress_probe = progress_probe.map(|probe| probe.finish(elapsed));
-        let mut summary = self.data(&["download-summary", "--include-telemetry"])?;
+        let ui_probe = (!killed).then(|| probe.map(UiProbe::finish)).flatten();
+        let progress_probe = (!killed)
+            .then(|| progress_probe.map(|probe| probe.finish(elapsed)))
+            .flatten();
+        let mut summary = if killed {
+            json!({"killed": true})
+        } else {
+            self.data(&["download-summary", "--include-telemetry"])?
+        };
         if !cancel_quiescent_ms.is_null() {
             summary["cancel_quiescent_ms"] = cancel_quiescent_ms;
+        }
+        if !cancel_trigger_hash_progress.is_null() {
+            summary["cancel_trigger_hash_progress"] = cancel_trigger_hash_progress;
+        }
+        if !close_wait_ms.is_null() {
+            summary["close_wait_ms"] = close_wait_ms;
+        }
+        if let Some(path) = promoted_file {
+            summary["promoted_file"] = json!(path);
+        }
+        if let Some(path) = external_edit_after_promotion {
+            summary["external_edit_after_promotion"] = json!(path);
+        }
+        if paused {
+            summary["paused"] = json!(true);
         }
         if let Some(ui_probe) = ui_probe {
             summary["ui_probe"] = ui_probe;
@@ -691,15 +1820,27 @@ impl ContextRun<'_> {
         if let Some(progress_probe) = progress_probe {
             summary["progress_probe"] = progress_probe;
         }
-        let progress = self.data(&["progress"])?;
-        let snapshot = self.data(&["snapshot"])?;
-        let captured = self.data(&[
-            "logs",
-            "--since-generation",
-            &generation.to_string(),
-            "--limit",
-            "2000",
-        ])?;
+        let progress = if killed {
+            Value::Null
+        } else {
+            self.data(&["progress"])?
+        };
+        let snapshot = if killed {
+            Value::Null
+        } else {
+            self.data(&["snapshot"])?
+        };
+        let captured = if killed {
+            Value::Null
+        } else {
+            self.data(&[
+                "logs",
+                "--since-generation",
+                &generation.to_string(),
+                "--limit",
+                "2000",
+            ])?
+        };
         let messages = captured["entries"]
             .as_array()
             .into_iter()
@@ -714,6 +1855,43 @@ impl ContextRun<'_> {
         Ok(
             json!({"elapsed_s":elapsed,"summary":summary,"progress":progress,"snapshot":snapshot,"logs":captured,"log_text":log}),
         )
+    }
+    /// Only a successful download raises `--download-complete`. One that fails
+    /// before it finishes (a disk-space preflight, say) ends its sync without
+    /// it, so wait in slices and stop once the sync has ended, leaving the
+    /// failure to the row's outcome rather than sitting out the whole timeout.
+    fn wait_for_download(&self, busy_reason: &str, timeout: Duration) -> Result<()> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let slice = deadline
+                .saturating_duration_since(Instant::now())
+                .min(DOWNLOAD_WAIT_SLICE);
+            ensure!(
+                !slice.is_zero(),
+                "Timed out after {} s waiting for the download to complete",
+                timeout.as_secs()
+            );
+            let args = [
+                "wait".to_owned(),
+                "--download-complete".to_owned(),
+                "--timeout-ms".to_owned(),
+                slice.as_millis().to_string(),
+            ];
+            if self.driver(&args, slice + Duration::from_secs(10)).is_ok() {
+                return Ok(());
+            }
+            // A sync can drop its busy reason for a moment between stages, so
+            // the end only counts when a second look a second later agrees.
+            if sync_ended_without_download(&self.data(&["progress"])?, busy_reason) {
+                thread::sleep(Duration::from_secs(1));
+                if sync_ended_without_download(&self.data(&["progress"])?, busy_reason) {
+                    eprintln!(
+                        "The sync ended without completing the download; recording the operation as it stands"
+                    );
+                    return Ok(());
+                }
+            }
+        }
     }
     fn logged_since(&self, generation: u64, needle: &str) -> Result<bool> {
         let captured = self.data(&[
@@ -823,7 +2001,23 @@ impl ContextRun<'_> {
     }
 }
 
-fn oracle(case: &Value, root: &Path, run: &Path, timeout: Duration) -> Result<bool> {
+fn oracle_repository<'a>(case: &'a Value, operation: &Value) -> Result<&'a Value> {
+    let Some(name) = operation["repository"].as_str() else {
+        return Ok(&case["repository"]);
+    };
+    std::iter::once(&case["repository"])
+        .chain(case["extra_repositories"].as_array().into_iter().flatten())
+        .find(|repository| repository["name"].as_str() == Some(name))
+        .context("Oracle target repository was not declared in the case")
+}
+
+fn oracle(
+    case: &Value,
+    operation: &Value,
+    root: &Path,
+    run: &Path,
+    timeout: Duration,
+) -> Result<bool> {
     let Some(argv) = case["guards"]
         .get("oracle_command")
         .filter(|v| !v.is_null())
@@ -834,8 +2028,20 @@ fn oracle(case: &Value, root: &Path, run: &Path, timeout: Duration) -> Result<bo
         .as_array()
         .context("guards.oracle_command must be an argv array, not a command string")?;
     ensure!(!argv.is_empty(), "guards.oracle_command cannot be empty");
-    let repository = case["repository"]["path"].as_str().unwrap_or("");
-    let url = case["repository"]["address"].as_str().unwrap_or("");
+    let target = oracle_repository(case, operation)?;
+    let repository = target["path"].as_str().unwrap_or("");
+    let url = target["address"].as_str().unwrap_or("");
+    let stem = if operation["setup_once"].as_bool() == Some(true) {
+        let name: String = target["name"]
+            .as_str()
+            .unwrap_or("repository")
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .collect();
+        format!("oracle-setup-{name}")
+    } else {
+        "oracle".to_owned()
+    };
     let expanded: Vec<String> = argv
         .iter()
         .map(|arg| {
@@ -856,12 +2062,12 @@ fn oracle(case: &Value, root: &Path, run: &Path, timeout: Duration) -> Result<bo
         .env("FOXY_TESTKIT_RUN_DIR", run);
     match launch::process(&mut command, timeout) {
         Ok(output) => {
-            fs::write(run.join("oracle.out"), &output.stdout)?;
-            fs::write(run.join("oracle.err"), &output.stderr)?;
+            fs::write(run.join(format!("{stem}.out")), &output.stdout)?;
+            fs::write(run.join(format!("{stem}.err")), &output.stderr)?;
             Ok(output.status.success())
         }
         Err(error) => {
-            fs::write(run.join("oracle.err"), error.to_string())?;
+            fs::write(run.join(format!("{stem}.err")), error.to_string())?;
             Ok(false)
         }
     }
@@ -948,6 +2154,10 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
     }
     let env: Environment = [
         (
+            "FOXY_TESTKIT_RUN_DIR".into(),
+            Some(run.to_string_lossy().into_owned()),
+        ),
+        (
             "FOXY_CONFIG_DIR".into(),
             Some(config.to_string_lossy().into_owned()),
         ),
@@ -972,7 +2182,20 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
     ]
     .into_iter()
     .collect();
-    let exe = if options.no_build {
+    let exe = if let Some(exe) = &options.foxy_binary {
+        let exe = fs::canonicalize(exe).context("Could not resolve --foxy-binary")?;
+        let local = fs::canonicalize(root.join(".local"))
+            .context("Repository .local directory is required for --foxy-binary")?;
+        ensure!(
+            exe.starts_with(local),
+            "--foxy-binary must point inside repository .local"
+        );
+        ensure!(
+            exe.is_file(),
+            "--foxy-binary must point to an executable file"
+        );
+        exe
+    } else if options.no_build {
         launch::executable(root, profile, "Foxy")
     } else {
         launch::build(root, profile, "Foxy", timeout)?
@@ -982,6 +2205,41 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
         "Foxy executable is missing; build it or omit --no-build"
     );
     let _origin = if let Some(origin) = resolved.get("origin").filter(|v| !v.is_null()) {
+        if let Some(versions) = origin["synthetic"].as_array() {
+            for version in versions {
+                let output = version["root"]
+                    .as_str()
+                    .context("Synthetic origin version requires root")?;
+                let output = ensure_run_path(&run, &PathBuf::from(output))?;
+                let mut source = output.as_os_str().to_owned();
+                source.push("-src");
+                ensure_run_path(&run, &PathBuf::from(source))?;
+                let options = crate::origin::synthetic::SyntheticOptions {
+                    output,
+                    mods: version["mods"].as_u64().unwrap_or(1) as u32,
+                    files_per_mod: version["files_per_mod"].as_u64().unwrap_or(2) as u32,
+                    file_bytes: version["file_bytes"].as_u64().unwrap_or(16 * 1024 * 1024) as usize,
+                    tail_file_bytes: None,
+                    pbo_entries: version["pbo_entries"].as_u64().unwrap_or(0) as u32,
+                    entry_bytes: version["entry_bytes"].as_u64().unwrap_or(64) as usize,
+                    seed: version["seed"].as_i64().unwrap_or(20261028) as i32,
+                    mod_seeds: version["mod_seeds"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_i64)
+                        .map(|seed| seed as i32)
+                        .collect(),
+                    repo_name: version["repo_name"]
+                        .as_str()
+                        .unwrap_or("RepoAlpha")
+                        .to_owned(),
+                    mode: "foxy".into(),
+                    force: true,
+                };
+                options.execute(root)?;
+            }
+        }
         let path = origin["root"]
             .as_str()
             .context("Case origin requires a root directory")?;
@@ -1041,6 +2299,7 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
         )?;
     }
     fixture::install(&resolved, &config, &run)?;
+    fixture::install_config_files(&resolved, &config)?;
     if harness == "gui"
         && !config.join("window_state.json").exists()
         && let Some(appdata) = std::env::var_os("APPDATA")
@@ -1091,6 +2350,8 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
             progress_probe: (options.progress_probe_ms > 0)
                 .then(|| Duration::from_millis(options.progress_probe_ms)),
             gui: &gui,
+            origin: _origin.as_ref(),
+            test_file_locks: RefCell::new(HashMap::new()),
             pid: &pid,
         };
         let mut effective_gate = options.db_write_gate;
@@ -1138,11 +2399,29 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
             .iter()
             .filter(|op| op["setup_once"].as_bool().unwrap_or(false))
         {
+            if context.state_operation(operation)? {
+                continue;
+            }
             if operation["op"].as_str() == Some("evict-cache") {
                 evict(operation)?;
                 continue;
             }
-            context.operation(operation)?;
+            let collected = context.operation(operation)?;
+            if matches!(
+                operation["op"].as_str(),
+                Some("download" | "download-full-files" | "force-redownload")
+            ) && operation.get("expect_outcome").is_none()
+                && resolved["harness"].as_str().unwrap_or("gui") == "gui"
+            {
+                ensure!(
+                    collected["progress"]["download_finished"].as_bool() == Some(true),
+                    "The setup download did not finish successfully; refusing to test an invalid initial state"
+                );
+                ensure!(
+                    oracle(&resolved, operation, root, &run, timeout)?,
+                    "The independent oracle rejected the setup payload"
+                );
+            }
         }
         let warmup = resolved["warmup"].as_bool().unwrap_or(false);
         let passes = resolved["repetitions"].as_u64().unwrap_or(3);
@@ -1160,6 +2439,9 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                 .filter(|op| !op["setup_once"].as_bool().unwrap_or(false))
             {
                 let name = operation["op"].as_str().context("Missing operation name")?;
+                if context.state_operation(operation)? {
+                    continue;
+                }
                 match name {
                     "mutate" => {
                         mutation_info = mutation
@@ -1176,20 +2458,6 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                     "evict-cache" => {
                         evict(operation)?;
                         evicted_pending = true;
-                        continue;
-                    }
-                    "origin-switch" => {
-                        let root = operation["root"]
-                            .as_str()
-                            .context("origin-switch requires a root directory")?;
-                        _origin
-                            .as_ref()
-                            .context("origin-switch requires a case origin")?
-                            .set_root(Path::new(root))?;
-                        let touched = crate::origin::server::touch_manifests(Path::new(root))?;
-                        eprintln!(
-                            "origin-switch: serving {root} ({touched} manifests republished)"
-                        );
                         continue;
                     }
                     _ => {}
@@ -1255,6 +2523,8 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                 write_json(&run.join(format!("summary-{stem}.json")), &summary)?;
                 let mut view = json!({
                     "summary": summary,
+                    "progress": collected["progress"],
+                    "snapshot": collected["snapshot"],
                     "sol": sol,
                     "breakdown": breakdown,
                     "references": references,
@@ -1263,6 +2533,8 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                     "download": sol::operation(&sol, "download"),
                     "quick_scan": sol::operation(&sol, "quick_scan"),
                     "startup": sol::operation(&sol, "startup"),
+                    "startup_probe": sol::operation(&sol, "startup_probe"),
+                    "startup_probe_retry": sol::operation(&sol, "startup_probe_retry"),
                     "remote_refresh": sol::operation(&sol, "remote_refresh"),
                     "db_persist": sol::operation(&sol, "db_persist"),
                     "db_purge": sol::operation(&sol, "db_purge"),
@@ -1274,7 +2546,12 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                 }
                 crate::references::attach(&mut view);
                 let mut flags = Vec::new();
-                if !expect::expectations(&view, &operation["expect"]).is_empty() {
+                let assertion_failures = expect::expectations(&view, &operation["expect"]);
+                write_json(
+                    &run.join(format!("assertions-{stem}.json")),
+                    &json!(assertion_failures),
+                )?;
+                if !assertion_failures.is_empty() {
                     flags.push("assertion-failed");
                 }
                 if !expect::thresholds(&view, &resolved["thresholds"]).is_empty() {
@@ -1306,6 +2583,9 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                         "download" | "download-full-files" | "force-redownload"
                     )
                     && !cancelled_on_purpose
+                    && operation["pause_after_s"].as_f64().is_none()
+                    && operation["kill_after_promoted_file"].as_bool() != Some(true)
+                    && operation["kill_after_s"].as_f64().is_none()
                     && summary["files_updated"].as_i64().unwrap_or(-1) != expected
                 {
                     flags.push("incomplete-payload");
@@ -1317,8 +2597,11 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                     name,
                     "download" | "download-full-files" | "force-redownload"
                 ) && !cancelled_on_purpose
+                    && operation["pause_after_s"].as_f64().is_none()
+                    && operation["kill_after_promoted_file"].as_bool() != Some(true)
+                    && operation["kill_after_s"].as_f64().is_none()
                 {
-                    if oracle(&resolved, root, &run, timeout)? {
+                    if oracle(&resolved, operation, root, &run, timeout)? {
                         "passed"
                     } else {
                         flags.push("oracle-failed");
@@ -1423,9 +2706,131 @@ fn outcome_matches(expected: Option<&str>, observed: Option<&str>) -> bool {
     expected.is_none() || expected == observed
 }
 
+/// How long one `--download-complete` wait blocks before the runner checks
+/// whether the sync ended without completing the download.
+const DOWNLOAD_WAIT_SLICE: Duration = Duration::from_secs(60);
+
+fn sync_ended_without_download(progress: &Value, busy_reason: &str) -> bool {
+    let busy = progress["busy_reasons"]
+        .as_array()
+        .is_some_and(|reasons| reasons.iter().any(|reason| reason == busy_reason));
+    !busy && progress["download_finished"].as_bool() != Some(true)
+}
+
 #[cfg(test)]
 mod cache_state_tests {
-    use super::{cache_state, outcome_matches, residual_download_artifacts};
+    use super::{
+        cache_state, ensure_run_path, file_state_contains, is_download_sidecar,
+        move_origin_addon_category, outcome_matches, residual_download_artifacts,
+        sync_ended_without_download,
+    };
+    use serde_json::{Value, json};
+    use std::fs;
+    use std::path::PathBuf;
+
+    #[test]
+    fn oracle_targets_the_operation_instance_even_when_urls_match() {
+        let case = json!({"repository": {"name":"RepoAlpha", "address":"http://127.0.0.1/", "path":"R:/Mods/RepoAlpha"},
+            "extra_repositories":[{"name":"RepoBeta", "address":"http://127.0.0.1/", "path":"R:/Mods/RepoBeta"}]});
+        assert_eq!(
+            super::oracle_repository(&case, &json!({})).unwrap()["path"],
+            "R:/Mods/RepoAlpha"
+        );
+        assert_eq!(
+            super::oracle_repository(&case, &json!({"repository":"RepoBeta"})).unwrap()["path"],
+            "R:/Mods/RepoBeta"
+        );
+        assert!(super::oracle_repository(&case, &json!({"repository":"Unknown"})).is_err());
+    }
+
+    #[test]
+    fn category_mutation_keeps_published_indexes_and_recomputes_checksum() {
+        let directory = tempfile::tempdir().unwrap();
+        let published = json!({
+            "checksum":"old",
+            "requiredMods":[],
+            "optionalMods":[]
+        });
+        let index = json!({
+            "checksum":"old",
+            "requiredMods":[{"modName":"@synthetic_000","checkSum":"A1","enabled":true}],
+            "optionalMods":[]
+        });
+        fs::write(
+            directory.path().join("repo.json"),
+            serde_json::to_vec(&published).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("foxy_addons.json"),
+            serde_json::to_vec(&index).unwrap(),
+        )
+        .unwrap();
+
+        move_origin_addon_category(directory.path(), "@synthetic_000", "required", "optional")
+            .unwrap();
+
+        let expected = blake3::hash(b"A1").to_hex().to_uppercase();
+        let repo: Value =
+            serde_json::from_slice(&fs::read(directory.path().join("repo.json")).unwrap()).unwrap();
+        let index: Value =
+            serde_json::from_slice(&fs::read(directory.path().join("foxy_addons.json")).unwrap())
+                .unwrap();
+        assert_eq!(repo["requiredMods"], json!([]));
+        assert_eq!(repo["checksum"], expected);
+        assert_eq!(index["requiredMods"], json!([]));
+        assert_eq!(index["optionalMods"][0]["modName"], "@synthetic_000");
+        assert_eq!(index["checksum"], expected);
+    }
+
+    #[test]
+    fn payload_state_ignores_sidecars_and_preserves_captured_file_bytes() {
+        for path in [
+            "file.foxy.bak",
+            "file.foxy.part",
+            "file.foxy.part.meta",
+            "file.foxy.tmp",
+            ".foxy-write.lock",
+        ] {
+            assert!(is_download_sidecar(std::path::Path::new(path)));
+        }
+        assert!(!is_download_sidecar(std::path::Path::new("file.pbo")));
+        let captured = json!({"promoted.bin": {"bytes": 3, "blake3": "new"}});
+        assert!(file_state_contains(
+            &json!({"promoted.bin": {"bytes": 3, "blake3": "new"}, "restored.bin": {"bytes": 3, "blake3": "old"}}),
+            &captured
+        ));
+        assert!(!file_state_contains(&json!({}), &captured));
+        assert!(!file_state_contains(
+            &json!({"promoted.bin": {"bytes": 3, "blake3": "old"}}),
+            &captured
+        ));
+    }
+
+    #[test]
+    fn test_paths_must_be_absolute_and_stay_inside_the_run() {
+        let run = tempfile::tempdir().unwrap();
+        let inside = run.path().join("nested");
+        std::fs::create_dir_all(&inside).unwrap();
+        assert_eq!(ensure_run_path(run.path(), &inside).unwrap(), inside);
+        let missing = inside.join("new").join("payload");
+        assert_eq!(ensure_run_path(run.path(), &missing).unwrap(), missing);
+        assert!(ensure_run_path(run.path(), &inside.join("..").join("escape")).is_err());
+        assert!(ensure_run_path(run.path(), &PathBuf::from("relative")).is_err());
+        assert!(
+            ensure_run_path(run.path(), &run.path().parent().unwrap().join("outside")).is_err()
+        );
+    }
+
+    #[test]
+    fn a_download_wait_ends_only_once_the_sync_is_over_without_completing() {
+        let running = json!({ "busy_reasons": ["core-sync"], "download_finished": false });
+        let failed = json!({ "busy_reasons": [], "download_finished": false });
+        let done = json!({ "busy_reasons": [], "download_finished": true });
+        assert!(!sync_ended_without_download(&running, "core-sync"));
+        assert!(sync_ended_without_download(&failed, "core-sync"));
+        assert!(!sync_ended_without_download(&done, "core-sync"));
+    }
 
     #[test]
     fn eviction_wins_over_the_iteration_number() {

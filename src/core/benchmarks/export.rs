@@ -163,13 +163,32 @@ pub fn summary_text(record: &BenchmarkRecord, best: Option<&BestComparison>) -> 
     line(
         "machine",
         format!(
-            "{} | {} x{} | {:.1} GB RAM | repo storage {} | hash profile {} | power {}",
+            "{} | {} x{} | {:.1} GB RAM | repo storage {} | hash profile {} | cpu usage limit {} | cpu threads {} | work priority {} | low disk priority {} | memory pressure {} | power {}",
             record.machine.os,
             record.machine.cpu,
             record.machine.cpu_cores,
             record.machine.total_memory_bytes as f64 / 1024.0 / 1024.0 / 1024.0,
             record.machine.repository_storage_class,
             record.machine.hash_io_profile,
+            record
+                .machine
+                .cpu_usage_limit_percent
+                .map_or_else(|| "none".to_string(), |limit| format!("{limit}%")),
+            record
+                .machine
+                .cpu_thread_limit
+                .map_or_else(|| "auto".to_string(), |limit| limit.to_string()),
+            if record.machine.work_priority.is_empty() {
+                "normal"
+            } else {
+                record.machine.work_priority.as_str()
+            },
+            record.machine.low_disk_priority,
+            if record.machine.memory_pressure_override.is_empty() {
+                "auto"
+            } else {
+                record.machine.memory_pressure_override.as_str()
+            },
             record.machine.power.summary()
         ),
     );

@@ -314,6 +314,30 @@ fn shared_mod_mismatch(name: &str, first: &Path, other: &Path) -> anyhow::Error 
     )
 }
 
+/// A shared mod is hashed once for a pool, so repositories that disagree on
+/// `chunking` would publish parts that one of them cannot verify.
+fn ensure_shared_chunking(repos: &[SpaceRepo], groups: &[SharedMod]) -> Result<()> {
+    for group in groups {
+        let Some(&(first_r, first_m)) = group.uses.first() else {
+            continue;
+        };
+        let first = repos[first_r].mods[first_m].chunking;
+        if let Some(&(r, _)) = group
+            .uses
+            .iter()
+            .find(|&&(r, m)| repos[r].mods[m].chunking != first)
+        {
+            bail!(
+                "Mod {} is shared by repositories {} and {} with different chunking settings. Use the same chunking in both configs or rename the mod in one of them.",
+                group.name,
+                repos[first_r].folder,
+                repos[r].folder
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Every use of a shared name must hash identically to its first use.
 fn ensure_shared_mods_match<'a>(
     groups: &[SharedMod],
@@ -924,6 +948,7 @@ pub fn cmd_create_space(
         Some(full)
     };
     let groups = group_shared_mods(&space.repos);
+    ensure_shared_chunking(&space.repos, &groups)?;
     let shared_count = groups.iter().filter(|g| g.uses.len() > 1).count();
 
     println!(
@@ -1175,12 +1200,14 @@ pub fn cmd_create_space(
             )
         })
         .collect();
-    let server_lines: Vec<String> = launch_params
+    let server_lines: Vec<Option<String>> = launch_params
         .iter()
-        .map(|params| mod_line::render_launch_params(params))
+        .map(|params| (!params.is_empty()).then(|| mod_line::render_launch_params(params)))
         .collect();
     for (r, line) in server_lines.iter().enumerate() {
-        published::write_server_mod_line(&ctx.repo_dir(r), line)?;
+        if let Some(line) = line {
+            published::write_server_mod_line(&ctx.repo_dir(r), line)?;
+        }
     }
 
     if layout == SpaceLayout::Pool {
@@ -1278,11 +1305,15 @@ pub fn cmd_create_space(
         _ => {}
     }
 
-    println!();
-    println!("Server mod lines:");
+    if server_lines.iter().any(Option::is_some) {
+        println!();
+        println!("Server mod lines:");
+    }
     for (repo, line) in space.repos.iter().zip(&server_lines) {
-        println!("{}:", repo.folder);
-        println!("{line}");
+        if let Some(line) = line {
+            println!("{}:", repo.folder);
+            println!("{line}");
+        }
     }
 
     let lines: Vec<_> = space
@@ -1410,6 +1441,7 @@ mod tests {
             is_required: true,
             enabled: true,
             client_side: false,
+            chunking: crate::types::Chunking::Fixed,
         }
     }
 
@@ -1492,6 +1524,32 @@ mod tests {
 
         let same = [Checksums::Blake3("A".into()), Checksums::Blake3("A".into())];
         assert!(ensure_shared_mods_match(&groups, |r, _| (&same[r], sources[r].as_path())).is_ok());
+    }
+
+    #[test]
+    fn shared_mod_with_different_chunking_is_rejected() {
+        let repo = |folder: &str, chunking: crate::types::Chunking| SpaceRepo {
+            folder: folder.to_string(),
+            name: folder.to_string(),
+            address: format!("https://repo.example.invalid/{folder}/"),
+            required: true,
+            config: serde_json::from_str(r#"{"repoName":"Test","basePath":"."}"#).unwrap(),
+            config_path: PathBuf::from("config.json"),
+            mods: vec![ResolvedMod {
+                chunking,
+                ..resolved("MyGame", "/src/MyGame")
+            }],
+        };
+        let mut repos = vec![
+            repo("alpha", crate::types::Chunking::Content),
+            repo("beta", crate::types::Chunking::Fixed),
+        ];
+        let groups = group_shared_mods(&repos);
+        let err = ensure_shared_chunking(&repos, &groups).unwrap_err();
+        assert!(err.to_string().contains("MyGame"));
+
+        repos[1].mods[0].chunking = crate::types::Chunking::Content;
+        assert!(ensure_shared_chunking(&repos, &groups).is_ok());
     }
 
     #[cfg(windows)]

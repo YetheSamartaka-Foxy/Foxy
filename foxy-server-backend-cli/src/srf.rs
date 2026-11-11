@@ -5,8 +5,8 @@ use std::path::Path;
 use crate::cli::GenerationMode;
 use crate::hash;
 use crate::types::{
-    FoxyAddonFile, FoxyAddonJson, FoxyAddonPart, FoxyAddonsJson, ModEntry, ProcessedMod,
-    RepoConfig, RepoGame, RepoJson, SrfFile, SrfManifest, SrfPart,
+    FoxyAddonFile, FoxyAddonJson, FoxyAddonPart, FoxyAddonsJson, GameBuildJson, ModEntry,
+    ProcessedMod, RepoConfig, RepoGame, RepoJson, SrfFile, SrfManifest, SrfPart,
 };
 
 pub const FOXY_MODE_VERSION: &str = "FoxyModeV1";
@@ -229,6 +229,7 @@ pub fn write_repo_json(
     let repo = RepoJson {
         repo_name: config.repo_name.clone(),
         game: (config.game != RepoGame::Arma3).then_some(config.game),
+        chunking: config.chunking,
         checksum: repo_checksum.to_string(),
         foxy_mode,
         required_mods,
@@ -243,6 +244,10 @@ pub fn write_repo_json(
         version: config.version.clone(),
         servers: config.servers.clone(),
         dlc_content: config.dlc_content,
+        game_build: config.game_build.as_ref().map(|build| GameBuildJson {
+            mod_name: build.mod_name.clone(),
+            executable: build.executable.clone(),
+        }),
     };
 
     let json = serde_json::to_string(&repo).context("Failed to serialize repo.json")?;
@@ -393,6 +398,7 @@ mod tests {
     fn repo_json_serializes_swifty_compatibility_fields() {
         let repo = RepoJson {
             game: None,
+            chunking: crate::types::Chunking::Fixed,
             repo_name: "Repo".to_string(),
             checksum: "REPOCHECKSUM".to_string(),
             foxy_mode: None,
@@ -427,6 +433,7 @@ mod tests {
                 battle_eye: false,
             }],
             dlc_content: None,
+            game_build: None,
         };
 
         let json = serde_json::to_string(&repo).expect("repo serialization should work");
@@ -452,6 +459,7 @@ mod tests {
     fn repo_json_includes_foxy_mode_when_set() {
         let repo = RepoJson {
             game: None,
+            chunking: crate::types::Chunking::Fixed,
             repo_name: "FoxyRepo".to_string(),
             checksum: "CHECK".to_string(),
             foxy_mode: Some("FoxyModeV1".to_string()),
@@ -467,6 +475,7 @@ mod tests {
             version: "3.2.0.0".to_string(),
             servers: vec![],
             dlc_content: None,
+            game_build: None,
         };
 
         let json = serde_json::to_string(&repo).expect("repo serialization should work");

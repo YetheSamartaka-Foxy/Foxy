@@ -1,0 +1,4 @@
+interface:
+  display_name: "Shared Repository Integrity"
+  short_description: "Trace repository identity and shared addon state."
+  default_prompt: "Use $foxy-shared-repository-integrity to trace identity and state across these repositories."

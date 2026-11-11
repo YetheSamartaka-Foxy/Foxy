@@ -25,6 +25,16 @@ impl Foxy {
             });
             return;
         };
+        let membership_review_members = self
+            .repository_view_state
+            .repositories
+            .iter()
+            .filter(|repo| {
+                repo.repository_space_id.as_deref() == Some(space.id.as_str())
+                    && repo.repository_space_membership_review
+            })
+            .map(|repo| (repo.address.clone(), repo.path.clone(), repo.name.clone()))
+            .collect::<Vec<_>>();
 
         let mut selector_state = self
             .repository_space_selector_state
@@ -101,12 +111,14 @@ impl Foxy {
         let mut add_entry_action: Option<(String, String)> = None;
         let mut jump_to_repository: Option<usize> = None;
         let mut detach_repo_idx: Option<usize> = None;
+        let mut resolve_membership_review: Option<(String, String, bool)> = None;
         let mut refresh_scan = false;
         let mut move_selected = false;
         let mut quick_check_all_in_space = false;
         let mut open_recheck_all_modal = false;
         let mut open_update_all_modal = false;
         let mut dismiss_completed_bulk_progress = false;
+        let mut export_logs_requested = false;
         self.ensure_repository_addon_size_cache_loaded();
 
         ScrollArea::vertical()
@@ -283,6 +295,7 @@ impl Foxy {
                         None,
                         None,
                         None,
+                        false,
                     );
                 }
 
@@ -350,7 +363,7 @@ impl Foxy {
                     .filter(|progress| progress.completed_count >= progress.total_count);
                 let bulk_finished_flare = rise_effect(
                     ui,
-                    egui::Id::new(("space-bulk-finished", space.id.as_str())),
+                    egui::Id::unique(("space-bulk-finished", space.id.as_str())),
                     finished_bulk.is_some(),
                     BANNER_FLARE_SECONDS,
                 );
@@ -393,6 +406,7 @@ impl Foxy {
                         None,
                         Some(dismiss_label.as_str()),
                         None,
+                        progress.failed_count > 0,
                     );
                     if let Some(flare) = bulk_finished_flare {
                         paint_border_flare(
@@ -405,6 +419,8 @@ impl Foxy {
                     }
                     if banner.inner == RepositoryBannerResponse::DismissClicked {
                         dismiss_completed_bulk_progress = true;
+                    } else if banner.inner == RepositoryBannerResponse::ExportLogsClicked {
+                        export_logs_requested = true;
                     }
                 }
 
@@ -462,6 +478,24 @@ impl Foxy {
                         });
                         if list_idx + 1 < filtered_entry_indices.len() {
                             ui.add_space(6.0);
+                        }
+                    }
+                    if !membership_review_members.is_empty() {
+                        ui.add_space(12.0);
+                        this.overview_section_title(ui, &this.t("Removed from the published space"));
+                        ui.label(this.t("Choose whether each local installation stays in this group. Files remain in place."));
+                        for (address, path, name) in &membership_review_members {
+                            ui.separator();
+                            ui.label(RichText::new(name).strong());
+                            ui.label(path);
+                            ui.horizontal(|ui| {
+                                if ui.button(this.t("Keep in group")).clicked() {
+                                    resolve_membership_review = Some((address.clone(), path.clone(), true));
+                                }
+                                if ui.button(this.t("Keep standalone")).clicked() {
+                                    resolve_membership_review = Some((address.clone(), path.clone(), false));
+                                }
+                            });
                         }
                     }
                 });
@@ -552,6 +586,22 @@ impl Foxy {
             selector_state.candidates = self.scan_repository_space_candidates(&space.id);
             selector_state.last_scan_result_count = Some(selector_state.candidates.len());
         }
+        if let Some((address, path, keep_in_group)) = resolve_membership_review
+            && let Some(repo_idx) = self
+                .repository_view_state
+                .repositories
+                .iter()
+                .position(|repo| repo.address == address && repo.path == path)
+        {
+            if keep_in_group {
+                let repo = &mut self.repository_view_state.repositories[repo_idx];
+                repo.repository_space_membership_review = false;
+                repo.repository_space_entry_address = None;
+                self.save_repositories();
+            } else {
+                self.detach_repository_from_space(repo_idx);
+            }
+        }
         if let Some(repo_idx) = jump_to_repository {
             self.selected_repository_space_id = None;
             self.repository_view_state.selected_repository = Some(repo_idx);
@@ -561,6 +611,9 @@ impl Foxy {
         }
         if dismiss_completed_bulk_progress {
             self.repository_space_bulk_progress = None;
+        }
+        if export_logs_requested {
+            self.on_export_logs_to_zip();
         }
 
         self.repository_space_selector_state = Some(selector_state);
