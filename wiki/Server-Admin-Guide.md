@@ -79,6 +79,8 @@ HybridMode serves both Foxy and legacy Swifty clients from the same repository. 
    ```
    The binary lands in the workspace `target/release/` folder as `foxy-server-backend-cli` (Linux) or `foxy-server-backend-cli.exe` (Windows).
 
+   Release archives include `LICENSE` and `THIRD-PARTY-LICENSES.txt`; keep them beside the executable when distributing it. For source builds, use the root `LICENSE` and `foxy-server-backend-cli/THIRD-PARTY-LICENSES.txt`.
+
 ---
 
 ## Setting Up a Repository

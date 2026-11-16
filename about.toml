@@ -1,7 +1,8 @@
 # Configuration for cargo-about (https://embarkstudios.github.io/cargo-about/).
 # Generates THIRD-PARTY-LICENSES.txt from the dependency lockfile:
 #
-#   cargo about generate about.hbs -o THIRD-PARTY-LICENSES.txt
+#   cargo about generate --locked --fail about.hbs -o THIRD-PARTY-LICENSES.txt
+#   cargo about generate --locked --fail --manifest-path foxy-server-backend-cli/Cargo.toml foxy-server-backend-cli/about.hbs -o foxy-server-backend-cli/THIRD-PARTY-LICENSES.txt
 #
 # `accepted` lists the SPDX license identifiers we allow third-party
 # dependencies to use. If `cargo about generate` reports an unmatched or
@@ -10,10 +11,12 @@
 #
 # NOTE: All bare (top-level) keys must appear before any [table] header below.
 
-# Only consider licenses relevant to the platforms we actually ship.
+# Cover release artifacts and the documented ARM64 Linux and macOS builds.
 targets = [
     "x86_64-pc-windows-msvc",
     "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
 ]
 
 # Build/dev dependencies are not distributed in the binary, so their notices
@@ -45,7 +48,7 @@ accepted = [
     "Ubuntu-font-1.0",
 ]
 
-# Skip first-party workspace crates (Foxy, foxy-server-backend-cli). They are covered
+# Skip private first-party crates. They are covered
 # by LICENSE (the Foxy Community Source License), not by this third-party file.
 # They are marked `publish = false`, which makes them "private" here.
 [private]

@@ -6,16 +6,130 @@ LICENSE). This file lists the third-party components distributed with Foxy and
 the licenses they are provided under. Third-party components remain governed by
 their own licenses and are not relicensed by the Foxy Community Source License.
 
-This file is generated from the dependency lockfile with cargo-about. Regenerate
-it before each release with:
+The Rust dependency section is generated from Cargo.lock with cargo-about.
+Bundled asset notices are maintained in about.hbs and included on regeneration.
+Regenerate this file before each release with:
 
-    cargo about generate about.hbs -o THIRD-PARTY-LICENSES.txt
+    cargo about generate --locked --fail about.hbs -o THIRD-PARTY-LICENSES.txt
+
+This file covers the Foxy desktop app and its client CLI. The standalone server
+backend CLI has separate notices in foxy-server-backend-cli/THIRD-PARTY-LICENSES.txt.
 
 License summary (count of crates per license):
 
 {{#each overview}}
   {{count}}x  {{{name}}} ({{id}})
 {{/each}}
+
+================================================================================
+BUNDLED FONTS, ICONS, ARTWORK, AND RUNTIME LIBRARIES
+================================================================================
+
+The following assets are bundled separately from Rust crates. Their licenses
+and trademark rights are not replaced by Foxy's first-party license.
+
+Roboto Regular
+--------------
+File: src/ui/fonts/Roboto-Regular.ttf
+Version: 2.001047 (2015)
+Copyright 2015 Google Inc. All Rights Reserved.
+Roboto is a trademark of Google.
+License: Apache License 2.0 (Apache-2.0).
+Source and license: https://github.com/googlefonts/Roboto-2
+The complete Apache License 2.0 text is included in the Rust dependency license
+section of this file and also applies to this font.
+
+Noto fonts
+----------
+License for each font below: SIL Open Font License 1.1 (OFL-1.1).
+The complete SIL Open Font License 1.1 text is included in the Rust dependency
+license section of this file and also applies to these fonts.
+
+File: src/ui/fonts/NotoSansArabic-Regular.ttf
+Version: 2.012
+Copyright 2022 The Noto Project Authors
+Source and license: https://github.com/notofonts/arabic
+
+File: src/ui/fonts/NotoSansBengali-Regular.ttf
+Version: 2.002
+Copyright 2017-2022 Google Inc. All Rights Reserved.
+Source and license: https://github.com/notofonts/bengali
+
+File: src/ui/fonts/NotoSansDevanagari-Regular.ttf
+Version: 2.002
+Copyright 2015-2022 Google Inc. All Rights Reserved.
+Source and license: https://github.com/notofonts/devanagari
+
+File: src/ui/fonts/NotoSansHebrew-Regular.ttf
+Version: 3.000
+Copyright 2019 Google Inc. All Rights Reserved.
+Source and license: https://github.com/notofonts/hebrew
+
+File: src/ui/fonts/NotoSansThai-Regular.ttf
+Version: 2.000
+Copyright 2016 Google Inc. All Rights Reserved.
+Source and license: https://github.com/notofonts/thai
+
+Files: src/ui/fonts/NotoSansCJKjp-Regular.otf,
+       src/ui/fonts/NotoSansCJKsc-Regular.otf
+Version: 2.004
+Copyright 2014-2021 Adobe (http://www.adobe.com/).
+Noto is a trademark of Google Inc.
+Source and license: https://github.com/notofonts/noto-cjk/tree/main/Sans
+
+Lucide gamepad icon
+------------------
+File: src/ui/icons/games/generic_white.png
+Source: https://github.com/lucide-icons/lucide/blob/main/icons/gamepad-2.svg
+Rasterized at 160 px with a white stroke; tinted by Foxy at display time.
+License source: https://github.com/lucide-icons/lucide/blob/main/LICENSE
+
+ISC License
+
+Copyright (c) 2026 Lucide Icons and Contributors
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+Bohemia Interactive game logos
+-----------------------------
+Files: src/ui/icons/games/arma3_black.png, arma3_white.png,
+       reforger_black.png, reforger_white.png
+Sources: https://arma3.com/assets/downloads/press_assets/Logo.zip
+         https://data.bistudio.com/press/arma/ArmaReforgerPressKit.zip
+Usage rules: https://www.bohemia.net/en/community/game-content-usage-rules
+These are third-party trademark assets used to identify the managed game.
+Foxy is not affiliated with, endorsed by, or authorized by Bohemia Interactive
+a.s. Bohemia Interactive, ARMA, and all associated logos and designs are
+trademarks or registered trademarks of Bohemia Interactive a.s.
+
+Task Force Roddenberry community logo
+------------------------------------
+File: src/ui/icons/tfr_logo.png
+Community: https://www.tfrod.cz/
+Used with permission of Task Force Roddenberry for inclusion in Foxy.
+This third-party community artwork is not relicensed under Foxy's source
+license. This notice does not grant a general license to reuse the logo.
+
+Steamworks SDK runtime libraries
+-------------------------------
+Files: steam_api64.dll (Windows), libsteam_api.so (Linux),
+       libsteam_api.dylib (macOS builds)
+Owner: Valve Corporation.
+Source: steamworks-sys vendor directory lib/steam/redistributable_bin/.
+These proprietary SDK redistributables are governed by Valve's Steamworks SDK
+Access Agreement, separately from the MIT/Apache licenses of the Rust bindings:
+https://partner.steamgames.com/documentation/sdk_access_agreement/
+Steam and the Steam logo are trademarks of Valve Corporation. Foxy is not
+affiliated with, endorsed by, or authorized by Valve Corporation.
 
 {{#each licenses}}
 ================================================================================
