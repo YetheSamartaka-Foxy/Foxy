@@ -3039,12 +3039,10 @@ async fn run_repository_pipeline(
             if let Some(adjusted_mods) = apply_download_target_estimates_to_pending_updates(
                 context.clone(),
                 &normalized_repo_url,
-                Some(&pending_mod_names),
+                &mods,
             )
             .await
             {
-                let mut adjusted_mods = adjusted_mods;
-                super::super::quick_scan::preserve_removed_file_diffs(&mods, &mut adjusted_mods);
                 mods = adjusted_mods;
                 emit_progress!(ProgressEvent::Diff { mods: mods.clone() });
                 persist_pending_updates(context.clone(), &normalized_repo_url, &mods).await;

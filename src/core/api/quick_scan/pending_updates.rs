@@ -626,10 +626,15 @@ pub(crate) async fn apply_patch_plan_estimates_to_pending_updates(
 pub(crate) async fn apply_download_target_estimates_to_pending_updates(
     context: Arc<FoxyContext>,
     repo_url: &str,
-    allowed_mod_names: Option<&HashSet<String>>,
+    mods: &[ModDiffSummary],
 ) -> Option<Vec<ModDiffSummary>> {
+    let pending_mod_names: HashSet<_> = mods
+        .iter()
+        .filter(|addon| addon.needs_update)
+        .map(|addon| addon.name.to_lowercase())
+        .collect();
     let (file_ids, _) =
-        collect_repo_download_targets(context.clone(), repo_url, allowed_mod_names).await;
+        collect_repo_download_targets(context.clone(), repo_url, Some(&pending_mod_names)).await;
     if file_ids.is_empty() {
         return None;
     }
@@ -653,11 +658,17 @@ pub(crate) async fn apply_download_target_estimates_to_pending_updates(
     attach_part_change_details(context.clone(), &mut targets).await;
     let (patchable_file_ids, planned_bytes, full_bytes) =
         apply_download_plan_bytes(context, &mut targets).await;
-    let mods = build_download_estimate_diffs(&targets);
+    let mut adjusted = build_download_estimate_diffs(&targets);
+    super::removed_files::preserve_removed_file_diffs(mods, &mut adjusted);
+    let deleted_files = adjusted
+        .iter()
+        .flat_map(|addon| &addon.files)
+        .filter(|file| file.change_kind == FileDiffKind::Deleted)
+        .count();
     info!(
-        "Download-target pending estimate applied for repo={}: mods={} files={} new_files={} changed_parts={} dropped_targets={} patch_files={} planned_transfer_bytes={} full_bytes={}",
+        "Download-target pending estimate applied for repo={}: mods={} files={} new_files={} changed_parts={} dropped_targets={} patch_files={} planned_transfer_bytes={} full_bytes={} deleted_files={}",
         repo_url,
-        mods.len(),
+        adjusted.len(),
         targets.len(),
         targets.iter().filter(|target| target.new_file).count(),
         targets
@@ -667,10 +678,11 @@ pub(crate) async fn apply_download_target_estimates_to_pending_updates(
         pre_filter_targets.saturating_sub(targets.len()),
         patchable_file_ids.len(),
         planned_bytes,
-        full_bytes
+        full_bytes,
+        deleted_files
     );
 
-    Some(mods)
+    Some(adjusted)
 }
 
 pub(crate) async fn pending_update_mod_scope(

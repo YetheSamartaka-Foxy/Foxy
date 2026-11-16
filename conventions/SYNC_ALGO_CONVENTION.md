@@ -578,8 +578,11 @@ Pruned addon-file links retain the prior file records. Check those records by
 both remote addon path and local folder, excluding normalized paths still owned
 by any known repository addon. This removal check also runs when the folder
 baseline matches, recovering a removal that an older check accepted as an extra.
-It reads file presence only, without hashing payloads. Keep deletion rows when
-download estimates replace transfer rows; a removal-only update needs no queue.
+It reads file presence only, without hashing payloads. The shared download-target
+estimator retains deletion rows from the current diff, including addons with no
+transfer targets. Startup must persist that complete result so subsequent scoped
+checks and the first prepared update include cleanup alongside downloads. A
+removal-only update needs no transfer queue.
 
 Quick scan must use the cheapest available cache:
 
