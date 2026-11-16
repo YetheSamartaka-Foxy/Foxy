@@ -113,23 +113,32 @@ The Foxy Community Source License applies to first-party Foxy code and materials
 
 When shipping binaries, installers, packages, or public continuation builds, maintainers must include all required third-party notices and license texts.
 
-The repository already contains the cargo-about configuration (`about.toml`) and the plain-text template (`about.hbs`). Do not run `cargo about init`; it would overwrite them. To regenerate the notices before a release:
+The repository contains the cargo-about configuration (`about.toml`) and separate templates for the desktop app (`about.hbs`) and standalone server backend CLI (`foxy-server-backend-cli/about.hbs`). Do not run `cargo about init`; it would overwrite the configuration. From the repository root, regenerate both notice files before a release:
 
 ```bash
 # The cargo-about binary requires the `cli` feature.
 cargo install cargo-about --locked --features cli
-cargo about generate about.hbs -o THIRD-PARTY-LICENSES.txt
+cargo about generate --locked --fail about.hbs -o THIRD-PARTY-LICENSES.txt
+cargo about generate --locked --fail --manifest-path foxy-server-backend-cli/Cargo.toml foxy-server-backend-cli/about.hbs -o foxy-server-backend-cli/THIRD-PARTY-LICENSES.txt
 ```
 
 If `cargo about generate` reports an unmatched or unexpected license, review that dependency and, if its license is acceptable, add the SPDX identifier to the `accepted` list in `about.toml`, then regenerate.
 
-The release process should ship `THIRD-PARTY-LICENSES.txt` next to the binary or installer and link it from the About screen if the application has one.
+Review the generated files before shipping. Normalize decorative typographic dash separators to plain hyphens to follow the repository text rules; do not change license clauses or copyright notices.
+
+Generation follows each package's runtime dependency graph in the shared lockfile. It excludes build and dev dependencies and private first-party crates. Keep the package-scoped commands above: scanning the whole workspace also includes dependencies used only by the developer testkit. The configured targets cover Windows x86-64, Linux x86-64 and ARM64, and the experimental macOS ARM64 build.
+
+Cargo metadata does not cover separately bundled fonts, icons, game artwork, or the proprietary Steamworks runtime. Their notices are maintained in `about.hbs` so regenerating the desktop notice file retains them. Recheck that section whenever a bundled asset changes.
+
+The desktop app embeds `LICENSE`, `LICENSING.md`, and the root `THIRD-PARTY-LICENSES.txt` and displays them in **About > License**, **Licensing**, and **Third-party licenses**. The standalone server backend CLI has no About screen; its release archives include `LICENSE` and its own `THIRD-PARTY-LICENSES.txt` beside the executable. Keep those files with redistributed binaries.
 
 ## 10. Trademarks and game artwork
 
 The Foxy Community Source License covers Foxy's own code and materials. It grants no rights in third-party trademarks, and the game logos embedded under `src/ui/icons/games/` are not licensed by it.
 
 Foxy is not affiliated with, endorsed by, or authorized by Bohemia Interactive a.s. or Valve Corporation. Bohemia Interactive, ARMA, and all associated logos and designs are trademarks or registered trademarks of Bohemia Interactive a.s.; Foxy shows the unmodified official Arma 3 and Arma Reforger logos only to identify the game a game space manages, following Bohemia Interactive's Game Content Usage Rules and the Arma 3 logo manual. Steam and the Steam logo are trademarks of Valve Corporation; Foxy does not use the Steam logo. Forks and continuation builds must keep these logos out of their own branding, keep the disclaimer, and remove the logos if the trademark owner asks. `src/ui/icons/games/README.md` lists the sources and rules for each file.
+
+The Task Force Roddenberry community logo (`src/ui/icons/tfr_logo.png`) is used with permission of Task Force Roddenberry for inclusion in Foxy. It remains third-party artwork; this permission does not apply a Creative Commons license or grant a general right to reuse the logo.
 
 ## 11. Repository files
 
@@ -142,7 +151,7 @@ LICENSING.md
 THIRD-PARTY-LICENSES.txt
 ```
 
-`THIRD-PARTY-LICENSES.txt` should be generated from the actual dependency lockfile before release.
+Both the root and `foxy-server-backend-cli/THIRD-PARTY-LICENSES.txt` should be generated from the actual dependency lockfile before release.
 
 ## 12. Cargo metadata
 

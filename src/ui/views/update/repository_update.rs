@@ -274,6 +274,42 @@ impl Foxy {
                         let banner_height = 8.0 + line_height + 8.0 + 1.0 + item_spacing;
                         reserved_for_footer += banner_height;
                     }
+                    if !downloading && !self.local_drift_addons.is_empty() {
+                        let wrap_width = ui.available_width();
+                        let spacing = ui.spacing();
+                        let checkbox_text_width =
+                            (wrap_width - spacing.icon_width - spacing.icon_spacing).max(0.0);
+                        let checkbox_min_height = spacing.interact_size.y;
+                        let label_height = ui
+                            .painter()
+                            .layout(
+                                self.t_fmt(
+                                    "Known local differences in: {addons}",
+                                    &[("addons", self.local_drift_addons.join(", "))],
+                                ),
+                                TextStyle::Body.resolve(ui.style()),
+                                egui::Color32::PLACEHOLDER,
+                                wrap_width,
+                            )
+                            .size()
+                            .y;
+                        let checkbox_text_height = ui
+                            .painter()
+                            .layout(
+                                self.t("Back up local differences before replacing these addons"),
+                                TextStyle::Button.resolve(ui.style()),
+                                egui::Color32::PLACEHOLDER,
+                                checkbox_text_width,
+                            )
+                            .size()
+                            .y;
+                        let checkbox_height = checkbox_text_height.max(checkbox_min_height);
+                        reserved_for_footer += separator_height
+                            + label_height
+                            + item_spacing
+                            + checkbox_height
+                            + item_spacing;
+                    }
                     let list_height = (available_height - reserved_for_footer).max(0.0);
                     ScrollArea::vertical()
                         .max_height(list_height)

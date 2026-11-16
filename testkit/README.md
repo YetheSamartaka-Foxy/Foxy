@@ -135,7 +135,7 @@ refused) can be accepted afterwards from its rows, provided it ran on a clean
 worktree:
 
 ```powershell
-foxy-testkit accept .	estkitunsperf-repo<run-id>
+foxy-testkit accept .\testkit\runs\<case-id>\<run-id>
 ```
 
 Compare WAL and MVCC without changing the case workload:

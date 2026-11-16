@@ -21,6 +21,9 @@ use crate::core::db::{DbValue, params};
 use crate::core::models::repository::{REPOSITORY_COLUMNS, repository_from_row};
 use crate::core::utils::fetch_json::fetch_json_fresh;
 
+#[cfg(test)]
+mod removal_tests;
+
 const STARTUP_REMOTE_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 /// Let each request reach its own timeout, then bound the stage; unprobed repositories remain unknown.
 const STARTUP_REMOTE_PROBE_BUDGET: Duration =
@@ -1086,7 +1089,7 @@ async fn run_quick_scan_worker_repo(
             if let Some(adjusted_mods) = apply_download_target_estimates_to_pending_updates(
                 context.clone(),
                 &normalized_repo_url,
-                Some(&pending_mod_names),
+                &mods,
             )
             .await
             {

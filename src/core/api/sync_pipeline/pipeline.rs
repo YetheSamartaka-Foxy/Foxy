@@ -2491,7 +2491,12 @@ async fn run_repository_pipeline(
             // Force-redownload targets come from the prepared queue; avoiding a pre-download tree read permits deferred part inserts.
             match fetch_all_download_targets_with_mod_and_name(context.clone()).await {
                 Ok(targets) => {
-                    mods = build_download_estimate_diffs(&targets);
+                    let mut adjusted_mods = build_download_estimate_diffs(&targets);
+                    super::super::quick_scan::preserve_removed_file_diffs(
+                        &mods,
+                        &mut adjusted_mods,
+                    );
+                    mods = adjusted_mods;
                 }
                 Err(err) => {
                     warn!(
@@ -2878,7 +2883,7 @@ async fn run_repository_pipeline(
             if let Some(adjusted_mods) = apply_download_target_estimates_to_pending_updates(
                 context.clone(),
                 &normalized_repo_url,
-                Some(&pending_mod_names),
+                &mods,
             )
             .await
             {
@@ -2905,7 +2910,12 @@ async fn run_repository_pipeline(
                     attach_part_change_details(context.clone(), &mut targets).await;
                     let (patchable_file_ids, planned_bytes, full_bytes) =
                         apply_download_plan_bytes(context.clone(), &mut targets).await;
-                    mods = build_download_estimate_diffs(&targets);
+                    let mut adjusted_mods = build_download_estimate_diffs(&targets);
+                    super::super::quick_scan::preserve_removed_file_diffs(
+                        &mods,
+                        &mut adjusted_mods,
+                    );
+                    mods = adjusted_mods;
                     info!(
                         "Final confirmation plan prepared: repo={} mods={} files={} patch_files={} planned_transfer_bytes={} full_bytes={}",
                         normalized_repo_url,

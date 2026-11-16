@@ -1,0 +1,33 @@
+THIRD-PARTY LICENSES FOR FOXY SERVER BACKEND CLI
+==============================================
+
+The Foxy server backend CLI is licensed under the Foxy Community Source License
+1.1.0 (see LICENSE). Its third-party dependencies remain governed by their own
+licenses and are not relicensed by the Foxy Community Source License.
+
+This file is generated from Cargo.lock with cargo-about. From the repository
+root, regenerate it before each release with:
+
+    cargo about generate --locked --fail --manifest-path foxy-server-backend-cli/Cargo.toml foxy-server-backend-cli/about.hbs -o foxy-server-backend-cli/THIRD-PARTY-LICENSES.txt
+
+License summary (count of crates per license):
+
+{{#each overview}}
+  {{count}}x  {{{name}}} ({{id}})
+{{/each}}
+
+{{#each licenses}}
+================================================================================
+{{{name}}} ({{id}})
+================================================================================
+
+Used by:
+{{#each used_by}}
+  - {{{crate.name}}} {{crate.version}}
+{{/each}}
+
+--------------------------------------------------------------------------------
+
+{{{text}}}
+
+{{/each}}

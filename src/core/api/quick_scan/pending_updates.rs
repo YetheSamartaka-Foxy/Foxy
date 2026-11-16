@@ -572,6 +572,9 @@ pub(crate) async fn apply_patch_plan_estimates_to_pending_updates(
 
         let mut total_bytes = 0u64;
         for file_summary in &mut mod_summary.files {
+            if file_summary.change_kind == FileDiffKind::Deleted {
+                continue;
+            }
             let key = normalize_pending_file_name(&file_summary.name);
             let Some((file_id, file_length)) = file_lookup.get(&(mod_id, key)).copied() else {
                 total_bytes = total_bytes.saturating_add(file_summary.total_bytes);
@@ -620,10 +623,15 @@ pub(crate) async fn apply_patch_plan_estimates_to_pending_updates(
 pub(crate) async fn apply_download_target_estimates_to_pending_updates(
     context: Arc<FoxyContext>,
     repo_url: &str,
-    allowed_mod_names: Option<&HashSet<String>>,
+    mods: &[ModDiffSummary],
 ) -> Option<Vec<ModDiffSummary>> {
+    let pending_mod_names: HashSet<_> = mods
+        .iter()
+        .filter(|addon| addon.needs_update)
+        .map(|addon| addon.name.to_lowercase())
+        .collect();
     let (file_ids, _) =
-        collect_repo_download_targets(context.clone(), repo_url, allowed_mod_names).await;
+        collect_repo_download_targets(context.clone(), repo_url, Some(&pending_mod_names)).await;
     if file_ids.is_empty() {
         return None;
     }
@@ -647,11 +655,17 @@ pub(crate) async fn apply_download_target_estimates_to_pending_updates(
     attach_part_change_details(context.clone(), &mut targets).await;
     let (patchable_file_ids, planned_bytes, full_bytes) =
         apply_download_plan_bytes(context, &mut targets).await;
-    let mods = build_download_estimate_diffs(&targets);
+    let mut adjusted = build_download_estimate_diffs(&targets);
+    super::removed_files::preserve_removed_file_diffs(mods, &mut adjusted);
+    let deleted_files = adjusted
+        .iter()
+        .flat_map(|addon| &addon.files)
+        .filter(|file| file.change_kind == FileDiffKind::Deleted)
+        .count();
     info!(
-        "Download-target pending estimate applied for repo={}: mods={} files={} new_files={} changed_parts={} dropped_targets={} patch_files={} planned_transfer_bytes={} full_bytes={}",
+        "Download-target pending estimate applied for repo={}: mods={} files={} new_files={} changed_parts={} dropped_targets={} patch_files={} planned_transfer_bytes={} full_bytes={} deleted_files={}",
         repo_url,
-        mods.len(),
+        adjusted.len(),
         targets.len(),
         targets.iter().filter(|target| target.new_file).count(),
         targets
@@ -661,10 +675,11 @@ pub(crate) async fn apply_download_target_estimates_to_pending_updates(
         pre_filter_targets.saturating_sub(targets.len()),
         patchable_file_ids.len(),
         planned_bytes,
-        full_bytes
+        full_bytes,
+        deleted_files
     );
 
-    Some(mods)
+    Some(adjusted)
 }
 
 pub(crate) async fn pending_update_mod_scope(
@@ -950,6 +965,30 @@ mod tests {
     #[test]
     fn patch_plan_estimate_uses_full_size_without_plan() {
         assert_eq!(patch_plan_estimate_bytes(100, None), 100);
+    }
+
+    #[tokio::test]
+    async fn patch_plan_estimates_do_not_charge_removed_files_with_a_matching_leaf_name() {
+        let handle = crate::core::tasks::db_turso::build_test_database().await;
+        let db = FoxyDb::from_turso(handle.clone());
+        let (context, _) = seed_same_url_repositories_for_patch_estimate(&db, handle).await;
+        let mut removed = file_summary("foo.pbo", 0);
+        removed.change_kind = FileDiffKind::Deleted;
+        let mods = vec![mod_summary(
+            "@ace3",
+            1000,
+            vec![file_summary("addons/foo.pbo", 1000), removed],
+        )];
+        let adjusted = apply_patch_plan_estimates_to_pending_updates(
+            context,
+            "https://example.test/repo/",
+            &mods,
+        )
+        .await
+        .unwrap();
+        assert_eq!(adjusted[0].total_bytes, 10);
+        assert_eq!(adjusted[0].files[1].total_bytes, 0);
+        assert_eq!(adjusted[0].files[1].change_kind, FileDiffKind::Deleted);
     }
 
     #[test]

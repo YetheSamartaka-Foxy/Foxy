@@ -330,11 +330,20 @@ jobs:
         shell: pwsh
         run: cargo build --release --package foxy-server-backend-cli --target x86_64-pc-windows-msvc
 
+      - name: Prepare server-backend-cli Windows licenses
+        shell: pwsh
+        run: |
+          Copy-Item -LiteralPath LICENSE -Destination target/x86_64-pc-windows-msvc/release/LICENSE
+          Copy-Item -LiteralPath foxy-server-backend-cli/THIRD-PARTY-LICENSES.txt -Destination target/x86_64-pc-windows-msvc/release/THIRD-PARTY-LICENSES.txt
+
       - name: Upload server-backend-cli Windows artifact
         uses: actions/upload-artifact@v6
         with:
           name: foxy-server-backend-cli-windows-${{ steps.vars.outputs.short_sha }}
-          path: target/x86_64-pc-windows-msvc/release/foxy-server-backend-cli.exe
+          path: |
+            target/x86_64-pc-windows-msvc/release/foxy-server-backend-cli.exe
+            target/x86_64-pc-windows-msvc/release/LICENSE
+            target/x86_64-pc-windows-msvc/release/THIRD-PARTY-LICENSES.txt
           if-no-files-found: error
           retention-days: 30
 
@@ -373,12 +382,17 @@ jobs:
         run: |
           mkdir -p dist
           cp target/x86_64-unknown-linux-gnu/release/foxy-server-backend-cli dist/foxy-server-backend-cli
+          cp LICENSE dist/LICENSE
+          cp foxy-server-backend-cli/THIRD-PARTY-LICENSES.txt dist/THIRD-PARTY-LICENSES.txt
           chmod +x dist/foxy-server-backend-cli
 
       - name: Upload server-backend-cli Linux artifact
         uses: actions/upload-artifact@v6
         with:
           name: foxy-server-backend-cli-linux-${{ steps.vars.outputs.short_sha }}
-          path: dist/foxy-server-backend-cli
+          path: |
+            dist/foxy-server-backend-cli
+            dist/LICENSE
+            dist/THIRD-PARTY-LICENSES.txt
           if-no-files-found: error
           retention-days: 30
