@@ -89,6 +89,7 @@ pub(crate) async fn invalidate_conflicting_siblings(
 struct FileExpectation {
     file_id: i64,
     addon_id: i64,
+    addon_name: String,
     repository_id: i64,
     repository_name: String,
     repository_url: String,
@@ -200,7 +201,7 @@ async fn overlapping_expectations(
         let placeholders = vec!["?"; chunk.len()].join(", ");
         let path_expression = normalized_path_sql("f.local_path");
         let sql = format!(
-            "SELECT DISTINCT f.id AS file_id, a.id AS addon_id, r.id AS repository_id, r.name AS repository_name, \
+            "SELECT DISTINCT f.id AS file_id, a.id AS addon_id, a.name AS addon_name, r.id AS repository_id, r.name AS repository_name, \
                     r.remote_url AS repository_url, r.local_path AS repository_path, \
                     f.local_path AS file_path, f.remote_checksum AS checksum \
              FROM files AS f \
@@ -222,6 +223,7 @@ async fn overlapping_expectations(
             rows_out.push(FileExpectation {
                 file_id: row.get_i64("file_id")?,
                 addon_id: row.get_i64("addon_id")?,
+                addon_name: row.get_string("addon_name")?,
                 repository_id: row.get_i64("repository_id")?,
                 repository_name: row.get_string("repository_name")?,
                 repository_url: row.get_string("repository_url")?,
@@ -306,13 +308,28 @@ pub(crate) async fn check_shared_version_conflicts(
         .map(|(path, _)| path.clone())
         .collect::<Vec<_>>();
     let before_refresh = overlapping_expectations(&db, current.id as i64, &file_paths).await?;
+    let source_by_path = source
+        .iter()
+        .map(|(path, checksum)| (path_key(path), checksum.trim()))
+        .collect::<HashMap<_, _>>();
     let strict = strict_member_keys(strict_members);
     let mut siblings = HashMap::new();
+    let mut conflicting_addons = HashMap::<_, HashSet<String>>::new();
     for sibling in before_refresh {
         let key = (
             repository_url_match_key(&sibling.repository_url),
             normalize_repository_local_path_identity(&sibling.repository_path),
         );
+        if !sibling.checksum.trim().is_empty()
+            && source_by_path
+                .get(&path_key(&sibling.file_path))
+                .is_some_and(|checksum| !checksum.eq_ignore_ascii_case(sibling.checksum.trim()))
+        {
+            conflicting_addons
+                .entry(key.clone())
+                .or_default()
+                .insert(sibling.addon_name.to_lowercase());
+        }
         siblings.entry(key).or_insert(sibling);
     }
     let current_identity = (
@@ -338,11 +355,35 @@ pub(crate) async fn check_shared_version_conflicts(
             )
         });
     }
-    for (_, (_, sibling_name, sibling_url, sibling_path, strict_member)) in refresh_targets {
-        let mut sibling_context = (*context)
-            .clone()
-            .with_target_local_path(sibling_path.clone())
-            .with_download_target_queueing(false);
+    for (identity, (sibling_id, sibling_name, sibling_url, sibling_path, strict_member)) in
+        refresh_targets
+    {
+        let enabled_rows = db
+            .query_all(
+                "SELECT a.name, a.enabled FROM repository_addons AS ra \
+                 JOIN addons AS a ON a.id = ra.addon_id WHERE ra.repository_id = ?",
+                crate::core::db::params![sibling_id],
+            )
+            .await
+            .context("load shared repository addon selection")?;
+        let enabled_overrides = enabled_rows
+            .iter()
+            .map(|row| {
+                Ok((
+                    row.get_string("name")?.to_lowercase(),
+                    row.get_bool("enabled")?,
+                ))
+            })
+            .collect::<std::result::Result<HashMap<_, _>, crate::core::db::DbErr>>()?;
+        let mut sibling_context =
+            FoxyContext::new(context.database.clone(), context.client.clone())
+                .with_target_local_path(sibling_path.clone())
+                .with_repository_space_shared_path(context.repository_space_shared_path.clone())
+                .with_forced_mod_refreshes(conflicting_addons.remove(&identity).unwrap_or_default())
+                .with_download_target_queueing(false);
+        if let Some(operation_id) = context.operation_id() {
+            sibling_context = sibling_context.with_operation_id(operation_id);
+        }
         if !strict_member {
             sibling_context = sibling_context.with_repository_space_shared_path(None);
         }
@@ -351,7 +392,7 @@ pub(crate) async fn check_shared_version_conflicts(
             sibling_context,
             &sibling_url,
             Some(&sibling_path),
-            None,
+            Some(&enabled_overrides),
             false,
             HashAlgorithmPreference::default(),
         )
@@ -377,6 +418,9 @@ pub(crate) async fn check_shared_version_conflicts(
         &strict,
     ))
 }
+
+#[cfg(test)]
+mod refresh_tests;
 
 #[cfg(test)]
 mod tests {

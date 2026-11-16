@@ -177,7 +177,7 @@ If the published space no longer lists a repository you installed through it, th
 
 A repository space can define a common local folder for all its repositories. When a repository belongs to a space, its local path is inherited from the space's shared path and cannot be changed individually. Required repositories of the space are added automatically and see the same shared folder.
 
-If an update through a repository space would install incompatible versions into that shared folder, Foxy blocks it and identifies the conflicting repositories. For ordinary repository entries that share a folder, Foxy warns which repositories need another version and lets the requested update proceed; it never reports incompatible copies as current.
+If an update through a repository space would install incompatible versions into that shared folder, Foxy blocks it and identifies the conflicting repositories. Foxy refreshes the affected addon manifests before reporting a version conflict, so stale cached file metadata does not block compatible updates. For ordinary repository entries that share a folder, Foxy warns which repositories need another version and lets the requested update proceed; it never reports incompatible copies as current.
 
 If only some of a repository's addons are installed in the shared folder, Foxy can check it and offer to download the rest. Addons already installed by another repository do not cause a wrong-folder warning for addons that have never been downloaded. Foxy still pauses if the configured folder is missing, files appear under unexpected paths, or most content with saved local verification state has disappeared.
 
