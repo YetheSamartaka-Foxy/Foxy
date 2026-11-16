@@ -10,11 +10,14 @@ impl Foxy {
 
         let running = session.is_running();
         let finished_successfully = session.finished_successfully();
-        let progress_pct: f32 = self
-            .download_progress
-            .as_ref()
-            .map(|(_, percent)| (*percent).clamp(0.0, 1.0))
-            .unwrap_or(if running { 0.0 } else { 1.0 });
+        let progress_pct: f32 = if finished_successfully {
+            1.0
+        } else {
+            self.download_progress
+                .as_ref()
+                .map(|(_, percent)| (*percent).clamp(0.0, 1.0))
+                .unwrap_or(if running { 0.0 } else { 1.0 })
+        };
 
         let total_bytes = session.total_bytes;
         let downloaded_bytes = session.downloaded_bytes;
@@ -31,6 +34,12 @@ impl Foxy {
 
         let mut set_download_paused: Option<bool> = None;
         let mut cancel_requested = false;
+        let mut approve_replacements = false;
+        let mut reject_replacements = false;
+        let collision_paths = self
+            .pending_direct_download_collisions
+            .as_ref()
+            .map(|(paths, _)| paths.clone());
 
         let outer_margin = Margin {
             left: 15,
@@ -61,8 +70,7 @@ impl Foxy {
                                 .output_mut(Foxy::set_pointing_cursor_output);
                         }
                         if close_button.clicked() {
-                            self.update_modal_open = false;
-                            self.direct_download_update_view = false;
+                            cancel_requested = true;
                         }
                     });
                 });
@@ -75,6 +83,22 @@ impl Foxy {
                 ui.label(
                     self.t_fmt("Target: {name}", &[("name", session.target_label.clone())]),
                 );
+                if let Some(paths) = &collision_paths {
+                    ui.add_space(6.0);
+                    ui.colored_label(self.color_text_error(), self.t_fmt(
+                        "These {count} existing file(s) will be replaced only after each new copy is complete:",
+                        &[("count", paths.len().to_string())],
+                    ));
+                    egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
+                        for path in paths {
+                            ui.label(path.display().to_string());
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.button(self.t("Replace existing files")).clicked() { approve_replacements = true; }
+                        if ui.button(self.t("Cancel replacement")).clicked() { reject_replacements = true; }
+                    });
+                }
                 ui.label(self.t_fmt(
                     "Files: {done}/{total}",
                     &[
@@ -97,7 +121,11 @@ impl Foxy {
                 let motion = update_bar_motion(running, self.download_paused, false);
                 ui.add(
                     ActivityBar::new(transfer_progress(progress_pct, motion))
-                        .fill(self.color_primary_accent())
+                        .fill(if finished_successfully {
+                            self.color_success()
+                        } else {
+                            self.color_primary_accent()
+                        })
                         .motion(motion)
                         .text(format!("{:.1}%", progress_pct * 100.0)),
                 );
@@ -139,18 +167,19 @@ impl Foxy {
                             .download_started_at
                             .map(|t| fmt_duration(t.elapsed()))
                             .unwrap_or_else(|| "0s".to_string());
+                        self.update_download_estimate(total_bytes);
                         let remaining_text = self
                             .download_eta_remaining
-                            .unwrap_or_else(|| Duration::from_secs(0));
-                        self.update_download_estimate(total_bytes);
+                            .map(fmt_duration)
+                            .unwrap_or_else(|| self.t("Unknown"));
                         self.t_fmt(
-                            "{stage} {percent}% - {speed} - {elapsed} elapsed / {remaining} remaining",
+                            "{stage} {percent}% - {speed} - {elapsed} elapsed / transfer estimate {remaining}",
                             &[
                                 ("stage", stage_text),
                                 ("percent", format!("{:.1}", progress_pct * 100.0)),
                                 ("speed", speed_text),
                                 ("elapsed", elapsed_text),
-                                ("remaining", fmt_duration(remaining_text)),
+                                ("remaining", remaining_text),
                             ],
                         )
                     } else if finished_successfully {
@@ -227,6 +256,10 @@ impl Foxy {
 
         if cancel_requested {
             self.cancel_direct_download();
+        } else if (approve_replacements || reject_replacements)
+            && let Some((_, reply_tx)) = self.pending_direct_download_collisions.take()
+        {
+            let _ = reply_tx.send(approve_replacements);
         }
         if let Some(paused) = set_download_paused {
             self.set_download_paused(paused);

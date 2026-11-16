@@ -1,0 +1,4 @@
+interface:
+  display_name: "Foxy Download Tail Analysis"
+  short_description: "Trace download ramp, waves, and tail time"
+  default_prompt: "Use $foxy-download-tail-analysis to explain this download tail from intervals, queue evidence, and completion state."

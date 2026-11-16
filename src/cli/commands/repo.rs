@@ -9,14 +9,12 @@ use crate::cli::args::{
 };
 use crate::cli::exit_codes;
 use crate::core::api::SyncMode;
-use crate::core::tasks::purge_repository::{
-    purge_repository_by_url, purge_repository_db_only_by_url,
-};
+use crate::core::tasks::purge_repository::purge_repository_db_only_by_url_and_path;
 use crate::ui::app::Foxy;
 use crate::ui::types::{
     Repository, RepositoryServer, apply_repo_client_parameters,
-    apply_repo_dlc_content_from_repo_json, repo_json_dlc_content_value, sanitize_repository_paths,
-    sanitize_user_path,
+    apply_repo_dlc_content_from_repo_json, apply_repo_game_build, repo_json_dlc_content_value,
+    repo_json_game_build, sanitize_repository_paths, sanitize_user_path,
 };
 use reqwest::blocking::get;
 use serde_json::{Value, json};
@@ -216,6 +214,9 @@ pub fn cmd_repo_sync(cli: &CliArgs, args: RepoSyncArgs) -> Result<CommandSuccess
         cli.dry_run,
         false,
     )?;
+    if !cli.dry_run {
+        refresh_game_build(idx)?;
+    }
 
     Ok(CommandSuccess {
         action: "repo.sync".to_string(),
@@ -251,7 +252,10 @@ fn cmd_repo_wipe_db(cli: &CliArgs, args: RepoWipeDbArgs) -> Result<CommandSucces
     let runtime = Runtime::new()
         .map_err(|e| CommandError::operation("repo.wipe-db", format!("Runtime error: {}", e)))?;
     runtime
-        .block_on(purge_repository_db_only_by_url(&normalized))
+        .block_on(purge_repository_db_only_by_url_and_path(
+            &normalized,
+            &repo.path,
+        ))
         .map_err(|e| CommandError::operation("repo.wipe-db", format!("Failed: {}", e)))?;
     if !args.keep_hash_record {
         crate::core::tasks::calculate_hashes::forget_verified_hashes_under(&repo.path);
@@ -296,20 +300,9 @@ fn cmd_repo_force_redownload(
     }
 
     ensure_remote_reachable_before_destructive("repo.force-redownload", &normalized)?;
-    ensure_backend_ready();
-    let runtime = Runtime::new().map_err(|e| {
-        CommandError::operation("repo.force-redownload", format!("Runtime error: {}", e))
-    })?;
-    crate::core::utils::profiling::phase("purge");
-    runtime
-        .block_on(purge_repository_by_url(&normalized, repo_path.as_deref()))
-        .map_err(|e| {
-            CommandError::operation(
-                "repo.force-redownload",
-                format!("Failed to purge repository: {}", e),
-            )
-        })?;
 
+    // The forced sync purges only this folder's files and rows; a purge by
+    // address here would also wipe another folder's copy of the repository.
     let summary = run_repository_sync(
         &repo,
         &state.settings,
@@ -335,6 +328,41 @@ fn default_repository_name_from_address(address: &str) -> String {
     } else {
         candidate.to_string()
     }
+}
+
+/// `foxy launch` starts a custom game from the build `repo.json` names, so a
+/// sync picks up a `gameBuild` the server added or changed since `repo add`.
+fn refresh_game_build(idx: usize) -> Result<(), CommandError> {
+    let mut state = AppState::load()?;
+    let Some(repo) = state.repositories.get_mut(idx) else {
+        return Ok(());
+    };
+    let repo_url = format!("{}/repo.json", repo.address.trim_end_matches('/'));
+    let json = match get(&repo_url).and_then(|response| response.error_for_status()) {
+        Ok(response) => match response.json::<Value>() {
+            Ok(json) => json,
+            Err(err) => {
+                log::warn!(
+                    "Could not read repo.json to refresh the game build: {}",
+                    err
+                );
+                return Ok(());
+            }
+        },
+        Err(err) => {
+            log::warn!(
+                "Could not fetch repo.json to refresh the game build: {}",
+                err
+            );
+            return Ok(());
+        }
+    };
+    let game_build = repo_json_game_build(&json);
+    if repo.game_build == game_build {
+        return Ok(());
+    }
+    apply_repo_game_build(repo, game_build);
+    state.save_repositories()
 }
 
 fn populate_repo_from_remote_metadata(
@@ -434,6 +462,7 @@ fn populate_repo_from_remote_metadata(
     if apply_dlc_content && let Some(value) = repo_json_dlc_content_value(&json) {
         apply_repo_dlc_content_from_repo_json(repo, value);
     }
+    apply_repo_game_build(repo, repo_json_game_build(&json));
 
     Ok(())
 }

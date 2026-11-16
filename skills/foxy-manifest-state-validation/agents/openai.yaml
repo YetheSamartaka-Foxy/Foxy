@@ -1,0 +1,4 @@
+interface:
+  display_name: "Manifest State Validation"
+  short_description: "Trace manifest fields into Foxy's stored sync state."
+  default_prompt: "Use $foxy-manifest-state-validation to validate this manifest and its stored Foxy state."

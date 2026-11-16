@@ -1,4 +1,7 @@
-use super::enums::{AppUpdateMode, HashIoProfilePreference, UiRendererPreference};
+use super::enums::{
+    AppUpdateMode, HashIoProfilePreference, MemoryPressurePreference, ProxyMode,
+    StorageTypePreference, UiRendererPreference, WorkPriorityPreference,
+};
 use super::repository::{ActiveUpdateSession, UpdateSummaryNotice};
 use super::scheduling::ScheduledJob;
 use crate::ui::fonts::FontSizes;
@@ -55,6 +58,14 @@ pub struct SettingsViewState {
     pub auto_quick_scan_on_launch: bool,
     #[serde(default)]
     pub auto_backup_on_update: bool,
+    /// Refresh repository metadata periodically while Foxy is idle.
+    #[serde(default = "default_periodic_remote_check_enabled")]
+    pub periodic_remote_check_enabled: bool,
+    /// Minutes between idle repository metadata refreshes.
+    #[serde(default = "default_periodic_remote_check_interval_minutes")]
+    pub periodic_remote_check_interval_minutes: u32,
+    #[serde(default = "default_auto_recheck_on_launch")]
+    pub retry_failed_downloads: bool,
     #[serde(default = "default_apply_repo_json_client_parameters")]
     pub apply_repo_json_client_parameters: bool,
     #[serde(default = "default_apply_repo_json_dlc_content")]
@@ -94,6 +105,8 @@ pub struct SettingsViewState {
     #[serde(default)]
     pub arma3_profiles_directory: String,
     #[serde(default)]
+    pub profile_backups: crate::core::profile_backups::BackupPolicy,
+    #[serde(default)]
     pub steam_directory: String,
     #[serde(default)]
     pub teamspeak3_directory: String,
@@ -102,6 +115,44 @@ pub struct SettingsViewState {
     pub backup_directory: String,
     #[serde(default = "default_download_speed_limit_mbps")]
     pub download_speed_limit_mbps: Option<u32>,
+    /// Most of the whole computer's processor time Foxy's work may use, in
+    /// percent; `None` is no limit. Missing from older settings files, where
+    /// it takes the default.
+    #[serde(default = "default_cpu_usage_limit_percent")]
+    pub cpu_usage_limit_percent: Option<u8>,
+    /// Processor threads hashing, scanning and checking plan around; `None`
+    /// is Auto, every processor the system reports.
+    #[serde(default)]
+    pub cpu_thread_limit: Option<u32>,
+    /// Keep `cpu_thread_limit` within the processors the system reports.
+    #[serde(default = "default_cpu_thread_limit_safe")]
+    pub cpu_thread_limit_safe: bool,
+    #[serde(default)]
+    pub work_priority: WorkPriorityPreference,
+    /// Run work threads in Windows background mode, which lowers their disk
+    /// and memory priority.
+    #[serde(default)]
+    pub low_disk_priority: bool,
+    #[serde(default)]
+    pub storage_type_override: StorageTypePreference,
+    #[serde(default)]
+    pub memory_pressure_override: MemoryPressurePreference,
+    /// Frames per second while progress animates; `None` is Auto.
+    #[serde(default)]
+    pub progress_frame_rate: Option<u32>,
+    #[serde(default)]
+    pub proxy_mode: ProxyMode,
+    /// Manual proxy address, without credentials.
+    #[serde(default)]
+    pub proxy_url: String,
+    #[serde(default)]
+    pub proxy_username: String,
+    /// Stored as plain text in `app_settings.json`; never logged or printed.
+    #[serde(default)]
+    pub proxy_password: String,
+    /// Comma-separated hosts, domains, or IP ranges reached without the proxy.
+    #[serde(default)]
+    pub proxy_bypass: String,
     #[serde(default)]
     pub hash_io_profile: HashIoProfilePreference,
     /// After a database reset, restore files the verified-hash record proves
@@ -212,6 +263,14 @@ fn default_download_speed_limit_mbps() -> Option<u32> {
     None
 }
 
+fn default_cpu_usage_limit_percent() -> Option<u8> {
+    Some(crate::core::utils::cpu_governor::DEFAULT_CPU_USAGE_LIMIT_PERCENT)
+}
+
+fn default_cpu_thread_limit_safe() -> bool {
+    true
+}
+
 fn default_backup_keep_latest_per_addon() -> u32 {
     5
 }
@@ -229,6 +288,14 @@ fn default_ui_scale_percent() -> u16 {
 
 fn default_auto_recheck_on_launch() -> bool {
     true
+}
+
+fn default_periodic_remote_check_enabled() -> bool {
+    true
+}
+
+fn default_periodic_remote_check_interval_minutes() -> u32 {
+    30
 }
 
 fn default_trust_verified_hashes() -> bool {
@@ -305,6 +372,10 @@ impl Default for SettingsViewState {
             auto_recheck_on_launch: default_auto_recheck_on_launch(),
             auto_quick_scan_on_launch: default_auto_quick_scan_on_launch(),
             auto_backup_on_update: false,
+            periodic_remote_check_enabled: default_periodic_remote_check_enabled(),
+            periodic_remote_check_interval_minutes: default_periodic_remote_check_interval_minutes(
+            ),
+            retry_failed_downloads: true,
             apply_repo_json_client_parameters: default_apply_repo_json_client_parameters(),
             apply_repo_json_dlc_content: default_apply_repo_json_dlc_content(),
             warn_editor_external_addons: default_warn_editor_external_addons(),
@@ -325,11 +396,25 @@ impl Default for SettingsViewState {
             generic_launch_template: String::new(),
             generic_mods_manifest: String::new(),
             arma3_profiles_directory: String::new(),
+            profile_backups: crate::core::profile_backups::BackupPolicy::default(),
             steam_directory: String::new(),
             teamspeak3_directory: String::new(),
             temp_directory: String::new(),
             backup_directory: String::new(),
             download_speed_limit_mbps: default_download_speed_limit_mbps(),
+            cpu_usage_limit_percent: default_cpu_usage_limit_percent(),
+            cpu_thread_limit: None,
+            cpu_thread_limit_safe: default_cpu_thread_limit_safe(),
+            work_priority: WorkPriorityPreference::default(),
+            low_disk_priority: false,
+            storage_type_override: StorageTypePreference::default(),
+            memory_pressure_override: MemoryPressurePreference::default(),
+            progress_frame_rate: None,
+            proxy_mode: ProxyMode::default(),
+            proxy_url: String::new(),
+            proxy_username: String::new(),
+            proxy_password: String::new(),
+            proxy_bypass: String::new(),
             hash_io_profile: HashIoProfilePreference::default(),
             trust_verified_hashes: default_trust_verified_hashes(),
             ui_renderer: UiRendererPreference::default(),
@@ -491,5 +576,79 @@ mod verified_hash_setting_tests {
             .remove("trust_verified_hashes");
         let settings: SettingsViewState = serde_json::from_value(saved).unwrap();
         assert!(settings.trust_verified_hashes);
+    }
+}
+
+#[cfg(test)]
+mod cpu_thread_setting_tests {
+    use super::SettingsViewState;
+
+    #[test]
+    fn settings_saved_before_the_option_existed_use_auto_with_safe_limits() {
+        let mut saved = serde_json::to_value(SettingsViewState::default()).unwrap();
+        let object = saved.as_object_mut().unwrap();
+        object.remove("cpu_thread_limit");
+        object.remove("cpu_thread_limit_safe");
+        let settings: SettingsViewState = serde_json::from_value(saved).unwrap();
+        assert_eq!(settings.cpu_thread_limit, None);
+        assert!(settings.cpu_thread_limit_safe);
+    }
+
+    #[test]
+    fn settings_saved_before_the_cpu_usage_limit_existed_get_the_default() {
+        let mut saved = serde_json::to_value(SettingsViewState::default()).unwrap();
+        saved
+            .as_object_mut()
+            .unwrap()
+            .remove("cpu_usage_limit_percent");
+        let settings: SettingsViewState = serde_json::from_value(saved).unwrap();
+        assert_eq!(settings.cpu_usage_limit_percent, Some(90));
+    }
+
+    #[test]
+    fn a_saved_no_limit_stays_no_limit() {
+        let mut saved = serde_json::to_value(SettingsViewState::default()).unwrap();
+        saved["cpu_usage_limit_percent"] = serde_json::Value::Null;
+        let settings: SettingsViewState = serde_json::from_value(saved).unwrap();
+        assert_eq!(settings.cpu_usage_limit_percent, None);
+    }
+}
+
+#[cfg(test)]
+mod resource_setting_tests {
+    use super::SettingsViewState;
+    use crate::ui::types::{
+        MemoryPressurePreference, ProxyMode, StorageTypePreference, WorkPriorityPreference,
+    };
+
+    #[test]
+    fn settings_saved_before_the_options_existed_keep_current_behavior() {
+        let mut saved = serde_json::to_value(SettingsViewState::default()).unwrap();
+        let object = saved.as_object_mut().unwrap();
+        for key in [
+            "work_priority",
+            "low_disk_priority",
+            "storage_type_override",
+            "memory_pressure_override",
+            "progress_frame_rate",
+            "proxy_mode",
+            "proxy_url",
+            "proxy_username",
+            "proxy_password",
+            "proxy_bypass",
+        ] {
+            object.remove(key);
+        }
+        let settings: SettingsViewState = serde_json::from_value(saved).unwrap();
+        assert_eq!(settings.work_priority, WorkPriorityPreference::Normal);
+        assert!(!settings.low_disk_priority);
+        assert_eq!(settings.storage_type_override, StorageTypePreference::Auto);
+        assert_eq!(
+            settings.memory_pressure_override,
+            MemoryPressurePreference::Auto
+        );
+        assert_eq!(settings.progress_frame_rate, None);
+        assert_eq!(settings.proxy_mode, ProxyMode::System);
+        assert!(settings.proxy_url.is_empty());
     }
 }

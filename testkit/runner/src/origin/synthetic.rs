@@ -28,6 +28,9 @@ pub struct SyntheticOptions {
     pub entry_bytes: usize,
     #[arg(long, default_value_t = 20260909)]
     pub seed: i32,
+    /// Optional per-mod random seeds. When present, provide one for every mod.
+    #[arg(long = "mod-seed")]
+    pub mod_seeds: Vec<i32>,
     #[arg(long, default_value = "TestKit Synthetic Writes")]
     pub repo_name: String,
     /// Generator mode: `foxy` (BLAKE3 parts), `swifty` (MD5, legacy `mod.srf`) or `hybrid`.
@@ -92,8 +95,11 @@ impl DotNetRandom {
 
 impl SyntheticOptions {
     pub fn execute(&self, repo_root: &Path) -> Result<Value> {
-        if self.mods == 0 || self.files_per_mod == 0 || self.file_bytes == 0 {
-            bail!("synthetic dimensions must be positive");
+        if self.files_per_mod == 0 || self.file_bytes == 0 {
+            bail!("synthetic file dimensions must be positive");
+        }
+        if !self.mod_seeds.is_empty() && self.mod_seeds.len() != self.mods as usize {
+            bail!("mod-seed must be provided once for every generated mod");
         }
         if self.pbo_entries > 0 && self.entry_bytes == 0 {
             bail!("entry-bytes must be positive when generating PBOs");
@@ -117,12 +123,20 @@ impl SyntheticOptions {
         let mut buffer = vec![0; self.file_bytes.min(8 << 20)];
         let mut names = Vec::new();
         for index in 0..self.mods {
+            let mut mod_random = self
+                .mod_seeds
+                .get(index as usize)
+                .map(|seed| DotNetRandom::new(*seed));
             let name = format!("@synthetic_{index:03}");
             let directory = source.join(&name);
             fs::create_dir_all(directory.join("addons"))?;
             for file in 0..self.files_per_mod {
+                let random = match mod_random.as_mut() {
+                    Some(random) => random,
+                    None => &mut random,
+                };
                 if self.pbo_entries > 0 {
-                    let bytes = synthetic_pbo(&mut random, self.pbo_entries, self.entry_bytes);
+                    let bytes = synthetic_pbo(random, self.pbo_entries, self.entry_bytes);
                     fs::write(
                         directory.join("addons").join(format!("part_{file:05}.pbo")),
                         &bytes,
@@ -154,6 +168,29 @@ impl SyntheticOptions {
             &config_path,
             &json!({"repoName": self.repo_name, "basePath": source, "appUpdateUrl": "", "requiredMods": required, "optionalMods": [], "iconImagePath": "", "repoImagePath": "", "clientParameters": "", "repoBasicAuthentication": {"username": "", "password": ""}, "version": "3.2.0.0", "servers": []}),
         )?;
+        if names.is_empty() {
+            fs::create_dir_all(&output)?;
+            anyhow::ensure!(
+                self.mode == "foxy",
+                "Empty synthetic publications require Foxy mode"
+            );
+            let checksum = blake3::hash(&[]).to_hex().to_uppercase();
+            write_json(
+                &output.join("repo.json"),
+                &json!({"repoName": self.repo_name, "checksum": checksum,
+                "foxyMode": "FoxyModeV1", "requiredMods": [], "optionalMods": []}),
+            )?;
+            write_json(
+                &output.join("foxy_addons.json"),
+                &json!({"version": "FoxyModeV1", "hashAlgorithm": "BLAKE3",
+                "checksum": checksum, "requiredMods": [], "optionalMods": []}),
+            )?;
+            let summary = json!({"kind": "synthetic", "seed": self.seed, "mode": self.mode,
+                "mods": 0, "files": 0, "parts": 0, "payload_bytes": 0});
+            write_json(&output.join("origin.json"), &summary)?;
+            fs::remove_dir_all(&source)?;
+            return Ok(summary);
+        }
         let generator = repo_root.join("target/release").join(format!(
             "foxy-server-backend-cli{}",
             std::env::consts::EXE_SUFFIX
@@ -212,7 +249,10 @@ impl SyntheticOptions {
                     })
             },
         )?;
-        let summary = json!({"kind": "synthetic", "generated_utc": chrono::Utc::now().to_rfc3339(), "seed": self.seed, "mode": self.mode, "mods": names.len(), "files": files, "parts": parts, "payload_bytes": bytes, "tail_file_bytes": self.tail_file_bytes});
+        let mut summary = json!({"kind": "synthetic", "generated_utc": chrono::Utc::now().to_rfc3339(), "seed": self.seed, "mode": self.mode, "mods": names.len(), "files": files, "parts": parts, "payload_bytes": bytes, "tail_file_bytes": self.tail_file_bytes});
+        if !self.mod_seeds.is_empty() {
+            summary["mod_seeds"] = json!(self.mod_seeds);
+        }
         write_json(&output.join("origin.json"), &summary)?;
         fs::remove_dir_all(&source)?;
         Ok(summary)
@@ -271,6 +311,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn empty_foxy_publication_is_explicit_and_needs_no_backend_process() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("empty-origin");
+        let options = SyntheticOptions {
+            output: output.clone(),
+            mods: 0,
+            files_per_mod: 1,
+            file_bytes: 1,
+            tail_file_bytes: None,
+            pbo_entries: 0,
+            entry_bytes: 1,
+            seed: 1,
+            mod_seeds: Vec::new(),
+            repo_name: "RepoAlpha".into(),
+            mode: "foxy".into(),
+            force: false,
+        };
+        let summary = options.execute(directory.path()).unwrap();
+        let index: Value =
+            serde_json::from_slice(&fs::read(output.join("foxy_addons.json")).unwrap()).unwrap();
+        assert_eq!(summary["mods"], 0);
+        assert_eq!(index["requiredMods"], json!([]));
+        assert_eq!(index["optionalMods"], json!([]));
+        assert_eq!(index["checksum"], blake3::hash(&[]).to_hex().to_uppercase());
+    }
+
+    #[test]
     fn only_the_last_flat_file_uses_the_tail_size() {
         let options = SyntheticOptions {
             output: PathBuf::new(),
@@ -281,6 +348,7 @@ mod tests {
             pbo_entries: 0,
             entry_bytes: 64,
             seed: 1,
+            mod_seeds: Vec::new(),
             repo_name: String::new(),
             mode: "foxy".to_owned(),
             force: false,

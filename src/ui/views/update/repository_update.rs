@@ -1,9 +1,6 @@
 use super::*;
-use crate::ui::app::{paint_area_under, paint_bar_label, paint_live_marker, rise_effect};
+use crate::ui::app::{paint_area_under, paint_bar_label, paint_live_marker};
 use crate::ui::views::galley_cache;
-
-const MOD_DONE_FLASH_SECONDS: f64 = 0.9;
-const UPDATE_FINISHED_FLASH_SECONDS: f64 = 1.2;
 
 impl Foxy {
     pub fn render_repository_update_view(&mut self, ui: &mut Ui) {
@@ -23,10 +20,10 @@ impl Foxy {
         let download_finished_for_selected =
             self.download_finished && selected.is_some() && self.download_finished_repo == selected;
 
-        let progress_pct: f32 = if let Some((_, percent)) = &self.download_progress {
-            ((*percent).clamp(0.0, 1.0) * 1000.0).round() / 1000.0
-        } else if download_finished_for_selected {
+        let progress_pct: f32 = if download_finished_for_selected {
             1.0
+        } else if let Some((_, percent)) = &self.download_progress {
+            ((*percent).clamp(0.0, 1.0) * 1000.0).round() / 1000.0
         } else {
             0.0
         };
@@ -168,6 +165,21 @@ impl Foxy {
                 });
                 ui.separator();
 
+                if !self.cleanup_plan_files.is_empty() && !download_finished_for_selected {
+                    ui.collapsing(self.t("Extra files scheduled for removal"), |ui| {
+                        ui.label(self.t("These files will be removed when this update starts."));
+                        for file in &self.cleanup_plan_files {
+                            ui.label(file);
+                        }
+                    });
+                    ui.separator();
+                }
+
+                if downloading {
+                    self.update_download_estimate(total_bytes);
+                    self.render_update_completion_estimate(ui);
+                    ui.add_space(6.0);
+                }
                 if pending_mod_count == 0 {
                     ui.label(self.t("No updates needed."));
                 } else {
@@ -324,7 +336,7 @@ impl Foxy {
                                         ui.vertical(|ui| {
                                                 // Row: [name] ... [Diff (X files) button (right)]
                                                 let details_id =
-                                                    Id::new(("update-details-toggle", mod_idx, &m.name));
+                                                    Id::unique(("update-details-toggle", mod_idx, &m.name));
                                                 let diff_file_indices: Vec<usize> = m
                                                     .files
                                                     .iter()
@@ -421,7 +433,7 @@ impl Foxy {
                                                         file_fingerprint,
                                                     );
                                                     ScrollArea::vertical()
-                                                        .id_salt(Id::new((
+                                                        .id_salt(Id::unique((
                                                             "update-details-files",
                                                             mod_idx,
                                                             &m.name,
@@ -522,24 +534,30 @@ impl Foxy {
                                                             &[("size", fmt_bytes(m.total_bytes))],
                                                         )
                                                     } else {
-                                                        bar_text
+                                                        self.t_fmt(
+                                                            "Attempt {attempt}: {progress}",
+                                                            &[
+                                                                    (
+                                                                        "attempt",
+                                                                        self.mod_download_attempts
+                                                                            .get(&m.name)
+                                                                            .copied()
+                                                                            .unwrap_or(1)
+                                                                            .to_string(),
+                                                                    ),
+                                                                ("progress", bar_text),
+                                                            ],
+                                                        )
                                                     };
                                                     let motion = update_bar_motion(
                                                         !mod_done && per_mod.is_some(),
                                                         self.download_paused,
                                                         in_cancel_stage,
                                                     );
-                                                    let flash = rise_effect(
-                                                        ui,
-                                                        Id::new(("update-mod-done", &m.name)),
-                                                        mod_done,
-                                                        MOD_DONE_FLASH_SECONDS,
-                                                    );
                                                     let response = ui.add(
                                                         ActivityBar::new(Some(pct))
                                                             .fill(fill)
-                                                            .motion(motion)
-                                                            .flash(flash),
+                                                            .motion(motion),
                                                     );
                                                     paint_update_progress_bar_text_left(
                                                         ui,
@@ -622,6 +640,17 @@ impl Foxy {
                     self.render_ts3_plugin_update_banner(ui);
                 }
 
+                if !downloading && !self.local_drift_addons.is_empty() {
+                    ui.separator();
+                    ui.label(self.t_fmt(
+                        "Known local differences in: {addons}",
+                        &[("addons", self.local_drift_addons.join(", "))],
+                    ));
+                    let backup_local_drift_label =
+                        self.t("Back up local differences before replacing these addons");
+                    ui.checkbox(&mut self.backup_local_drift_requested, backup_local_drift_label);
+                }
+
                 ui.separator();
                 ui.add_space(progress_footer_top_gap);
 
@@ -664,15 +693,16 @@ impl Foxy {
                             .unwrap_or_else(|| "00:00".to_string());
                         let remaining_text = self
                             .download_eta_remaining
-                            .unwrap_or_else(|| Duration::from_secs(0));
+                            .map(fmt_duration)
+                            .unwrap_or_else(|| self.t("Unknown"));
                         self.t_fmt(
-                            "{stage} {percent}% - {speed} - {elapsed} elapsed / {remaining} remaining",
+                            "{stage} {percent}% - {speed} - {elapsed} elapsed / transfer estimate {remaining}",
                             &[
                                 ("stage", stage_text),
                                 ("percent", format!("{:.1}", progress_pct * 100.0)),
                                 ("speed", speed_text),
                                 ("elapsed", elapsed_text),
-                                ("remaining", fmt_duration(remaining_text)),
+                                ("remaining", remaining_text),
                             ],
                         )
                     }
@@ -750,7 +780,7 @@ impl Foxy {
                 } else {
                     Sense::click()
                 };
-                let response = ui.interact(rect, Id::new("repository-update-action"), sense);
+                let response = ui.interact(rect, Id::unique("repository-update-action"), sense);
                 let bg_color = if response.hovered() && !start_disabled {
                     if download_finished_for_selected {
                         self.color_success_muted()
@@ -780,12 +810,6 @@ impl Foxy {
                     .fill(fill_color)
                     .track(bg_color)
                     .motion(footer_motion)
-                    .flash(rise_effect(
-                        ui,
-                        Id::new("repository-update-finished"),
-                        download_finished_for_selected,
-                        UPDATE_FINISHED_FLASH_SECONDS,
-                    ))
                     .paint_at(ui, rect);
 
                 ui.painter().rect_stroke(
@@ -899,7 +923,7 @@ impl Foxy {
         });
 
         if cancel_requested {
-            self.cancel_sync();
+            self.cancel_sync_and_queued_runs();
         }
         if let Some(paused) = set_download_paused {
             self.set_download_paused(paused);
@@ -1175,6 +1199,7 @@ impl Foxy {
             sample.hash_files_per_sec
         });
         let cpu_max = max_summary_value(&summary.telemetry_samples, |sample| sample.cpu_percent);
+        let cpu_threads = crate::core::utils::cpu_threads::detected_cpu_threads().unwrap_or(1);
         let memory_max = max_summary_value(&summary.telemetry_samples, |sample| {
             sample.memory_bytes as f64
         });
@@ -1196,10 +1221,13 @@ impl Foxy {
                 row: 1,
                 selected_idx: selected_disk_write_idx,
                 label: self.t("Disk write speed"),
-                value_text: fmt_speed_mbps(selected_disk_write_sample.disk_write_bps),
+                value_text: fmt_bytes_per_sec(selected_disk_write_sample.disk_write_bps),
                 peak_text: self.t_fmt(
                     "Peak {value}",
-                    &[("value", fmt_speed_mbps(disk_write_max / 8.0 * 1_000_000.0))],
+                    &[(
+                        "value",
+                        fmt_bytes_per_sec(disk_write_max / 8.0 * 1_000_000.0),
+                    )],
                 ),
                 max_value: disk_write_max,
                 color: self.color_success(),
@@ -1229,8 +1257,17 @@ impl Foxy {
                 row: 3,
                 selected_idx: selected_cpu_idx,
                 label: "CPU".to_string(),
-                value_text: format_percent(selected_cpu_sample.cpu_percent),
-                peak_text: self.t_fmt("Peak {value}", &[("value", format_percent(cpu_max))]),
+                value_text: format_percent(machine_cpu_percent(
+                    selected_cpu_sample.cpu_percent,
+                    cpu_threads,
+                )),
+                peak_text: self.t_fmt(
+                    "Peak {value}",
+                    &[(
+                        "value",
+                        format_percent(machine_cpu_percent(cpu_max, cpu_threads)),
+                    )],
+                ),
                 max_value: cpu_max,
                 color: self.color_warn(),
             },
@@ -1324,7 +1361,13 @@ impl Foxy {
             ui.ctx().output_mut(|output| {
                 output.cursor_icon = CursorIcon::Crosshair;
             });
-            let cpu_tooltip = format!("CPU: {}", format_percent(selected_cpu_sample.cpu_percent));
+            let cpu_tooltip = format!(
+                "CPU: {}",
+                format_percent(machine_cpu_percent(
+                    selected_cpu_sample.cpu_percent,
+                    cpu_threads
+                ))
+            );
             let memory_tooltip = format!(
                 "{}: {}",
                 self.t("Memory"),
@@ -1350,7 +1393,7 @@ impl Foxy {
                     "Disk write: {speed}",
                     &[(
                         "speed",
-                        fmt_speed_mbps(selected_disk_write_sample.disk_write_bps)
+                        fmt_bytes_per_sec(selected_disk_write_sample.disk_write_bps)
                     )]
                 ),
                 self.t_fmt(
@@ -1525,6 +1568,12 @@ fn mbps_value(bytes_per_sec: f64) -> f64 {
 
 fn format_percent(value: f64) -> String {
     format!("{:.1}%", value.max(0.0))
+}
+
+/// Telemetry counts one fully busy processor thread as 100%; Task Manager
+/// shows the share of every thread, which is what the lane reports.
+fn machine_cpu_percent(per_thread_percent: f64, threads: usize) -> f64 {
+    per_thread_percent / threads.max(1) as f64
 }
 
 fn nearest_summary_sample_index(
@@ -1765,6 +1814,13 @@ fn repository_update_cancel_stage(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cpu_lane_reports_a_share_of_every_thread() {
+        assert_eq!(machine_cpu_percent(631.7, 24), 631.7 / 24.0);
+        assert_eq!(machine_cpu_percent(2400.0, 24), 100.0);
+        assert_eq!(machine_cpu_percent(50.0, 0), 50.0);
+    }
 
     #[test]
     fn update_view_inset_width_preserves_equal_gutters() {

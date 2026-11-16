@@ -1,0 +1,11 @@
+[package]
+name = "installer-art"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+publish = false
+
+[workspace]
+
+[dependencies]
+image = { version = "0.25", default-features = false, features = ["ico", "png"] }

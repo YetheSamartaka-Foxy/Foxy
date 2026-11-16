@@ -1,4 +1,5 @@
 use super::AddonContextAction;
+use super::addon_bulk_actions::render_filtered_only_checkbox;
 use crate::ui::app::{AddonDestructiveConfirmAction, Foxy, RepositoryAddonListKind};
 use crate::ui::context_menu::{ContextMenuItem, attach_context_menu};
 use crate::ui::i18n::{fmt_bytes, tr, tr_fmt};
@@ -40,6 +41,7 @@ struct AddonRowTooltips {
 
 struct AddonContextMenuLabels {
     open_directory: String,
+    open_workshop: Option<String>,
     backup: String,
     restore_backup: String,
     recheck_integrity: String,
@@ -589,62 +591,65 @@ impl Foxy {
         }
 
         let mut context_action: Option<AddonContextAction> = None;
-        attach_context_menu(
-            &context_response,
-            &[
-                ContextMenuItem::new(
-                    AddonContextAction::OpenDirectory,
-                    context_menu_labels.open_directory.clone(),
-                )
-                .disabled_if(addon_directory_path.is_none()),
-                ContextMenuItem::new(
-                    AddonContextAction::Backup,
-                    context_menu_labels.backup.clone(),
-                )
-                .disabled_if(addon_directory_path.is_none() || !backup_configured)
-                .separator_before(),
-                ContextMenuItem::new(
-                    AddonContextAction::RestoreBackup,
-                    context_menu_labels.restore_backup.clone(),
-                )
-                .disabled_if(!backup_configured)
-                .separator_before(),
-                ContextMenuItem::new(
-                    AddonContextAction::RecheckIntegrity,
-                    context_menu_labels.recheck_integrity.clone(),
-                )
-                .separator_before(),
-                ContextMenuItem::new(
-                    AddonContextAction::StandaloneDownload,
-                    context_menu_labels.standalone_download.clone(),
-                )
-                .separator_before(),
-                ContextMenuItem::new(
-                    AddonContextAction::ToggleStructure,
-                    if structure_expanded {
-                        context_menu_labels.collapse_structure.clone()
-                    } else {
-                        context_menu_labels.expand_structure.clone()
-                    },
-                )
-                .disabled_if(addon_directory_path.is_none())
-                .separator_before(),
-                ContextMenuItem::new(
-                    AddonContextAction::ForceRedownload,
-                    context_menu_labels.force_redownload.clone(),
-                )
-                .separator_before()
-                .danger(),
-                ContextMenuItem::new(
-                    AddonContextAction::Delete,
-                    context_menu_labels.delete.clone(),
-                )
-                .disabled_if(addon_directory_path.is_none())
-                .separator_before()
-                .danger(),
-            ],
-            &mut context_action,
-        );
+        let mut context_items = vec![
+            ContextMenuItem::new(
+                AddonContextAction::OpenDirectory,
+                context_menu_labels.open_directory.clone(),
+            )
+            .disabled_if(addon_directory_path.is_none()),
+            ContextMenuItem::new(
+                AddonContextAction::Backup,
+                context_menu_labels.backup.clone(),
+            )
+            .disabled_if(addon_directory_path.is_none() || !backup_configured)
+            .separator_before(),
+            ContextMenuItem::new(
+                AddonContextAction::RestoreBackup,
+                context_menu_labels.restore_backup.clone(),
+            )
+            .disabled_if(!backup_configured)
+            .separator_before(),
+            ContextMenuItem::new(
+                AddonContextAction::RecheckIntegrity,
+                context_menu_labels.recheck_integrity.clone(),
+            )
+            .separator_before(),
+            ContextMenuItem::new(
+                AddonContextAction::StandaloneDownload,
+                context_menu_labels.standalone_download.clone(),
+            )
+            .separator_before(),
+            ContextMenuItem::new(
+                AddonContextAction::ToggleStructure,
+                if structure_expanded {
+                    context_menu_labels.collapse_structure.clone()
+                } else {
+                    context_menu_labels.expand_structure.clone()
+                },
+            )
+            .disabled_if(addon_directory_path.is_none())
+            .separator_before(),
+            ContextMenuItem::new(
+                AddonContextAction::ForceRedownload,
+                context_menu_labels.force_redownload.clone(),
+            )
+            .separator_before()
+            .danger(),
+            ContextMenuItem::new(
+                AddonContextAction::Delete,
+                context_menu_labels.delete.clone(),
+            )
+            .disabled_if(addon_directory_path.is_none())
+            .separator_before()
+            .danger(),
+        ];
+        if let Some(label) = &context_menu_labels.open_workshop {
+            context_items.insert(
+                1,
+                ContextMenuItem::new(AddonContextAction::OpenWorkshop, label.clone()),
+            );
+        }
+        attach_context_menu(&context_response, &context_items, &mut context_action);
         if let Some(action) = context_action {
             *addon_context_action = Some((name.to_string(), addon_directory_path, action));
         }
@@ -659,7 +664,17 @@ impl Foxy {
         search_files: &mut bool,
         addon_state_filter: &mut String,
     ) {
-        self.ensure_repository_addon_list_cache_cached(repo_index, kind);
+        self.ensure_filtered_repository_addon_indices_cached(
+            repo_index,
+            kind,
+            filter,
+            addon_state_filter,
+            self.addon_favorites_only_filter && kind == RepositoryAddonListKind::OptionalAddons,
+            self.addon_client_side_only_filter
+                && Self::client_side_addons_supported()
+                && kind == RepositoryAddonListKind::OptionalAddons,
+            *search_files,
+        );
 
         let label = match kind {
             RepositoryAddonListKind::Addons => "addons",
@@ -702,6 +717,7 @@ impl Foxy {
         };
         let context_menu_labels = AddonContextMenuLabels {
             open_directory: tr("Open addon directory"),
+            open_workshop: self.addon_workshop_label(),
             backup: tr("Manual addon backup"),
             restore_backup: tr("Restore addon backup"),
             recheck_integrity: tr("Recheck addon integrity"),
@@ -754,6 +770,14 @@ impl Foxy {
                         self.persist_repository_addon_row_state_cached(repo_index, kind);
                     }
 
+                    ui.add_space(10.0);
+                    let filtered_only = match kind {
+                        RepositoryAddonListKind::Addons => &mut self.addons_bulk_filtered_only,
+                        RepositoryAddonListKind::OptionalAddons => {
+                            &mut self.optional_addons_bulk_filtered_only
+                        }
+                    };
+                    render_filtered_only_checkbox(ui, filtered_only);
                     ui.add_space(10.0);
                     ui.add(
                         egui::Label::new(RichText::new(info_text).italics().color(info_color))
@@ -1099,6 +1123,14 @@ impl Foxy {
 
         if let Some((addon_name, addon_directory_path, action)) = addon_context_action {
             match action {
+                AddonContextAction::OpenWorkshop => {
+                    self.open_addon_workshop(
+                        ui.ctx(),
+                        &addon_name,
+                        addon_directory_path.as_deref(),
+                        Some(repo_index),
+                    );
+                }
                 AddonContextAction::OpenDirectory => {
                     if let Some(path) = addon_directory_path {
                         if !self.open_addon_directory(&addon_name, &path) {

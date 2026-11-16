@@ -1,0 +1,4 @@
+interface:
+  display_name: "Turso Schema Recovery"
+  short_description: "Diagnose schema repair state without touching live data."
+  default_prompt: "Use $foxy-turso-schema-recovery to diagnose this Foxy database schema repair issue."

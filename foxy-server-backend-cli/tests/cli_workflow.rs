@@ -323,3 +323,161 @@ fn space_prune_asks_for_yes_only_when_published_optionals_exist() {
     assert!(!published.exists());
     assert!(source.join("optionals").join("unused.pbo").exists());
 }
+
+fn pseudo_random_bytes(len: usize, seed: u64) -> Vec<u8> {
+    let mut state = seed;
+    (0..len)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 24) as u8
+        })
+        .collect()
+}
+
+fn published_parts(output: &Path, mod_name: &str, file: &str) -> Vec<(String, u64)> {
+    let manifest: Value = serde_json::from_slice(
+        &std::fs::read(output.join(mod_name).join("foxy_addon.json")).unwrap(),
+    )
+    .unwrap();
+    manifest["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["path"] == file)
+        .unwrap()["parts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|part| {
+            (
+                part["checksum"].as_str().unwrap().to_string(),
+                part["length"].as_u64().unwrap(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn custom_game_build_publishes_content_chunked_parts_that_survive_a_rebuild() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = dir.path().join("source").join("MyGame");
+    std::fs::create_dir_all(&game).unwrap();
+    let build = pseudo_random_bytes(12 << 20, 5);
+    std::fs::write(game.join("game.exe"), &build).unwrap();
+    std::fs::write(game.join("readme.txt"), b"play").unwrap();
+    let config = dir.path().join("config.json");
+    write_json(
+        &config,
+        json!({
+            "repoName": "Custom",
+            "game": "generic",
+            "chunking": "content",
+            "basePath": dir.path().join("source"),
+            "gameBuild": {"folder": "MyGame", "executable": "game.exe"}
+        }),
+    );
+    let output = dir.path().join("output");
+    let bin = env!("CARGO_BIN_EXE_foxy-server-backend-cli");
+    let create = || {
+        let built = Command::new(bin)
+            .args(["--json", "create"])
+            .arg(&config)
+            .arg(&output)
+            .arg("--no-progress")
+            .output()
+            .unwrap();
+        assert!(
+            built.status.success(),
+            "{}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+        serde_json::from_slice::<Value>(&built.stdout).unwrap()
+    };
+
+    let result = create();
+    assert!(result["details"]["serverLine"].is_null());
+    assert!(!output.join("server_mod_line.txt").exists());
+    let repo: Value =
+        serde_json::from_slice(&std::fs::read(output.join("repo.json")).unwrap()).unwrap();
+    assert_eq!(repo["game"], "generic");
+    assert_eq!(repo["chunking"], "content");
+    assert_eq!(
+        repo["gameBuild"],
+        json!({"modName": "MyGame", "executable": "game.exe"})
+    );
+    let before = published_parts(&output, "MyGame", "game.exe");
+    assert!(before.len() > 3);
+    assert_eq!(
+        before.iter().map(|(_, len)| len).sum::<u64>(),
+        build.len() as u64
+    );
+    assert!(
+        Command::new(bin)
+            .arg("verify")
+            .arg(&output)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+
+    let mut rebuilt = build[..(4 << 20)].to_vec();
+    rebuilt.extend_from_slice(b"patched code");
+    rebuilt.extend_from_slice(&build[(4 << 20)..]);
+    std::fs::write(game.join("game.exe"), &rebuilt).unwrap();
+    create();
+    let after = published_parts(&output, "MyGame", "game.exe");
+    let reused = after.iter().filter(|part| before.contains(part)).count();
+    assert!(
+        reused + 2 >= after.len(),
+        "reused {reused} of {} parts",
+        after.len()
+    );
+    assert!(
+        Command::new(bin)
+            .arg("verify")
+            .arg(&output)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+}
+
+#[test]
+fn custom_game_refuses_mod_line_files() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("source").join("MyGame")).unwrap();
+    std::fs::write(dir.path().join("source").join("MyGame").join("a.txt"), b"a").unwrap();
+    std::fs::write(dir.path().join("start.cmd"), "game.exe -mod=x\r\n").unwrap();
+    let config = dir.path().join("config.json");
+    write_json(
+        &config,
+        json!({
+            "repoName": "Custom",
+            "game": "generic",
+            "basePath": dir.path().join("source"),
+            "requiredMods": [{"modName": "MyGame"}],
+            "modLineFiles": ["start.cmd"]
+        }),
+    );
+    let built = Command::new(env!("CARGO_BIN_EXE_foxy-server-backend-cli"))
+        .args(["--json", "create"])
+        .arg(&config)
+        .arg(dir.path().join("output"))
+        .arg("--no-progress")
+        .output()
+        .unwrap();
+    assert!(!built.status.success());
+    let result: Value = serde_json::from_slice(&built.stdout).unwrap();
+    assert!(
+        result["error"]
+            .as_str()
+            .unwrap()
+            .contains("no server launch line"),
+        "{}",
+        result["error"]
+    );
+}

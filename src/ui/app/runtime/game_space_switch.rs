@@ -7,11 +7,15 @@ use std::time::Duration;
 
 use eframe::egui;
 use log::{info, warn};
+use serde::de::DeserializeOwned;
 
 use crate::core::api;
 use crate::core::game::spaces::{self, GameSpaceEntry};
 use crate::ui::app::Foxy;
-use crate::ui::types::{FoxyView, RepositorySettingsTab, RepositoryViewState};
+use crate::ui::types::{
+    FoxyView, Repository, RepositorySettingsTab, RepositorySpace, RepositoryViewState,
+    RepositoryVisualFolder, SettingsViewState, normalize_loaded_repositories,
+};
 
 impl Foxy {
     /// Why a switch cannot start right now, or `None` when it can. Both the
@@ -24,7 +28,24 @@ impl Foxy {
         if self.settings_view_state.debug_mode {
             return Some("Leave debug mode before switching game spaces.");
         }
+        if self.profile_backup_work_in_flight() {
+            return Some("Wait for profile backup work to finish.");
+        }
+        if self.hash_evidence_retry_in_flight
+            || self.retained_files_cleanup_in_flight
+            || self.pending_retained_file_removal.is_some()
+        {
+            return Some(
+                "Finish reviewing or removing retained files before switching game spaces.",
+            );
+        }
         let busy = self.repository_sync_active()
+            || self.pending_link_target_sync.is_some()
+            || self.launch_action.is_pending()
+            || self.game_space_removal_in_flight()
+            || self.backup_manager_work_in_flight()
+            || self.pending_installer_path.is_some()
+            || self.scheduler_pending_post_action.is_some()
             || self.update_modal_open
             || !self.active_quick_scan_instance_keys.is_empty()
             || self.is_direct_download_running()
@@ -37,7 +58,12 @@ impl Foxy {
             || !self.pending_repository_db_wipes.is_empty()
             || !self.pending_addon_deletes.is_empty()
             || !self.pending_addon_force_redownloads.is_empty()
-            || self.scheduler_active_run.is_some();
+            || self.scheduler_active_run.is_some()
+            // A Workshop task resolves its space folder once and keeps writing there.
+            || self
+                .workshop_task_worker
+                .as_ref()
+                .is_some_and(|handle| !handle.is_finished());
         busy.then_some("Finish downloads and scans before switching game spaces.")
     }
 
@@ -49,12 +75,20 @@ impl Foxy {
         if self.pending_game_space_switch.is_some() {
             return;
         }
+        if spaces::active_game_space().space_id == entry.id {
+            return;
+        }
         if let Some(reason) = self.game_space_switch_block_reason() {
             self.show_error_toast(self.t(reason));
             return;
         }
         info!("Game space switch requested: {}", entry.id);
         self.pending_game_space_switch = Some(entry.clone());
+        self.pending_game_space_switch_save_error = None;
+        self.game_space_switch_open_error = None;
+        self.game_space_switch_prepare_rx = None;
+        self.game_space_switch_prepare_worker = None;
+        self.pending_game_space_switch_discard_save = false;
         self.game_space_switch_requested_at = Some(std::time::Instant::now());
         self.needs_repaint = true;
     }
@@ -63,33 +97,274 @@ impl Foxy {
         if self.pending_game_space_switch.is_none() {
             return;
         }
-        self.maybe_dispatch_persistence_requests(true);
+        if self.pending_game_space_switch_discard_save {
+            if self.settings_save_in_flight_revision.is_some()
+                || self.repositories_save_in_flight_revision.is_some()
+            {
+                ctx.request_repaint_after(Duration::from_millis(16));
+                return;
+            }
+            self.settings_dirty = false;
+            self.settings_completed_revision = self.settings_revision;
+            self.settings_last_mutated_at = None;
+            self.repositories_dirty = false;
+            self.repositories_completed_revision = self.repositories_revision;
+            self.repositories_last_mutated_at = None;
+            self.pending_game_space_switch_save_error = None;
+        } else {
+            if self.pending_game_space_switch_save_error.is_some() {
+                return;
+            }
+            self.maybe_dispatch_persistence_requests(true);
+        }
         if self.has_pending_persistence_writes() {
             ctx.request_repaint_after(Duration::from_millis(16));
             return;
         }
-        let Some(entry) = self.pending_game_space_switch.take() else {
+        if self.game_space_switch_open_error.is_some() {
             return;
-        };
-        self.finish_game_space_switch(ctx, &entry);
+        }
+        if let Some(receiver) = self.game_space_switch_prepare_rx.as_ref() {
+            match receiver.try_recv() {
+                Ok(Ok(reservation)) => {
+                    self.game_space_switch_prepare_rx = None;
+                    if let Some(worker) = self.game_space_switch_prepare_worker.take() {
+                        let _ = worker.join();
+                    }
+                    self.game_space_switch_open_error = None;
+                    if let Some(entry) = self.pending_game_space_switch.clone() {
+                        self.finish_game_space_switch(ctx, &entry, reservation);
+                    }
+                    return;
+                }
+                Ok(Err(error)) => {
+                    self.game_space_switch_prepare_rx = None;
+                    if let Some(worker) = self.game_space_switch_prepare_worker.take() {
+                        let _ = worker.join();
+                    }
+                    self.game_space_switch_open_error = Some(error);
+                    self.needs_repaint = true;
+                    return;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    ctx.request_repaint_after(Duration::from_millis(50));
+                    return;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.game_space_switch_prepare_rx = None;
+                    self.game_space_switch_prepare_worker = None;
+                    self.game_space_switch_open_error =
+                        Some("The game-space preparation worker stopped unexpectedly.".to_string());
+                    self.needs_repaint = true;
+                    return;
+                }
+            }
+        }
+        if let Some(entry) = self.pending_game_space_switch.clone() {
+            self.start_game_space_preparation(ctx, &entry);
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
     }
 
-    fn finish_game_space_switch(&mut self, ctx: &egui::Context, entry: &GameSpaceEntry) {
+    pub(crate) fn retry_game_space_switch_save(&mut self) {
+        if self.pending_game_space_switch.is_none() {
+            return;
+        }
+        self.pending_game_space_switch_save_error = None;
+        self.pending_game_space_switch_discard_save = false;
+        if self.settings_dirty {
+            self.settings_last_mutated_at = Some(std::time::Instant::now());
+        }
+        if self.repositories_dirty {
+            self.repositories_last_mutated_at = Some(std::time::Instant::now());
+        }
+        self.needs_repaint = true;
+    }
+
+    pub(crate) fn retry_game_space_open(&mut self) {
+        if self.pending_game_space_switch.is_some() && self.game_space_switch_open_error.is_some() {
+            self.game_space_switch_open_error = None;
+            self.needs_repaint = true;
+        }
+    }
+
+    pub(crate) fn discard_game_space_switch_save_and_continue(&mut self) {
+        if self.pending_game_space_switch.is_some()
+            && self.pending_game_space_switch_save_error.is_some()
+        {
+            self.pending_game_space_switch_discard_save = true;
+            self.needs_repaint = true;
+        }
+    }
+
+    pub(crate) fn cancel_pending_game_space_switch(&mut self) {
+        if self
+            .game_space_switch_prepare_worker
+            .as_ref()
+            .is_some_and(|worker| !worker.is_finished())
+        {
+            return;
+        }
+        if let Some(worker) = self.game_space_switch_prepare_worker.take() {
+            let _ = worker.join();
+        }
+        self.pending_game_space_switch = None;
+        self.game_space_switch_requested_at = None;
+        self.pending_game_space_switch_save_error = None;
+        self.game_space_switch_open_error = None;
+        self.game_space_switch_prepare_rx = None;
+        self.game_space_switch_prepare_worker = None;
+        self.pending_game_space_switch_discard_save = false;
+        self.needs_repaint = true;
+    }
+
+    pub(crate) fn render_pending_game_space_switch(&mut self, ctx: &egui::Context) {
+        if let Some(error) = self.game_space_switch_open_error.clone() {
+            let name = self
+                .pending_game_space_switch
+                .as_ref()
+                .map(|entry| entry.display_name.clone())
+                .unwrap_or_default();
+            egui::Modal::new(egui::Id::unique("game_space_switch_open_error")).show(ctx, |ui| {
+                ui.heading(self.t("Could not open game space"));
+                ui.label(self.t_fmt(
+                    "{name} could not be opened. Your current game space is still active.",
+                    &[("name", name)],
+                ));
+                ui.label(error);
+                ui.horizontal(|ui| {
+                    if ui.button(self.t("Retry opening")).clicked() {
+                        self.retry_game_space_open();
+                    }
+                    if ui.button(self.t("Cancel opening")).clicked() {
+                        self.cancel_pending_game_space_switch();
+                    }
+                });
+            });
+            return;
+        }
+        let Some(error) = self.pending_game_space_switch_save_error.clone() else {
+            if self.pending_game_space_switch.is_some() {
+                egui::Modal::new(egui::Id::unique("game_space_switch_progress")).show(ctx, |ui| {
+                    ui.heading(self.t("Switching game space"));
+                    let message = if self.game_space_switch_prepare_rx.is_some() {
+                        self.t("Preparing the requested game space...")
+                    } else {
+                        self.t("Saving changes before switching game spaces...")
+                    };
+                    ui.label(message);
+                    if self.game_space_switch_prepare_rx.is_none()
+                        && ui.button(self.t("Cancel switching")).clicked()
+                    {
+                        self.cancel_pending_game_space_switch();
+                    }
+                });
+            }
+            return;
+        };
+
+        egui::Modal::new(egui::Id::unique("game_space_switch_save_error")).show(ctx, |ui| {
+            ui.heading(self.t("Could not save before switching"));
+            ui.label(self.t("Your changes are still in the current game space."));
+            ui.label(error);
+            ui.horizontal(|ui| {
+                if ui.button(self.t("Retry save")).clicked() {
+                    self.retry_game_space_switch_save();
+                }
+                if ui.button(self.t("Discard changes and switch")).clicked() {
+                    self.discard_game_space_switch_save_and_continue();
+                }
+                if ui.button(self.t("Cancel switching")).clicked() {
+                    self.cancel_pending_game_space_switch();
+                }
+            });
+        });
+    }
+
+    pub(crate) fn render_legacy_migration_review(&mut self, ctx: &egui::Context) {
+        if self.legacy_migration_review_files.is_empty() {
+            return;
+        }
+        let files = self.legacy_migration_review_files.clone();
+        egui::Modal::new(egui::Id::unique("legacy_migration_review")).show(ctx, |ui| {
+            ui.heading(self.t("Review preserved configuration files"));
+            ui.label(self.t(
+                "Foxy found valid legacy and game-space configuration copies and kept both. Review them before deciding which setup to keep; Foxy did not merge them.",
+            ));
+            for file in &files {
+                ui.label(file);
+            }
+            ui.horizontal(|ui| {
+                if ui.button(self.t("Open both folders")).clicked() {
+                    let root = crate::core::utils::app_paths::foxy_data_dir();
+                    let target = spaces::active_game_space_dir();
+                    let opened_root = crate::core::utils::platform::open_with_default_app(&root);
+                    let opened_target = crate::core::utils::platform::open_with_default_app(&target);
+                    if let Err(error) = opened_root.and(opened_target) {
+                        self.show_error_toast(error);
+                    }
+                }
+                if ui.button(self.t("Mark reviewed")).clicked() {
+                    match spaces::acknowledge_legacy_migration_review(
+                        &spaces::active_game_space_dir(),
+                    ) {
+                        Ok(()) => self.legacy_migration_review_files.clear(),
+                        Err(error) => self.show_error_toast(error),
+                    }
+                }
+            });
+        });
+    }
+
+    fn start_game_space_preparation(&mut self, ctx: &egui::Context, entry: &GameSpaceEntry) {
+        let root = crate::core::utils::app_paths::foxy_data_dir();
+        let target_dir = spaces::game_space_dir_for(&entry.id);
+        let target_db = target_dir.join("database.db");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let repaint = ctx.clone();
+        self.game_space_switch_prepare_rx = Some(rx);
+        self.game_space_switch_prepare_worker = Some(std::thread::spawn(move || {
+            let result = prepare_game_space_target(&root, &target_dir, &target_db);
+            let _ = tx.send(result);
+            repaint.request_repaint();
+        }));
+    }
+
+    fn finish_game_space_switch(
+        &mut self,
+        ctx: &egui::Context,
+        entry: &GameSpaceEntry,
+        reservation: crate::core::tasks::db_process_lock::ReservedClaim,
+    ) {
+        self.hash_evidence_state = None;
+        let outgoing_db =
+            spaces::game_space_dir_for(&spaces::active_game_space().space_id).join("database.db");
         // Release the outgoing space's database before retargeting. The handle
         // slot would otherwise only swap on the next database access, leaving
         // `database.db` open in a space the user can now remove.
         crate::core::tasks::init_database::close_active_database_sync();
 
+        if crate::core::tasks::db_process_lock::LockOutcome::Acquired != reservation.activate() {
+            let _ = crate::core::tasks::db_process_lock::acquire(&outgoing_db);
+            self.game_space_switch_open_error = Some(
+                "The target database claim could not be activated. Retry opening the game space."
+                    .to_string(),
+            );
+            self.needs_repaint = true;
+            return;
+        }
+
         let opened = match spaces::activate_game_space(&entry.id) {
             Ok(opened) => opened,
             Err(err) => {
+                let _ = crate::core::tasks::db_process_lock::acquire(&outgoing_db);
                 warn!("Failed to switch game space: {}", err);
-                self.show_error_toast(
-                    self.t_fmt("Could not switch game space: {error}", &[("error", err)]),
-                );
+                self.game_space_switch_open_error = Some(err);
+                self.needs_repaint = true;
                 return;
             }
         };
+        self.pending_game_space_switch = None;
         info!(
             "Switching to game space {} (game {}) without restart",
             opened.id, opened.game_id
@@ -167,6 +442,9 @@ impl Foxy {
         }
         crate::core::tasks::init_database::check_and_wipe_database();
         self.load_settings();
+        self.legacy_migration_review_files =
+            spaces::pending_legacy_migration_review(&spaces::active_game_space_dir())
+                .unwrap_or_default();
         // Debug mode stays a launch-flag-only feature across reloads;
         // switching is blocked while it is active.
         self.settings_view_state.debug_mode = self.launch_debug_mode;
@@ -177,8 +455,9 @@ impl Foxy {
         self.pending_db_schema_wipe = None;
         self.refresh_database_repair_requirement();
         self.load_repositories();
-        self.load_repository_spaces();
-        self.reconcile_repository_space_paths();
+        if self.load_repository_spaces() {
+            self.reconcile_repository_space_paths();
+        }
         self.load_repository_visual_folders();
         info!(
             "Game space state loaded: repositories={} repository_spaces={}",
@@ -259,12 +538,16 @@ impl Foxy {
     /// startup default. App-global state (window, theme, locale, activity
     /// log, app updates, backups, tray) is deliberately left alone.
     fn reset_space_scoped_state(&mut self) {
+        self.interrupted_update_instances.clear();
+        self.profile_backup_state.reset_for_space();
+        self.startup_recovery_rx = None;
         // Mount table snapshot behind hash IO tuning: the incoming space may sit
         // on a drive attached after the last refresh.
         crate::core::tasks::calculate_hashes::invalidate_storage_class_cache();
 
         // Steam Workshop store of the outgoing space.
         self.workshop_view_state = crate::ui::views::workshop::WorkshopViewState::default();
+        self.addon_workshop_lookups.clear();
 
         // Repository list, spaces, and folders.
         self.repository_view_state = RepositoryViewState::default();
@@ -284,11 +567,20 @@ impl Foxy {
         self.repository_space_detail_filter_space_id = None;
         self.repository_space_selector_state = None;
         self.repository_space_settings_state = None;
+        self.paused_repository_instances.clear();
+        self.pending_game_space_switch_save_error = None;
+        self.pending_game_space_switch_discard_save = false;
+        self.game_space_switch_open_error = None;
+        self.game_space_switch_prepare_rx = None;
+        self.game_space_switch_prepare_worker = None;
+        self.show_unreadable_config_replacement = false;
         self.pending_repository_space_bulk_action = None;
         self.repository_space_bulk_progress = None;
         self.repository_space_import_in_flight = false;
         self.repository_space_freshness_rx = None;
         self.repository_space_last_refresh = None;
+        self.periodic_remote_check_last_run = None;
+        self.dispatching_background_sync = false;
         self.repository_space_remote_changes.clear();
         self.repository_selection = None;
         self.selected_repository_for_settings = None;
@@ -350,12 +642,15 @@ impl Foxy {
         self.repository_addon_size_bytes_by_repo_and_addon.clear();
         self.addons_filter.clear();
         self.addons_search_files = false;
+        self.addons_bulk_filtered_only = false;
         self.optional_addons_filter.clear();
         self.external_addons_filter.clear();
         self.external_addons_origin_filter = "All".to_string();
         self.external_addons_group_by_origin = false;
         self.optional_addons_search_files = false;
         self.external_addons_search_files = false;
+        self.optional_addons_bulk_filtered_only = false;
+        self.external_addons_bulk_filtered_only = false;
         self.addon_state_filter.clear();
         self.addon_favorites_only_filter = false;
         self.addon_client_side_only_filter = false;
@@ -373,7 +668,6 @@ impl Foxy {
         self.pending_server_queries.clear();
         self.pending_queries.clear();
         while self.server_updates.try_recv().is_ok() {}
-        self.join_preflight_cache.clear();
         self.pending_join_preflight = None;
         self.pending_join_preflight_query = None;
         self.pending_join_status_query = None;
@@ -385,6 +679,7 @@ impl Foxy {
         // Direct-download inputs point at the previous space's game folders.
         self.direct_download_url_input.clear();
         self.direct_download_destination_input.clear();
+        self.pending_direct_download_collisions = None;
         self.direct_download_error = None;
         self.direct_download_update_view = false;
 
@@ -417,6 +712,11 @@ impl Foxy {
         self.quick_scan_worker = None;
         self.startup_quick_scan_filter_rx = None;
         self.startup_quick_scan_filter_worker = None;
+        self.startup_probe_unknown.clear();
+        self.startup_probe_retry_armed_at = None;
+        self.startup_probe_retries_completed = 0;
+        self.startup_probe_retry_rx = None;
+        self.startup_probe_retry_worker = None;
         self.deferred_fs_scan.clear();
         self.pending_quick_scan_urls.clear();
         self.pending_quick_scan_prevalidated_urls.clear();
@@ -443,7 +743,12 @@ impl Foxy {
         // never settle and would pin the `startup-sync` busy reason.
         self.startup_sync = None;
         self.startup_quick_scan_requested = 0;
-        self.prelaunch_recheck_at = None;
+        self.prelaunch_process_checks = Default::default();
+        self.launch_action = Default::default();
+        self.configuration_recovery_error = None;
+        self.download_transfer_attempt = 0;
+        self.settings_save_error = None;
+        self.legacy_migration_review_files.clear();
 
         // Sync/download progress and results.
         self.backend_progress_rx = None;
@@ -452,13 +757,37 @@ impl Foxy {
         self.frame_cost_at_sync_start = None;
         self.syncing_repository = None;
         self.scheduler_active_run = None;
+        self.scheduler_held_jobs.clear();
+        self.addon_selection_baseline.clear();
+        self.pending_addon_selection_checks.clear();
         self.scheduler_pending_post_action = None;
+        self.scheduler_deferred_post_actions.clear();
         self.pending_update_cache.clear();
         self.clear_mod_diff_cache();
         self.progress_events.clear();
+        self.hash_evidence_state = None;
+        self.hash_evidence_retry_in_flight = false;
+        self.hash_evidence_notice_open = false;
+        self.hash_evidence_notice_seen = (0, 0, false);
+        self.hash_stall_acknowledged.clear();
         self.update_modal_open = false;
+        self.local_drift_addons.clear();
+        self.backup_local_drift_requested = false;
+        self.empty_publication_status = None;
+        self.retained_files_cleanup_in_flight = false;
+        self.pending_retained_file_removal = None;
+        self.enrolled_link_targets.clear();
+        self.cleanup_plan_files.clear();
+        self.pending_link_target_sync = None;
+        self.pending_link_target_previews = None;
+        self.link_target_preview_bypass_once = false;
         self.update_ready_repo = None;
         self.current_sync_mode = None;
+        self.active_sync_selection = None;
+        self.active_sync_modifiers = None;
+        self.proxy_change_prompt = None;
+        self.pending_integrity_recheck_prompt = None;
+        self.integrity_recheck_after_settlement = None;
         self.download_progress = None;
         self.download_finished = false;
         self.download_finished_repo = None;
@@ -467,6 +796,7 @@ impl Foxy {
         self.update_modal_disk_space_probe = None;
         self.open_update_after_sync = false;
         self.mod_download_progress.clear();
+        self.mod_download_attempts.clear();
         self.download_started_at = None;
         self.download_stage_started_at = None;
         self.hash_stage_started_at = None;
@@ -479,8 +809,16 @@ impl Foxy {
         self.total_downloaded_bytes = 0;
         self.download_eta_remaining = None;
         self.download_eta_updated_at = None;
+        self.completion_estimate = Default::default();
         self.download_pause_tx = None;
         self.download_paused = false;
+        self.pending_update_launch = None;
+        self.scheduling_job_change_prompt = None;
+        self.pending_download_retry = None;
+        self.download_retry_attempts.clear();
+        self.sync_retryable_failure = false;
+        self.sync_is_bulk = false;
+        self.sync_visual_folder_id = None;
         self.cancel_tx = None;
         self.recheck_stage_label = None;
         self.recheck_stage_percent = None;
@@ -536,6 +874,85 @@ impl Foxy {
     }
 }
 
+fn prepare_game_space_target(
+    root: &std::path::Path,
+    target_dir: &std::path::Path,
+    target_db: &std::path::Path,
+) -> Result<crate::core::tasks::db_process_lock::ReservedClaim, String> {
+    if let Ok(metadata) = std::fs::symlink_metadata(target_dir)
+        && metadata.file_type().is_symlink()
+    {
+        return Err("The target game-space directory is a symbolic link.".to_string());
+    }
+    std::fs::create_dir_all(target_dir)
+        .map_err(|error| format!("Could not prepare the target game-space folder: {error}"))?;
+    let reservation = crate::core::tasks::db_process_lock::reserve(target_db).map_err(
+        |outcome| match outcome {
+            crate::core::tasks::db_process_lock::LockOutcome::Busy { holder_pid } => format!(
+                "The target database is in use by another Foxy process{}.",
+                holder_pid
+                    .map(|pid| format!(" (PID {pid})"))
+                    .unwrap_or_default()
+            ),
+            crate::core::tasks::db_process_lock::LockOutcome::Unavailable(error) => {
+                format!("Could not claim the target database: {error}")
+            }
+            crate::core::tasks::db_process_lock::LockOutcome::Acquired => {
+                "Could not reserve the target database.".to_string()
+            }
+        },
+    )?;
+    crate::core::game::launch_preparation::recover(target_dir)?;
+    crate::core::game::foxypack::recover_pending_import(target_dir)?;
+
+    validate_space_configuration(root, target_dir)?;
+    Ok(reservation)
+}
+
+fn validate_space_configuration(
+    root: &std::path::Path,
+    target_dir: &std::path::Path,
+) -> Result<(), String> {
+    let app_settings = root.join(crate::core::game::spaces::APP_SETTINGS_FILE);
+    let game_settings = target_dir.join(crate::core::game::spaces::GAME_SETTINGS_FILE);
+    let defaults = serde_json::to_value(SettingsViewState::default())
+        .map_err(|error| format!("Could not prepare default settings: {error}"))?;
+    let settings =
+        crate::core::game::spaces::read_merged_settings_value(&app_settings, &game_settings)
+            .map_err(|error| format!("Could not read target settings: {error}"))?
+            .unwrap_or_else(|| defaults.clone());
+    serde_json::from_value::<SettingsViewState>(
+        crate::core::game::spaces::merge_value_over_defaults(defaults, settings),
+    )
+    .map_err(|error| format!("Target settings are not readable: {error}"))?;
+
+    let mut repositories: Vec<Repository> =
+        read_optional_json(&target_dir.join("repositories.json"), "repositories.json")?;
+    normalize_loaded_repositories(&mut repositories);
+    let mut repository_spaces: Vec<RepositorySpace> = read_optional_json(
+        &target_dir.join("repository_spaces.json"),
+        "repository_spaces.json",
+    )?;
+    crate::ui::types::sanitize_repository_spaces_paths(&mut repository_spaces);
+    let _: Vec<RepositoryVisualFolder> = read_optional_json(
+        &target_dir.join("repository_visual_folders.json"),
+        "repository_visual_folders.json",
+    )?;
+    Ok(())
+}
+
+fn read_optional_json<T: DeserializeOwned + Default>(
+    path: &std::path::Path,
+    label: &str,
+) -> Result<T, String> {
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|error| format!("Target {label} is not readable: {error}")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
+        Err(error) => Err(format!("Could not read target {label}: {error}")),
+    }
+}
+
 /// `Foxy` fields that deliberately survive a game-space switch because they are
 /// app-global, not space-scoped: the window and renderer, theme and locale, the
 /// activity log, app updates, the backup manager, the tray, scheduling
@@ -550,6 +967,9 @@ impl Foxy {
 /// prevent, so forgetting one has to fail loudly somewhere.
 #[cfg(test)]
 const APP_GLOBAL_FOXY_FIELDS: &[&str] = &[
+    "pending_installer_path",
+    "pending_installer_error",
+    "shutdown_after_close",
     // Window, rendering, and view chrome.
     "app_icon",
     "app_icon_texture_bytes",
@@ -567,6 +987,9 @@ const APP_GLOBAL_FOXY_FIELDS: &[&str] = &[
     // once per launch.
     "startup_diagnostics_rx",
     "close_requested_at",
+    "close_worker_wait_started_at",
+    // Tick history spans spaces; a switch is no sleep gap.
+    "scheduler_last_tick_at",
     "current_view",
     "last_view",
     "main_view_state",
@@ -579,6 +1002,7 @@ const APP_GLOBAL_FOXY_FIELDS: &[&str] = &[
     "last_applied_palette",
     "cached_color32",
     "last_font_image_size",
+    "last_font_pixels_per_point",
     "last_saved_window_state",
     "last_logged_display_metrics",
     "tray_manager",
@@ -587,6 +1011,8 @@ const APP_GLOBAL_FOXY_FIELDS: &[&str] = &[
     "pending_renderer_fallback_notice",
     // App-global settings, locale, and debug flags.
     "settings_view_state",
+    // Backup acknowledgments are keyed by full source path across spaces.
+    "unreadable_config_replacements",
     "i18n",
     "launch_debug_mode",
     "show_debug_windows",
@@ -631,6 +1057,10 @@ const APP_GLOBAL_FOXY_FIELDS: &[&str] = &[
     "backup_manager_view_cache",
     "backup_manager_notice",
     "backup_manager_confirm_action",
+    "backup_cleanup_task_rx",
+    "backup_cleanup_task_tx",
+    "backup_cleanup_worker",
+    "backup_cleanup_in_flight",
     "backup_inventory_refresh_requested",
     "backup_inventory_refresh_in_progress",
     "backup_inventory_request_id",
@@ -680,6 +1110,14 @@ const APP_GLOBAL_FOXY_FIELDS: &[&str] = &[
     "join_preflight_worker",
     "join_preflight_result_rx",
     "join_preflight_result_tx",
+    "hash_evidence_retry_tx",
+    "hash_evidence_retry_rx",
+    "link_target_preview_tx",
+    "link_target_preview_rx",
+    "retained_file_preview_tx",
+    "retained_file_preview_rx",
+    "retained_file_removal_tx",
+    "retained_file_removal_rx",
     "image_result_rx",
     "image_result_tx",
     "repo_metadata_result_rx",
@@ -712,10 +1150,21 @@ const APP_GLOBAL_FOXY_FIELDS: &[&str] = &[
 
 #[cfg(test)]
 mod tests {
-    use super::APP_GLOBAL_FOXY_FIELDS;
+    use super::{APP_GLOBAL_FOXY_FIELDS, validate_space_configuration};
 
     const FOXY_STRUCT_SOURCE: &str = include_str!("../mod.rs");
     const SWITCH_SOURCE: &str = include_str!("game_space_switch.rs");
+
+    #[test]
+    fn target_preflight_accepts_missing_configs_and_rejects_unreadable_repositories() {
+        let root = tempfile::tempdir().expect("root");
+        let target = root.path().join("games").join("beta");
+        std::fs::create_dir_all(&target).expect("target");
+        validate_space_configuration(root.path(), &target).expect("empty target configs");
+
+        std::fs::write(target.join("repositories.json"), "{broken").expect("bad config");
+        assert!(validate_space_configuration(root.path(), &target).is_err());
+    }
 
     /// Field names declared on `pub struct Foxy`.
     fn foxy_fields() -> Vec<String> {

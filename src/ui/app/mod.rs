@@ -8,6 +8,7 @@ mod diagnostics;
 mod downloads;
 mod init;
 mod persistence;
+pub(crate) mod profile_backups;
 mod repository;
 mod runtime;
 mod scheduling;
@@ -18,7 +19,12 @@ pub(crate) use ui_helpers::activity::{
     paint_area_under, paint_bar_label, paint_border_beam, paint_border_flare, paint_live_marker,
     rise_effect, transfer_progress,
 };
-pub(crate) use ui_helpers::spinner::{PROGRESS_FRAME_INTERVAL, PacedSpinner, request_frame_after};
+#[cfg(test)]
+pub(crate) use ui_helpers::spinner::PROGRESS_FRAME_INTERVAL;
+pub(crate) use ui_helpers::spinner::{
+    PacedSpinner, WindowPresence, progress_frame_interval, progress_frame_interval_override,
+    request_frame_after, set_progress_frame_rate, set_window_presence, window_presence,
+};
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -41,9 +47,11 @@ use super::types::*;
 use agent_driver::AgentGuiRuntime;
 
 pub use downloads::UpdateModalDiskSpaceProbe;
+pub(crate) use downloads::direct_download_managed_paths_problem;
 pub use repository::game_space_overview::{RepositoryGroupSummary, TeamSpeakSummary};
 pub(crate) use runtime::DatabaseLaunchContinuation;
-pub use scheduling::{PendingPostAction, ScheduledJobRun};
+pub(crate) use runtime::LaunchRequest;
+pub use scheduling::{HeldScheduledJob, PendingPostAction, ScheduledJobRun};
 pub use state::*;
 
 /// Last logged display metrics: (monitor resolution, app resolution, scale percent).
@@ -73,6 +81,22 @@ impl QuickScanProgressState {
 }
 
 pub struct Foxy {
+    pub(crate) interrupted_update_instances: HashSet<String>,
+    pub(crate) startup_recovery_rx:
+        Option<std::sync::mpsc::Receiver<runtime::repository_status::UpdateRecoveryResult>>,
+    pub(crate) pending_download_retry: Option<runtime::download_retry::PendingDownloadRetry>,
+    pub(crate) download_retry_attempts: HashMap<String, u32>,
+    pub(crate) sync_retryable_failure: bool,
+    pub(crate) sync_is_bulk: bool,
+    pub(crate) sync_visual_folder_id: Option<String>,
+    pub(crate) paused_repository_instances: HashSet<String>,
+    pub(crate) pending_game_space_switch_save_error: Option<String>,
+    pub(crate) pending_game_space_switch_discard_save: bool,
+    pub(crate) unreadable_config_replacements:
+        HashMap<std::path::PathBuf, Option<std::path::PathBuf>>,
+    pub(crate) show_unreadable_config_replacement: bool,
+    pub(crate) pending_update_launch: Option<PendingUpdateLaunch>,
+    pub(crate) scheduling_job_change_prompt: Option<scheduling::ScheduledJobChangePrompt>,
     pub app_icon: Option<egui::TextureHandle>,
     pub tfr_logo: Option<egui::TextureHandle>,
     pub default_repo_image: Option<egui::TextureHandle>,
@@ -168,6 +192,7 @@ pub struct Foxy {
     pub repository_selection: Option<RepositorySelection>,
     /// Cached list of detected Arma 3 profiles.
     pub detected_arma3_profiles: Vec<crate::core::arma3_profiles::Arma3Profile>,
+    pub(crate) profile_backup_state: profile_backups::ProfileBackupState,
     /// The auto-detected "currently active" Arma 3 profile name.
     pub detected_active_arma3_profile: Option<String>,
     /// Pending rename/clone/delete action from the Arma 3 profile manager
@@ -217,12 +242,15 @@ pub struct Foxy {
     pub current_about_tab: AboutTab,
     pub addons_filter: String,
     pub addons_search_files: bool,
+    pub addons_bulk_filtered_only: bool,
     pub optional_addons_filter: String,
     pub external_addons_filter: String,
     pub external_addons_origin_filter: String,
     pub external_addons_group_by_origin: bool,
     pub optional_addons_search_files: bool,
     pub external_addons_search_files: bool,
+    pub optional_addons_bulk_filtered_only: bool,
+    pub external_addons_bulk_filtered_only: bool,
     pub addon_state_filter: String,
     pub addon_favorites_only_filter: bool,
     pub addon_client_side_only_filter: bool,
@@ -234,7 +262,6 @@ pub struct Foxy {
     pub pending_queries: Vec<std::thread::JoinHandle<()>>,
     pub server_updates: StdReceiver<(String, String, ServerOnlineStatus)>,
     pub updates_sender: StdSender<(String, String, ServerOnlineStatus)>,
-    pub join_preflight_cache: HashMap<(String, u16), JoinPreflightCacheEntry>,
     pub join_preflight_worker: Option<std::thread::JoinHandle<()>>,
     pub join_preflight_result_rx: StdReceiver<JoinPreflightQueryResult>,
     pub join_preflight_result_tx: StdSender<JoinPreflightQueryResult>,
@@ -260,6 +287,9 @@ pub struct Foxy {
     >,
     /// When the last refresh of every space started; drives the periodic recheck.
     pub(crate) repository_space_last_refresh: Option<Instant>,
+    /// Last idle metadata sweep in this game space.
+    pub(crate) periodic_remote_check_last_run: Option<Instant>,
+    pub(crate) dispatching_background_sync: bool,
     pub(crate) repository_space_remote_changes:
         crate::ui::app::repository::space_freshness::RepositorySpaceRemoteChanges,
     /// Background addon hash recalculation (file hashing off the UI thread).
@@ -292,6 +322,12 @@ pub struct Foxy {
     pub quick_scan_worker: Option<std::thread::JoinHandle<()>>,
     startup_quick_scan_filter_rx: Option<StdReceiver<StartupQuickScanFilterResult>>,
     startup_quick_scan_filter_worker: Option<std::thread::JoinHandle<()>>,
+    /// Repositories whose launch probe got no answer. Retried off the paint path.
+    startup_probe_unknown: Vec<crate::core::api::StartupRepositoryInstance>,
+    startup_probe_retry_armed_at: Option<Instant>,
+    startup_probe_retries_completed: u32,
+    startup_probe_retry_rx: Option<StdReceiver<crate::core::api::StartupProbeRetryPlan>>,
+    startup_probe_retry_worker: Option<std::thread::JoinHandle<()>>,
     pub fs_watch_rx: StdReceiver<api::FsChangeEvent>,
     pub fs_watch_tx: StdSender<api::FsChangeEvent>,
     pub fs_watch_worker: Option<std::thread::JoinHandle<()>>,
@@ -355,6 +391,10 @@ pub struct Foxy {
     pub backup_manager_view_cache: Option<BackupManagerViewCache>,
     pub backup_manager_notice: Option<BackupManagerNotice>,
     pub backup_manager_confirm_action: Option<BackupManagerConfirmAction>,
+    backup_cleanup_task_rx: StdReceiver<BackupCleanupTaskResult>,
+    backup_cleanup_task_tx: StdSender<BackupCleanupTaskResult>,
+    pub backup_cleanup_worker: Option<std::thread::JoinHandle<()>>,
+    pub backup_cleanup_in_flight: bool,
     pub sync_started_at: Option<Instant>,
     pub frame_cost: crate::ui::app::runtime::frame_cost::FrameCostTotals,
     pub frame_cost_at_sync_start: Option<crate::ui::app::runtime::frame_cost::FrameCostTotals>,
@@ -366,6 +406,8 @@ pub struct Foxy {
     pub show_direct_download_screen: bool,
     pub direct_download_url_input: String,
     pub direct_download_destination_input: String,
+    pub(crate) pending_direct_download_collisions:
+        Option<(Vec<std::path::PathBuf>, std::sync::mpsc::Sender<bool>)>,
     pub direct_download_use_global_speed_limit: bool,
     pub direct_download_override_speed_unlimited: bool,
     pub direct_download_override_speed_limit_mbps: u32,
@@ -385,10 +427,12 @@ pub struct Foxy {
     pub ts3_plugin_scan_prompt_on_update: bool,
     /// A scan requested while one was already running; starts once that lands.
     pub ts3_plugin_scan_requeued: bool,
-    /// Throttle marker for re-checking TeamSpeak- and Steam-running state while
-    /// the join/launch preflight modal is open, so those warnings auto-clear
-    /// once TS3 or Steam starts.
-    pub prelaunch_recheck_at: Option<std::time::Instant>,
+    pub(crate) prelaunch_process_checks: repository::prelaunch_checks::PrelaunchProcessChecks,
+    pub(crate) launch_action: runtime::LaunchActionState,
+    pub(crate) pending_installer_path: Option<std::path::PathBuf>,
+    pub(crate) pending_installer_error: Option<String>,
+    pub(crate) shutdown_after_close: bool,
+    pub(crate) configuration_recovery_error: Option<String>,
     // Core sync
     pub backend_progress_rx: Option<BroadcastReceiver<ProgressEvent>>,
     pub backend_worker: Option<std::thread::JoinHandle<()>>,
@@ -396,8 +440,9 @@ pub struct Foxy {
     startup_pending_restore_worker: Option<std::thread::JoinHandle<()>>,
     pub startup_repository_layout_logged: bool,
     pub startup_recheck_queue: VecDeque<(String, String, SyncMode)>,
-    pub repository_space_sync_queue: VecDeque<(String, usize, SyncMode)>,
-    pub repository_visual_folder_sync_queue: VecDeque<(usize, SyncMode)>,
+    pub repository_space_sync_queue: VecDeque<repository::space_actions::QueuedRepositorySpaceSync>,
+    pub repository_visual_folder_sync_queue:
+        VecDeque<repository::space_actions::QueuedRepositoryVisualFolderSync>,
     pub addon_hash_recalc_queue: VecDeque<(String, String)>,
     /// The scheduled job currently executing its recheck/download pipeline, if
     /// any. Runtime-only; never persisted. See `src/ui/app/scheduling/`.
@@ -405,6 +450,18 @@ pub struct Foxy {
     /// A pending post-action (close app / shut down PC) waiting out its
     /// cancellable countdown before it fires. Runtime-only.
     pub scheduler_pending_post_action: Option<PendingPostAction>,
+    pub(crate) scheduler_deferred_post_actions: Vec<PendingPostAction>,
+    /// Due occurrences held back while other work ran, by job id. Holding
+    /// does not age them toward the missed-grace window. Runtime-only.
+    pub scheduler_held_jobs: HashMap<String, HeldScheduledJob>,
+    /// Wall-clock time of the previous scheduler tick, which tells a sleeping
+    /// computer apart from a job that is only waiting.
+    pub scheduler_last_tick_at: Option<chrono::DateTime<chrono::Local>>,
+    /// Enabled-addon fingerprint per repository instance as its database last
+    /// stored it, so a changed selection can queue a quick local check.
+    pub addon_selection_baseline: HashMap<String, u64>,
+    /// Repository instances waiting for that check, by instance key.
+    pub pending_addon_selection_checks: HashSet<String>,
     /// Open editor draft for the Scheduling tab (Add/Edit). Runtime-only.
     pub scheduling_editor: Option<ScheduleJobDraft>,
     pub syncing_repository: Option<usize>,
@@ -413,11 +470,47 @@ pub struct Foxy {
     pub pending_update_cache: HashMap<String, Vec<ModDiffSummary>>,
     pub mod_diff_cache: Vec<ModDiffSummary>,
     pub progress_events: VecDeque<ProgressEvent>,
+    pub(crate) hash_evidence_state:
+        Option<Arc<crate::core::tasks::calculate_hashes::HashEvidenceState>>,
+    hash_evidence_retry_tx: StdSender<Result<bool, String>>,
+    hash_evidence_retry_rx: StdReceiver<Result<bool, String>>,
+    pub(crate) hash_evidence_retry_in_flight: bool,
+    pub(crate) hash_evidence_notice_open: bool,
+    pub(crate) hash_evidence_notice_seen: (usize, usize, bool),
+    pub(crate) hash_stall_acknowledged: HashSet<String>,
     pub update_modal_open: bool,
     pub update_ready_repo: Option<usize>,
+    pub local_drift_addons: Vec<String>,
+    pub backup_local_drift_requested: bool,
+    pub(crate) empty_publication_status: Option<(String, String, bool, Vec<String>)>,
+    pub enrolled_link_targets: Vec<api::LinkedTargetPreview>,
+    pub(crate) cleanup_plan_files: Vec<String>,
+    pub(crate) pending_link_target_sync: Option<PendingLinkedTargetSync>,
+    pub(crate) pending_link_target_previews: Option<Vec<api::LinkedTargetPreview>>,
+    pub(crate) link_target_preview_bypass_once: bool,
+    link_target_preview_tx: StdSender<LinkedTargetPreviewResult>,
+    link_target_preview_rx: StdReceiver<LinkedTargetPreviewResult>,
+    retained_file_preview_tx: StdSender<RetainedFilePreviewResult>,
+    retained_file_preview_rx: StdReceiver<RetainedFilePreviewResult>,
+    retained_file_removal_tx: StdSender<RetainedFileRemovalResult>,
+    retained_file_removal_rx: StdReceiver<RetainedFileRemovalResult>,
+    pub(crate) retained_files_cleanup_in_flight: bool,
+    pub(crate) pending_retained_file_removal: Option<PendingRetainedFileRemoval>,
     pub current_sync_mode: Option<SyncMode>,
+    pub(crate) active_sync_selection: Option<Vec<(String, bool)>>,
+    pub(crate) active_sync_modifiers: Option<(bool, bool, bool, bool)>,
+    pub(crate) proxy_change_prompt: Option<ProxyChangePrompt>,
+    pub(crate) game_space_switch_prepare_rx:
+        Option<StdReceiver<Result<crate::core::tasks::db_process_lock::ReservedClaim, String>>>,
+    pub(crate) game_space_switch_prepare_worker: Option<std::thread::JoinHandle<()>>,
+    pub(crate) game_space_switch_open_error: Option<String>,
+    pub(crate) legacy_migration_review_files: Vec<String>,
+    pub(crate) settings_save_error: Option<String>,
+    pub(crate) pending_integrity_recheck_prompt: Option<(String, String)>,
+    pub(crate) integrity_recheck_after_settlement: Option<(String, String)>,
     pub download_progress: Option<(String, f32)>,
     pub download_finished: bool,
+    pub(crate) download_transfer_attempt: u32,
     pub download_finished_repo: Option<usize>,
     pub download_summary: Option<DownloadSummary>,
     /// The downloader refused the last run for this repository index because
@@ -428,6 +521,7 @@ pub struct Foxy {
     pub open_update_after_sync: bool,
     pub needs_repaint: bool,
     pub mod_download_progress: HashMap<String, (f32, usize, usize, u64, u64)>,
+    pub mod_download_attempts: HashMap<String, usize>,
     pub download_started_at: Option<Instant>,
     pub download_stage_started_at: Option<Instant>,
     pub hash_stage_started_at: Option<Instant>,
@@ -440,6 +534,7 @@ pub struct Foxy {
     pub total_downloaded_bytes: u64,
     pub download_eta_remaining: Option<Duration>,
     pub download_eta_updated_at: Option<Instant>,
+    pub(crate) completion_estimate: downloads::CompletionEstimateState,
     pub download_pause_tx: Option<watch::Sender<bool>>,
     pub download_paused: bool,
     pub cancel_tx: Option<watch::Sender<bool>>,
@@ -488,6 +583,8 @@ pub struct Foxy {
     /// O8 timeline for this launch; `None` until startup work is dispatched.
     pub(crate) startup_sync: Option<runtime::StartupSyncTracker>,
     pub close_requested_at: Option<Instant>,
+    /// Set while a close waits for a cancelled sync to roll back its files.
+    pub close_worker_wait_started_at: Option<Instant>,
     pub update_modal_sorted_mod_indices: Vec<usize>,
     pub update_modal_mod_name_lowers: Vec<String>,
     pub update_modal_sort_generation: u64,
@@ -529,6 +626,7 @@ pub struct Foxy {
     /// checked. A change signals an atlas recreation/growth that invalidates any
     /// `Arc<Galley>` held across frames, so we drop those caches the frame it moves.
     pub last_font_image_size: [usize; 2],
+    pub last_font_pixels_per_point: f32,
     pub last_saved_window_state: Option<WindowState>,
     /// Used to log monitor/app resolutions at startup and whenever they change.
     pub last_logged_display_metrics: Option<DisplayMetricsSnapshot>,
@@ -585,6 +683,7 @@ pub struct Foxy {
     pub game_space_switch_requested_at: Option<std::time::Instant>,
     // Steam Workshop
     pub workshop_view_state: crate::ui::views::workshop::WorkshopViewState,
+    pub(crate) addon_workshop_lookups: Vec<StdReceiver<Option<String>>>,
     /// Result channel of the Workshop worker. Workshop actions download through
     /// the Steam helper subprocess or copy whole mod folders, so none of them
     /// may run on the frame loop.

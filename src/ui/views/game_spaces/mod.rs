@@ -1,4 +1,5 @@
 pub mod overview;
+mod removal;
 pub mod settings;
 
 use eframe::egui::{self, Button, Key, Label, Margin, RichText, ScrollArea, TextEdit, Ui, Vec2};
@@ -32,6 +33,7 @@ pub struct GameSpacesViewState {
     pub focus_create_name: bool,
     pub pending_open: Option<GameSpaceEntry>,
     pub pending_remove: Option<GameSpaceEntry>,
+    pub(crate) removal_rx: Option<std::sync::mpsc::Receiver<Result<GameSpaceEntry, String>>>,
 }
 
 impl Foxy {
@@ -479,9 +481,10 @@ impl Foxy {
     /// (keyboard parity per the accessibility conventions). Consumes the keys
     /// so the list navigation underneath never sees them.
     fn game_space_modal_keys(ui: &Ui) -> (bool, bool) {
+        let default_activation = ui.memory(|memory| memory.focused().is_none());
         ui.ctx().input_mut(|input| {
             (
-                input.consume_key(egui::Modifiers::NONE, Key::Enter),
+                default_activation && input.consume_key(egui::Modifiers::NONE, Key::Enter),
                 input.consume_key(egui::Modifiers::NONE, Key::Escape),
             )
         })
@@ -545,6 +548,11 @@ impl Foxy {
             return;
         };
         let (confirm_key, cancel_key) = Self::game_space_modal_keys(ui);
+        let payload_preview = spaces::private_payload_preview(&entry.id);
+        let preserve_id = egui::Id::unique(("preserve_game_space_payloads", entry.id.as_str()));
+        let mut preserve_payloads = ui
+            .ctx()
+            .data(|data| data.get_temp::<bool>(preserve_id).unwrap_or(false));
         let mut close_modal = cancel_key;
         egui::Window::new(tr("Remove game space"))
             .frame(self.modal_window_chrome(ui.ctx()))
@@ -561,36 +569,71 @@ impl Foxy {
                         &[("name", entry.display_name.clone())],
                     ));
                     ui.label(tr(
-                        "This deletes the Foxy workspace for this game space: its repository list, game settings, and local database. Game installs and downloaded mods are not deleted.",
+                        "Removing a game space deletes its Foxy workspace, including private payloads. Preserve them first if needed. External game installations and repository downloads stay on disk.",
                     ));
+                    match &payload_preview {
+                        Ok(preview)
+                            if !preview.workshop_item_ids.is_empty()
+                                || !preview.extra_file_ids.is_empty() =>
+                        {
+                            ui.add_space(8.0);
+                            ui.label(self.t("Private managed payloads in this space:"));
+                            for item_id in &preview.workshop_item_ids {
+                                ui.label(self.t_fmt("Managed Workshop payload {id}", &[("id", item_id.clone())]));
+                            }
+                            for entry_id in &preview.extra_file_ids {
+                                ui.label(self.t_fmt("Managed extra-file payload {id}", &[("id", entry_id.clone())]));
+                            }
+                            let checkbox = ui.checkbox(
+                                &mut preserve_payloads,
+                                self.t("Preserve these payloads before removal"),
+                            );
+                            if checkbox.changed() {
+                                ui.ctx().data_mut(|data| data.insert_temp(preserve_id, preserve_payloads));
+                            }
+                            if preserve_payloads {
+                                let destination = crate::core::utils::app_paths::foxy_data_dir()
+                                    .join("preserved_game_spaces");
+                                ui.label(self.t_fmt(
+                                    "Payloads will be saved in a new folder under {path}.",
+                                    &[("path", destination.display().to_string())],
+                                ));
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(err) => {
+                            ui.colored_label(self.color_text_error(), self.t_fmt(
+                                "Could not inspect managed payloads: {error}",
+                                &[("error", err.clone())],
+                            ));
+                        }
+                    }
                     ui.add_space(20.0);
                     ui.horizontal(|ui| {
                         ui.with_layout(
                             egui::Layout::centered_and_justified(egui::Direction::TopDown),
                             |ui| {
-                                let remove_button = ui.button(tr("Yes, Remove"));
+                                let remove_button = ui
+                                    .add_enabled(payload_preview.is_ok(), Button::new(tr("Yes, Remove")))
+                                    .on_disabled_hover_text(self.t("Resolve the payload inspection error before removing this space."));
                                 if remove_button.hovered() {
                                     ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                                 }
-                                if remove_button.clicked() || confirm_key {
+                                if (remove_button.clicked() || confirm_key) && payload_preview.is_ok() {
                                     close_modal = true;
-                                    match spaces::remove_game_space(&entry.id) {
-                                        Ok(removed) => {
-                                            info!("Removed game space {}", removed.id);
-                                            self.show_success_toast(self.t_fmt(
-                                                "Game space {name} removed.",
-                                                &[("name", removed.display_name)],
-                                            ));
-                                        }
-                                        Err(err) => {
-                                            warn!("Failed to remove game space: {}", err);
-                                            self.show_error_toast(self.t_fmt(
-                                                "Could not remove game space: {error}",
-                                                &[("error", err)],
-                                            ));
-                                        }
-                                    }
-                                    self.reload_game_spaces();
+                                    let preservation_root = preserve_payloads.then(|| {
+                                        crate::core::utils::app_paths::foxy_data_dir()
+                                            .join("preserved_game_spaces")
+                                            .join(format!(
+                                                "{}-{}",
+                                                entry.id,
+                                                std::time::SystemTime::now()
+                                                    .duration_since(std::time::UNIX_EPOCH)
+                                                    .unwrap_or_default()
+                                                    .as_nanos(),
+                                            ))
+                                    });
+                                    self.start_game_space_removal(entry.id.clone(), preservation_root);
                                 }
                                 let cancel_button = ui.button(tr("Cancel"));
                                 if cancel_button.hovered() {
@@ -606,6 +649,8 @@ impl Foxy {
             });
         if close_modal {
             self.game_spaces_view_state.pending_remove = None;
+            ui.ctx()
+                .data_mut(|data| data.insert_temp(preserve_id, false));
         }
     }
 

@@ -12,9 +12,6 @@ use eframe::egui::{
 };
 use log::{info, warn};
 
-/// How often the preflight modal re-checks whether TeamSpeak or Steam started.
-const PRELAUNCH_RECHECK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1500);
-
 fn join_preflight_body<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> R {
     let footer_reserve = 3.0 * ui.spacing().interact_size.y
         + 2.0 * ui.text_style_height(&egui::TextStyle::Heading)
@@ -32,6 +29,7 @@ fn join_preflight_body<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) 
 impl Foxy {
     pub(super) fn render_join_preflight_modal(&mut self, ctx: &egui::Context) {
         let Some(mut pending) = self.pending_join_preflight.clone() else {
+            self.prelaunch_process_checks = Default::default();
             return;
         };
 
@@ -40,6 +38,8 @@ impl Foxy {
         let mut launch_ts3 = false;
         let mut launch_steam = false;
         let mut cancel = false;
+        let mut retry_final_query = false;
+        let mut retry_addon_query = false;
         let mut pending_changed = false;
         let mut remote_download_request = None;
 
@@ -49,35 +49,31 @@ impl Foxy {
             || !pending.extra_enabled.is_empty();
         let has_dlc_changes = pending.has_dlc_changes();
         let has_addon_actions = has_addon_list_actions || has_dlc_changes;
+        let final_facts_query_running = self.pending_join_preflight_query.is_some();
 
-        if pending.ts3_required || pending.steam_required {
-            let now = std::time::Instant::now();
-            let due = self
-                .prelaunch_recheck_at
-                .is_none_or(|at| now.duration_since(at) >= PRELAUNCH_RECHECK_INTERVAL);
-            if due {
-                self.prelaunch_recheck_at = Some(now);
-                if pending.ts3_required {
-                    let running = crate::core::ts3_plugin::is_teamspeak_running();
-                    pending_changed |= pending.ts3_running != running;
-                    pending.ts3_running = running;
-                }
-                if pending.steam_required {
-                    let running = crate::core::steam::is_steam_running(
-                        &self.settings_view_state.steam_directory,
-                    );
-                    pending_changed |= pending.steam_running != running;
-                    pending.steam_running = running;
-                }
+        if let Some(status) = self.prelaunch_process_checks.poll(
+            ctx,
+            pending.ts3_required,
+            pending.steam_required,
+            &self.settings_view_state.steam_directory,
+        ) {
+            if let Some(running) = status.ts3_running {
+                pending_changed |= pending.ts3_running != running;
+                pending.ts3_running = running;
             }
-            ctx.request_repaint_after(PRELAUNCH_RECHECK_INTERVAL);
+            if let Some(running) = status.steam_running {
+                pending_changed |= pending.steam_running != running;
+                pending.steam_running = running;
+            }
         }
 
         let ts3_attention = pending.ts3_required && !pending.ts3_running;
         let steam_attention = pending.steam_required && !pending.steam_running;
         let can_launch = pending.can_launch();
 
-        let title = if !has_addon_actions && steam_attention {
+        let title = if pending.addon_query_error.is_some() {
+            self.t("Could not check server addons")
+        } else if !has_addon_actions && steam_attention {
             self.t("Steam is not running")
         } else if !has_addon_actions && ts3_attention {
             self.t("TeamSpeak 3 is not running")
@@ -117,6 +113,39 @@ impl Foxy {
             .default_width(modal_width)
             .show(ctx, |ui| {
                 join_preflight_body(ui, |ui| {
+                    if let Some(error) = pending.final_query_error.as_ref() {
+                        ui.colored_label(
+                            self.color_text_error(),
+                            self.t_fmt(
+                                "The final Join refresh failed: {error}",
+                                &[("error", error.clone())],
+                            ),
+                        );
+                    }
+                    if let Some(error) = pending.addon_query_error.as_ref() {
+                        ui.colored_label(
+                            self.color_text_error(),
+                            self.t("The server is online, but Foxy could not read its addon list."),
+                        );
+                        ui.label(RichText::new(error.as_str()).color(self.color_text_dim()));
+                        ui.label(self.t(
+                            "Retry the check, or join without comparing your addons to the server's.",
+                        ));
+                        ui.add_space(6.0);
+                    }
+                    if pending.final_facts_refreshed {
+                        ui.colored_label(
+                            self.color_text_error(),
+                            self.t("Server or local addon requirements changed. Review the refreshed choices before joining."),
+                        );
+                        ui.add_space(6.0);
+                    }
+                    if final_facts_query_running {
+                        ui.horizontal(|ui| {
+                            ui.add(crate::ui::app::PacedSpinner::new());
+                            ui.label(self.t("Refreshing server and local addon requirements..."));
+                        });
+                    }
                 Frame::NONE
                     .fill(self.color_main_bg())
                     .stroke(egui::Stroke::new(1.0, self.color_text_gray()))
@@ -176,6 +205,7 @@ impl Foxy {
 
                 if !has_addon_actions
                     && pending.unavailable_enabled.is_empty()
+                    && pending.addon_query_error.is_none()
                     && !steam_attention
                     && !ts3_attention
                 {
@@ -552,8 +582,8 @@ impl Foxy {
                         } else {
                             self.t("Launch with selected addons")
                         };
-                        let launch_with_btn = ui.add_enabled(
-                            has_selected_addons && (selected_missing_known_remote || can_launch),
+                    let launch_with_btn = ui.add_enabled(
+                        !final_facts_query_running && pending.final_query_error.is_none() && has_selected_addons && (selected_missing_known_remote || can_launch),
                             Button::new(action_label),
                         );
                         if launch_with_btn.hovered() && launch_with_btn.enabled() {
@@ -567,7 +597,9 @@ impl Foxy {
                     // With no addon actions this is a TeamSpeak/Steam-only modal,
                     // so the button just proceeds: "Launch" for a plain launch,
                     // "Join" for a server join, rather than "Launch without ...".
-                    let launch_without_label = if has_addon_list_actions {
+                    let launch_without_label = if pending.addon_query_error.is_some() {
+                        self.t("Join without addon check")
+                    } else if has_addon_list_actions {
                         self.t("Launch without suggested addons")
                     } else if has_dlc_changes {
                         self.t("Launch without DLC changes")
@@ -576,13 +608,22 @@ impl Foxy {
                     } else {
                         self.t("Join")
                     };
-                    let launch_without_btn =
-                        ui.add_enabled(can_launch, Button::new(launch_without_label));
+                    let launch_without_btn = ui.add_enabled(
+                        !final_facts_query_running && pending.final_query_error.is_none() && can_launch,
+                        Button::new(launch_without_label),
+                    );
                     if launch_without_btn.hovered() && can_launch {
                         ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                     }
                     if launch_without_btn.clicked() {
                         launch_without_suggestions = true;
+                    }
+
+                    if pending.final_query_error.is_some() {
+                        retry_final_query = ui.button(self.t("Retry final Join refresh")).clicked();
+                    }
+                    if pending.addon_query_error.is_some() {
+                        retry_addon_query = ui.button(self.t("Retry addon check")).clicked();
                     }
 
                     let cancel_btn = ui.button(self.t("Cancel"));
@@ -597,7 +638,26 @@ impl Foxy {
 
         if cancel {
             self.pending_join_preflight = None;
-            self.prelaunch_recheck_at = None;
+            self.pending_join_preflight_query = None;
+            self.prelaunch_process_checks = Default::default();
+            return;
+        }
+
+        if retry_final_query {
+            if let Some(choice) = pending.final_confirmation_choice {
+                self.confirm_final_join_facts(ctx, &pending, choice);
+            }
+            return;
+        }
+
+        if retry_addon_query {
+            self.pending_join_preflight = None;
+            self.prelaunch_process_checks = Default::default();
+            self.start_join_server_query(
+                &pending.original_repository,
+                &pending.server,
+                &pending.repo_name,
+            );
             return;
         }
 
@@ -618,7 +678,7 @@ impl Foxy {
             }
             // Recheck promptly on the next frame so the warning clears once
             // Steam finishes starting.
-            self.prelaunch_recheck_at = None;
+            self.prelaunch_process_checks = Default::default();
             self.pending_join_preflight = Some(pending);
             return;
         }
@@ -643,7 +703,7 @@ impl Foxy {
             }
             // Recheck promptly on the next frame so the warning clears once the
             // client finishes starting.
-            self.prelaunch_recheck_at = None;
+            self.prelaunch_process_checks = Default::default();
             self.pending_join_preflight = Some(pending);
             return;
         }
@@ -651,6 +711,7 @@ impl Foxy {
         if let Some(remote) = remote_download_request {
             if self.start_join_preflight_remote_download(&pending, &remote) {
                 self.pending_join_preflight = None;
+                self.prelaunch_process_checks = Default::default();
             } else {
                 self.pending_join_preflight = Some(pending);
             }
@@ -674,6 +735,19 @@ impl Foxy {
             }
         }
 
+        if launch_with_suggestions || launch_without_suggestions {
+            let has_selected_missing_remote = launch_with_suggestions
+                && pending
+                    .known_remote
+                    .iter()
+                    .any(|remote| remote.selected && !remote.available);
+            if !has_selected_missing_remote
+                && self.confirm_final_join_facts(ctx, &pending, launch_with_suggestions)
+            {
+                return;
+            }
+        }
+
         if launch_with_suggestions {
             let selected_missing_known_remote = pending
                 .known_remote
@@ -682,6 +756,7 @@ impl Foxy {
             if selected_missing_known_remote {
                 if self.start_selected_join_preflight_remote_download(&pending) {
                     self.pending_join_preflight = None;
+                    self.prelaunch_process_checks = Default::default();
                 } else {
                     self.pending_join_preflight = Some(pending);
                 }
@@ -689,6 +764,7 @@ impl Foxy {
             }
 
             self.pending_join_preflight = None;
+            self.prelaunch_process_checks = Default::default();
             let selected_repository = Self::repository_with_join_preflight_selections(&pending);
             let result = self.launch_repository_with_database_guard(
                 &selected_repository,
@@ -704,7 +780,7 @@ impl Foxy {
 
         if launch_without_suggestions {
             self.pending_join_preflight = None;
-            self.prelaunch_recheck_at = None;
+            self.prelaunch_process_checks = Default::default();
             if pending.query_server_before_join {
                 self.start_join_server_query(
                     &pending.original_repository,
@@ -1017,6 +1093,7 @@ impl Foxy {
                 ));
                 if let Some(error) = &pending.error {
                     ui.colored_label(self.color_text_error(), error);
+                    self.render_export_logs_button(ui);
                 }
 
                 ui.add_space(12.0);
@@ -1276,6 +1353,7 @@ impl Foxy {
         }
 
         let mut submit = false;
+        let mut create_blank = false;
         let mut close = false;
         egui::Window::new(self.t("Add repository"))
             .frame(self.modal_window_chrome(ctx))
@@ -1292,7 +1370,7 @@ impl Foxy {
                         // Stable id so the agent GUI driver's `focus` command can
                         // target this field deterministically (see agent_driver
                         // AGENT_FOCUS_TARGETS).
-                        .id(egui::Id::new("agent.add-repository-input"))
+                        .id(egui::Id::unique("agent.add-repository-input"))
                         .desired_width(ui.available_width()),
                 );
                 if input.hovered() {
@@ -1343,12 +1421,13 @@ impl Foxy {
                     }
                 });
 
-                if let Some(error) = &self.add_repository_input_error {
+                if let Some(error) = self.add_repository_input_error.clone() {
                     ui.colored_label(self.color_text_error(), error);
+                    self.render_export_logs_button(ui);
                 }
 
                 ui.add_space(12.0);
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     let importing = self.repository_space_import_in_flight;
                     let add_button = ui.add_enabled(!importing, Button::new(self.t("Add")));
                     if add_button.hovered() && !importing {
@@ -1356,6 +1435,15 @@ impl Foxy {
                     }
                     if add_button.clicked() {
                         submit = true;
+                    }
+
+                    let blank_button =
+                        ui.add_enabled(!importing, Button::new(self.t("Create blank repository")));
+                    if blank_button.hovered() {
+                        ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                    }
+                    if blank_button.clicked() {
+                        create_blank = true;
                     }
 
                     let cancel_button = ui.button(self.t("Cancel"));
@@ -1379,6 +1467,17 @@ impl Foxy {
             self.add_repository_input_error = None;
             self.add_repository_input_name.clear();
             self.add_repository_input_path.clear();
+            self.pending_repository_duplicate_add = None;
+            return;
+        }
+
+        if create_blank && !self.repository_space_import_in_flight {
+            let name = std::mem::take(&mut self.add_repository_input_name);
+            let path = std::mem::take(&mut self.add_repository_input_path);
+            self.add_blank_repository(&name, &path);
+            self.show_add_repository_modal = false;
+            self.add_repository_input_address.clear();
+            self.add_repository_input_error = None;
             self.pending_repository_duplicate_add = None;
             return;
         }
@@ -1431,6 +1530,16 @@ impl Foxy {
             self.pending_repository_space_bulk_action = None;
             return;
         }
+        let unresolved_members = self
+            .repository_view_state
+            .repositories
+            .iter()
+            .filter(|repo| {
+                repo.repository_space_id.as_deref() == Some(action.space_id.as_str())
+                    && repo.repository_space_membership_review
+            })
+            .map(|repo| repo.name.clone())
+            .collect::<Vec<_>>();
 
         let mut confirm = false;
         let mut cancel = false;
@@ -1481,6 +1590,12 @@ impl Foxy {
                 "Review repositories in {name}",
                 &[("name", action.space_name.clone())],
             ));
+            if !unresolved_members.is_empty() {
+                ui.label(self.t_fmt(
+                    "Awaiting membership choice and excluded from this run: {repositories}",
+                    &[("repositories", unresolved_members.join(", "))],
+                ));
+            }
             ui.horizontal(|ui| {
                 let select_all_btn = ui.button(self.t("Select all"));
                 if select_all_btn.hovered() {
@@ -2010,11 +2125,13 @@ impl Foxy {
                             ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                         }
                         if self.delete_repository_delete_files {
-                            ui.label(
-                                self.t(
+                            if let Some(note) = self.delete_files_kept_note(repo_idx) {
+                                ui.label(egui::RichText::new(note).color(self.color_warn()));
+                            } else {
+                                ui.label(self.t(
                                     "This will also delete downloaded files for this repository.",
-                                ),
-                            );
+                                ));
+                            }
                         }
                     }
                     if matches!(

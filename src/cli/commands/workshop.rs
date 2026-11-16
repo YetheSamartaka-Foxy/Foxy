@@ -5,10 +5,10 @@ use std::fs;
 use super::{AppState, CommandError, CommandSuccess};
 use crate::cli::args::{
     CliArgs, WorkshopAddArgs, WorkshopBundleCommand, WorkshopBundleExportArgs,
-    WorkshopBundleImportArgs, WorkshopBundleInspectArgs, WorkshopChecksumArgs, WorkshopCommand,
-    WorkshopDownloadArgs, WorkshopDownloadBackend, WorkshopExportArgs, WorkshopExportFormat,
-    WorkshopFreezeArgs, WorkshopImportArgs, WorkshopOrderArgs, WorkshopPinsArgs,
-    WorkshopRemoveArgs, WorkshopResolveArgs, WorkshopSetArgs, WorkshopShareArgs,
+    WorkshopBundleImportArgs, WorkshopBundleInspectArgs, WorkshopBundleMode, WorkshopChecksumArgs,
+    WorkshopCommand, WorkshopDownloadArgs, WorkshopDownloadBackend, WorkshopExportArgs,
+    WorkshopExportFormat, WorkshopFreezeArgs, WorkshopImportArgs, WorkshopOrderArgs,
+    WorkshopPinsArgs, WorkshopRemoveArgs, WorkshopResolveArgs, WorkshopSetArgs, WorkshopShareArgs,
     WorkshopUnfreezeArgs,
 };
 use crate::cli::exit_codes;
@@ -28,6 +28,7 @@ pub fn run_workshop_command(
         WorkshopCommand::Add(args) => cmd_workshop_add(cli, args),
         WorkshopCommand::Import(args) => cmd_workshop_import(cli, args),
         WorkshopCommand::Remove(args) => cmd_workshop_remove(cli, args),
+        WorkshopCommand::Unsubscribe(args) => cmd_workshop_unsubscribe(cli, args),
         WorkshopCommand::Set(args) => cmd_workshop_set(cli, args),
         WorkshopCommand::Freeze(args) => cmd_workshop_freeze(cli, args),
         WorkshopCommand::Pins(args) => cmd_workshop_pins(args),
@@ -401,21 +402,8 @@ fn cmd_workshop_remove(
     if !cli.yes {
         return Err(CommandError::validation(
             "workshop.remove",
-            "Removing a Workshop item modifies workshop.json and may unsubscribe or delete files; pass --yes to confirm",
+            "Removing a Workshop item changes this game space and may delete Foxy's frozen copy; pass --yes to confirm",
         ));
-    }
-    match args.backend {
-        WorkshopDownloadBackend::SteamHelper => {
-            workshop::run_steam_helper_remove(app_id, &item_id, args.timeout_seconds)
-                .map_err(|err| CommandError::operation("workshop.remove", err))?;
-        }
-        WorkshopDownloadBackend::None => {}
-        WorkshopDownloadBackend::Steamcmd => {
-            return Err(CommandError::validation(
-                "workshop.remove",
-                "SteamCMD cannot unsubscribe Workshop items; use --backend steam-helper or --backend none",
-            ));
-        }
     }
     let summary = workshop::remove_item(
         &space_dir,
@@ -429,6 +417,74 @@ fn cmd_workshop_remove(
         action: "workshop.remove".to_string(),
         message: format!("Removed Steam Workshop item {}", item_id),
         data: json!(summary),
+        exit_code: exit_codes::SUCCESS,
+    })
+}
+
+pub fn cmd_workshop_unsubscribe(
+    cli: &CliArgs,
+    args: WorkshopRemoveArgs,
+) -> Result<CommandSuccess, CommandError> {
+    let state = AppState::load()?;
+    let app_id = active_app_id("workshop.unsubscribe", &state.settings)?;
+    let item_id = single_item_id("workshop.unsubscribe", &args.item)?;
+    let space_dir = spaces::active_game_space_dir();
+    let store = workshop::load_store(&space_dir)
+        .map_err(|err| CommandError::operation("workshop.unsubscribe", err))?;
+    let entry = store.entry(app_id, &item_id).ok_or_else(|| {
+        CommandError::not_found(
+            "workshop.unsubscribe",
+            format!("Steam Workshop item {} is not managed", item_id),
+        )
+    })?;
+    if cli.dry_run {
+        return Ok(CommandSuccess {
+            action: "workshop.unsubscribe".to_string(),
+            message: format!("Dry-run: would unsubscribe Steam Workshop item {}", item_id),
+            data: json!({"entry": entry, "delete_data": args.delete_data, "backend": format!("{:?}", args.backend), "dry_run": true}),
+            exit_code: exit_codes::SUCCESS,
+        });
+    }
+    if !cli.yes {
+        return Err(CommandError::validation(
+            "workshop.unsubscribe",
+            "Unsubscribing changes Steam Workshop state; pass --yes to confirm",
+        ));
+    }
+    match args.backend {
+        WorkshopDownloadBackend::SteamHelper => {
+            workshop::run_steam_helper_remove(app_id, &item_id, args.timeout_seconds)
+                .map_err(|err| CommandError::operation("workshop.unsubscribe", err))?
+        }
+        WorkshopDownloadBackend::None => {
+            return Err(CommandError::validation(
+                "workshop.unsubscribe",
+                "Choose --backend steam-helper to unsubscribe",
+            ));
+        }
+        WorkshopDownloadBackend::Steamcmd => {
+            return Err(CommandError::validation(
+                "workshop.unsubscribe",
+                "SteamCMD cannot unsubscribe Workshop items; use --backend steam-helper",
+            ));
+        }
+    };
+    let deleted_content_path = if args.delete_data {
+        workshop::delete_steam_content(
+            &space_dir,
+            app_id,
+            &item_id,
+            &state.settings.steam_directory,
+        )
+        .map_err(|err| CommandError::operation("workshop.unsubscribe", err))?
+        .map(|path| path.display().to_string())
+    } else {
+        None
+    };
+    Ok(CommandSuccess {
+        action: "workshop.unsubscribe".to_string(),
+        message: format!("Unsubscribed Steam Workshop item {}", item_id),
+        data: json!({"item": entry, "deleted_content_path": deleted_content_path}),
         exit_code: exit_codes::SUCCESS,
     })
 }
@@ -902,6 +958,8 @@ fn cmd_workshop_bundle_import(
     let space_dir = spaces::active_game_space_dir();
     let manifest = workshop::bundle::read_manifest(&args.input)
         .map_err(|err| CommandError::operation("workshop.bundle.import", err))?;
+    let preview = workshop::bundle::preview_import_bundle(&space_dir, app_id, &args.input)
+        .map_err(|err| CommandError::operation("workshop.bundle.import", err))?;
 
     if cli.dry_run {
         return Ok(CommandSuccess {
@@ -911,9 +969,15 @@ fn cmd_workshop_bundle_import(
                 manifest.items.len(),
                 args.input.display()
             ),
-            data: json!({"manifest": manifest, "dry_run": true}),
+            data: json!({"manifest": manifest, "preview": preview, "mode": args.mode.map(|mode| format!("{:?}", mode)), "dry_run": true}),
             exit_code: exit_codes::SUCCESS,
         });
+    }
+    if (!preview.updated.is_empty() || !preview.unlisted.is_empty()) && args.mode.is_none() {
+        return Err(CommandError::validation(
+            "workshop.bundle.import",
+            "The target already has managed Workshop items; choose --mode merge or --mode match",
+        ));
     }
     if !cli.yes {
         return Err(CommandError::validation(
@@ -922,9 +986,18 @@ fn cmd_workshop_bundle_import(
         ));
     }
 
-    let summary =
-        workshop::bundle::import_bundle(&space_dir, app_id, &args.input, !args.skip_payloads)
-            .map_err(|err| CommandError::operation("workshop.bundle.import", err))?;
+    let mode = match args.mode.unwrap_or(WorkshopBundleMode::Merge) {
+        WorkshopBundleMode::Merge => workshop::bundle::BundleImportMode::Merge,
+        WorkshopBundleMode::Match => workshop::bundle::BundleImportMode::Match,
+    };
+    let summary = workshop::bundle::import_bundle_with_mode(
+        &space_dir,
+        app_id,
+        &args.input,
+        !args.skip_payloads,
+        mode,
+    )
+    .map_err(|err| CommandError::operation("workshop.bundle.import", err))?;
 
     let backend = effective_backend(&args.download);
     let mut failed_downloads = Vec::new();
@@ -939,8 +1012,21 @@ fn cmd_workshop_bundle_import(
             &args.download,
         ) {
             Ok(Some(helper)) => {
-                workshop::upsert_item(&space_dir, app_id, item_id, None, None, Some(&helper), true)
-                    .map_err(|err| CommandError::operation("workshop.bundle.import", err))?;
+                let enabled = workshop::load_store(&space_dir)
+                    .map_err(|err| CommandError::operation("workshop.bundle.import", err))?
+                    .entry(app_id, item_id)
+                    .map(|entry| entry.enabled)
+                    .unwrap_or(true);
+                workshop::upsert_item(
+                    &space_dir,
+                    app_id,
+                    item_id,
+                    None,
+                    None,
+                    Some(&helper),
+                    enabled,
+                )
+                .map_err(|err| CommandError::operation("workshop.bundle.import", err))?;
                 downloaded.push(item_id.clone());
                 if args.freeze
                     && let Err(error) = workshop::freeze_item(
@@ -974,6 +1060,8 @@ fn cmd_workshop_bundle_import(
         ),
         data: json!({
             "summary": summary,
+            "preview": preview,
+            "mode": format!("{:?}", mode),
             "downloaded": downloaded,
             "failed_downloads": failed_downloads,
             "share_code": manifest.share_code,

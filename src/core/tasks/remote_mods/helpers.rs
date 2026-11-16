@@ -10,9 +10,7 @@ use std::path::Path;
 pub(super) const MANIFEST_FETCH_CONCURRENCY: usize = 64;
 
 pub(super) fn mod_task_limit() -> usize {
-    let cpu = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
+    let cpu = crate::core::utils::cpu_threads::cpu_threads().unwrap_or(4);
     // Keep remote fan-out bounded to SQLite write capacity.
     let lock_retries = sqlite_perf_snapshot().lock_retries;
     let pressure_divisor = if lock_retries >= 64 {

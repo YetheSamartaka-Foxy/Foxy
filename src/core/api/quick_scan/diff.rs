@@ -262,6 +262,33 @@ async fn quick_local_change_diff_locked(
     pre_hashed: PreHashedFiles<'_>,
 ) -> Vec<ModDiffSummary> {
     let quick_scan_total_started = Instant::now();
+    if context
+        .hash_cancel_rx()
+        .is_some_and(|cancel| *cancel.borrow())
+    {
+        return Vec::new();
+    }
+    let (repository_empty, empty_addons) =
+        match crate::core::api::check_contracts::accepted_empty_scope(
+            &context,
+            repo_url,
+            context.target_local_path.as_deref().unwrap_or_default(),
+        ) {
+            Ok(scope) => scope,
+            Err(detail) => {
+                context.hash_evidence.record_issue(
+                    crate::core::tasks::calculate_hashes::HashIssue {
+                        file_path: String::new(),
+                        kind: crate::core::tasks::calculate_hashes::HashIssueKind::Skipped,
+                        detail: Some(detail),
+                    },
+                );
+                return Vec::new();
+            }
+        };
+    if repository_empty {
+        return Vec::new();
+    }
     let preflight_started = Instant::now();
     let mut checksum_ready_check_elapsed = Duration::default();
     let mut bootstrap_check_elapsed = Duration::default();
@@ -286,6 +313,15 @@ async fn quick_local_change_diff_locked(
         checksum_ready_check_elapsed = checksum_ready_started.elapsed();
 
         if !preflight.remote_ready {
+            context
+                .hash_evidence
+                .record_issue(crate::core::tasks::calculate_hashes::HashIssue {
+                    file_path: String::new(),
+                    kind: crate::core::tasks::calculate_hashes::HashIssueKind::Skipped,
+                    detail: Some(
+                        "Local check is incomplete. Refresh repository metadata first.".into(),
+                    ),
+                });
             info!(
                 "Quick scan skipped for repo {}: remote checksum metadata is not ready yet",
                 repo_url
@@ -323,6 +359,13 @@ async fn quick_local_change_diff_locked(
                     });
                 }
                 calculate_hashes(context.clone(), repo_url, progress_tx).await;
+                if context.hash_evidence.is_incomplete()
+                    || context
+                        .hash_cancel_rx()
+                        .is_some_and(|cancel| *cancel.borrow())
+                {
+                    return Vec::new();
+                }
                 bootstrap_hashed_all_files = true;
                 let _ =
                     refresh_content_hashes_for_repository(context.clone(), repo_url, None).await;
@@ -386,6 +429,13 @@ async fn quick_local_change_diff_locked(
                             }
                         } else {
                             calculate_hashes(context.clone(), repo_url, progress_tx).await;
+                            if context.hash_evidence.is_incomplete()
+                                || context
+                                    .hash_cancel_rx()
+                                    .is_some_and(|cancel| *cancel.borrow())
+                            {
+                                return Vec::new();
+                            }
                             bootstrap_hashed_all_files = true;
                             let _ = refresh_content_hashes_for_repository(
                                 context.clone(),
@@ -500,6 +550,12 @@ async fn quick_local_change_diff_locked(
         bootstrap_check_elapsed = bootstrap_started.elapsed();
     }
 
+    if context
+        .hash_cancel_rx()
+        .is_some_and(|cancel| *cancel.borrow())
+    {
+        return Vec::new();
+    }
     let preflight_elapsed = preflight_started.elapsed();
 
     let db_load_started = Instant::now();
@@ -588,6 +644,7 @@ async fn quick_local_change_diff_locked(
         idx = end;
     }
     let addon_rows_elapsed = addon_rows_started.elapsed();
+    mods.retain(|addon| !empty_addons.contains(&addon.name.to_lowercase()));
 
     if let Some(filter) = mod_name_filter
         && !filter.is_empty()
@@ -789,7 +846,10 @@ async fn quick_local_change_diff_locked(
     let diffs = diff_result.diffs;
 
     if !diff_result.clean_hash_updates.is_empty() {
-        persist_mod_content_hashes(&db, repo_url, &diff_result.clean_hash_updates).await;
+        if !persist_mod_content_hashes(&db, repo_url, &diff_result.clean_hash_updates).await {
+            super::content_hash::record_content_save_failure(&context);
+            return diffs;
+        }
         finalize_repository_hashes_from_mods(context.clone(), repo_url).await;
         finalize_repository_content_hashes_from_mods(context.clone(), repo_url).await;
         info!(

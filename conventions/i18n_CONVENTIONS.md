@@ -67,6 +67,10 @@ cargo run --manifest-path tools/i18n-checker/Cargo.toml --bin locale-apply -- --
 
 The `translations.json` file must be UTF-8 and shaped as `{ "locale": { "English key from en.json": "translated value" } }`. The helper preserves existing formatting, inserts missing keys near their `en.json` order, checks placeholders, and rejects literal `?` in changed values unless `--allow-question-mark` is passed after manual review. Pass `--remove-extra` when the same batch also replaces obsolete keys; it removes only keys absent from `en.json` in the locale files named by the batch.
 
+Locale-specific plural keys such as `.few` can also appear in translation batches when their base key exists in `en.json`. The helper inserts these variants after the base key and preserves valid plural variants under `--remove-extra`. The checker validates their empty values and placeholders against the English base. The changed-pair audit includes newly added entries as well as edits to existing entries.
+
+English key coverage alone does not establish plural coverage. Review the categories selected by `plural_category` in `src/ui/i18n.rs` and supply the matching variants for each pluralized message; otherwise the UI falls back to the base wording.
+
 Then run:
 
 ```powershell

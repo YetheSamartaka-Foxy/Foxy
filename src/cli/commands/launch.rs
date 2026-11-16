@@ -2,11 +2,14 @@ use super::game::launch_error_to_command_error_for;
 use super::{AppState, CommandError, CommandSuccess, effective_repository, find_repository_index};
 use crate::cli::args::{CliArgs, LaunchArgs};
 use crate::cli::exit_codes;
-use crate::core::game::{GameLaunchCtx, GameModule, LaunchCommand};
-use crate::core::steam::{SteamEnsureResult, ensure_steam_running};
+use crate::core::game::{
+    GameLaunchCtx, GameModule, LaunchCommand,
+    launch_preparation::{LaunchApproval, LaunchFailure},
+};
 use crate::ui::types::{Repository, RepositoryServer, SettingsViewState};
 use serde_json::json;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 
 pub fn cmd_launch(cli: &CliArgs, args: LaunchArgs) -> Result<CommandSuccess, CommandError> {
     let active = crate::core::game::spaces::active_game_space();
@@ -69,6 +72,7 @@ pub fn cmd_launch(cli: &CliArgs, args: LaunchArgs) -> Result<CommandSuccess, Com
                 "args": launch_spec.args,
                 "cwd": launch_spec.cwd.display().to_string(),
                 "execute": false,
+                "extra_file_preparation": super::extra_file_launch_preview("launch", &state.settings)?,
                 "dry_run": cli.dry_run
             }),
             exit_code: exit_codes::SUCCESS,
@@ -86,55 +90,45 @@ pub fn cmd_launch(cli: &CliArgs, args: LaunchArgs) -> Result<CommandSuccess, Com
         ));
     }
 
-    let extra_file_activation = crate::core::game::extra_files::activate_for_launch(
-        &crate::core::game::spaces::active_game_space_dir(),
-        module.install_dir_from_settings(&state.settings),
-    )
-    .map_err(|err| {
-        CommandError::operation(
+    let approval = LaunchApproval {
+        incomplete_extra_files: args.allow_incomplete_preparation,
+        live_workshop_fallback: args.allow_live_fallback,
+        extra_file_conflicts: super::extra_file_launch_choices(
             "launch",
-            format!("Failed to apply extra files before launch: {}", err),
-        )
-    })?;
-
-    let steam_status = match ensure_steam_running(&state.settings.steam_directory) {
-        Ok(SteamEnsureResult::AlreadyRunning) => "already_running",
-        Ok(SteamEnsureResult::Started) => "started",
-        Ok(SteamEnsureResult::SkippedMissingDirectory) => "not_configured_fallback",
-        Err(err) => {
-            return Err(CommandError::operation(
-                "launch",
-                format!("Failed to prepare Steam before launch: {}", err),
-            ));
-        }
+            &state.settings,
+            &args.keep_extra_file,
+            &args.reapply_extra_file,
+            args.approve_extra_file_layers,
+            cli.yes,
+        )?,
+        approve_extra_file_layers: super::approved_extra_file_layers(
+            "launch",
+            &state.settings,
+            args.approve_extra_file_layers,
+        )?,
     };
-
-    if module.steam_app_id_from_settings(&state.settings).is_some()
-        && !crate::core::steam::is_steam_running(&state.settings.steam_directory)
-    {
-        return Err(CommandError::operation("launch", "Steam is not running"));
-    }
-
-    let args: Vec<std::ffi::OsString> = launch_spec
-        .args
-        .iter()
-        .map(std::ffi::OsString::from)
-        .collect();
-    let pid = crate::core::utils::deelevate::spawn_unelevated(
-        launch_spec.executable.as_os_str(),
-        &args,
-        Some(launch_spec.cwd.as_ref()),
+    let cancelled = AtomicBool::new(false);
+    let handoff = crate::core::game::launch_preparation::dispatch_repository(
+        module,
+        &state.settings,
+        &effective,
+        selected_server.as_ref(),
+        approval,
+        None,
+        &cancelled,
     )
-    .map_err(|e| CommandError::operation("launch", format!("Failed to launch: {}", e)))?;
-
-    let message = match steam_status {
-        "started" => format!("Steam started and launch command started (pid={})", pid),
-        "not_configured_fallback" => format!(
-            "Launch command started without Steam pre-check (pid={})",
-            pid
-        ),
-        _ => format!("Launch command started (pid={})", pid),
+    .map_err(|failure| launch_failure_to_command_error("launch", failure))?;
+    let pid = handoff.pid;
+    let command = handoff.command;
+    let steam_status = match handoff.steam_status {
+        Some(crate::core::steam::SteamEnsureResult::AlreadyRunning) => "already_running",
+        Some(crate::core::steam::SteamEnsureResult::Started) => "started",
+        Some(crate::core::steam::SteamEnsureResult::SkippedMissingDirectory) => {
+            "not_configured_fallback"
+        }
+        None => "not_needed",
     };
+    let message = format!("Launch command started (pid={})", pid);
 
     Ok(CommandSuccess {
         action: "launch".to_string(),
@@ -142,14 +136,14 @@ pub fn cmd_launch(cli: &CliArgs, args: LaunchArgs) -> Result<CommandSuccess, Com
         data: json!({
             "repository": repo.name,
             "selected_profile": repo.selected_profile,
-            "executable": launch_spec.executable.display().to_string(),
-            "args": launch_spec.args,
-            "cwd": launch_spec.cwd.display().to_string(),
+            "executable": command.program.display().to_string(),
+            "args": command.args,
+            "cwd": command.cwd.as_ref().unwrap_or(&launch_spec.cwd).display().to_string(),
             "steam_status": steam_status,
             "extra_files": {
-                "activated": extra_file_activation.activated.len(),
-                "failed": extra_file_activation.failed.len(),
-                "skipped_disabled": extra_file_activation.skipped_disabled
+                "activated": handoff.extra_files.activated.len(),
+                "failed": handoff.extra_files.failed.len(),
+                "skipped_disabled": handoff.extra_files.skipped_disabled
             },
             "execute": true,
             "pid": pid
@@ -187,7 +181,7 @@ fn build_launch_spec(
         steam_directory: &settings.steam_directory,
         settings: Some(settings),
     };
-    let command: LaunchCommand = module.build_launch(&plan, &ctx).map_err(to_error)?;
+    let command: LaunchCommand = module.build_launch_preview(&plan, &ctx).map_err(to_error)?;
     let cwd = match command.cwd {
         Some(cwd) => cwd,
         None => launch_working_directory(&install_dir)?,
@@ -199,6 +193,44 @@ fn build_launch_spec(
         cwd,
         requires_existing_executable: cfg!(target_os = "windows"),
     })
+}
+
+fn launch_failure_to_command_error(action: &str, failure: LaunchFailure) -> CommandError {
+    match failure {
+        LaunchFailure::ExtraFileConflicts(conflicts) => CommandError::validation(
+            action,
+            format!(
+                "Extra files changed: {}. Choose --keep-extra-file <id> or --reapply-extra-file <id> --yes.",
+                conflicts
+                    .iter()
+                    .map(|entry| entry.entry_id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ),
+        LaunchFailure::ExtraFileLayers(_) => CommandError::validation(
+            action,
+            "Review extra-file layer replacements with config extra-file activate --dry-run, then pass --approve-extra-file-layers --yes",
+        ),
+        LaunchFailure::ExtraFiles(failures) => CommandError::validation(
+            action,
+            format!(
+                "Extra-file preparation failed ({} issue(s)); pass --allow-incomplete-preparation to continue: {}",
+                failures.len(),
+                failures.join("; ")
+            ),
+        ),
+        LaunchFailure::FrozenCopies(missing) => CommandError::validation(
+            action,
+            format!(
+                "Frozen Workshop copies are missing for: {}; pass --allow-live-fallback to use live Workshop content",
+                missing.join(", ")
+            ),
+        ),
+        LaunchFailure::Failed(error) | LaunchFailure::Recovery(error) => {
+            CommandError::operation(action, error)
+        }
+    }
 }
 
 fn launch_working_directory(install_dir: &str) -> Result<PathBuf, CommandError> {

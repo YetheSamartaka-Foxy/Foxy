@@ -1,3 +1,6 @@
+mod input;
+
+use input::{NavigationSteps, key_events};
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -8,7 +11,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{
-    self, Event, Key, Modifiers, MouseWheelUnit, PointerButton, Pos2, TouchPhase, UserData, Vec2,
+    self, Event, Key, Modifiers, MouseWheelUnit, PointerButton, Pos2, TouchPhase, Vec2,
     ViewportCommand,
 };
 use rand::{RngExt, distr::Alphanumeric, rng};
@@ -56,6 +59,10 @@ pub struct AgentGuiRuntime {
     pending_screenshots: Vec<PendingScreenshot>,
     pending_waits: Vec<PendingWait>,
     pending_settles: Vec<PendingSettle>,
+    pending_navigation: VecDeque<PendingNavigation>,
+    pending_focus: Option<PendingFocus>,
+    native_modifiers: Modifiers,
+    restore_native_modifiers: bool,
     /// In-flight `drag` gestures, advanced one event per rendered frame.
     pending_drags: Vec<PendingDrag>,
     /// In-flight server-side `batch` pipelines, resumed across frames.
@@ -133,6 +140,7 @@ struct PendingBatch {
     deadline: Instant,
     /// Set while the current step is parked, awaiting its response.
     step_rx: Option<Receiver<AgentGuiResponse>>,
+    resume_after_frame: u64,
 }
 
 /// One semantic UI event for the `events` ring buffer.
@@ -145,10 +153,10 @@ struct AgentUiEvent {
 
 #[derive(Debug)]
 struct PendingScreenshot {
-    request_id: u64,
     output: PathBuf,
     response_tx: Sender<AgentGuiResponse>,
     requested_at: Instant,
+    image_rx: Receiver<std::sync::Arc<egui::ColorImage>>,
     /// Node rects captured at request time when `--annotate` was set, so the
     /// completion path can draw the overlay and emit the sidecar JSON.
     annotation: Option<Vec<AgentGuiNode>>,
@@ -176,6 +184,19 @@ struct PendingSettle {
     /// When set, include the resolved focused-widget name in the response (used
     /// by `nav` so the caller learns where focus landed).
     report_focus: bool,
+}
+
+#[derive(Debug)]
+struct PendingNavigation {
+    steps: NavigationSteps,
+    completion: PendingSettle,
+}
+
+#[derive(Debug)]
+struct PendingFocus {
+    id: egui::Id,
+    completion: PendingSettle,
+    response: AgentGuiResponse,
 }
 
 #[derive(Debug)]
@@ -821,6 +842,10 @@ impl AgentGuiRuntime {
             pending_screenshots: Vec::new(),
             pending_waits: Vec::new(),
             pending_settles: Vec::new(),
+            pending_navigation: VecDeque::new(),
+            pending_focus: None,
+            native_modifiers: Modifiers::default(),
+            restore_native_modifiers: false,
             pending_drags: Vec::new(),
             pending_batches: Vec::new(),
             diff_baselines: VecDeque::new(),
@@ -1254,10 +1279,63 @@ impl Foxy {
         }
     }
 
+    pub(crate) fn agent_gui_raw_input(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
+        if input.viewport_id != egui::ViewportId::ROOT {
+            return;
+        }
+        let Some(mut runtime) = self.agent_gui.take() else {
+            return;
+        };
+        for event in &input.events {
+            match event {
+                Event::ModifiersChanged(modifiers) => runtime.native_modifiers = *modifiers,
+                Event::WindowFocused(false) => runtime.native_modifiers = Modifiers::default(),
+                _ => {}
+            }
+        }
+        if runtime.restore_native_modifiers {
+            input
+                .events
+                .push(Event::ModifiersChanged(runtime.native_modifiers));
+        }
+        let native_event_count = input.events.len();
+        if runtime.pending_navigation.is_empty() && runtime.pending_focus.is_none() {
+            while let Ok(request) = runtime.rx.try_recv() {
+                self.handle_agent_gui_request(ctx, &mut runtime, input, request);
+                if input.events.len() > native_event_count
+                    || !runtime.pending_navigation.is_empty()
+                    || runtime.pending_focus.is_some()
+                {
+                    break;
+                }
+            }
+            if input.events.len() == native_event_count && runtime.pending_focus.is_none() {
+                self.agent_gui_advance_batches(ctx, &mut runtime, input);
+            }
+        }
+        if let Some(navigation) = runtime.pending_navigation.front_mut()
+            && Instant::now() < navigation.completion.deadline
+            && input.events.len() == native_event_count
+            && navigation.steps.apply_frame(input)
+        {
+            navigation.completion.target_frame = ctx.cumulative_frame_nr().saturating_add(1);
+            ctx.request_repaint();
+        }
+        if input.events.len() == native_event_count {
+            self.agent_gui_complete_drags(ctx, &mut runtime, input);
+        }
+        runtime.restore_native_modifiers = input.events[native_event_count..]
+            .iter()
+            .any(|event| matches!(event, Event::ModifiersChanged(_)));
+        self.agent_gui = Some(runtime);
+    }
+
     pub(crate) fn poll_agent_gui(&mut self, ctx: &egui::Context) {
         let Some(mut runtime) = self.agent_gui.take() else {
             return;
         };
+
+        self.agent_gui_complete_focus(ctx, &mut runtime);
 
         // Re-assert stable-render each frame so frozen animation time / disabled
         // blink survive egui's per-frame style reset while the mode is on.
@@ -1267,16 +1345,9 @@ impl Foxy {
 
         self.agent_gui_complete_screenshots(ctx, &mut runtime);
 
-        while let Ok(request) = runtime.rx.try_recv() {
-            self.handle_agent_gui_request(ctx, &mut runtime, request);
-        }
-
         self.agent_gui_complete_waits(ctx, &mut runtime);
         self.agent_gui_complete_settles(ctx, &mut runtime);
-        self.agent_gui_complete_drags(ctx, &mut runtime);
-        // Resume any parked batch pipelines after the per-step completion passes
-        // above so a step that finished this frame is picked up promptly.
-        self.agent_gui_advance_batches(ctx, &mut runtime);
+        self.agent_gui_complete_navigation(ctx, &mut runtime);
         // Derive view/modal/focus/toast/download transition events from the
         // frame we just observed (the causal feed behind `events`).
         self.agent_gui_record_state_events(ctx, &mut runtime);
@@ -1290,6 +1361,8 @@ impl Foxy {
         if !runtime.pending_waits.is_empty()
             || !runtime.pending_screenshots.is_empty()
             || !runtime.pending_settles.is_empty()
+            || !runtime.pending_navigation.is_empty()
+            || runtime.pending_focus.is_some()
             || !runtime.pending_drags.is_empty()
             || !runtime.pending_batches.is_empty()
         {
@@ -1303,6 +1376,7 @@ impl Foxy {
         &mut self,
         ctx: &egui::Context,
         runtime: &mut AgentGuiRuntime,
+        input: &mut egui::RawInput,
         request: AgentGuiUiRequest,
     ) {
         let started_at = Instant::now();
@@ -1409,6 +1483,7 @@ impl Foxy {
                 double,
             } => match self.agent_gui_click(
                 ctx,
+                input,
                 text.as_deref(),
                 id.as_deref(),
                 *x,
@@ -1432,14 +1507,14 @@ impl Foxy {
             } => {
                 let pos = self.agent_gui_pointer_pos(ctx, id.as_deref(), *x, *y);
                 let mods = modifiers.to_egui();
-                ctx.input_mut(|input| {
-                    input.events.push(Event::PointerMoved(pos));
-                    input.events.push(Event::MouseWheel {
-                        unit: MouseWheelUnit::Point,
-                        delta: Vec2::new(*dx, *dy),
-                        phase: TouchPhase::Move,
-                        modifiers: mods,
-                    });
+                input.events.push(Event::ModifiersChanged(mods));
+                input.events.push(Event::PointerMoved(pos));
+                input.events.push(Event::MouseWheel {
+                    source: egui::MouseWheelSource::Unknown,
+                    unit: MouseWheelUnit::Point,
+                    delta: Vec2::new(*dx, *dy),
+                    phase: TouchPhase::Move,
+                    modifiers: mods,
                 });
                 ctx.request_repaint();
                 AgentGuiResponse::ok(
@@ -1451,7 +1526,7 @@ impl Foxy {
             }
             AgentGuiCommand::Hover { id, x, y } => {
                 let pos = self.agent_gui_pointer_pos(ctx, id.as_deref(), *x, *y);
-                ctx.input_mut(|input| input.events.push(Event::PointerMoved(pos)));
+                input.events.push(Event::PointerMoved(pos));
                 ctx.request_repaint();
                 AgentGuiResponse::ok(
                     &command,
@@ -1468,6 +1543,7 @@ impl Foxy {
                 button,
             } => match self.agent_gui_mouse_button(
                 ctx,
+                input,
                 id.as_deref(),
                 *x,
                 *y,
@@ -1492,6 +1568,7 @@ impl Foxy {
                 button,
             } => match self.agent_gui_mouse_button(
                 ctx,
+                input,
                 id.as_deref(),
                 *x,
                 *y,
@@ -1511,22 +1588,8 @@ impl Foxy {
             AgentGuiCommand::Key { key, modifiers } => match parse_agent_gui_key(key) {
                 Some(parsed) => {
                     let mods = modifiers.to_egui();
-                    ctx.input_mut(|input| {
-                        input.events.push(Event::Key {
-                            key: parsed,
-                            physical_key: None,
-                            pressed: true,
-                            repeat: false,
-                            modifiers: mods,
-                        });
-                        input.events.push(Event::Key {
-                            key: parsed,
-                            physical_key: None,
-                            pressed: false,
-                            repeat: false,
-                            modifiers: mods,
-                        });
-                    });
+                    input.events.push(Event::ModifiersChanged(mods));
+                    input.events.extend(key_events(parsed, mods));
                     ctx.request_repaint();
                     AgentGuiResponse::ok(&command, &view, started_at, json!({ "queued": true }))
                 }
@@ -1539,7 +1602,7 @@ impl Foxy {
                 ),
             },
             AgentGuiCommand::Type { text } => {
-                ctx.input_mut(|input| input.events.push(Event::Text(text.clone())));
+                input.events.push(Event::Text(text.clone()));
                 ctx.request_repaint();
                 AgentGuiResponse::ok(
                     &command,
@@ -1553,16 +1616,19 @@ impl Foxy {
                 // Capture the node overlay map now so the sidecar reflects the
                 // frame the screenshot was requested from.
                 let annotation = annotate.then(|| self.agent_gui_nodes(ctx));
+                let (image_tx, image_rx) = std::sync::mpsc::channel();
                 runtime.pending_screenshots.push(PendingScreenshot {
-                    request_id: request.request_id,
                     output,
                     response_tx: request.response_tx,
                     requested_at: started_at,
+                    image_rx,
                     annotation,
                 });
-                ctx.send_viewport_cmd(ViewportCommand::Screenshot(UserData::new(
-                    request.request_id,
-                )));
+                let repaint = ctx.clone();
+                ctx.request_screenshot(move |image| {
+                    let _ = image_tx.send(image);
+                    repaint.request_repaint();
+                });
                 ctx.request_repaint();
                 return;
             }
@@ -1749,41 +1815,18 @@ impl Foxy {
                 }
             }
             AgentGuiCommand::Nav { count, reverse } => {
-                let mods = AgentGuiModifiers {
-                    shift: *reverse,
-                    ..Default::default()
-                }
-                .to_egui();
-                ctx.input_mut(|input| {
-                    for _ in 0..(*count).max(1) {
-                        input.events.push(Event::Key {
-                            key: Key::Tab,
-                            physical_key: None,
-                            pressed: true,
-                            repeat: false,
-                            modifiers: mods,
-                        });
-                        input.events.push(Event::Key {
-                            key: Key::Tab,
-                            physical_key: None,
-                            pressed: false,
-                            repeat: false,
-                            modifiers: mods,
-                        });
-                    }
-                });
-                ctx.request_repaint();
-                // Park one frame so egui consumes the Tab events, then report
-                // where focus landed.
-                runtime.pending_settles.push(PendingSettle {
-                    command: command.clone(),
-                    target_frame: ctx.cumulative_frame_nr().saturating_add(1),
-                    response_tx: request.response_tx,
-                    deadline: Instant::now()
-                        .checked_add(DEFAULT_COMMAND_TIMEOUT)
-                        .unwrap_or_else(Instant::now),
-                    requested_at: started_at,
-                    report_focus: true,
+                runtime.pending_navigation.push_back(PendingNavigation {
+                    steps: NavigationSteps::new(*count, *reverse),
+                    completion: PendingSettle {
+                        command: command.clone(),
+                        target_frame: u64::MAX,
+                        response_tx: request.response_tx,
+                        deadline: Instant::now()
+                            .checked_add(DEFAULT_COMMAND_TIMEOUT)
+                            .unwrap_or_else(Instant::now),
+                        requested_at: started_at,
+                        report_focus: true,
+                    },
                 });
                 ctx.request_repaint_after(Duration::from_millis(16));
                 return;
@@ -1916,6 +1959,7 @@ impl Foxy {
                 // text with a follow-up snapshot/text call.
                 match self.agent_gui_mouse_button(
                     ctx,
+                    input,
                     id.as_deref(),
                     *x,
                     *y,
@@ -1926,6 +1970,7 @@ impl Foxy {
                     Ok(down) => {
                         let _ = self.agent_gui_mouse_button(
                             ctx,
+                            input,
                             id.as_deref(),
                             down.get("x").and_then(Value::as_f64).map(|v| v as f32),
                             down.get("y").and_then(Value::as_f64).map(|v| v as f32),
@@ -1954,6 +1999,7 @@ impl Foxy {
                 // path to activate one by its visible label.
                 match self.agent_gui_click(
                     ctx,
+                    input,
                     Some(item),
                     None,
                     None,
@@ -2082,6 +2128,7 @@ impl Foxy {
                 self.agent_gui_start_batch(
                     ctx,
                     runtime,
+                    input,
                     steps.clone(),
                     *stop_on_error,
                     request.response_tx,
@@ -2266,7 +2313,66 @@ impl Foxy {
             }
         }
 
-        let _ = request.response_tx.send(response);
+        let focus_id = if response.ok {
+            match &command {
+                AgentGuiCommand::Focus { .. } => response.data["focused"]
+                    .as_str()
+                    .and_then(agent_gui_focus_target_id),
+                AgentGuiCommand::Fill { target, .. } => {
+                    agent_gui_focus_target_id(&normalize_selector(target))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(id) = focus_id {
+            runtime.pending_focus = Some(PendingFocus {
+                id,
+                completion: PendingSettle {
+                    command,
+                    target_frame: u64::MAX,
+                    response_tx: request.response_tx,
+                    deadline: started_at + DEFAULT_COMMAND_TIMEOUT,
+                    requested_at: started_at,
+                    report_focus: false,
+                },
+                response,
+            });
+            ctx.request_repaint();
+        } else {
+            let _ = request.response_tx.send(response);
+        }
+    }
+
+    fn agent_gui_complete_focus(&self, ctx: &egui::Context, runtime: &mut AgentGuiRuntime) {
+        let Some(mut pending) = runtime.pending_focus.take() else {
+            return;
+        };
+        if ctx.cumulative_frame_nr() >= pending.completion.target_frame
+            && ctx.memory(|memory| memory.focused()) == Some(pending.id)
+        {
+            let _ = pending.completion.response_tx.send(pending.response);
+        } else if Instant::now() >= pending.completion.deadline {
+            let response = AgentGuiResponse::error(
+                pending.completion.command.name(),
+                self.agent_gui_view_name(),
+                pending.completion.requested_at,
+                "timeout",
+                "Timed out waiting for the focus target to become available",
+            );
+            let _ = pending.completion.response_tx.send(response);
+        } else {
+            if ctx
+                .read_response(pending.id)
+                .is_some_and(|response| response.enabled())
+            {
+                ctx.memory_mut(|memory| memory.request_focus(pending.id));
+                pending.completion.target_frame = ctx.cumulative_frame_nr().saturating_add(1);
+            }
+            runtime.pending_focus = Some(pending);
+            ctx.request_repaint();
+        }
     }
 
     fn agent_gui_complete_screenshots(
@@ -2274,27 +2380,10 @@ impl Foxy {
         ctx: &egui::Context,
         runtime: &mut AgentGuiRuntime,
     ) {
-        let events = ctx.input(|input| input.events.clone());
-        for event in events {
-            let Event::Screenshot {
-                user_data, image, ..
-            } = event
-            else {
-                continue;
-            };
-            let Some(request_id) = user_data
-                .data
-                .as_ref()
-                .and_then(|data| data.downcast_ref::<u64>())
-                .copied()
-            else {
-                continue;
-            };
-            let Some(index) = runtime
-                .pending_screenshots
-                .iter()
-                .position(|pending| pending.request_id == request_id)
-            else {
+        let mut index = 0;
+        while index < runtime.pending_screenshots.len() {
+            let Ok(image) = runtime.pending_screenshots[index].image_rx.try_recv() else {
+                index += 1;
                 continue;
             };
             let pending = runtime.pending_screenshots.remove(index);
@@ -2435,18 +2524,55 @@ impl Foxy {
             }
             if now >= runtime.pending_settles[index].deadline {
                 let pending = runtime.pending_settles.remove(index);
-                // A settle that times out still returns the current snapshot:
-                // the frame simply did not advance, which is itself observable.
-                let response = AgentGuiResponse::ok(
-                    &pending.command,
+                let mut response = AgentGuiResponse::error(
+                    pending.command.name(),
                     self.agent_gui_view_name(),
                     pending.requested_at,
-                    self.agent_gui_snapshot_value(ctx),
+                    "timeout",
+                    "Timed out waiting for the requested frame to finish",
                 );
+                response.data = self.agent_gui_snapshot_value(ctx);
                 let _ = pending.response_tx.send(response);
                 continue;
             }
             index += 1;
+        }
+    }
+
+    fn agent_gui_complete_navigation(
+        &mut self,
+        ctx: &egui::Context,
+        runtime: &mut AgentGuiRuntime,
+    ) {
+        while let Some(navigation) = runtime.pending_navigation.front() {
+            let now = Instant::now();
+            let completed = navigation.steps.is_finished()
+                && ctx.cumulative_frame_nr() >= navigation.completion.target_frame;
+            if !completed && now < navigation.completion.deadline {
+                break;
+            }
+            let pending = runtime
+                .pending_navigation
+                .pop_front()
+                .expect("navigation present")
+                .completion;
+            let response = if completed {
+                AgentGuiResponse::ok(
+                    &pending.command,
+                    self.agent_gui_view_name(),
+                    pending.requested_at,
+                    self.agent_gui_snapshot_value(ctx),
+                )
+            } else {
+                AgentGuiResponse::error(
+                    pending.command.name(),
+                    self.agent_gui_view_name(),
+                    pending.requested_at,
+                    "timeout",
+                    "Timed out before keyboard navigation completed",
+                )
+            };
+            let _ = pending.response_tx.send(response);
         }
     }
 
@@ -2527,6 +2653,7 @@ impl Foxy {
     fn agent_gui_click(
         &mut self,
         ctx: &egui::Context,
+        input: &mut egui::RawInput,
         text: Option<&str>,
         id: Option<&str>,
         x: Option<f32>,
@@ -2558,23 +2685,22 @@ impl Foxy {
         let button = parse_pointer_button(button)?;
         let mods = modifiers.to_egui();
         let clicks = if double { 2 } else { 1 };
-        ctx.input_mut(|input| {
-            input.events.push(Event::PointerMoved(pos));
-            for _ in 0..clicks {
-                input.events.push(Event::PointerButton {
-                    pos,
-                    button,
-                    pressed: true,
-                    modifiers: mods,
-                });
-                input.events.push(Event::PointerButton {
-                    pos,
-                    button,
-                    pressed: false,
-                    modifiers: mods,
-                });
-            }
-        });
+        input.events.push(Event::ModifiersChanged(mods));
+        input.events.push(Event::PointerMoved(pos));
+        for _ in 0..clicks {
+            input.events.push(Event::PointerButton {
+                pos,
+                button,
+                pressed: true,
+                modifiers: mods,
+            });
+            input.events.push(Event::PointerButton {
+                pos,
+                button,
+                pressed: false,
+                modifiers: mods,
+            });
+        }
         ctx.request_repaint();
         Ok(json!({ "queued": true, "x": pos.x, "y": pos.y, "double": double }))
     }
@@ -2583,6 +2709,7 @@ impl Foxy {
     fn agent_gui_mouse_button(
         &self,
         ctx: &egui::Context,
+        input: &mut egui::RawInput,
         id: Option<&str>,
         x: Option<f32>,
         y: Option<f32>,
@@ -2593,14 +2720,13 @@ impl Foxy {
         let button = parse_pointer_button(button)?;
         let pos = self.agent_gui_pointer_pos(ctx, id, x, y);
         let mods = modifiers.to_egui();
-        ctx.input_mut(|input| {
-            input.events.push(Event::PointerMoved(pos));
-            input.events.push(Event::PointerButton {
-                pos,
-                button,
-                pressed,
-                modifiers: mods,
-            });
+        input.events.push(Event::ModifiersChanged(mods));
+        input.events.push(Event::PointerMoved(pos));
+        input.events.push(Event::PointerButton {
+            pos,
+            button,
+            pressed,
+            modifiers: mods,
         });
         ctx.request_repaint();
         Ok(json!({ "queued": true, "x": pos.x, "y": pos.y, "pressed": pressed }))
@@ -2948,6 +3074,10 @@ impl Foxy {
         push(self.startup_sync_in_progress(), "startup-sync");
         push(self.quick_scan_worker.is_some(), "quick-scan");
         push(self.direct_download_worker.is_some(), "direct-download");
+        push(self.launch_action.is_busy(), "launch-preparation");
+        push(self.game_space_removal_in_flight(), "game-space-removal");
+        push(self.profile_backup_work_in_flight(), "profile-backups");
+        push(self.pending_installer_path.is_some(), "installer-queued");
         push(
             self.repository_space_import_in_flight,
             "repository-space-import",
@@ -2990,7 +3120,7 @@ impl Foxy {
                 "name": repo.name,
                 "address": repo.address,
                 "path": repo.path,
-                "state": repo_state_name(self.repo_state_for_address(&repo.address, &repo.path)),
+                "state": repo_state_name(self.repo_state_for_repository(repo)),
                 "selected": self.repository_view_state.selected_repository == Some(index),
                 "pending_update_count": pending,
                 "addon_count": repo.addons.len(),
@@ -3467,9 +3597,60 @@ impl Foxy {
                     json!(clamped)
                 }
             }
+            "cpu-threads" | "cpu_threads" | "cpu_thread_limit" => {
+                if trimmed.eq_ignore_ascii_case("auto") || trimmed.is_empty() {
+                    self.settings_view_state.cpu_thread_limit = None;
+                } else {
+                    let parsed: u32 = trimmed.parse().map_err(|_| {
+                        format!("Expected an integer thread count or 'auto' for cpu-threads, got '{value}'")
+                    })?;
+                    let max_threads = crate::core::utils::cpu_threads::cpu_thread_limit_max(
+                        self.settings_view_state.cpu_thread_limit_safe,
+                        crate::core::utils::cpu_threads::detected_cpu_threads(),
+                    );
+                    self.settings_view_state.cpu_thread_limit = Some(parsed.clamp(1, max_threads));
+                }
+                crate::core::utils::cpu_threads::set_cpu_thread_limit(
+                    self.settings_view_state.cpu_thread_limit,
+                    self.settings_view_state.cpu_thread_limit_safe,
+                );
+                self.mark_settings_dirty();
+                json!(self.settings_view_state.cpu_thread_limit)
+            }
+            "cpu-safe-limits" | "cpu_safe_limits" | "cpu_thread_limit_safe" => {
+                let parsed = parse_agent_gui_bool(trimmed).ok_or_else(|| {
+                    format!("Expected a boolean for cpu-safe-limits, got '{value}'")
+                })?;
+                self.settings_view_state.cpu_thread_limit_safe = parsed;
+                crate::core::utils::cpu_threads::set_cpu_thread_limit(
+                    self.settings_view_state.cpu_thread_limit,
+                    self.settings_view_state.cpu_thread_limit_safe,
+                );
+                self.mark_settings_dirty();
+                json!(parsed)
+            }
+            "cpu-usage-limit" | "cpu_usage_limit" | "cpu_usage_limit_percent" => {
+                if trimmed.eq_ignore_ascii_case("unlimited")
+                    || trimmed.eq_ignore_ascii_case("none")
+                    || trimmed.is_empty()
+                {
+                    self.settings_view_state.cpu_usage_limit_percent = None;
+                } else {
+                    let parsed: u8 = trimmed.parse().map_err(|_| {
+                        format!("Expected a percent (10-100) or 'unlimited' for cpu-usage-limit, got '{value}'")
+                    })?;
+                    self.settings_view_state.cpu_usage_limit_percent =
+                        crate::core::utils::cpu_governor::sanitize_cpu_usage_limit(Some(parsed));
+                }
+                crate::core::utils::cpu_governor::set_cpu_usage_limit(
+                    self.settings_view_state.cpu_usage_limit_percent,
+                );
+                self.mark_settings_dirty();
+                json!(self.settings_view_state.cpu_usage_limit_percent)
+            }
             other => {
                 return Err(format!(
-                    "Unsupported setting '{other}' (try debug-mode, show-activity-log, show-fps-counter, reduce-motion, extended-diagnostics-logging, ui-scale-percent, locale, or download-speed-limit-mbps)"
+                    "Unsupported setting '{other}' (try debug-mode, show-activity-log, show-fps-counter, reduce-motion, extended-diagnostics-logging, ui-scale-percent, locale, download-speed-limit-mbps, cpu-usage-limit, cpu-threads, or cpu-safe-limits)"
                 ));
             }
         };
@@ -3480,10 +3661,30 @@ impl Foxy {
     /// Serialize the live, effective settings the running app currently holds.
     /// Mirrors `settings show` but reads in-memory state rather than the file.
     fn agent_gui_settings_value(&self) -> Value {
-        serde_json::to_value(&self.settings_view_state).unwrap_or_else(|_| json!({}))
+        let mut settings =
+            serde_json::to_value(&self.settings_view_state).unwrap_or_else(|_| json!({}));
+        crate::core::utils::proxy::redact_settings_value(&mut settings);
+        settings
     }
 
     fn agent_gui_progress_value(&self) -> Value {
+        let mut hash_evidence_issue_counts = json!({
+            "missing": 0, "unreadable": 0, "unstable": 0, "save_failed": 0, "skipped": 0
+        });
+        if let Some(evidence) = &self.hash_evidence_state {
+            use crate::core::tasks::calculate_hashes::HashIssueKind;
+            for issue in evidence.issues_snapshot() {
+                let key = match issue.kind {
+                    HashIssueKind::Missing => "missing",
+                    HashIssueKind::Unreadable => "unreadable",
+                    HashIssueKind::Unstable => "unstable",
+                    HashIssueKind::SaveFailed => "save_failed",
+                    HashIssueKind::Skipped => "skipped",
+                };
+                let count = hash_evidence_issue_counts[key].as_u64().unwrap_or_default();
+                hash_evidence_issue_counts[key] = json!(count + 1);
+            }
+        }
         let download_label = self
             .download_progress
             .as_ref()
@@ -3505,9 +3706,21 @@ impl Foxy {
             "download_label": download_label,
             "download_percent": download_percent,
             "download_paused": self.download_paused,
+            "paused_repositories": self.repository_view_state.repositories.iter().enumerate()
+                .filter(|(_, repo)| self.is_repository_paused(repo))
+                .map(|(index, _)| json!({"repo_index":index}))
+                .collect::<Vec<_>>(),
+            "repository_space_bulk_progress": self.repository_space_bulk_progress.as_ref().map(|progress| json!({
+                "total_count":progress.total_count,
+                "completed_count":progress.completed_count,
+                "succeeded_count":progress.succeeded_count,
+                "failed_count":progress.failed_count,
+            })),
             "download_finished": self.download_finished,
             "download_speed_bps": self.download_speed_bps,
             "download_eta_secs": self.download_eta_remaining.map(|d| d.as_secs_f64()),
+            "update_completion_eta_secs": self.update_completion_forecast().remaining.map(|d| d.as_secs_f64()),
+            "update_completion_phase": self.update_completion_phase().map(|phase| format!("{phase:?}")),
             "total_downloaded_bytes": self.total_downloaded_bytes,
             "active_mod_downloads": self.mod_download_progress.len(),
             "recheck_stage_label": self.recheck_stage_label,
@@ -3515,6 +3728,7 @@ impl Foxy {
             "recheck_hash_counter": recheck_hash,
             "recheck_hash_bytes": recheck_hash_bytes,
             "recheck_hash_progress": self.recheck_hash_progress_fraction(),
+            "hash_evidence_issue_counts": hash_evidence_issue_counts,
             "recheck_progress": self.recheck_progress_fraction(),
             "update_modal_open": self.update_modal_open,
         })
@@ -3546,6 +3760,30 @@ impl Foxy {
             }
         };
         push(self.update_modal_open, "update");
+        push(self.launch_action.is_busy(), "launch-preparation");
+        push(
+            self.launch_action.awaits_consent(),
+            "launch-preparation-consent",
+        );
+        push(
+            self.configuration_recovery_error.is_some(),
+            "configuration-recovery",
+        );
+        push(
+            self.pending_direct_download_collisions.is_some(),
+            "direct-download-replacement",
+        );
+        push(self.pending_installer_path.is_some(), "installer-queued");
+        push(
+            self.addon_backup_restore_state
+                .as_ref()
+                .is_some_and(|dialog| dialog.pending_origin_confirmation.is_some()),
+            "backup-origin-confirmation",
+        );
+        push(
+            self.show_unreadable_config_replacement,
+            "unreadable-config-replacement",
+        );
         push(self.show_add_repository_modal, "add-repository");
         push(
             self.pending_repository_duplicate_add.is_some(),
@@ -3645,19 +3883,15 @@ impl Foxy {
         }
         let target = target.ok_or_else(|| "Provide --target <name> or --clear".to_string())?;
         let normalized = normalize_selector(target);
-        let id = agent_gui_focus_target_id(&normalized).ok_or_else(|| {
+        agent_gui_focus_target_id(&normalized).ok_or_else(|| {
             format!(
                 "No focusable widget registered for target '{target}'. Registered: {}. Use fill/set-filter for other text fields.",
                 agent_gui_focus_target_names().join(", ")
             )
         })?;
-        // The widget must actually render this frame, or egui reports a focused
-        // id that AccessKit's tree does not contain and the UI thread panics
-        // (`Focused ID ... is not in the node list`). `poll_agent_gui` runs
-        // before the views draw, so opening the container here makes the widget
-        // present in the same frame it claims focus.
+        // AccessKit requires the focused widget in this frame's tree, so open
+        // its container before requesting focus.
         self.agent_gui_ensure_focus_target_visible(&normalized);
-        ctx.memory_mut(|memory| memory.request_focus(id));
         ctx.request_repaint();
         Ok(json!({ "focused": normalized, "requested": true }))
     }
@@ -3666,6 +3900,8 @@ impl Foxy {
     /// (see the AccessKit panic note in `agent_gui_focus`).
     fn agent_gui_ensure_focus_target_visible(&mut self, normalized_target: &str) {
         if normalized_target == "add-repository-input" {
+            self.current_view = FoxyView::RepositoryList;
+            self.last_view = FoxyView::None;
             self.show_add_repository_modal = true;
         }
     }
@@ -3684,9 +3920,8 @@ impl Foxy {
         // re-running the same step sees a caret in the box. Make the container
         // visible first to avoid the AccessKit focus panic (see `agent_gui_focus`).
         let normalized = normalize_selector(target);
-        if let Some(id) = agent_gui_focus_target_id(&normalized) {
+        if agent_gui_focus_target_id(&normalized).is_some() {
             self.agent_gui_ensure_focus_target_visible(&normalized);
-            ctx.memory_mut(|memory| memory.request_focus(id));
         }
         ctx.request_repaint();
         Ok(json!({ "target": canonical, "value": value }))
@@ -4393,23 +4628,37 @@ impl Foxy {
     /// Drive parked `drag` gestures: emit the down event, then `steps`
     /// interpolated moves, then the up event - one per frame so egui classifies
     /// the sequence as a real drag.
-    fn agent_gui_complete_drags(&mut self, ctx: &egui::Context, runtime: &mut AgentGuiRuntime) {
+    fn agent_gui_complete_drags(
+        &mut self,
+        ctx: &egui::Context,
+        runtime: &mut AgentGuiRuntime,
+        input: &mut egui::RawInput,
+    ) {
         let now = Instant::now();
         let mut index = 0;
         while index < runtime.pending_drags.len() {
             let current_frame = ctx.cumulative_frame_nr();
-            if current_frame < runtime.pending_drags[index].next_frame {
-                if now >= runtime.pending_drags[index].deadline {
-                    let drag = runtime.pending_drags.remove(index);
-                    let response = AgentGuiResponse::ok(
-                        &drag.command,
-                        self.agent_gui_view_name(),
-                        drag.requested_at,
-                        self.agent_gui_snapshot_value(ctx),
-                    );
-                    let _ = drag.response_tx.send(response);
-                    continue;
+            if now >= runtime.pending_drags[index].deadline {
+                let drag = runtime.pending_drags.remove(index);
+                if drag.phase > 0 {
+                    input.events.push(Event::PointerButton {
+                        pos: drag.to,
+                        button: drag.button,
+                        pressed: false,
+                        modifiers: Modifiers::default(),
+                    });
                 }
+                let response = AgentGuiResponse::error(
+                    drag.command.name(),
+                    self.agent_gui_view_name(),
+                    drag.requested_at,
+                    "timeout",
+                    "Timed out before the drag completed",
+                );
+                let _ = drag.response_tx.send(response);
+                continue;
+            }
+            if current_frame < runtime.pending_drags[index].next_frame {
                 ctx.request_repaint_after(Duration::from_millis(16));
                 index += 1;
                 continue;
@@ -4421,42 +4670,38 @@ impl Foxy {
             };
             let mods = Modifiers::default();
             if phase == 0 {
-                ctx.input_mut(|input| {
-                    input.events.push(Event::PointerMoved(from));
-                    input.events.push(Event::PointerButton {
-                        pos: from,
-                        button,
-                        pressed: true,
-                        modifiers: mods,
-                    });
+                input.events.push(Event::PointerMoved(from));
+                input.events.push(Event::PointerButton {
+                    pos: from,
+                    button,
+                    pressed: true,
+                    modifiers: mods,
                 });
             } else if phase <= steps {
                 let t = phase as f32 / steps as f32;
                 let pos = Pos2::new(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t);
-                ctx.input_mut(|input| input.events.push(Event::PointerMoved(pos)));
+                input.events.push(Event::PointerMoved(pos));
             } else {
-                ctx.input_mut(|input| {
-                    input.events.push(Event::PointerMoved(to));
-                    input.events.push(Event::PointerButton {
-                        pos: to,
-                        button,
-                        pressed: false,
-                        modifiers: mods,
-                    });
+                input.events.push(Event::PointerMoved(to));
+                input.events.push(Event::PointerButton {
+                    pos: to,
+                    button,
+                    pressed: false,
+                    modifiers: mods,
                 });
             }
             ctx.request_repaint();
 
-            // phase > steps means we just emitted the pointer-up: gesture done.
             if phase > steps {
                 let drag = runtime.pending_drags.remove(index);
-                let response = AgentGuiResponse::ok(
-                    &drag.command,
-                    self.agent_gui_view_name(),
-                    drag.requested_at,
-                    self.agent_gui_snapshot_value(ctx),
-                );
-                let _ = drag.response_tx.send(response);
+                runtime.pending_settles.push(PendingSettle {
+                    command: drag.command,
+                    target_frame: current_frame.saturating_add(1),
+                    response_tx: drag.response_tx,
+                    deadline: drag.deadline,
+                    requested_at: drag.requested_at,
+                    report_focus: false,
+                });
                 continue;
             }
             let drag = &mut runtime.pending_drags[index];
@@ -4470,10 +4715,12 @@ impl Foxy {
 
     /// Begin a `batch`: drive it immediately, parking it for later resumption
     /// only if a step has not yet completed.
+    #[allow(clippy::too_many_arguments)]
     fn agent_gui_start_batch(
         &mut self,
         ctx: &egui::Context,
         runtime: &mut AgentGuiRuntime,
+        input: &mut egui::RawInput,
         steps: Vec<AgentGuiCommand>,
         stop_on_error: bool,
         response_tx: Sender<AgentGuiResponse>,
@@ -4500,8 +4747,9 @@ impl Foxy {
             requested_at: started_at,
             deadline,
             step_rx: None,
+            resume_after_frame: ctx.cumulative_frame_nr(),
         };
-        match self.drive_batch(ctx, runtime, &mut batch) {
+        match self.drive_batch(ctx, runtime, input, &mut batch) {
             Some(response) => {
                 let _ = batch.response_tx.send(response);
             }
@@ -4513,11 +4761,17 @@ impl Foxy {
     }
 
     /// Resume parked batch pipelines whose current step may have completed.
-    fn agent_gui_advance_batches(&mut self, ctx: &egui::Context, runtime: &mut AgentGuiRuntime) {
+    fn agent_gui_advance_batches(
+        &mut self,
+        ctx: &egui::Context,
+        runtime: &mut AgentGuiRuntime,
+        input: &mut egui::RawInput,
+    ) {
         let mut index = 0;
+        let events_before = input.events.len();
         while index < runtime.pending_batches.len() {
             let mut batch = runtime.pending_batches.remove(index);
-            match self.drive_batch(ctx, runtime, &mut batch) {
+            match self.drive_batch(ctx, runtime, input, &mut batch) {
                 Some(response) => {
                     let _ = batch.response_tx.send(response);
                 }
@@ -4525,6 +4779,12 @@ impl Foxy {
                     runtime.pending_batches.insert(index, batch);
                     index += 1;
                 }
+            }
+            if input.events.len() > events_before
+                || runtime.pending_focus.is_some()
+                || !runtime.pending_navigation.is_empty()
+            {
+                break;
             }
         }
     }
@@ -4535,9 +4795,15 @@ impl Foxy {
         &mut self,
         ctx: &egui::Context,
         runtime: &mut AgentGuiRuntime,
+        input: &mut egui::RawInput,
         batch: &mut PendingBatch,
     ) -> Option<AgentGuiResponse> {
         use std::sync::mpsc::TryRecvError;
+
+        if ctx.cumulative_frame_nr() < batch.resume_after_frame {
+            ctx.request_repaint();
+            return None;
+        }
 
         // Resolve a parked step first.
         if batch.step_rx.is_some() {
@@ -4597,12 +4863,20 @@ impl Foxy {
                 command: step,
                 response_tx: tx,
             };
-            self.handle_agent_gui_request(ctx, runtime, sub);
+            let events_before = input.events.len();
+            self.handle_agent_gui_request(ctx, runtime, input, sub);
+            let queued_input = input.events.len() > events_before;
             match rx.try_recv() {
                 Ok(response) => {
                     self.absorb_batch_step(batch, response);
                     if !batch.all_ok && batch.stop_on_error {
                         return Some(self.finish_batch(batch));
+                    }
+                    if queued_input {
+                        // Backward focus is applied at the start of egui's following pass.
+                        batch.resume_after_frame = ctx.cumulative_frame_nr().saturating_add(2);
+                        ctx.request_repaint();
+                        return None;
                     }
                 }
                 Err(TryRecvError::Empty) => {
@@ -5201,6 +5475,7 @@ impl Foxy {
                     })?
                     .to_string();
                 self.agent_gui_apply_profile(index, &profile)?;
+                self.save_repositories();
             }
             "start-sync" => {
                 let index = self.agent_gui_resolve_repo_index(params)?;
@@ -5260,6 +5535,105 @@ impl Foxy {
                     RepositorySpaceBulkMode::RecheckAll,
                     &selected,
                 );
+            }
+            "space-update-all" => {
+                let space_id = params
+                    .get("space")
+                    .or_else(|| params.get("space_id"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .or_else(|| self.selected_repository_space_id.clone())
+                    .ok_or_else(|| {
+                        (
+                            "invalid-params".to_string(),
+                            "Provide space or select a repository space first".to_string(),
+                        )
+                    })?;
+                let action = self
+                    .build_repository_space_bulk_action(
+                        &space_id,
+                        RepositorySpaceBulkMode::UpdateAll,
+                    )
+                    .ok_or_else(|| {
+                        (
+                            "invalid-params".to_string(),
+                            format!("No repository space with id '{space_id}'"),
+                        )
+                    })?;
+                let selected: Vec<usize> = action
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.selected)
+                    .map(|entry| entry.repo_index)
+                    .collect();
+                self.start_repository_space_bulk_action(
+                    &space_id,
+                    RepositorySpaceBulkMode::UpdateAll,
+                    &selected,
+                );
+            }
+            "set-space-shared-path" => {
+                let space_id = params.get("space").and_then(Value::as_str).ok_or_else(|| {
+                    (
+                        "invalid-params".to_string(),
+                        "Provide a space id".to_string(),
+                    )
+                })?;
+                let path = params.get("path").and_then(Value::as_str).ok_or_else(|| {
+                    (
+                        "invalid-params".to_string(),
+                        "Provide a path under the test run directory".to_string(),
+                    )
+                })?;
+                self.validate_agent_gui_testkit_path(path)?;
+                self.set_repository_space_shared_path(space_id, path.to_string());
+            }
+            "detach-space-repository" => {
+                let index = self.agent_gui_resolve_repo_index(params)?;
+                if !self.detach_repository_from_space(index) {
+                    return Err((
+                        "invalid-state".to_string(),
+                        "The repository is not attached to a repository space".to_string(),
+                    ));
+                }
+            }
+            "attach-existing-space-repository" => {
+                let space_id = params.get("space").and_then(Value::as_str).ok_or_else(|| {
+                    (
+                        "invalid-params".to_string(),
+                        "Provide a space id".to_string(),
+                    )
+                })?;
+                let index = self.agent_gui_resolve_repo_index(params)?;
+                let repo_path = self
+                    .repository_view_state
+                    .repositories
+                    .get(index)
+                    .map(|repo| repo.path.clone())
+                    .ok_or_else(|| {
+                        (
+                            "invalid-params".to_string(),
+                            "Repository index is out of range".to_string(),
+                        )
+                    })?;
+                self.validate_agent_gui_testkit_path(&repo_path)?;
+                let mut candidate = self
+                    .scan_repository_space_candidates(space_id)
+                    .into_iter()
+                    .find(|candidate| candidate.repo_index == index)
+                    .ok_or_else(|| {
+                        (
+                            "invalid-state".to_string(),
+                            "The repository is not a candidate for this space".to_string(),
+                        )
+                    })?;
+                candidate.checked = true;
+                if self.apply_repository_space_scan_candidates(space_id, &[candidate]) == 0 {
+                    return Err((
+                        "invalid-state".to_string(),
+                        "The repository could not be attached to the space".to_string(),
+                    ));
+                }
             }
             "wipe-repo-db" => {
                 let index = self.agent_gui_resolve_repo_index(params)?;
@@ -5351,7 +5725,7 @@ impl Foxy {
             }
             "pause-download" => self.set_download_paused(true),
             "resume-download" => self.set_download_paused(false),
-            "cancel-download" => self.cancel_sync(),
+            "cancel-download" => self.cancel_sync_and_queued_runs(),
             "switch-game-space" => {
                 let space_id = params
                     .get("game-space")
@@ -5392,6 +5766,59 @@ impl Foxy {
         }
         ctx.request_repaint();
         Ok(json!({ "action": name, "ran": true, "destructive": meta.destructive }))
+    }
+
+    fn validate_agent_gui_testkit_path(&self, path: &str) -> Result<(), (String, String)> {
+        let run_root = std::env::var_os("FOXY_TESTKIT_RUN_DIR")
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                (
+                    "testkit-only".to_string(),
+                    "This path mutation is available only in an isolated testkit run".to_string(),
+                )
+            })?;
+        let run_root = std::fs::canonicalize(run_root).map_err(|_| {
+            (
+                "testkit-only".to_string(),
+                "The isolated testkit run directory is unavailable".to_string(),
+            )
+        })?;
+        let config_dir = std::fs::canonicalize(Self::get_config_directory()).map_err(|_| {
+            (
+                "testkit-only".to_string(),
+                "The isolated testkit configuration directory is unavailable".to_string(),
+            )
+        })?;
+        if !config_dir.starts_with(&run_root) {
+            return Err((
+                "testkit-only".to_string(),
+                "Path mutation is refused outside the isolated testkit configuration".to_string(),
+            ));
+        }
+        let requested = PathBuf::from(path);
+        if !requested.is_absolute()
+            || requested
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err((
+                "invalid-params".to_string(),
+                "The path must be absolute and contain no parent-directory component".to_string(),
+            ));
+        }
+        let resolved = std::fs::canonicalize(&requested).map_err(|_| {
+            (
+                "invalid-params".to_string(),
+                "The test repository directory must exist before changing the target".to_string(),
+            )
+        })?;
+        if !resolved.starts_with(&run_root) {
+            return Err((
+                "invalid-params".to_string(),
+                "The target path must stay under the isolated testkit run directory".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     /// Clear the simple boolean modal/window flags (non-destructive). Used by
@@ -5599,6 +6026,30 @@ const AGENT_ACTIONS: &[AgentAction] = &[
         destructive: true,
         params: "space?",
         summary: "Recheck every repository of a repository space (the space's Recheck all, confirmed with its default selection)",
+    },
+    AgentAction {
+        name: "space-update-all",
+        destructive: true,
+        params: "space?",
+        summary: "Update repositories in a space that currently have pending updates",
+    },
+    AgentAction {
+        name: "set-space-shared-path",
+        destructive: true,
+        params: "space, path",
+        summary: "Change a repository space path (isolated testkit runs only)",
+    },
+    AgentAction {
+        name: "detach-space-repository",
+        destructive: true,
+        params: "repo-index",
+        summary: "Detach a repository from its space",
+    },
+    AgentAction {
+        name: "attach-existing-space-repository",
+        destructive: true,
+        params: "space, repo-index",
+        summary: "Attach an existing repository to a space (isolated testkit runs only)",
     },
     AgentAction {
         name: "wipe-repo-db",
@@ -5950,7 +6401,7 @@ fn agent_gui_focus_target_id(name: &str) -> Option<egui::Id> {
     AGENT_FOCUS_TARGETS
         .iter()
         .find(|(target, _)| *target == name)
-        .map(|(_, id)| egui::Id::new(id))
+        .map(|(_, id)| egui::Id::unique(id))
 }
 
 /// The registered focus target names, for error messages.
@@ -5963,7 +6414,7 @@ fn agent_gui_focus_target_names() -> Vec<&'static str> {
 fn agent_gui_focused_name(ctx: &egui::Context) -> Option<String> {
     let focused = ctx.memory(|memory| memory.focused())?;
     for (name, id) in AGENT_FOCUS_TARGETS {
-        if egui::Id::new(id) == focused {
+        if egui::Id::unique(id) == focused {
             return Some((*name).to_string());
         }
     }
@@ -6754,7 +7205,7 @@ mod tests {
     fn focus_target_registry_resolves_known_target() {
         assert_eq!(
             agent_gui_focus_target_id("add-repository-input"),
-            Some(egui::Id::new("agent.add-repository-input"))
+            Some(egui::Id::unique("agent.add-repository-input"))
         );
         assert_eq!(agent_gui_focus_target_id("nope"), None);
         assert!(agent_gui_focus_target_names().contains(&"add-repository-input"));

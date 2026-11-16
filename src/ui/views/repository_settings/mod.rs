@@ -1,3 +1,4 @@
+mod addon_bulk_actions;
 mod addon_cache;
 mod addons;
 mod cached_views;
@@ -9,6 +10,7 @@ mod export_structure;
 mod external_addon_views;
 mod external_addons;
 mod profiles;
+mod workshop_links;
 
 use crate::ui::app::{AddonDestructiveConfirmAction, Foxy, ProfileConfirmAction};
 use crate::ui::i18n::{fmt_bytes, tr, tr_fmt};
@@ -25,6 +27,7 @@ pub(super) const PROFILE_CLIPBOARD_HEADER: &str = "FOXYPROF01";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum AddonContextAction {
     OpenDirectory,
+    OpenWorkshop,
     Backup,
     RestoreBackup,
     RecheckIntegrity,
@@ -37,6 +40,7 @@ pub(super) enum AddonContextAction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ExternalAddonContextAction {
     OpenDirectory,
+    OpenWorkshop,
     ToggleStructure,
     Delete,
 }
@@ -62,6 +66,36 @@ pub(super) fn normalize_local_path_for_compare(path: &str) -> String {
         normalized = normalized.to_lowercase();
     }
     normalized
+}
+
+/// A repository that delivers a game build shows addon tabs only for addons
+/// it actually has, so a game-only repository shows no addon tabs at all.
+pub(super) fn visible_repository_settings_tabs(repo: &Repository) -> Vec<RepositorySettingsTab> {
+    RepositorySettingsTab::all_tabs()
+        .into_iter()
+        .filter(|tab| {
+            if repo.is_local() {
+                return match tab {
+                    RepositorySettingsTab::Addons => !repo.addons.is_empty(),
+                    RepositorySettingsTab::OptionalAddons => !repo.optional_addons.is_empty(),
+                    _ => true,
+                };
+            }
+            repo.game_build.is_none()
+                || match tab {
+                    RepositorySettingsTab::Configuration => true,
+                    RepositorySettingsTab::Addons => !repo.addons.is_empty(),
+                    RepositorySettingsTab::OptionalAddons => !repo.optional_addons.is_empty(),
+                    RepositorySettingsTab::ExternalAddons => {
+                        !repo.external_addons.is_empty()
+                            || repo
+                                .profiles
+                                .iter()
+                                .any(|profile| !profile.external_addons.is_empty())
+                    }
+                }
+        })
+        .collect()
 }
 
 pub(super) fn should_wipe_cache_after_local_path_change(
@@ -149,6 +183,11 @@ impl Foxy {
             self.restore_last_view_or_default();
             return;
         }
+        let visible_tabs =
+            visible_repository_settings_tabs(&self.repository_view_state.repositories[repo_index]);
+        if !visible_tabs.contains(&self.current_repository_settings_tab) {
+            self.current_repository_settings_tab = RepositorySettingsTab::Configuration;
+        }
         let current_repository_settings_tab = self.current_repository_settings_tab;
         let outer_margin = Margin {
             left: 15,
@@ -211,6 +250,9 @@ impl Foxy {
                 });
             });
             ui.separator();
+            if !self.addon_workshop_lookups.is_empty() {
+                ui.label(tr("Loading..."));
+            }
             let mut repository_structure_export_clicked = false;
             {
                 self.ensure_repository_addon_list_cache_cached(
@@ -248,7 +290,10 @@ impl Foxy {
                 let external_count = external_cache.rows.len();
                 let enabled_launch_size =
                     enabled_repository_size.saturating_add(external_cache.enabled_size_bytes);
-                let total_size_text = if enabled_launch_size != total_size {
+                // A game-only repository has no addon to enable, so a launch
+                // size and addon counts would only describe an empty list.
+                let shows_addons = visible_tabs.len() > 1;
+                let total_size_text = if shows_addons && enabled_launch_size != total_size {
                     format!(
                         "{} / {}",
                         tr_fmt("Total size: {size}", &[("size", fmt_bytes(total_size))]),
@@ -277,16 +322,27 @@ impl Foxy {
                 let external_addons_help = tr("external_addons_quick_info_help");
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
-                    ui.label(RichText::new(summary_prefix_text).color(color_text_dim));
-                    ui.label(RichText::new(external_addons_text).color(color_text_dim))
-                        .on_hover_text(external_addons_help);
-                    ui.add_space(12.0);
-                    let export_structure = ui.button(tr("Export Repository Structure"));
-                    if export_structure.hovered() {
-                        ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                    if repo.is_local() {
+                        ui.label(RichText::new(tr("Local repository")).color(color_text_dim));
+                        ui.add_space(12.0);
+                        ui.label(RichText::new(external_addons_text).color(color_text_dim))
+                            .on_hover_text(external_addons_help);
+                    } else if shows_addons {
+                        ui.label(RichText::new(summary_prefix_text).color(color_text_dim));
+                        ui.label(RichText::new(external_addons_text).color(color_text_dim))
+                            .on_hover_text(external_addons_help);
+                    } else {
+                        ui.label(RichText::new(total_size_text).color(color_text_dim));
                     }
-                    if export_structure.clicked() {
-                        repository_structure_export_clicked = true;
+                    if !repo.is_local() {
+                        ui.add_space(12.0);
+                        let export_structure = ui.button(tr("Export Repository Structure"));
+                        if export_structure.hovered() {
+                            ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                        }
+                        if export_structure.clicked() {
+                            repository_structure_export_clicked = true;
+                        }
                     }
                 });
                 ui.separator();
@@ -523,7 +579,7 @@ impl Foxy {
                         }
                     }
 
-                    let tabs = RepositorySettingsTab::all_tabs();
+                    let tabs = &visible_tabs;
                     let labels: Vec<&str> = tabs.iter().map(|t| t.as_str()).collect();
                     let selected = tabs
                         .iter()
@@ -575,6 +631,9 @@ impl Foxy {
                                 this.addon_state_filter = addon_state_filter;
                             }
                             RepositorySettingsTab::ExternalAddons => {
+                                if this.repository_view_state.repositories[repo_index].is_local() {
+                                    ui.label(tr("Select mods in External Addons. Enable Include Steam Addons for Steam Workshop mods. Add other mod folders in Game space settings."));
+                                }
                                 let mut external_addons_filter =
                                     this.external_addons_filter.clone();
                                 let mut external_addons_origin_filter =
@@ -1052,6 +1111,8 @@ impl Foxy {
 
     fn render_addon_backup_restore_modal(&mut self, ctx: &egui::Context, repo_index: usize) {
         let mut restore_request: Option<crate::ui::app::AddonBackupRestoreState> = None;
+        let mut stop_retry_restore: Option<crate::ui::app::AddonBackupRestoreState> = None;
+        let mut keep_retrying = false;
         let mut close_restore_modal = false;
 
         if let Some(mut restore_state) = self
@@ -1068,6 +1129,26 @@ impl Foxy {
                 .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
                 .default_width(560.0)
                 .show(ctx, |ui| {
+                    if restore_state.retry_arbitration {
+                        ui.label(tr("An automatic update retry is waiting for this repository."));
+                        if let Some(backup) = restore_state.backups.get(restore_state.selected_backup_index) {
+                            ui.label(tr_fmt(
+                                "Selected backup: {name} ({hash})",
+                                &[("name", backup.folder_name.clone()), ("hash", backup.content_hash.clone())],
+                            ));
+                        }
+                        ui.label(tr("Choose whether restoring this backup should stop the retry, or keep the retry and retain this backup selection."));
+                        ui.add_space(12.0);
+                        ui.horizontal(|ui| {
+                            if ui.button(tr("Restore and stop retry")).clicked() {
+                                stop_retry_restore = Some(restore_state.clone());
+                            }
+                            if ui.button(tr("Keep retrying")).clicked() {
+                                keep_retrying = true;
+                            }
+                        });
+                        return;
+                    }
                     ui.label(tr_fmt(
                         "Choose addon backup to restore for {name}.",
                         &[("name", restore_state.addon_name.clone())],
@@ -1135,7 +1216,11 @@ impl Foxy {
                     });
                 });
 
-            if close_restore_modal {
+            if keep_retrying {
+                restore_state.retry_arbitration = false;
+                restore_state.allow_retry = true;
+                self.addon_backup_restore_state = Some(restore_state);
+            } else if close_restore_modal {
                 self.addon_backup_restore_state = None;
             } else {
                 self.addon_backup_restore_state = Some(restore_state);
@@ -1145,12 +1230,72 @@ impl Foxy {
         if let Some(restore_state) = restore_request {
             self.start_manual_addon_restore(restore_state);
         }
+        if let Some(mut restore_state) = stop_retry_restore {
+            self.addon_backup_restore_state = None;
+            self.cancel_pending_download_retry();
+            restore_state.retry_arbitration = false;
+            self.start_manual_addon_restore(restore_state);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn game_build_repositories_show_only_addon_tabs_with_content() {
+        let mut repo = Repository {
+            address: "https://repo.example.invalid:8080/".into(),
+            ..Repository::default()
+        };
+        assert_eq!(
+            visible_repository_settings_tabs(&repo),
+            RepositorySettingsTab::all_tabs().to_vec()
+        );
+
+        repo.game_build = Some(crate::ui::types::RepositoryGameBuild {
+            addon: "MyGame".to_string(),
+            executable: "MyGame.exe".to_string(),
+        });
+        assert_eq!(
+            visible_repository_settings_tabs(&repo),
+            vec![RepositorySettingsTab::Configuration]
+        );
+
+        repo.optional_addons.push(("@mod_01".to_string(), false));
+        assert_eq!(
+            visible_repository_settings_tabs(&repo),
+            vec![
+                RepositorySettingsTab::Configuration,
+                RepositorySettingsTab::OptionalAddons
+            ]
+        );
+    }
+
+    #[test]
+    fn local_repositories_show_configuration_and_external_addons() {
+        assert_eq!(
+            visible_repository_settings_tabs(&Repository::default()),
+            vec![
+                RepositorySettingsTab::Configuration,
+                RepositorySettingsTab::ExternalAddons
+            ]
+        );
+    }
+
+    #[test]
+    fn removing_a_server_address_keeps_existing_addon_selection_tabs() {
+        let repo = Repository {
+            addons: vec![("@mod_01".to_string(), true)],
+            optional_addons: vec![("@mod_02".to_string(), false)],
+            ..Repository::default()
+        };
+        assert_eq!(
+            visible_repository_settings_tabs(&repo),
+            RepositorySettingsTab::all_tabs()
+        );
+    }
 
     #[test]
     fn normalize_local_path_for_compare_strips_trailing_separators() {

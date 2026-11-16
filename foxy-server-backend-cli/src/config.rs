@@ -1,12 +1,12 @@
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 
-use crate::types::{RepoConfig, RepoGame, ResolvedMod};
+use crate::types::{Chunking, GameBuildConfig, RepoConfig, RepoGame, ResolvedMod};
 
 /// Read and validate the config JSON, expanding any wildcard mod references.
 pub fn load_config(config_path: &Path) -> Result<(RepoConfig, Vec<ResolvedMod>)> {
     let content = std::fs::read_to_string(config_path).context("Failed to read config file")?;
-    let config: RepoConfig =
+    let mut config: RepoConfig =
         serde_json::from_str(&content).context("Failed to parse config JSON")?;
 
     let base = PathBuf::from(&config.base_path);
@@ -40,11 +40,72 @@ pub fn load_config(config_path: &Path) -> Result<(RepoConfig, Vec<ResolvedMod>)>
         resolved.extend(expanded);
     }
 
+    if let Some(build) = config.game_build.as_mut() {
+        let game_mod = resolve_game_build(&base, config.game, build)?;
+        if let Some(listed) = resolved
+            .iter()
+            .find(|item| item.mod_name.eq_ignore_ascii_case(&game_mod.mod_name))
+        {
+            bail!(
+                "gameBuild folder {} is also listed as a mod; list it only in gameBuild",
+                listed.mod_name
+            );
+        }
+        resolved.insert(0, game_mod);
+    }
+
     if resolved.is_empty() {
         bail!("No mods found after expanding all mod references");
     }
+    for item in &mut resolved {
+        item.chunking = config.chunking;
+    }
 
     Ok((config, resolved))
+}
+
+/// The game build is published as a required, enabled mod. Clients run its
+/// executable, so the path must stay inside the folder and exist at build time.
+fn resolve_game_build(
+    base: &Path,
+    game: RepoGame,
+    build: &mut GameBuildConfig,
+) -> Result<ResolvedMod> {
+    if game != RepoGame::Generic {
+        bail!(
+            "gameBuild needs \"game\": \"generic\"; only Generic game spaces launch a game build"
+        );
+    }
+    let folder = build.folder.trim();
+    if folder.is_empty() || folder.contains(['*', '?', '[']) {
+        bail!("gameBuild.folder must name one folder, without wildcards");
+    }
+    let executable = build.executable.trim().replace('\\', "/");
+    let inside_folder = !executable.is_empty()
+        && !Path::new(&executable).is_absolute()
+        && !executable.contains(':')
+        && executable
+            .split('/')
+            .all(|component| !component.is_empty() && component != "." && component != "..");
+    if !inside_folder {
+        bail!(
+            "gameBuild.executable must be a path inside the game folder, such as \"MyGame.exe\" or \"bin/MyGame.exe\""
+        );
+    }
+    let mut mods = expand_mod_ref(base, folder, true, true, false)?;
+    let game_mod = mods
+        .pop()
+        .context("gameBuild.folder resolved to no folder")?;
+    if !game_mod.source_path.join(&executable).is_file() {
+        bail!(
+            "gameBuild.executable {} does not exist in {}",
+            executable,
+            game_mod.source_path.display()
+        );
+    }
+    build.executable = executable;
+    build.mod_name = game_mod.mod_name.clone();
+    Ok(game_mod)
 }
 
 fn published_mod_name(path: &Path) -> Result<String> {
@@ -114,6 +175,7 @@ fn expand_mod_ref(
                 is_required,
                 enabled,
                 client_side,
+                chunking: Chunking::Fixed,
             });
         }
 
@@ -138,6 +200,7 @@ fn expand_mod_ref(
         is_required,
         enabled,
         client_side,
+        chunking: Chunking::Fixed,
     }])
 }
 
@@ -153,7 +216,9 @@ pub fn generate_template_config(output: &Path, game: RepoGame) -> Result<()> {
 /// Arma 3 keeps the historical template. Reforger drops the keys the game
 /// has no use for (Creator DLCs, client-side mods, BattlEye) and uses the
 /// game's default port; mod folders are the unpacked addon directories that
-/// hold the `.gproj` and `addons/*.pak`.
+/// hold the `.gproj` and `addons/*.pak`. A custom game names its build
+/// folder in `gameBuild`, with content chunking so a rebuilt executable or data
+/// archive only re-sends the parts that changed.
 pub fn template_config_value(game: RepoGame) -> serde_json::Value {
     match game {
         RepoGame::Arma3 => serde_json::json!({
@@ -225,6 +290,25 @@ pub fn template_config_value(game: RepoGame) -> serde_json::Value {
                 }
             ]
         }),
+        RepoGame::Generic => serde_json::json!({
+            "repoName": "My Game",
+            "game": "generic",
+            "chunking": "content",
+            "basePath": ".",
+            "appUpdateUrl": "",
+            "gameBuild": { "folder": "MyGame", "executable": "MyGame.exe" },
+            "requiredMods": [],
+            "optionalMods": [],
+            "iconImagePath": "icon.png",
+            "repoImagePath": "repo.png",
+            "clientParameters": "",
+            "repoBasicAuthentication": {
+                "username": "",
+                "password": ""
+            },
+            "version": "1.0.0.0",
+            "servers": []
+        }),
     }
 }
 
@@ -235,7 +319,7 @@ mod tests {
 
     #[test]
     fn template_configs_round_trip_through_the_config_parser() {
-        for game in [RepoGame::Arma3, RepoGame::Reforger] {
+        for game in [RepoGame::Arma3, RepoGame::Reforger, RepoGame::Generic] {
             let value = template_config_value(game);
             let parsed: RepoConfig =
                 serde_json::from_value(value.clone()).expect("template parses as RepoConfig");
@@ -249,6 +333,10 @@ mod tests {
         assert!(reforger.get("dlcContent").is_none());
         assert_eq!(reforger["servers"][0]["port"], "2001");
         assert_eq!(reforger["clientParameters"], "-noSplash");
+        let generic: RepoConfig =
+            serde_json::from_value(template_config_value(RepoGame::Generic)).unwrap();
+        assert_eq!(generic.chunking, crate::types::Chunking::Content);
+        assert!(generic.servers.is_empty());
     }
 
     fn temp_dir(name: &str) -> PathBuf {
@@ -257,6 +345,72 @@ mod tests {
             .expect("system time should be after unix epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("foxy-server-backend-cli-{name}-{unique}"))
+    }
+
+    #[test]
+    fn game_build_is_published_first_and_validated() {
+        let base = temp_dir("game-build");
+        std::fs::create_dir_all(base.join("MyGame").join("bin")).unwrap();
+        std::fs::write(base.join("MyGame").join("bin").join("game.exe"), b"exe").unwrap();
+        std::fs::create_dir_all(base.join("@mod_01")).unwrap();
+        let load = |game_build: serde_json::Value, extra_mod: &str, game: &str| {
+            let config = base.join("config.json");
+            let value = serde_json::json!({
+                "repoName": "MainRepo",
+                "game": game,
+                "basePath": base,
+                "gameBuild": game_build,
+                "requiredMods": [{ "modName": extra_mod }],
+            });
+            std::fs::write(&config, serde_json::to_vec(&value).unwrap()).unwrap();
+            load_config(&config)
+        };
+
+        let (config, mods) = load(
+            serde_json::json!({ "folder": "MyGame", "executable": "bin\\game.exe" }),
+            "@mod_01",
+            "generic",
+        )
+        .unwrap();
+        let build = config.game_build.unwrap();
+        assert_eq!(build.executable, "bin/game.exe");
+        assert_eq!(build.mod_name, "MyGame");
+        assert_eq!(mods[0].mod_name, "MyGame");
+        assert!(mods[0].is_required && mods[0].enabled);
+        assert_eq!(mods[1].mod_name, "@mod_01");
+
+        let error = |game_build: serde_json::Value, extra_mod: &str, game: &str| {
+            load(game_build, extra_mod, game).unwrap_err().to_string()
+        };
+        let valid = serde_json::json!({ "folder": "MyGame", "executable": "bin/game.exe" });
+        assert!(error(valid.clone(), "@mod_01", "arma3").contains("generic"));
+        assert!(error(valid, "MyGame", "generic").contains("only in gameBuild"));
+        assert!(
+            error(
+                serde_json::json!({ "folder": "MyGame", "executable": "../game.exe" }),
+                "@mod_01",
+                "generic"
+            )
+            .contains("inside the game folder")
+        );
+        assert!(
+            error(
+                serde_json::json!({ "folder": "MyGame", "executable": "missing.exe" }),
+                "@mod_01",
+                "generic"
+            )
+            .contains("does not exist")
+        );
+        assert!(
+            error(
+                serde_json::json!({ "folder": "My*", "executable": "bin/game.exe" }),
+                "@mod_01",
+                "generic"
+            )
+            .contains("without wildcards")
+        );
+
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]

@@ -200,6 +200,7 @@ pub(super) fn save_persistent_addon_hash_cache(
 pub(super) struct AddonRootProbe {
     pub(super) fingerprint: AddonRootFingerprint,
     pub(super) content_hash: Option<String>,
+    pub(super) read_error: Option<String>,
 }
 
 pub(super) fn addon_root_fingerprint(path: &str) -> AddonRootProbe {
@@ -208,15 +209,18 @@ pub(super) fn addon_root_fingerprint(path: &str) -> AddonRootProbe {
         return AddonRootProbe {
             fingerprint: AddonRootFingerprint::default(),
             content_hash: None,
+            read_error: None,
         };
     }
     let root = Path::new(trimmed);
     let metadata = match std::fs::metadata(root) {
         Ok(metadata) => metadata,
-        Err(_) => {
+        Err(error) => {
             return AddonRootProbe {
                 fingerprint: AddonRootFingerprint::default(),
                 content_hash: None,
+                read_error: (error.kind() != std::io::ErrorKind::NotFound)
+                    .then(|| error.to_string()),
             };
         }
     };
@@ -235,10 +239,12 @@ pub(super) fn addon_root_fingerprint(path: &str) -> AddonRootProbe {
         return AddonRootProbe {
             fingerprint,
             content_hash: None,
+            read_error: None,
         };
     }
 
     let mut content_hash = None;
+    let mut read_error = None;
     match collect_addon_root_fingerprint_stats(root) {
         Ok(stats) => {
             fingerprint.content_fingerprint_ready = true;
@@ -250,6 +256,7 @@ pub(super) fn addon_root_fingerprint(path: &str) -> AddonRootProbe {
             content_hash = Some(stats.content_hash);
         }
         Err(err) => {
+            read_error = Some(err.to_string());
             debug!(
                 "Failed to build quick-scan addon root fingerprint for {}: {}",
                 fingerprint.normalized_path, err
@@ -260,6 +267,7 @@ pub(super) fn addon_root_fingerprint(path: &str) -> AddonRootProbe {
     AddonRootProbe {
         fingerprint,
         content_hash,
+        read_error,
     }
 }
 

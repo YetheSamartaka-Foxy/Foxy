@@ -4,17 +4,36 @@ use super::{
 };
 use crate::core::api::SyncMode;
 use crate::ui::app::{
-    ActivityBar, BarMotion, Foxy, ProgressOrb, RepositoryListContextAction, RepositoryListRow,
-    RepositoryListSection,
+    ActivityBar, BarMotion, Foxy, ListGalleyCache, ProgressOrb, RepositoryListContextAction,
+    RepositoryListRow, RepositoryListSection,
 };
 use crate::ui::context_menu::{ContextMenuItem, attach_context_menu};
-use crate::ui::types::{FoxyView, Repository, RepositorySpaceBulkMode};
+use crate::ui::types::{FoxyView, RepoState, Repository, RepositorySpaceBulkMode};
 use crate::ui::views::galley_cache;
 use eframe::egui::{
     self, Align, Atom, Button, CornerRadius, CursorIcon, Frame, Image, Label, Layout, Margin,
     RichText, Sense, Stroke, TextStyle, Ui, Vec2,
 };
 use log::info;
+
+fn repository_status_galley(
+    ui: &Ui,
+    cache: &mut ListGalleyCache,
+    row: usize,
+    state: RepoState,
+    font: eframe::egui::FontId,
+    color: egui::Color32,
+) -> std::sync::Arc<egui::Galley> {
+    let (column, icon) = match state {
+        RepoState::Synced => (1, "\u{2705}"),
+        RepoState::PendingUpdate => (2, "\u{26A0}"),
+        RepoState::Updating => (3, "\u{21BB}"),
+        RepoState::Unknown => (4, "\u{2753}"),
+    };
+    galley_cache::lazy_galley_colored(ui, cache.slot(row, column), font, color, || {
+        format!(" {icon}")
+    })
+}
 
 impl Foxy {
     fn render_repository_list_section_row(
@@ -569,22 +588,23 @@ impl Foxy {
         } else {
             self.color_widget_bg()
         };
-        let (name, icon_checksum, address, repo_path, repo_has_local_path, repo_space_id) = {
+        let (name, icon_checksum, address, repo_has_local_path, repo_space_id) = {
             let repo = &self.repository_view_state.repositories[repo_index];
             (
                 repo.name.clone(),
                 repo.icon_image_checksum.clone(),
                 repo.address.clone(),
-                repo.path.clone(),
                 !repo.path.trim().is_empty(),
                 repo.repository_space_id.clone(),
             )
         };
         let can_go_to_space = repo_space_id.is_some();
+        let is_local = address.trim().is_empty();
         let can_remove_from_folder = self.repository_visual_folder_for_repo(repo_index).is_some();
         let db_wipe_pending = self.is_repository_db_wipe_pending(&address);
         let icon = self.cached_icons.get(&icon_checksum);
-        let state = self.repo_state_for_address(&address, &repo_path);
+        let state =
+            self.repo_state_for_repository(&self.repository_view_state.repositories[repo_index]);
         let active_operation_tooltip = self.active_repository_row_operation_tooltip(repo_index);
         let (operation_progress, operation_motion) = if active_operation_tooltip.is_some() {
             self.repository_operation_activity(repo_index)
@@ -597,32 +617,56 @@ impl Foxy {
             self.color_primary_accent()
         };
 
-        let state_icon = match state {
-            crate::ui::types::RepoState::Synced => "\u{2705}",
-            crate::ui::types::RepoState::PendingUpdate => "\u{26A0}",
-            crate::ui::types::RepoState::Updating => "\u{21BB}",
-            crate::ui::types::RepoState::Unknown => "\u{2753}",
-        };
         let name_max_chars = if icon.is_some() { 20 } else { 24 };
         let truncated_name = Self::truncate_display_name(&name, name_max_chars);
-        let display_text = if active_operation_tooltip.is_some() {
-            truncated_name
-        } else {
-            format!("{truncated_name}  {state_icon}")
-        };
-
-        let text_color = self.color_text_normal();
-        let text = galley_cache::lazy_galley_colored(
-            ui,
-            self.repository_list_galleys.slot(row_slot, 0),
-            TextStyle::Heading.resolve(ui.style()),
-            text_color,
-            || display_text,
-        );
         let row_height = Self::repository_list_row_height();
         let indent = if indented { 18.0 } else { 0.0 };
         let row_width = (ui.available_width() - indent).max(80.0);
         let status_size = Vec2::splat(18.0);
+        let text_color = self.color_text_normal();
+        let font = TextStyle::Heading.resolve(ui.style());
+        let status_text = if is_local {
+            galley_cache::lazy_galley_colored(
+                ui,
+                self.repository_list_galleys.slot(row_slot, 5),
+                font.clone(),
+                text_color,
+                || " \u{1F4C1}".to_string(),
+            )
+        } else {
+            repository_status_galley(
+                ui,
+                &mut self.repository_list_galleys,
+                row_slot,
+                state,
+                font.clone(),
+                text_color,
+            )
+        };
+        let status_width = if active_operation_tooltip.is_some() {
+            status_size.x
+        } else {
+            status_text.size().x
+        };
+        let icon_width = if icon.is_some() {
+            28.0 + ui.spacing().icon_spacing
+        } else {
+            0.0
+        };
+        let name_width = (row_width
+            - ui.spacing().button_padding.x * 2.0
+            - icon_width
+            - ui.spacing().icon_spacing
+            - status_width)
+            .max(16.0);
+        let text = galley_cache::lazy_galley_truncated(
+            ui,
+            self.repository_list_galleys.slot(row_slot, 0),
+            font,
+            text_color,
+            name_width,
+            || truncated_name,
+        );
 
         let resp = ui
             .horizontal(|ui| {
@@ -631,7 +675,7 @@ impl Foxy {
                 }
                 let area = Vec2::new(row_width, row_height);
                 if let Some(tooltip) = active_operation_tooltip.as_ref() {
-                    let spinner_id = egui::Id::new(("repository_status_spinner", repo_index));
+                    let spinner_id = egui::IdSalt::new(("repository_status_spinner", repo_index));
                     let atom_response = if let Some(tex) = icon {
                         let img = Image::new((tex.id(), Vec2::splat(28.0)));
                         Button::new((img, text, Atom::custom(spinner_id, status_size)))
@@ -677,10 +721,19 @@ impl Foxy {
                     let img = Image::new((tex.id(), Vec2::splat(28.0)));
                     ui.add_sized(
                         area,
-                        Button::image_and_text(img, text).fill(fill).truncate(),
+                        Button::new((img, text, status_text))
+                            .fill(fill)
+                            .min_size(area)
+                            .truncate(),
                     )
                 } else {
-                    ui.add_sized(area, Button::new(text).fill(fill).truncate())
+                    ui.add_sized(
+                        area,
+                        Button::new((text, status_text))
+                            .fill(fill)
+                            .min_size(area)
+                            .truncate(),
+                    )
                 }
             })
             .inner;
@@ -779,12 +832,12 @@ impl Foxy {
                     self.t("Quick local check"),
                 )
                 .separator_before()
-                .disabled_if(self.current_sync_mode == Some(SyncMode::QuickCheckOnly)),
+                .disabled_if(is_local || self.current_sync_mode == Some(SyncMode::QuickCheckOnly)),
                 ContextMenuItem::new(
                     RepositoryListContextAction::RemoteRecheck,
                     self.t("Remote data recheck"),
                 )
-                .disabled_if(self.syncing_repository.is_some()),
+                .disabled_if(is_local || self.syncing_repository.is_some()),
                 ContextMenuItem::new(
                     RepositoryListContextAction::OpenLocalPath,
                     self.t("Open repository local path"),
@@ -800,14 +853,14 @@ impl Foxy {
                     self.t("Force redownload repository"),
                 )
                 .separator_before()
-                .disabled_if(db_wipe_pending)
+                .disabled_if(is_local || db_wipe_pending)
                 .danger(),
                 ContextMenuItem::new(
                     RepositoryListContextAction::WipeRepositoryDb,
                     self.t("Wipe repository database entries"),
                 )
                 .separator_before()
-                .disabled_if(db_wipe_pending)
+                .disabled_if(is_local || db_wipe_pending)
                 .danger(),
                 ContextMenuItem::new(
                     RepositoryListContextAction::Delete,
@@ -834,4 +887,47 @@ fn row_label_width(ui: &Ui, button_width: f32, with_icon: bool) -> f32 {
         0.0
     };
     (button_width - 2.0 * spacing.button_padding.x - icon - 4.0).max(16.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::repository_status_galley;
+    use crate::ui::app::ListGalleyCache;
+    use crate::ui::types::RepoState;
+    use eframe::egui::{self, Color32, FontId};
+    use std::sync::Arc;
+
+    #[test]
+    fn repository_status_galley_tracks_state_without_content_generation_changes() {
+        let ctx = egui::Context::default();
+        let mut cache = ListGalleyCache::default();
+        cache.ensure(1, 5, 7, 11);
+        let mut synced = None;
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            for (state, icon) in [
+                (RepoState::Unknown, "\u{2753}"),
+                (RepoState::Synced, "\u{2705}"),
+                (RepoState::PendingUpdate, "\u{26A0}"),
+                (RepoState::Updating, "\u{21BB}"),
+                (RepoState::Synced, "\u{2705}"),
+            ] {
+                let galley = repository_status_galley(
+                    ui,
+                    &mut cache,
+                    0,
+                    state,
+                    FontId::proportional(20.0),
+                    Color32::WHITE,
+                );
+                assert_eq!(galley.job.text, format!(" {icon}"));
+                if state == RepoState::Synced
+                    && let Some(previous) = synced.replace(galley.clone())
+                {
+                    assert!(Arc::ptr_eq(&previous, &galley));
+                }
+            }
+        });
+        assert!((1..5).all(|column| cache.slot(0, column).is_some()));
+        output.textures_delta.clear();
+    }
 }

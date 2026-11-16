@@ -22,7 +22,7 @@
       "expect_outcome": "completed",
       "expect": [
         { "path": "breakdown.run_metrics.failed_pipelines", "equals": 0 },
-        { "path": "breakdown.run_metrics.hash_work_bytes", "equals": 4331121846 },
+        { "path": "breakdown.run_metrics.hash_work_bytes", "equals": 4281422525 },
         { "path": "breakdown.run_metrics.hash_total_s", "min": 10 },
         { "path": "breakdown.run_metrics.hash_profile_selected", "equals": "Conservative" }
       ]

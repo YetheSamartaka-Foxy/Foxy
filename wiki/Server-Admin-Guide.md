@@ -1,6 +1,6 @@
 # Server Admin Guide
 
-This guide covers everything a server administrator needs to set up and maintain Foxy-compatible mod repositories for Arma 3 and Arma Reforger communities with `foxy-server-backend-cli`.
+This guide covers everything a server administrator needs to set up and maintain Foxy-compatible repositories for Arma 3 and Arma Reforger communities, and for custom games, with `foxy-server-backend-cli`.
 
 ---
 
@@ -11,14 +11,15 @@ This guide covers everything a server administrator needs to set up and maintain
 3. [Setting Up a Repository](#setting-up-a-repository)
 4. [Server Launch Line and Keys](#server-launch-line-and-keys)
 5. [Arma Reforger Repositories](#arma-reforger-repositories)
-6. [Repository Structure](#repository-structure)
-7. [Repository Spaces](#repository-spaces)
-8. [Checks, Previews, and Safe Publishing](#checks-previews-and-safe-publishing)
-9. [App Updates Distribution](#app-updates-distribution)
-10. [Configuration Reference](#configuration-reference)
-11. [Hosting Behind a Reverse Proxy](#hosting-behind-a-reverse-proxy)
-12. [Maintaining Repositories](#maintaining-repositories)
-13. [Troubleshooting](#troubleshooting)
+6. [Custom Game Repositories](#custom-game-repositories)
+7. [Repository Structure](#repository-structure)
+8. [Repository Spaces](#repository-spaces)
+9. [Checks, Previews, and Safe Publishing](#checks-previews-and-safe-publishing)
+10. [App Updates Distribution](#app-updates-distribution)
+11. [Configuration Reference](#configuration-reference)
+12. [Hosting Behind a Reverse Proxy](#hosting-behind-a-reverse-proxy)
+13. [Maintaining Repositories](#maintaining-repositories)
+14. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -39,7 +40,7 @@ Foxy clients connect to your repository URL, read the `repo.json` manifest, and 
 
 | Command | Purpose |
 |---------|---------|
-| `new [config.json] [--game arma3\|reforger]` | Write a blank repository config |
+| `new [config.json] [--game arma3\|reforger\|generic]` | Write a blank repository config |
 | `create <config> <output>` | Generate one repository |
 | `new-space [space.json]` | Write a blank repository space config |
 | `create-space <space.json> <output>` | Generate every repository of a space plus `repository_space.json` |
@@ -88,7 +89,7 @@ HybridMode serves both Foxy and legacy Swifty clients from the same repository. 
 foxy-server-backend-cli new config.json
 ```
 
-This writes a blank Arma 3 `config.json`. Use `new config.json --game reforger` for an Arma Reforger template. If the file already exists, the command refuses to overwrite it.
+This writes a blank Arma 3 `config.json`. Use `new config.json --game reforger` for an Arma Reforger template, or `--game generic` for a custom game (see [Custom Game Repositories](#custom-game-repositories)). If the file already exists, the command refuses to overwrite it.
 
 The Arma 3 template looks like this:
 
@@ -193,7 +194,7 @@ Key points:
 foxy-server-backend-cli create config.json ./output
 ```
 
-This reads the config, discovers the files in each mod folder, copies them to the output, computes checksums, writes the manifest files, and prints the server launch line last.
+This reads the config, discovers the files in each mod folder, copies them to the output, computes checksums, and writes the manifest files. For Arma 3 and Reforger it prints the server launch line last; custom games have no server launch line.
 
 Useful options:
 
@@ -227,7 +228,7 @@ Point your web server at the output directory. Foxy clients access `https://your
 
 ### The printed launch line
 
-`create` finishes by printing the server launch line for the generated repository and saves the same single line to `<output>/server_mod_line.txt`, so a wrapper script can read it later:
+For Arma 3 and Reforger, `create` finishes by printing the server launch line for the generated repository and saves the same single line to `<output>/server_mod_line.txt`, so a wrapper script can read it later. Custom game repositories have no server launch line or `server_mod_line.txt`:
 
 ```
 foxy-server-backend-cli create config.json ./output --mod-line-prefix mods
@@ -286,7 +287,7 @@ Set `"game": "reforger"` in the config (`new config.json --game reforger` writes
 
 - Addon folders are hashed the same way as Arma 3 mods. Keep each addon's `addon.gproj`, `.pak` files and `resourceDatabase.rdb` together in its own folder. Packed Reforger addons do not need an Arma 3-style `addons/` subfolder. `.pak` archives inside them are parsed so clients can update individual entries.
 - The printed launch line is `-addonsDir <prefix or .> -addons <id,...>`. Each id is the mod's `.gproj` GUID, with the project ID, the Workshop `ServerData.json` id, and finally the folder name as fallbacks.
-- `dlcContent` and `clientSide` mean nothing for Reforger; they are accepted with a warning and ignored.
+- `dlcContent` has no effect for Reforger and triggers a warning. `clientSide` also triggers a warning because Foxy does not mark Reforger mods as client-side in the repository; a mod marked client-side is omitted from the generated server launch line.
 - The generated `repo.json` carries `"game": "reforger"`. Arma 3 output does not include the key.
 
 ### Generate and regenerate the repository
@@ -371,6 +372,44 @@ Ensure dependencies are available in the game's addon search roots. `-addonsDir`
 
 ---
 
+## Custom Game Repositories
+
+A repository can carry a game itself, not only mods for it. Players add it in a **Generic game** space; Foxy downloads and updates the game like any repository content, shows it as the game rather than as an addon, and **Launch** starts it from the downloaded folder. Set `"game": "generic"` in the config (`new config.json --game generic` writes a template) and name the folder that holds the build in `gameBuild`:
+
+```json
+{
+  "repoName": "MainRepo",
+  "game": "generic",
+  "chunking": "content",
+  "basePath": "R:/Mods/MainRepo",
+  "gameBuild": { "folder": "@mod_01", "executable": "Game.exe" },
+  "requiredMods": [],
+  "optionalMods": [],
+  "iconImagePath": "icon.png",
+  "repoImagePath": "repo.png",
+  "clientParameters": "",
+  "servers": []
+}
+```
+
+- `gameBuild.folder` is a folder under `basePath` (no wildcards). It can hold a single executable or a whole game tree: executable, data archives, libraries, and subfolders. It is published as a required, always-enabled entry, and players receive it as `<their repository folder>/@mod_01/`. Do not list it in `requiredMods` or `optionalMods` as well.
+- `gameBuild.executable` is the file to start, relative to that folder (`Game.exe`, or `bin/Game.exe`). It must exist when the repository is generated and must stay inside the folder. Foxy starts it directly, without Steam, with the game folder as its working directory.
+- `requiredMods` and `optionalMods` can still list mods for the game. Players see those as addons, and the Generic game's launch template receives them as `{mods}`.
+- `"chunking": "content"` places part boundaries by content instead of every 5 MB (see [File parts](#file-parts)). When a rebuilt executable or data archive gains or loses bytes, the later parts keep their checksums, so clients download only the parts around the change and copy the rest from the file they already have. Use it for game builds and other large binaries that are rebuilt between releases, such as Godot executables with an embedded data pack, or Unity and Unreal data archives.
+- No server launch line is printed and no `server_mod_line.txt` is written. `modLineFiles` is refused for a custom game, and `dlcContent` and `clientSide` are accepted with a warning and ignored.
+- `clientParameters` is passed to the game as the repository's launch parameters.
+- The generated `repo.json` carries `"game": "generic"`, `"chunking": "content"`, and `"gameBuild": { "modName": "@mod_01", "executable": "Game.exe" }`. `verify` reads `chunking` so it re-hashes the published files the same way.
+- In a repository space, a mod shared by several repositories must use the same `chunking` in each of them.
+
+```text
+foxy-server-backend-cli new "R:\Mods\MainRepo\config.json" --game generic
+foxy-server-backend-cli create "R:\Mods\MainRepo\config.json" "R:\Mods\Published\MainRepo" --atomic --yes
+```
+
+After each new build, replace the contents of the game folder with it and run the same `create` command. Players then see an update and download only the changed parts. The player side is described in the User Guide under **Custom game repositories**.
+
+---
+
 ## Repository Structure
 
 After `create`, the output directory has the following layout, depending on the generation mode.
@@ -434,6 +473,7 @@ Files are split into **parts** for fine-grained checksums and delta updates:
 - **PBO files** (Arma 3) are parsed into a `$$HEADER$$` part, one part per archived entry, and a `$$END$$` tail part, so clients patch at the entry level.
 - **PAK files** (Arma Reforger, PAC1 format) are parsed into a `$$HEADER$$` part, one part per entry, `$$GAP:n$$` parts for bytes between entries, and a `$$END$$` part.
 - **Other files** are split into 5 MB chunks. A 12 MB file becomes three parts: `filename_5000000`, `filename_10000000`, `filename_12000000`.
+- **Other files with `"chunking": "content"`** are split where their content says, into parts of 256 KiB to 4 MiB (about 1 MiB on average). Names keep the `filename_<end offset>` form. An inserted or removed byte changes only the parts around it. PBO and PAK archives keep their per-entry parts. All Foxy clients read these parts. Changing `chunking` on an existing repository makes clients download each affected file once in full.
 - **`.srf` files** in source mod folders are skipped (they are regenerated), and so is a `foxy_addon.json` at a mod's root, so an earlier output can be reused as a source.
 
 ### The `foxyMode` field
@@ -500,7 +540,7 @@ A mod name that appears in several repositories must hash identically in all of 
 
 ### Space options
 
-- `--mode`, `--threads`, `--app-update-url`, the launch line options, `--dry-run`, `--incremental`, `--atomic --yes`, and `--report` work as for `create`, applied to every repository. A launch line and `server_mod_line.txt` are written per repository, and each repository's `modLineFiles` are rewritten with its own line.
+- `--mode`, `--threads`, `--app-update-url`, the launch line options, `--dry-run`, `--incremental`, `--atomic --yes`, and `--report` work as for `create`, applied to every repository. Arma 3 and Reforger repositories get a launch line and `server_mod_line.txt`; custom game repositories do not. Each applicable repository's `modLineFiles` are rewritten with its own line.
 - `--collect-keys` gathers the keys of the whole space into `<output>/keys`. `--per-repo-keys` also writes each repository's keys (plus `--additional-keys`) into `<output>/<folder>/keys`, so a server can symlink one repository's keys folder directly.
 - `--only <folder>` (repeatable) regenerates only the selected repositories and keeps the full space manifest. It refuses mods shared with repositories you did not select, and it cannot rebuild the combined keys folder.
 - `--prune-unused-optionals` works with `copy` and `pool`, not with `link`.
@@ -589,10 +629,10 @@ Foxy supports **self-hosted app updates**, so each community can distribute Foxy
 
 ```
 foxy-server-backend-cli setup-app-updater \
-  --version 1.1.0 \
-  --windows-installer ./installers/Foxy-1.1.0-setup.exe \
-  --linux-installer ./installers/Foxy-1.1.0-linux-x86_64-installer.sh \
-  --linux-aarch64-installer ./installers/Foxy-1.1.0-linux-aarch64-installer.sh \
+  --version 1.2.1 \
+  --windows-installer ./installers/Foxy-1.2.1-setup.exe \
+  --linux-installer ./installers/Foxy-1.2.1-linux-x86_64-installer.sh \
+  --linux-aarch64-installer ./installers/Foxy-1.2.1-linux-aarch64-installer.sh \
   --changelog ./CHANGELOG.md \
   --output ./update-server
 ```
@@ -603,7 +643,7 @@ This produces:
 update-server/
   foxy-app-updater.json         # Update manifest (BLAKE3 hashes, schema version 1)
   changelogs/
-    1.1.0.json                  # Structured changelog extracted from CHANGELOG.md
+    1.2.1.json                  # Structured changelog extracted from CHANGELOG.md
 ```
 
 Requirements:
@@ -615,10 +655,10 @@ Requirements:
 
 ```
 foxy-server-backend-cli new-app-update \
-  --version 1.2.0 \
-  --windows-installer ./installers/Foxy-1.2.0-setup.exe \
-  --linux-installer ./installers/Foxy-1.2.0-linux-x86_64-installer.sh \
-  --linux-aarch64-installer ./installers/Foxy-1.2.0-linux-aarch64-installer.sh \
+  --version 1.2.2 \
+  --windows-installer ./installers/Foxy-1.2.2-setup.exe \
+  --linux-installer ./installers/Foxy-1.2.2-linux-x86_64-installer.sh \
+  --linux-aarch64-installer ./installers/Foxy-1.2.2-linux-aarch64-installer.sh \
   --changelog ./CHANGELOG.md \
   --output ./update-server
 ```
@@ -631,17 +671,17 @@ This keeps every earlier version in the manifest (so players can downgrade from 
 update-server/
   foxy-app-updater.json
   installers/
-    Foxy-1.2.0-setup.exe
-    Foxy-1.2.0-linux-x86_64-installer.sh
-    Foxy-1.2.0-linux-aarch64-installer.sh
-    Foxy-1.1.0-setup.exe
+    Foxy-1.2.2-setup.exe
+    Foxy-1.2.2-linux-x86_64-installer.sh
+    Foxy-1.2.2-linux-aarch64-installer.sh
+    Foxy-1.2.1-setup.exe
     ...
   changelogs/
-    1.2.0.json
-    1.1.0.json
+    1.2.2.json
+    1.2.1.json
 ```
 
-The manifest references installers by relative path (for example `installers/Foxy-1.2.0-setup.exe`), so place them in an `installers/` folder next to it.
+The manifest references installers by relative path (for example `installers/Foxy-1.2.2-setup.exe`), so place them in an `installers/` folder next to it.
 
 ### Connecting updates to repositories
 
@@ -658,32 +698,32 @@ The URL points to the folder containing `foxy-app-updater.json`. Clients fill it
 ```json
 {
   "schemaVersion": 1,
-  "latest": "1.2.0",
+  "latest": "1.2.2",
   "versions": [
     {
-      "version": "1.2.0",
-      "changelog": "changelogs/1.2.0.json",
+      "version": "1.2.2",
+      "changelog": "changelogs/1.2.2.json",
       "platforms": {
         "windows-x86_64": {
-          "installerPath": "installers/Foxy-1.2.0-setup.exe",
+          "installerPath": "installers/Foxy-1.2.2-setup.exe",
           "installerHash": "<blake3-hex>",
           "installerSize": 12345678
         },
         "linux-x86_64": {
-          "installerPath": "installers/Foxy-1.2.0-linux-x86_64-installer.sh",
+          "installerPath": "installers/Foxy-1.2.2-linux-x86_64-installer.sh",
           "installerHash": "<blake3-hex>",
           "installerSize": 9876543
         },
         "linux-aarch64": {
-          "installerPath": "installers/Foxy-1.2.0-linux-aarch64-installer.sh",
+          "installerPath": "installers/Foxy-1.2.2-linux-aarch64-installer.sh",
           "installerHash": "<blake3-hex>",
           "installerSize": 9765432
         }
       }
     },
     {
-      "version": "1.1.0",
-      "changelog": "changelogs/1.1.0.json",
+      "version": "1.2.1",
+      "changelog": "changelogs/1.2.1.json",
       "platforms": { ... }
     }
   ]
@@ -701,7 +741,9 @@ Platform keys are `windows-x86_64`, `linux-x86_64`, and `linux-aarch64`. The cli
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `repoName` | string | yes | - | Display name of the repository |
-| `game` | string | no | `"arma3"` | `arma3` or `reforger`; selects the server launch line |
+| `game` | string | no | `"arma3"` | `arma3`, `reforger`, or `generic` (a custom game, no server launch line); selects the server launch line |
+| `chunking` | string | no | `"fixed"` | `fixed` (5 MB parts) or `content` (content-defined parts for files that are not PBO or PAK archives) |
+| `gameBuild` | object | no | omitted | `{ folder, executable }`: the folder under `basePath` holding a custom game build and the file to start in it; requires `"game": "generic"` |
 | `basePath` | string | yes | - | Root folder containing the mod folders |
 | `appUpdateUrl` | string | no | `""` | Foxy app update source written into `repo.json` |
 | `requiredMods` | array | no | `[]` | Required mod references |
@@ -759,7 +801,9 @@ When set, Foxy clients send HTTP Basic Auth headers with every request to this r
 | Field | Description |
 |-------|-------------|
 | `repoName` | Repository display name |
-| `game` | Present only for non-Arma 3 repositories, for example `"reforger"` |
+| `game` | Present only for non-Arma 3 repositories, for example `"reforger"` or `"generic"` |
+| `chunking` | `"content"` when the config uses content chunking (omitted for `fixed`) |
+| `gameBuild` | `{ modName, executable }` for a custom game build (omitted when not configured) |
 | `checksum` | Repository-level checksum (BLAKE3 in FoxyMode, SHA-1 in SwiftyMode) |
 | `foxyMode` | `"FoxyModeV1"` in FoxyMode and HybridMode |
 | `requiredMods` | Array of `{ modName, checkSum, enabled, clientSide? }` (empty in FoxyMode, MD5 in Swifty/Hybrid) |
@@ -913,7 +957,8 @@ nginx follows symlinks by default, so `pool` and `link` space layouts work as is
 - **HTTPS is recommended.** Foxy supports HTTP, but HTTPS protects file integrity in transit.
 - **Disable directory listings.** The manifests contain everything clients need.
 - **Set cache headers.** JSON manifests (`repo.json`, `foxy_addons.json`, `foxy_addon.json`, `repository_space.json`) should have short TTLs (5-15 minutes) so updates propagate quickly. Mod files can be cached longer because clients verify them by checksum.
-- **HTTP range requests** must work, because Foxy downloads large files in parallel ranges and patches individual parts.
+- **HTTP range requests** must work, because Foxy downloads large files in parallel ranges and patches individual parts. Foxy rejects a range response that is not `206 Partial Content` or whose `Content-Range` does not match the request, so check any proxy or CDN in front of the server.
+- **Busy responses.** Foxy retries `408`, `429`, and `5xx` responses a few times per request and honors `Retry-After` up to 30 seconds, so rate limiting slows a download instead of failing it straight away.
 - **Compression.** Enable gzip or brotli for `.json` files. Mod archives are already compressed and do not benefit from transport compression.
 - **Basic authentication.** If you set `repoBasicAuthentication`, enforce the same credentials in the web server.
 - **Bandwidth.** Large modsets can be tens of gigabytes. Delta patching reduces update sizes significantly, but plan hosting for full first downloads.
@@ -932,13 +977,15 @@ foxy-server-backend-cli create config.json ./output
 
 This re-discovers the files, recomputes checksums, regenerates the manifests, and rewrites any `modLineFiles`. Add `--incremental` to skip rehashing mods whose files did not change, `--report` to see what changed, and `--atomic --yes` so players never see a half-written output.
 
-Foxy clients detect changes through the repository checksum in `repo.json` and download only the files and file parts that differ.
+Foxy clients detect changes through the repository checksum in `repo.json` and download only the files and file parts that differ. Before an update starts, clients also reread the manifests of the addons they are about to update, even when the repository checksum is unchanged, so a publish that lands while a player has an update pending is picked up. A client that reads a half-published state retries once with fresh requests and then stops with an error instead of applying it.
 
 ### Adding or removing mods
 
 1. Edit `requiredMods` / `optionalMods` in `config.json`.
 2. Run `validate` to catch typos.
 3. Run `create` (or `create-space`) again. The generated manifests and the launch line reflect the new list.
+
+Publishing an empty repository (explicitly empty `requiredMods` and `optionalMods`) or an empty mod does not remove anything from players' disks. Foxy keeps the installed files and offers **Review removal of retained files** for a separate confirmation. A failed or omitted manifest is never treated as empty.
 
 ### Switching generation modes
 
@@ -1014,6 +1061,14 @@ Some actions remove published data or write into your sources: `--layout link`, 
 1. Check that `checksum` in `repo.json` changed. Identical mod files produce the same checksum.
 2. Check web server caching. A long cache on JSON files serves a stale `repo.json`.
 3. Make sure the client's repository URL points to the folder that contains `repo.json`.
+
+### Clients report inconsistent metadata
+
+Foxy checks that the file parts in a manifest cover each file's declared size. If they do not, it retries once with a fresh request and then stops before any cleanup. Regenerate the repository, preferably with `--atomic --yes`, check the output with `verify`, and clear any cache or CDN in front of it. Files that fail their checksum after download are rolled back on the client the same way.
+
+### Clients stop on a missing file (HTTP 404 or 410)
+
+The client rolls back the attempt and refreshes its file lists on the next try. If the fresh plan still requests a missing file, the published files and manifests disagree: run `verify` on the output and regenerate it. Check that the files were copied to the web root, and that the URL paths match their case on case-sensitive hosts.
 
 ### Clients cannot connect
 

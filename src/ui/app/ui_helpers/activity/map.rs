@@ -1,6 +1,4 @@
-use egui::{
-    Color32, Mesh, Rect, Response, Sense, Shape, Ui, Widget, WidgetInfo, WidgetType, pos2, vec2,
-};
+use egui::{Color32, Mesh, Rect, Response, Role, Sense, Shape, Ui, Widget, WidgetInfo, pos2, vec2};
 
 use super::sprites::add_dust;
 use super::textures::ActivityTextures;
@@ -112,7 +110,7 @@ impl Widget for VerificationMap {
         let width = ui.available_size_before_wrap().x.max(96.0);
         let (rect, response) = ui.allocate_exact_size(vec2(width, Self::HEIGHT), Sense::hover());
         response.widget_info(|| {
-            let mut info = WidgetInfo::new(WidgetType::ProgressIndicator);
+            let mut info = WidgetInfo::new(Role::ProgressIndicator);
             info.value = self
                 .progress
                 .map(|progress| (f64::from(progress.clamp(0.0, 1.0)) * 100.0).floor());

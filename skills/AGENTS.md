@@ -1,26 +1,21 @@
-# AGENTS.md
-## Repo Skills
+# Repository skills
 
-Skills in this directory are shareable agent workflows maintained with the repo. Prefer these repo-local copies over user-global skill copies when working in this repository, because they track Foxy's current conventions and helper scripts.
+`skills/<name>/SKILL.md` is the canonical workflow. Prefer it over user-global copies when working in Foxy. Codex loaders in `.agents/skills/` and Claude Code loaders in `.claude/skills/` link back here; keep their names and descriptions aligned.
 
-## Load When Needed
+## Load when needed
 
-- Foxy locale JSON translation, exact-English fallback cleanup, placeholder audits, or i18n checker workflows: `skills/foxy-locale-translator/SKILL.md`.
-- Agentic GUI automation, Playwright-like desktop UI debugging, screenshots, FPS probes, semantic UI snapshots, or driver IPC for Codex/Claude: `skills/foxy-gui-driver/SKILL.md`.
-- Running the developer-machine test kit (UX click-through cases, downloader/checker/database performance cases, ledger, baselines, calibration, WAL vs MVCC): `skills/foxy-testkit/SKILL.md`, then `testkit/README.md`.
-- Claude Code invocation of these skills: `.claude/skills/foxy-gui-driver/SKILL.md` and `.claude/skills/foxy-testkit/SKILL.md`, thin loaders for the canonical files above.
+- The categorized catalog in `skills/README.md` routes all specialized workflows. Use the narrow skill for diagnosis, sync/database integrity, performance attribution, desktop verification, or platform/release work; use the foundation skills below for shared mechanics. Do not load all skill bodies for one task.
+- Rust implementation and crate-aware validation: `skills/foxy-rust-change/SKILL.md`.
+- Instructions, skills, discovery, roles, or checker maintenance: `skills/foxy-agent-maintenance/SKILL.md` and `conventions/AGENT_WORKFLOWS.md`.
+- Locale translation, fallback cleanup, placeholder audits, or i18n checking: `skills/foxy-locale-translator/SKILL.md` and `conventions/i18n_CONVENTIONS.md`.
+- Agentic GUI automation and desktop inspection: `skills/foxy-gui-driver/SKILL.md`.
+- Developer-machine UX/performance cases, baselines, calibration, and WAL/MVCC comparison: `skills/foxy-testkit/SKILL.md`, then `testkit/README.md`.
 
 ## Maintenance
 
-- Keep skill scripts runnable from the repository root.
-- Keep command examples repo-relative, not user-specific absolute paths.
-- For repeated locale insertion/update work, prefer the `locale-apply` binary in `tools/i18n-checker/` over one-off generated patch blocks. Skills in this repo call compiled Rust helpers, not scripting-language helpers.
-- For locale skills or examples, avoid PowerShell text-write patterns that can corrupt non-ASCII text into literal `?`; require UTF-8-safe edits plus a post-edit scan for `?` in changed translated values.
-- When localization conventions change, update both `conventions/i18n_CONVENTIONS.md` and `skills/foxy-locale-translator/SKILL.md` in the same change.
-- When the GUI driver or test kit workflow changes, update the canonical `skills/<name>/SKILL.md` first, then keep the matching `.claude/skills/<name>/SKILL.md` as a small pointer whose quick reference still agrees with it.
-- Validate skill metadata with:
-
-  ```powershell
-  py -3 "${env:USERPROFILE}\.codex\skills\.system\skill-creator\scripts\quick_validate.py" skills\foxy-locale-translator
-  py -3 "${env:USERPROFILE}\.codex\skills\.system\skill-creator\scripts\quick_validate.py" skills\foxy-gui-driver
-  ```
+- Keep descriptions precise, bodies focused, and conditional detail in linked references. Update the matching convention and root router when a workflow changes.
+- Add both discovery loaders for every canonical skill. Keep canonical `agents/openai.yaml` and its `.agents/skills/<name>/agents/openai.yaml` copy identical. Default prompts name `$<skill-name>`.
+- Link every canonical skill from `skills/README.md`. The Rust checker discovers skills dynamically, validates local links throughout canonical skills and references, and checks text rules in canonical and discovery metadata.
+- Use repo-relative commands and compiled Rust helpers under `tools/`; do not add scripting-language helpers. For translation batches use the Rust `locale-apply` binary and audit non-ASCII strings for literal `?` corruption.
+- Store local batches, caches, and working notes in ignored locations, not skill directories.
+- Run `cargo agent-check` and `git diff --check` after changing skills or their entrypoints. For checker code changes follow `tools/AGENTS.md`.

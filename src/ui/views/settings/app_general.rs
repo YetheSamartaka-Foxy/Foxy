@@ -59,7 +59,7 @@ impl Foxy {
         response
     }
 
-    /// Language selector, download speed limit, checkboxes (auto-backup, auto-apply, auto-recheck,
+    /// Language selector, download speed limit, proxy, resource usage, checkboxes (auto-backup, auto-apply, auto-recheck,
     /// auto-quick-scan), open config/logs buttons, reset, debug windows, close/hide-after-launch,
     /// and wipe database (dev).
     pub(super) fn render_application_settings_general(
@@ -244,6 +244,12 @@ impl Foxy {
         });
         ui.separator();
 
+        self.render_application_settings_proxy(ui, horizontal_padding, changed);
+        ui.separator();
+
+        self.render_application_settings_resources(ui, horizontal_padding, changed);
+        ui.separator();
+
         // Hashing profile
         ui.horizontal(|ui| {
             ui.add_space(horizontal_padding);
@@ -384,6 +390,15 @@ impl Foxy {
                         Self::render_wrapped_settings_checkbox(
                             ui,
                             true,
+                            &mut self.settings_view_state.periodic_remote_check_enabled,
+                            tr("Periodically check repository metadata"),
+                            Some(tr("While Foxy is idle in the active game space, refresh repository metadata. This checks for updates but never downloads them automatically.")),
+                            row_width,
+                            changed,
+                        );
+                        Self::render_wrapped_settings_checkbox(
+                            ui,
+                            true,
                             &mut self.settings_view_state.auto_quick_scan_on_launch,
                             tr("Auto quick scan for changes on launch"),
                             Some(tr("Automatically run a quick local file scan for all repositories when the app starts.")),
@@ -399,6 +414,15 @@ impl Foxy {
                             row_width,
                             changed,
                         );
+                    });
+                    ui.add_enabled_ui(self.settings_view_state.periodic_remote_check_enabled, |ui| {
+                        ui.horizontal(|ui| {
+                            let label = ui.label(tr("Check interval"));
+                            if ui.add(egui::DragValue::new(&mut self.settings_view_state.periodic_remote_check_interval_minutes)
+                                .range(5..=1440).suffix(tr(" minutes"))).labelled_by(label.id).changed() {
+                                *changed = true;
+                            }
+                        });
                     });
                 },
             );

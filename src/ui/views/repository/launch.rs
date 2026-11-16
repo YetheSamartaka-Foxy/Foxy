@@ -1,53 +1,257 @@
-use super::{LaunchDispatchResult, spawn_launch_process};
+use super::LaunchDispatchResult;
+use super::launch_policy::{
+    join_preflight_fact_keys, merge_join_preflight_choices, paths_overlap, repository_launch_paths,
+};
 use crate::core::addon_metadata::load_addon_display_name_snapshot;
 use crate::core::arma3_missions::EditorMission;
 use crate::core::arma3_server_query::{
     ServerAddonQueryResult, creator_dlc_by_app_id, query_server_addon_requirements,
 };
-use crate::core::steam::{self, SteamEnsureResult};
+use crate::core::steam;
 use crate::ui::app::{
-    Foxy, JoinPreflightQueryResult, PendingJoinPreflightQuery, PendingJoinStatusQuery,
-    PendingMissionEditorLaunchWarningState,
+    Foxy, JoinPreflightQueryResult, LaunchRequest, PendingJoinPreflightQuery,
+    PendingJoinStatusQuery, PendingMissionEditorLaunchWarningState, PendingUpdateLaunch,
 };
 use crate::ui::types::{Repository, RepositoryServer, ServerOnlineStatus};
 use eframe::egui;
 use log::{info, warn};
-use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 const EDITOR_LAUNCH_COOLDOWN: Duration = Duration::from_secs(30);
-const JOIN_PREFLIGHT_CACHE_TTL: Duration = Duration::from_secs(60);
+static NEXT_JOIN_PREFLIGHT_QUERY_ID: AtomicU64 = AtomicU64::new(1);
 
 impl Foxy {
-    fn activate_extra_files_before_launch(&mut self) {
-        let space_dir = crate::core::game::spaces::active_game_space_dir();
-        let game_dir = crate::core::game::registry()
-            .active()
-            .install_dir_from_settings(&self.settings_view_state)
-            .to_string();
-        match crate::core::game::extra_files::activate_for_launch(&space_dir, &game_dir) {
-            Ok(summary) => {
-                if let Some((name, reason)) = summary.failed.first() {
-                    warn!(
-                        "Extra-file activation had {} failure(s) before launch",
-                        summary.failed.len()
-                    );
-                    let message = self.t_fmt(
-                        "Could not apply extra file {name}: {error}",
-                        &[("name", name.clone()), ("error", reason.clone())],
-                    );
-                    self.show_error_toast(message);
+    fn repository_space_shared_path(&self, repository: &Repository) -> Option<&str> {
+        let space_id = repository.repository_space_id.as_deref()?;
+        self.repository_spaces
+            .iter()
+            .find(|space| space.id == space_id)
+            .map(|space| space.shared_path.as_str())
+    }
+
+    fn conflicting_download_instance(&self, target: &Repository) -> Option<String> {
+        if self.current_sync_mode != Some(crate::core::api::SyncMode::Download) {
+            return None;
+        }
+        let source = self
+            .syncing_repository
+            .and_then(|index| self.repository_view_state.repositories.get(index))?;
+        let source_shared = self.repository_space_shared_path(source);
+        let target_shared = self.repository_space_shared_path(target);
+        let source_paths = repository_launch_paths(source, source_shared);
+        let target_paths = repository_launch_paths(target, target_shared);
+        source_paths
+            .iter()
+            .any(|source_path| {
+                target_paths
+                    .iter()
+                    .any(|target_path| paths_overlap(source_path, target_path))
+            })
+            .then(|| Self::repo_instance_key(&source.address, &source.path))
+    }
+
+    fn queue_launch_if_conflicting_update(
+        &mut self,
+        effective: &Repository,
+        server: Option<&RepositoryServer>,
+        repo_name: &str,
+        launch_label: &str,
+    ) -> bool {
+        let target_instance_key = Self::repo_instance_key(&effective.address, &effective.path);
+        if let Some(pending) = self.pending_update_launch.as_mut()
+            && pending.target_instance_key == target_instance_key
+        {
+            if pending.server.as_ref() != server || pending.repository != *effective {
+                pending.replacement = Some(Box::new(PendingUpdateLaunch {
+                    repository: effective.clone(),
+                    server: server.cloned(),
+                    repo_name: repo_name.to_string(),
+                    blocking_instance_key: pending.blocking_instance_key.clone(),
+                    target_instance_key,
+                    update_finished: pending.update_finished,
+                    update_succeeded: pending.update_succeeded,
+                    replacement: None,
+                }));
+            }
+            return true;
+        }
+        let Some(blocking_instance_key) = self.conflicting_download_instance(effective) else {
+            return false;
+        };
+        if let Some(pending) = self.pending_update_launch.as_mut() {
+            pending.replacement = Some(Box::new(PendingUpdateLaunch {
+                repository: effective.clone(),
+                server: server.cloned(),
+                repo_name: repo_name.to_string(),
+                blocking_instance_key: pending.blocking_instance_key.clone(),
+                target_instance_key,
+                update_finished: pending.update_finished,
+                update_succeeded: pending.update_succeeded,
+                replacement: None,
+            }));
+            return true;
+        }
+        info!(
+            "Queued {} for repository {} until overlapping update completes",
+            launch_label, repo_name
+        );
+        self.pending_update_launch = Some(PendingUpdateLaunch {
+            repository: effective.clone(),
+            server: server.cloned(),
+            repo_name: repo_name.to_string(),
+            blocking_instance_key,
+            target_instance_key,
+            update_finished: false,
+            update_succeeded: false,
+            replacement: None,
+        });
+        true
+    }
+
+    pub(crate) fn finish_queued_update_launch(
+        &mut self,
+        blocking_instance_key: &str,
+        succeeded: bool,
+    ) {
+        let Some(pending) = self.pending_update_launch.as_mut() else {
+            return;
+        };
+        if pending.blocking_instance_key != blocking_instance_key {
+            return;
+        }
+        pending.update_finished = true;
+        pending.update_succeeded = succeeded;
+    }
+
+    pub(crate) fn render_queued_update_launch(&mut self, ctx: &egui::Context) {
+        let Some(pending) = self.pending_update_launch.clone() else {
+            return;
+        };
+        if let Some(replacement) = pending.replacement.as_ref() {
+            let mut replace = false;
+            let mut keep = false;
+            egui::Modal::new(egui::Id::unique("replace_queued_launch")).show(ctx, |ui| {
+                ui.heading(self.t("Replace queued launch?"));
+                ui.label(self.t_fmt(
+                    "Current request: {target}",
+                    &[(
+                        "target",
+                        format!(
+                                "{} - {} ({}) - {}",
+                                pending.repo_name,
+                                pending
+                                    .server
+                                    .as_ref()
+                                    .map(|server| server.name.as_str())
+                                    .unwrap_or("Launch"),
+                                pending
+                                    .repository
+                                    .selected_profile
+                                    .as_deref()
+                                    .unwrap_or("Default"),
+                                pending.repository.path
+                            ),
+                    )],
+                ));
+                ui.label(self.t_fmt(
+                    "New request: {target}",
+                    &[(
+                        "target",
+                        format!(
+                                "{} - {} ({}) - {}",
+                                replacement.repo_name,
+                                replacement
+                                    .server
+                                    .as_ref()
+                                    .map(|server| server.name.as_str())
+                                    .unwrap_or("Launch"),
+                                replacement
+                                    .repository
+                                    .selected_profile
+                                    .as_deref()
+                                    .unwrap_or("Default"),
+                                replacement.repository.path
+                            ),
+                    )],
+                ));
+                ui.horizontal(|ui| {
+                    keep = ui.button(self.t("Keep current request")).clicked();
+                    replace = ui.button(self.t("Replace queued launch")).clicked();
+                });
+            });
+            if replace {
+                let mut chosen = *replacement.clone();
+                chosen.update_finished = pending.update_finished;
+                chosen.update_succeeded = pending.update_succeeded;
+                chosen.blocking_instance_key = pending.blocking_instance_key;
+                self.pending_update_launch = Some(chosen);
+            } else if keep && let Some(current) = self.pending_update_launch.as_mut() {
+                current.replacement = None;
+            }
+            return;
+        }
+        let mut cancel = false;
+        egui::Window::new(self.t("Launch queued for update"))
+            .frame(self.modal_window_chrome(ctx))
+            .title_frame(self.modal_window_chrome(ctx))
+            .title_bar(true)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .default_width(480.0)
+            .show(ctx, |ui| {
+                if pending.update_finished && !pending.update_succeeded {
+                    ui.label(self.t("The update did not complete. The game was not launched."));
+                } else {
+                    ui.label(self.t_fmt(
+                        "Waiting for the update to finish before launching {repository}.",
+                        &[("repository", pending.repo_name.clone())],
+                    ));
+                    if !pending.update_finished {
+                        ui.add(crate::ui::app::PacedSpinner::new());
+                    }
                 }
+                ui.add_space(12.0);
+                cancel = ui.button(self.t("Cancel queued launch")).clicked();
+            });
+        if cancel {
+            self.pending_update_launch = None;
+            return;
+        }
+        if !pending.update_finished {
+            return;
+        }
+        if !pending.update_succeeded {
+            self.pending_update_launch = None;
+            self.show_error_toast(
+                self.t("The update did not complete. The game was not launched."),
+            );
+            return;
+        }
+        if let Some(blocker) = self.conflicting_download_instance(&pending.repository) {
+            if let Some(queued) = self.pending_update_launch.as_mut() {
+                queued.blocking_instance_key = blocker;
+                queued.update_finished = false;
+                queued.update_succeeded = false;
             }
-            Err(err) => {
-                warn!("Extra-file activation failed before launch: {}", err);
-                let message = self.t_fmt(
-                    "Could not apply extra files before launch: {error}",
-                    &[("error", err.clone())],
-                );
-                self.show_error_toast(message);
-            }
+            return;
+        }
+        self.pending_update_launch = None;
+        if self
+            .repo_index_by_instance(
+                &Self::normalize_repo_url(&pending.repository.address),
+                &Self::repo_instance_path_key(&pending.repository.path),
+            )
+            .is_none()
+        {
+            return;
+        }
+        if let Some(server) = pending.server.as_ref() {
+            self.try_join_repository_server(ctx, &pending.repository, server, &pending.repo_name);
+        } else {
+            self.present_launch_preflight(ctx, &pending.repository, &pending.repo_name);
         }
     }
 
@@ -93,6 +297,9 @@ impl Foxy {
         repo_name: &str,
         launch_label: &'static str,
     ) -> LaunchDispatchResult {
+        if self.queue_launch_if_conflicting_update(effective, server, repo_name, launch_label) {
+            return LaunchDispatchResult::Deferred;
+        }
         self.refresh_database_repair_requirement();
         if self.database_updates_blocked() {
             if self.pending_database_launch.is_none() {
@@ -110,6 +317,45 @@ impl Foxy {
         self.launch_repository_with_steam_guard(effective, server, repo_name, launch_label)
     }
 
+    /// A game build the repository downloaded starts its own executable, never
+    /// a Steam install.
+    fn repository_launch_uses_steam(&self, effective: &Repository) -> bool {
+        effective.game_build.is_none()
+            && crate::core::game::registry()
+                .active()
+                .steam_app_id_from_settings(&self.settings_view_state)
+                .is_some()
+    }
+
+    fn show_game_build_launch_error(&mut self, effective: &Repository, repo_name: &str) {
+        let Some(build) = effective.game_build.as_ref() else {
+            return;
+        };
+        let repo_path = Path::new(effective.path.trim());
+        let dir = crate::core::utils::fs_safety::resolve_child_dir_case_insensitive(
+            repo_path,
+            &build.addon,
+        );
+        let message = match dir {
+            None => self.t_fmt(
+                "{game} has not been downloaded yet. Update the repository first.",
+                &[("game", repo_name.to_string())],
+            ),
+            Some(dir) if !dir.join(&build.executable).is_file() => self.t_fmt(
+                "{file} was not found in the downloaded {game} files. Recheck the repository.",
+                &[
+                    ("file", build.executable.clone()),
+                    ("game", repo_name.to_string()),
+                ],
+            ),
+            Some(_) => self.t_fmt(
+                "{game} could not be launched. Check the executable and launch settings in Game space settings.",
+                &[("game", repo_name.to_string())],
+            ),
+        };
+        self.show_error_toast(message);
+    }
+
     pub(crate) fn launch_repository_with_steam_guard(
         &mut self,
         effective: &Repository,
@@ -124,6 +370,10 @@ impl Foxy {
                     "Launching from a repository is not supported for {game}.",
                     &[("game", module.display_name().to_string())],
                 ));
+                return LaunchDispatchResult::Failed;
+            }
+            if effective.game_build.is_some() {
+                self.show_game_build_launch_error(effective, repo_name);
                 return LaunchDispatchResult::Failed;
             }
             let game = module.display_name().to_string();
@@ -157,111 +407,23 @@ impl Foxy {
                         "{game} executable not found at the configured path.",
                         &[("game", game)],
                     ));
+                } else {
+                    self.show_error_toast(self.t_fmt(
+                        "{game} could not be launched. Check the executable and launch settings in Game space settings.",
+                        &[("game", game)],
+                    ));
                 }
             }
             return LaunchDispatchResult::Failed;
         };
 
-        let executable = command.get_program().to_os_string();
-        let args: Vec<OsString> = command.get_args().map(|arg| arg.to_os_string()).collect();
-        let cwd: Option<PathBuf> = command.get_current_dir().map(Path::to_path_buf);
-        let game_name = crate::core::game::registry()
-            .active()
-            .display_name()
-            .to_string();
-        let steam_required = crate::core::game::registry()
-            .active()
-            .steam_app_id_from_settings(&self.settings_view_state)
-            .is_some();
-        self.activate_extra_files_before_launch();
-
-        if !steam_required || steam::is_steam_running(&self.settings_view_state.steam_directory) {
-            return match spawn_launch_process(
-                &executable,
-                &args,
-                cwd.as_deref(),
-                steam_required,
-                &self.settings_view_state.steam_directory,
-            ) {
-                Ok(pid) => {
-                    info!(
-                        "Launched {} for repository {} (pid={})",
-                        game_name, repo_name, pid
-                    );
-                    self.mark_repository_launched(&effective.address, &effective.path);
-                    LaunchDispatchResult::Launched
-                }
-                Err(err) => {
-                    warn!(
-                        "Failed to launch {} for repository {}: {}",
-                        game_name, repo_name, err
-                    );
-                    self.show_error_toast(self.t("Failed to launch Arma 3."));
-                    LaunchDispatchResult::Failed
-                }
-            };
-        }
-
-        info!(
-            "Steam is not running; preparing Steam before {} launch for repository {}",
-            launch_label, repo_name
-        );
-
-        self.mark_repository_launched(&effective.address, &effective.path);
-        let steam_directory = self.settings_view_state.steam_directory.clone();
-        let repo_name_owned = repo_name.to_string();
-        let launch_label_owned = launch_label.to_string();
-        let executable_for_thread = executable;
-        let args_for_thread = args;
-        let cwd_for_thread = cwd;
-        std::thread::spawn(move || {
-            match steam::ensure_steam_running(&steam_directory) {
-                Ok(SteamEnsureResult::AlreadyRunning) => {}
-                Ok(SteamEnsureResult::Started) => {
-                    info!(
-                        "Steam started successfully before {} launch for repository {}",
-                        launch_label_owned, repo_name_owned
-                    );
-                }
-                Ok(SteamEnsureResult::SkippedMissingDirectory) => {
-                    warn!(
-                        "Steam directory is not configured and auto-detection failed; cancelling \
-                         {} launch for repository {}",
-                        launch_label_owned, repo_name_owned
-                    );
-                    return;
-                }
-                Err(err) => {
-                    warn!(
-                        "Failed to prepare Steam before {} launch for repository {}: {}",
-                        launch_label_owned, repo_name_owned, err
-                    );
-                    return;
-                }
-            }
-
-            match spawn_launch_process(
-                &executable_for_thread,
-                &args_for_thread,
-                cwd_for_thread.as_deref(),
-                steam_required,
-                &steam_directory,
-            ) {
-                Ok(pid) => {
-                    info!(
-                        "Launched {} for repository {} (pid={})",
-                        game_name, repo_name_owned, pid
-                    );
-                }
-                Err(err) => {
-                    warn!(
-                        "Failed to launch {} for repository {} after Steam preparation: {}",
-                        game_name, repo_name_owned, err
-                    );
-                }
-            }
+        let _ = (command, launch_label);
+        self.start_launch_action(crate::ui::app::LaunchRequest {
+            repository: effective.clone(),
+            server: server.cloned(),
+            name: repo_name.to_string(),
+            mission_path: None,
         });
-
         LaunchDispatchResult::Deferred
     }
 
@@ -309,7 +471,7 @@ impl Foxy {
             ts3_gate,
             steam_gate,
         ) {
-            self.prelaunch_recheck_at = None;
+            self.prelaunch_process_checks = Default::default();
             self.pending_join_preflight = Some(preflight);
             ctx.request_repaint();
             return;
@@ -333,14 +495,15 @@ impl Foxy {
         // round-trip). The join decision resumes in `poll_pending_join_status`
         // once a fresh status arrives, so a slow or unreachable server can no
         // longer freeze the UI.
+        let (query_id, started_at, result_rx) = self.start_join_server_status_query(server);
         self.pending_join_status_query = Some(PendingJoinStatusQuery {
             repo_name: repo_name.to_string(),
             server: server.clone(),
             effective_repository: effective.clone(),
-            key: (server.address.clone(), server.port.clone()),
-            started_at: Instant::now(),
+            query_id,
+            started_at,
+            result_rx,
         });
-        self.spawn_query_thread(server);
         self.needs_repaint = true;
     }
 
@@ -357,12 +520,10 @@ impl Foxy {
             return;
         };
 
-        // Accept the freshest status that landed at or after we dispatched.
-        let status = self
-            .server_statuses
-            .get(&pending.key)
-            .filter(|cache| cache.last_check >= pending.started_at)
-            .map(|cache| cache.status);
+        let result = pending.result_rx.try_recv().ok();
+        let status = result
+            .filter(|result| result.matches_pending(pending.query_id, pending.started_at))
+            .map(|result| result.status);
         if status.is_none() && pending.started_at.elapsed() < JOIN_STATUS_QUERY_TIMEOUT {
             return; // still waiting - no clone, no take
         }
@@ -382,6 +543,23 @@ impl Foxy {
                 self.show_error_toast(self.t("Cannot join: server appears offline."));
                 self.needs_repaint = true;
             }
+        }
+    }
+
+    pub(crate) fn render_pending_join_status(&mut self, ctx: &egui::Context) {
+        if self.pending_join_status_query.is_none() {
+            return;
+        }
+        let mut cancel = false;
+        egui::Modal::new(egui::Id::unique("pending_join_status_query")).show(ctx, |ui| {
+            ui.set_max_width(420.0);
+            ui.label(self.t("Refreshing server and local addon requirements..."));
+            ui.add(crate::ui::app::PacedSpinner::new());
+            cancel = ui.button(self.t("Cancel")).clicked();
+        });
+        if cancel {
+            self.pending_join_status_query = None;
+            self.needs_repaint = true;
         }
     }
 
@@ -413,15 +591,6 @@ impl Foxy {
                     );
                     match server.port.parse::<u16>() {
                         Ok(port) => {
-                            if self.handle_cached_join_preflight(
-                                ctx, effective, server, repo_name, port,
-                            ) {
-                                info!(
-                                    "Join addon preflight handled from cache for repository {} server {}:{}",
-                                    repo_name, server.address, server.port
-                                );
-                                return;
-                            }
                             self.spawn_join_preflight_query(
                                 ctx, effective, server, repo_name, port,
                             );
@@ -445,7 +614,7 @@ impl Foxy {
                     "Joining repository {} without addon preflight dialog because no addon preflight gate was active",
                     repo_name
                 );
-                self.present_join_addon_preflight(ctx, effective, server, repo_name, None);
+                self.present_join_addon_preflight(ctx, effective, server, repo_name, None, false);
             }
             ServerOnlineStatus::Offline => {
                 warn!(
@@ -455,39 +624,6 @@ impl Foxy {
                 self.show_error_toast(self.t("Cannot join: server appears offline."));
             }
         }
-    }
-
-    fn handle_cached_join_preflight(
-        &mut self,
-        ctx: &egui::Context,
-        effective: &Repository,
-        server: &RepositoryServer,
-        repo_name: &str,
-        port: u16,
-    ) -> bool {
-        let key = (server.address.clone(), port);
-        let Some(entry) = self.join_preflight_cache.get(&key) else {
-            return false;
-        };
-        if entry.cached_at.elapsed() > JOIN_PREFLIGHT_CACHE_TTL {
-            info!(
-                "Join addon preflight cache expired for repository {} server {}:{}",
-                repo_name, server.address, server.port
-            );
-            self.join_preflight_cache.remove(&key);
-            return false;
-        }
-        info!(
-            "Join addon preflight cache hit for repository {} server {}:{} with {} requirement(s)",
-            repo_name,
-            server.address,
-            server.port,
-            entry.result.requirements.len()
-        );
-        let result = entry.result.clone();
-        let display_names = entry.display_names.clone();
-        self.finish_join_preflight(ctx, effective, server, repo_name, &result, &display_names);
-        true
     }
 
     fn spawn_join_preflight_query(
@@ -509,6 +645,7 @@ impl Foxy {
         }
 
         self.pending_join_preflight_query = Some(PendingJoinPreflightQuery {
+            query_id: NEXT_JOIN_PREFLIGHT_QUERY_ID.fetch_add(1, Ordering::Relaxed),
             repo_name: repo_name.to_string(),
             server: server.clone(),
             original_repository: effective.clone(),
@@ -528,6 +665,11 @@ impl Foxy {
             repo_name, address, port
         );
         let tx = self.join_preflight_result_tx.clone();
+        let query_id = self
+            .pending_join_preflight_query
+            .as_ref()
+            .expect("preflight request was just installed")
+            .query_id;
         let repaint_ctx = self.repaint_ctx.clone().or_else(|| Some(ctx.clone()));
         self.join_preflight_worker = Some(std::thread::spawn(move || {
             let started_at = Instant::now();
@@ -588,6 +730,7 @@ impl Foxy {
             }
             if tx
                 .send(JoinPreflightQueryResult {
+                    query_id,
                     address,
                     port,
                     result,
@@ -610,6 +753,15 @@ impl Foxy {
         display_names: &crate::core::addon_metadata::AddonDisplayNameSnapshot,
     ) {
         Self::log_join_preflight_query_output(repo_name, server, result);
+        let confirmation = self
+            .pending_join_preflight
+            .as_ref()
+            .filter(|pending| {
+                pending.server.address == server.address
+                    && pending.server.port == server.port
+                    && pending.final_confirmation_choice.is_some()
+            })
+            .cloned();
         let mut addon_state = Self::build_join_preflight_state(
             effective,
             &self.repository_view_state.repositories,
@@ -625,6 +777,39 @@ impl Foxy {
             repo_name,
             result,
         );
+        if let Some(previous) = confirmation {
+            let mut refreshed = self
+                .join_preflight_state_or_local_fallback(
+                    addon_state.take(),
+                    effective,
+                    server,
+                    repo_name,
+                )
+                .unwrap_or_else(|| {
+                    crate::ui::app::PendingJoinPreflightState::empty(
+                        repo_name,
+                        server.clone(),
+                        effective.clone(),
+                        false,
+                    )
+                });
+            merge_join_preflight_choices(&previous, &mut refreshed);
+            let facts_changed =
+                join_preflight_fact_keys(&previous) != join_preflight_fact_keys(&refreshed);
+            let keep_suggestions = previous.final_confirmation_choice.unwrap_or(false);
+            self.pending_join_preflight = None;
+            if facts_changed {
+                refreshed.final_facts_refreshed = true;
+                refreshed.final_confirmation_choice = None;
+                self.pending_join_preflight = Some(refreshed);
+                self.prelaunch_process_checks = Default::default();
+                ctx.request_repaint();
+                return;
+            }
+            refreshed.final_facts_refreshed = true;
+            self.dispatch_refreshed_join(ctx, &refreshed, keep_suggestions);
+            return;
+        }
         if let Some(preflight) = &addon_state {
             info!(
                 "Join addon preflight dialog opened for repository {} server {}:{}: requirements={}, suggestions={}, ambiguous={}, known_remote={}, extra_enabled={}",
@@ -647,7 +832,76 @@ impl Foxy {
                 result.requirements.len()
             );
         }
-        self.present_join_addon_preflight(ctx, effective, server, repo_name, addon_state);
+        self.present_join_addon_preflight(ctx, effective, server, repo_name, addon_state, true);
+    }
+
+    fn dispatch_refreshed_join(
+        &mut self,
+        ctx: &egui::Context,
+        pending: &crate::ui::app::PendingJoinPreflightState,
+        keep_suggestions: bool,
+    ) {
+        let mut pending = pending.clone();
+        if pending.steam_required {
+            pending.steam_running =
+                steam::is_steam_running(&self.settings_view_state.steam_directory);
+            if !pending.can_launch() {
+                self.pending_join_preflight = Some(pending);
+                ctx.request_repaint();
+                return;
+            }
+        }
+        let repository = if keep_suggestions {
+            Self::repository_with_join_preflight_selections(&pending)
+        } else {
+            Self::repository_without_join_preflight_suggestions(&pending)
+        };
+        let result = self.launch_repository_with_database_guard(
+            &repository,
+            Some(&pending.server),
+            &pending.repo_name,
+            "join",
+        );
+        if result == super::LaunchDispatchResult::Launched {
+            self.handle_post_launch_window_behavior(ctx, "join launch completed");
+        }
+    }
+
+    pub(super) fn confirm_final_join_facts(
+        &mut self,
+        ctx: &egui::Context,
+        pending: &crate::ui::app::PendingJoinPreflightState,
+        keep_suggestions: bool,
+    ) -> bool {
+        if !pending.refreshes_server_facts_before_join() {
+            return false;
+        }
+        if self.pending_join_preflight_query.is_some()
+            || self
+                .join_preflight_worker
+                .as_ref()
+                .is_some_and(|worker| !worker.is_finished())
+        {
+            return true;
+        }
+        let Ok(port) = pending.server.port.parse::<u16>() else {
+            self.show_error_toast(
+                self.t("Cannot refresh server requirements because its query port is invalid."),
+            );
+            return true;
+        };
+        let mut pending = pending.clone();
+        pending.final_confirmation_choice = Some(keep_suggestions);
+        pending.final_query_error = None;
+        self.pending_join_preflight = Some(pending.clone());
+        self.spawn_join_preflight_query(
+            ctx,
+            &pending.original_repository,
+            &pending.server,
+            &pending.repo_name,
+            port,
+        );
+        true
     }
 
     /// Adds the Creator DLC differences to the join modal. Skipped when the
@@ -708,17 +962,14 @@ impl Foxy {
         state.dlc_disable = dlc_disable;
     }
 
-    pub(crate) fn present_join_addon_preflight(
-        &mut self,
-        ctx: &egui::Context,
+    fn join_preflight_state_or_local_fallback(
+        &self,
+        addon_state: Option<crate::ui::app::PendingJoinPreflightState>,
         effective: &Repository,
         server: &RepositoryServer,
         repo_name: &str,
-        addon_state: Option<crate::ui::app::PendingJoinPreflightState>,
-    ) {
-        self.prelaunch_recheck_at = None;
-        let (steam_required, steam_running) = self.evaluate_steam_launch_gate(effective, repo_name);
-        let mut addon_state = addon_state.or_else(|| {
+    ) -> Option<crate::ui::app::PendingJoinPreflightState> {
+        addon_state.or_else(|| {
             Self::build_join_preflight_state(
                 effective,
                 &self.repository_view_state.repositories,
@@ -727,7 +978,50 @@ impl Foxy {
                 &[],
                 &crate::core::addon_metadata::AddonDisplayNameSnapshot::new(),
             )
-        });
+        })
+    }
+
+    /// The server answered its status query, so a failed addon query is shown
+    /// with Retry and Join without addon check instead of ending the Join.
+    pub(crate) fn present_join_addon_query_failure(
+        &mut self,
+        ctx: &egui::Context,
+        effective: &Repository,
+        server: &RepositoryServer,
+        repo_name: &str,
+        error: String,
+    ) {
+        let mut state = self
+            .join_preflight_state_or_local_fallback(None, effective, server, repo_name)
+            .unwrap_or_else(|| {
+                crate::ui::app::PendingJoinPreflightState::empty(
+                    repo_name,
+                    server.clone(),
+                    effective.clone(),
+                    false,
+                )
+            });
+        state.addon_query_error = Some(error);
+        info!(
+            "Join addon check unavailable for repository {} server {}:{}; offering retry or join without addon check",
+            repo_name, server.address, server.port
+        );
+        self.present_join_addon_preflight(ctx, effective, server, repo_name, Some(state), false);
+    }
+
+    pub(crate) fn present_join_addon_preflight(
+        &mut self,
+        ctx: &egui::Context,
+        effective: &Repository,
+        server: &RepositoryServer,
+        repo_name: &str,
+        addon_state: Option<crate::ui::app::PendingJoinPreflightState>,
+        server_addons_checked: bool,
+    ) {
+        self.prelaunch_process_checks = Default::default();
+        let (steam_required, steam_running) = self.evaluate_steam_launch_gate(effective, repo_name);
+        let mut addon_state =
+            self.join_preflight_state_or_local_fallback(addon_state, effective, server, repo_name);
         if steam_required && !steam_running {
             addon_state.get_or_insert_with(|| {
                 crate::ui::app::PendingJoinPreflightState::empty(
@@ -743,6 +1037,7 @@ impl Foxy {
             Some(mut preflight) => {
                 preflight.steam_required = steam_required;
                 preflight.steam_running = steam_running;
+                preflight.server_addons_checked = server_addons_checked;
                 self.pending_join_preflight = Some(preflight);
             }
             None => {
@@ -789,10 +1084,7 @@ impl Foxy {
     /// since Steam must be running for Arma 3 to launch. Synchronous - acceptable
     /// for a user-initiated launch/join action.
     fn evaluate_steam_launch_gate(&self, effective: &Repository, repo_name: &str) -> (bool, bool) {
-        if crate::core::game::registry()
-            .active()
-            .steam_app_id_from_settings(&self.settings_view_state)
-            .is_none()
+        if !self.repository_launch_uses_steam(effective)
             || !self.repo_check_steam_running_before_launch(effective)
         {
             return (false, false);
@@ -833,7 +1125,7 @@ impl Foxy {
                 steam_attention,
                 unavailable_enabled.len()
             );
-            self.prelaunch_recheck_at = None;
+            self.prelaunch_process_checks = Default::default();
             self.pending_join_preflight = Some(crate::ui::app::PendingJoinPreflightState {
                 unavailable_enabled,
                 steam_required,
@@ -1008,7 +1300,7 @@ impl Foxy {
     /// as a positional argument to open it in the editor.
     pub(super) fn launch_editor_with_mission(
         &mut self,
-        ctx: &egui::Context,
+        _ctx: &egui::Context,
         effective: &Repository,
         mission: &EditorMission,
         repo_name: &str,
@@ -1025,14 +1317,6 @@ impl Foxy {
             return;
         }
 
-        let Some(mut command) = self.create_launch_command(effective, None) else {
-            self.show_error_toast(self.t("Failed to launch Arma 3 Editor."));
-            return;
-        };
-
-        let mission_arg = steam::arma3_mission_argument(&command, Path::new(&mission.sqm_path));
-        command.arg(mission_arg);
-
         info!(
             "Launching Eden Editor with mission {} ({}) for repository {}",
             mission.display_name, mission.folder_name, repo_name
@@ -1040,52 +1324,11 @@ impl Foxy {
 
         self.editor_launch_cooldown_until = Some(now + EDITOR_LAUNCH_COOLDOWN);
         self.show_success_toast(self.t("Starting Arma 3 Editor..."));
-
-        let executable = command.get_program().to_os_string();
-        let args: Vec<OsString> = command.get_args().map(|a| a.to_os_string()).collect();
-        let cwd: Option<PathBuf> = command.get_current_dir().map(Path::to_path_buf);
-        self.activate_extra_files_before_launch();
-
-        if steam::is_steam_running(&self.settings_view_state.steam_directory) {
-            match spawn_launch_process(
-                &executable,
-                &args,
-                cwd.as_deref(),
-                true,
-                &self.settings_view_state.steam_directory,
-            ) {
-                Ok(pid) => {
-                    info!("Launched Eden Editor (pid={})", pid);
-                    self.handle_post_launch_window_behavior(ctx, "editor launch completed");
-                }
-                Err(err) => {
-                    warn!("Failed to launch Eden Editor: {}", err);
-                    self.editor_launch_cooldown_until = None;
-                    self.show_error_toast(self.t("Failed to launch Arma 3 Editor."));
-                }
-            }
-            return;
-        }
-
-        let steam_directory = self.settings_view_state.steam_directory.clone();
-        let repo_name_owned = repo_name.to_string();
-        std::thread::spawn(
-            move || match steam::ensure_steam_running(&steam_directory) {
-                Ok(_) => match spawn_launch_process(
-                    &executable,
-                    &args,
-                    cwd.as_deref(),
-                    true,
-                    &steam_directory,
-                ) {
-                    Ok(pid) => info!(
-                        "Launched Eden Editor after Steam startup (pid={}) for repository {}",
-                        pid, repo_name_owned
-                    ),
-                    Err(err) => warn!("Failed to launch Eden Editor: {}", err),
-                },
-                Err(err) => warn!("Failed to start Steam: {}", err),
-            },
-        );
+        self.start_launch_action(LaunchRequest {
+            repository: effective.clone(),
+            server: None,
+            name: repo_name.to_string(),
+            mission_path: Some(Path::new(&mission.sqm_path).to_path_buf()),
+        });
     }
 }

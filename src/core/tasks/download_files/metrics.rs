@@ -272,7 +272,6 @@ pub(super) struct DownloadCounters {
     pub(super) peak_network_bps: AtomicU64,
     /// Measured width in nanoseconds of the window that set `peak_network_bps`.
     pub(super) peak_window_ns: AtomicU64,
-    pub(super) disk_bytes_written: AtomicU64,
     /// Full size of every file that was delta patched rather than downloaded;
     /// its bytes were produced by local copies and never re-read by the hash.
     pub(super) patched_full_bytes: AtomicU64,
@@ -497,7 +496,6 @@ impl DownloadMetrics {
                 bytes_transferred: AtomicU64::new(0),
                 peak_network_bps: AtomicU64::new(0),
                 peak_window_ns: AtomicU64::new(0),
-                disk_bytes_written: AtomicU64::new(0),
                 patched_full_bytes: AtomicU64::new(0),
                 files_completed: AtomicUsize::new(0),
                 range_retries: AtomicUsize::new(0),
@@ -630,11 +628,6 @@ impl DownloadMetrics {
                 .patched_full_bytes
                 .fetch_add(metric.size as u64, Ordering::Relaxed);
         }
-        if metric.split_count <= 1 && metric.disk_write_time > Duration::ZERO {
-            self.counters
-                .disk_bytes_written
-                .fetch_add(metric.size as u64, Ordering::Relaxed);
-        }
         if let Ok(mut files) = self.file_events.lock() {
             files.push(metric);
         }
@@ -642,11 +635,6 @@ impl DownloadMetrics {
 
     /// Record a completed range request.
     pub(super) fn record_range(&self, metric: RangeMetric) {
-        if metric.write_time > Duration::ZERO {
-            self.counters
-                .disk_bytes_written
-                .fetch_add(metric.bytes, Ordering::Relaxed);
-        }
         if let Ok(mut ranges) = self.range_events.lock() {
             ranges.push(metric);
         }
@@ -722,6 +710,7 @@ impl DownloadMetrics {
                 );
             }
             let mut rates = RateSampler::new(telemetry_epoch);
+            let written_at_start = crate::core::utils::file_io::bytes_written_total();
             loop {
                 tokio::select! {
                     _ = interval.tick() => {}
@@ -732,7 +721,8 @@ impl DownloadMetrics {
                 let stopping = me.sampler_stop.load(Ordering::Relaxed);
                 let sample = rates.sample(
                     me.counters.bytes_transferred.load(Ordering::Relaxed),
-                    me.counters.disk_bytes_written.load(Ordering::Relaxed),
+                    crate::core::utils::file_io::bytes_written_total()
+                        .saturating_sub(written_at_start),
                     Instant::now(),
                 );
                 if stopping && sample.network_delta == 0 && sample.disk_delta == 0 {
@@ -765,6 +755,12 @@ impl DownloadMetrics {
                 } else {
                     (0.0, 0)
                 };
+                // Task Manager's figure (private working set) rather than the
+                // whole working set, which also counts the shared and
+                // memory-mapped file pages hashing reads through.
+                let memory_bytes = crate::ui::memory::sample_process_memory()
+                    .task_manager_memory_bytes()
+                    .unwrap_or(memory_bytes);
                 debug!(
                     "Download sample: speed={:.2} MB/s disk={:.2} MB/s interval_ms={} bytes={} cpu={:.1}% memory={} active_files={} active_ranges={} completed_files={}",
                     speed_mbps,

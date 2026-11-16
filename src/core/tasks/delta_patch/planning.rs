@@ -19,7 +19,7 @@ use super::types::{
     infer_repository_url, is_empty_content_checksum, normalize_checksum,
 };
 fn patch_paths_for_file(file_id: u64) -> (PathBuf, PathBuf) {
-    let base = app_paths::foxy_large_payload_dir();
+    let base = app_paths::foxy_patch_artifacts_dir();
     (
         base.join(format!("file_{}.patch.json", file_id)),
         base.join(format!("file_{}.patch.bin", file_id)),

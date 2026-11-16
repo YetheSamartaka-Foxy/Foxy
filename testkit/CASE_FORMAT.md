@@ -20,6 +20,7 @@ the ignored run directory.
 | `config_dir` | no | run-local `config` | isolated path, never the live Foxy root |
 | `config_seed` | no | none | directory copied into `config_dir` before the fixture |
 | `fixture` | no | generated from `repository` | agent-gui fixture object |
+| `config_files` | no | `{}` | synthetic JSON files written under the isolated `config_dir` after fixture setup and before launch |
 | `origin` | no | none | `{root, port}` local origin served for the run |
 | `profile` | no | `false` | boolean; sets `FOXY_PROFILE=1` for the run |
 | `notes` | no | empty | Free text kept with the case; ignored by the runner |
@@ -30,6 +31,12 @@ written straight into the isolated config directory in the legacy flat layout
 so Foxy's one-shot game-space migration converts it on first start. Supply
 `fixture.files` to use an exact fixture instead; only `settings.json`,
 `repositories.json`, and `repository_spaces.json` are accepted.
+
+`config_files` adds or replaces run-local `.json` files after fixture generation
+and before Foxy starts. Paths are relative and cannot traverse outside
+`config_dir`; the runner rejects links and non-file destinations. Use this for
+synthetic split settings or a multi-space `games.json`, not for runtime user
+data.
 
 `config_seed` copies a real Foxy configuration directory into the isolated
 config directory, so a case can measure an already-populated profile - real
@@ -47,6 +54,18 @@ When `origin` is present the runner serves `origin.root` on `origin.port`
 (loopback, byte-range capable) for the duration of the case, and a perf case
 additionally refuses to start when the repository's manifest publishes no
 mods.
+
+An origin may declare `synthetic` as an array of `{root, seed, repo_name?,
+mods, files_per_mod, file_bytes, pbo_entries?, entry_bytes?, mod_seeds?}` versions.
+`mod_seeds` contains one 32-bit seed per mod, which lets versions change selected
+addons while keeping other synthetic addons byte-identical. A positive
+`pbo_entries` generates PBO files whose entries can be mutated for delta repair;
+`entry_bytes` defaults to 64. The runner generates each repository
+under its own `root` before starting the server; every root must stay under the
+case run directory. Different seeds produce different payload bytes with the
+same published file names, so `origin-switch` can reproduce an in-place update
+without an external fixture. The runner uses the testkit repository generator
+when preparing these versions.
 
 `profile` turns on the app's deep profiler. The run then emits `PROFILE ...`
 lines that the kit parses into `profile-<iteration>-<operation>.json`:
@@ -116,18 +135,35 @@ and `settings` fixture fields described below.
 Supported operations are `startup`, `ui-walk`, `switch-game-space`,
 `remote-refresh`, `quick-check`, `recheck`, `recheck-integrity`,
 `force-redownload`, `download`, `download-full-files`, `wipe-db`, `mutate`, `restore`,
-`evict-cache`, and `origin-switch`. `origin-switch` makes the running case origin serve the operation's `root`
+`evict-cache`, `origin-switch`, `seed-startup-state`,
+`acquire-test-file-lock`, `release-test-file-lock`, `write-file`, `cli-command`,
+`replace-test-file-with-directory`, `move-origin-addon-category`,
+`capture-origin-requests`, `assert-origin-requests-unchanged`,
+`assert-file-exists`, `assert-file-absent`, and
+`assert-pending-update-count`, `ui-set-setting`, `wait-for-config-json`,
+`assert-config-json`, and `second-process-game-use`.
+`seed-startup-state` stops the
+app, then in the case repository's database ensures a saved pending update (an
+existing row is left as it is) and, when `stale_link` is true, an addon file
+link the published manifest does not list. When `incomplete_parts` is true, it
+also removes part rows for the selected pending addon while preserving file
+rows and installed bytes. It is not ledgered. `origin-switch` makes the running case origin serve the operation's `root`
 from the next request on, on the same listener and port, which models a server
 republishing the repository in place. Every `.json` manifest under the new root gets a fresh
 modification time, as a regenerated repository has, because the origin answers
 conditional requests from `Last-Modified` alone; switching back to the first root restores the published
-state for the next iteration. It is not ledgered and cannot be `setup_once`. Each operation may contain `wait_timeout_s`,
-`expect`, `label`, and `repository`. `repository` names the fixture repository
+state for the next iteration. It is not ledgered and may be `setup_once`. Each operation may contain `wait_timeout_s`,
+`expect`, `label`, and `repository`. A GUI download operation waits for the download to complete, or until its sync
+ends without completing it (a failed preflight, say), checked once a minute, so a failure is recorded on the row
+instead of holding the run for the whole `wait_timeout_s`. `repository` names the fixture repository
 the operation acts on (the CLI `--repo-name`, or the GUI row with that name);
 it defaults to the case `repository`. `extra_repositories` is what puts a
 second repository into the fixture, so a case can download one repository and
-then check its sibling in the same folder. Mutation, the oracle, and the
-manifest probe always address the case `repository`. Setup operations are not ledgered. `label` names the
+then check its sibling in the same folder. Mutation and the manifest probe address
+the case `repository`; the oracle verifies the operation's selected repository.
+Setup operations are not ledgered. A GUI setup download without an explicit
+expected outcome must complete and pass the configured oracle before measured
+operations can start. `label` names the
 operation's artifacts and its ledger row (`label` field) when a case repeats
 one kind of operation inside an iteration, such as a quick check run twice to
 prove the second one reads nothing; without it the second operation's
@@ -243,6 +279,7 @@ the series into `summary.memory`, mirrored into the ledger row as `memory`:
 | `growth_private_bytes` | retained minus the operation's first sample, floored at zero |
 | `transient_private_bytes` | peak minus retained: what the operation borrowed |
 | `cpu_user_s`, `cpu_kernel_s`, `cpu_s` | process CPU seconds over the operation, user, kernel and both; `memory.cpu_s` is compared with a 15% advisory band |
+| `cpu_machine_percent`, `cpu_machine_peak_percent`, `cpu_threads` | process CPU as a share of every logical processor (Task Manager's scale, the app's CPU usage limit scale): the average over the operation before the settle tail, and the busiest 1 s window; `cpu_threads` is the processor count both divide by. An `expect` on `summary.memory.cpu_machine_peak_percent` checks the limit holds. Off Windows these and `cpu_s` are the only fields with values: the sampler reads total CPU time there and leaves the private-commit, working-set, fault, read and user/kernel figures out |
 | `median_private_bytes`, `peak_working_set_bytes`, `retained_working_set_bytes`, `process_peak_working_set_bytes`, `page_faults`, `samples`, `span_ms` | supporting detail |
 
 Private commit is the gated metric because the OS trims working set under
@@ -257,7 +294,9 @@ which is what separates "peaked here" from "still holding it"; it defaults to
 1500 ms and an operation may set `memory_settle_ms`. It is charged after
 `elapsed_s` is taken, so it does not enter any timing metric. The raw series is
 written to `memory-<iteration>-<operation>.json` beside the other artifacts and
-stripped from the ledger row.
+stripped from the ledger row, as is `cpu_series` (`[elapsed_ms, process CPU ms
+so far]` per sample, on every platform), which places a CPU peak in the
+operation.
 
 A `startup` operation replaces the app mid-watch; the sampler notices the pid
 change and discards the outgoing process's samples, so `start_private_bytes` for
@@ -315,8 +354,8 @@ other platforms it walks the tree and reports `supported: false`.
 | `expected_files` | unset | Required `files_updated` for full-download operations |
 | `oracle_command` | unset | Independent post-run argv array; nonzero exit invalidates the row |
 
-`oracle_command` runs after every measured `download` and `force-redownload`
-operation, not after checks: a check that sits between a mutation and its
+`oracle_command` runs after every completed measured download and ordinary GUI
+setup download, not after checks: a check that sits between a mutation and its
 repair sees the mutated payload on purpose.
 
 `oracle_command` is an **argv array**, never a command string. A bare string is
@@ -333,7 +372,7 @@ in its arguments:
 ]
 ```
 
-It runs only after a measured operation and receives
+It receives
 `FOXY_TESTKIT_REPOSITORY_PATH`, `FOXY_TESTKIT_REPOSITORY_URL`, and
 `FOXY_TESTKIT_RUN_DIR`. Do not use Foxy's own hash implementation as the oracle
 when the hash path is the subject under test.
@@ -378,6 +417,127 @@ copied from the local source, so an adjacent mutation and a scattered one are
 told apart by resource cost, not only elapsed. `cancel_after_s` works on every
 GUI sync operation (a `recheck-integrity` cancelled in its hash stage, a
 patching `download` cancelled while applying), not only on full downloads.
+For an integrity cancellation that must interrupt hashing itself, a GUI
+`recheck-integrity` operation may use `cancel_after_hash_progress` with a
+fraction strictly between 0 and 1. The runner polls the driver's
+`recheck_hash_progress` and cancels only after that threshold is observed while
+the pipeline remains active. If hashing or the pipeline finishes first, or the
+threshold is not reached before `wait_timeout_s`, the operation fails instead
+of recording a false hash-stage cancellation. The observed trigger fraction is
+saved as `summary.cancel_trigger_hash_progress` beside the usual
+`summary.cancel_quiescent_ms`.
+`kill_after_s` on a GUI sync operation stops the process that many seconds
+after it reports busy, without a cooperative cancel, and the next operation
+starts the app again. The killed row has no pipeline outcome.
+
+For deterministic recovery checks, GUI downloads also accept the boolean
+`cancel_after_promoted_file`, `close_after_promoted_file`, and
+`kill_after_promoted_file`. Each waits until the content digest of a file that
+already existed in the target folder changes, then performs cooperative cancel,
+normal app close and restart, or process kill respectively. The captured file
+path is recorded in the operation summary. The normal-close path is allowed to
+finish naturally; a failed case timeout then uses ordinary child-process cleanup.
+`pause_after_s` pauses a running GUI download after the given
+number of seconds and returns while it remains paused; payload and oracle gates
+are skipped for that intentionally incomplete operation.
+
+State operations do not produce ledger rows. `capture-file-state` stores a
+deterministic relative-path/length/BLAKE3 map under the run directory, and
+`assert-file-state` compares a run-local repository directory with that saved
+map (`comparison` is `equal`, `different`, or `contains`). `contains` permits
+additional recovered files but requires every captured payload file to retain
+its exact bytes. Download sidecars are excluded from these payload snapshots.
+An optional `path` is allowed only
+inside the current run directory. `prepare-test-directory` creates such an
+isolated path. `assert-repository-paused` checks a repository index in the
+driver's paused-instance snapshot. `invoke-driver` calls a named `agent-gui`
+intent with JSON params; destructive intents still require
+`allow_destructive:true`. `wait-for-busy` waits for a named driver busy reason,
+or for it to clear when `cleared:true`. `assert-space-bulk-target-count`,
+`assert-space-bulk-completed-count`, `assert-space-bulk-failed-count`, and
+`wait-for-space-bulk-target-count`
+inspect the active bulk run's counts.
+`write-file` creates a new file with UTF-8 content under the run directory and
+fails if the path already exists. `overwrite_existing: true` explicitly replaces
+an existing regular run-local file for fault injection; it cannot create a missing
+target or replace a link. `capture-origin-requests` and
+`assert-origin-requests-unchanged` snapshot and compare the in-process origin's
+HTTP request count, which lets a local-check case prove it made no server
+request. These controls require a case origin and are not ledgered.
+`assert-file-exists` and `assert-file-absent` check a named regular file under
+the run directory and are not ledgered.
+`assert-file-content` compares that run-local regular file with the exact UTF-8
+`content` value, without following a final symbolic link.
+`assert-pending-update-count` checks that the named repository has at least the
+requested number of pending addon updates in the GUI driver's current view; an
+optional `maximum` makes the assertion an exact or bounded count, and optional
+`addons` requires named addons to appear in the pending update set.
+`ui-set-setting` changes one supported setting through the running app's
+`agent-gui` driver. Pair it with `wait-for-config-json`, `startup`, and
+`assert-config-json` to prove a UI save reached disk and survived restart.
+Config JSON assertions resolve a dotted object/array path and compare its value
+exactly; every target must be a regular file inside the isolated config root.
+`second-process-game-use` is a GUI-only setup operation that starts a separate
+Foxy CLI process with the exact same run-local config directory and runs
+`game use <space_id>`. It requires exit code 6 (`DATABASE_BUSY`) and verifies
+that the listed config files are byte-identical before and after the attempt.
+This checks the operational root claim while another game space is targeted;
+it does not replace the database and physical-target lock checks.
+`acquire-test-file-lock` and `release-test-file-lock` are Windows-only state
+operations for deterministic file-operation failures. By default they hold an
+existing regular file under the run's synthetic repository open with sharing
+disabled, without writing bytes. With `allow_read: true`, they permit read
+sharing while still blocking replacement and deletion; this mode is available
+only to CLI cases and only for files under that run's config directory or
+repository. GUI cases keep the exclusive default. The handle remains open
+across operations and closes on release or when the run exits. Both operations
+require the exact same path and `allow_read` value.
+The testkit-only shared-path intent refuses to run without
+`FOXY_TESTKIT_RUN_DIR`, when Foxy's config is outside that run, or when the new
+path resolves outside it. These operations are intended for synthetic recovery
+and queue cases, never for a live profile.
+
+`cli-command` runs one allowlisted config-pack/extra-file, profile, addon-query or offline Workshop CLI
+command as a separate Foxy process. The runner always supplies its run-local
+`--config-dir` and `--json`; case arguments cannot override either setting.
+Every file argument must be listed in `path_arguments`, whose indexes are
+validated against the command shape and must resolve under the current run
+directory. `expected_exit_code` checks the process result and `expect` checks
+dot-separated paths in Foxy's JSON envelope with exact `equals` values. The
+runner also writes `cli-scenario-<label>.json` under the run directory. Each
+invocation is a separate Foxy process, so later operations verify persisted
+state from a fresh process. `replace-test-file-with-directory` can replace
+only an existing regular file under the run directory with a directory, for
+synthetic late-write failures. Both are state operations and do not create
+ledger rows.
+
+The offline Workshop allowlist includes local removal and selection plus bundle
+export/import with `--backend none --skip-metadata`. Bundle paths remain run-local;
+Steam unsubscribe and online backends are rejected. The N03/N14 example checks
+selection after a fresh CLI process and verifies private and shared payload bytes.
+
+`move-origin-addon-category` changes one addon between the required and
+optional arrays in a synthetic Foxy-mode `foxy_addons.json`, recomputes the
+published BLAKE3 repository checksum, and updates the matching `repo.json`
+checksum. Its root must resolve under the run directory; pair it with
+`origin-switch` to refresh manifest timestamps before a remote refresh.
+
+For an N01 rollback case, a GUI download may combine
+`cancel_after_promoted_file: true` with
+`external_edit_after_promoted_file: "..."`. The runner waits for a managed
+file's promotion, overwrites that same file inside the run-local repository,
+then cancels the update. The operation summary records the relative path as
+`external_edit_after_promotion`; a following `assert-file-state` should verify
+the pre-update snapshot was restored.
+
+`state-n05-foxypack-atomic-import.example.json` combines these operations to
+export a run-local pack containing an extra-file payload and a Workshop item,
+then holds the existing Workshop store file open for reads while denying
+replacement and deletion. The import reaches the late Workshop write and
+leaves its recovery journal when rollback is blocked by the same handle. After
+release, a fresh CLI process recovers the journal; the case compares the exact
+old payload and Workshop store bytes, verifies the journal is gone, and checks
+the extra-file entry remains available.
 
 The ledger row also retains `delta_patch_stages`, the typed per-file planning,
 fetch, apply, promote, verify and finalize spans emitted during the operation.

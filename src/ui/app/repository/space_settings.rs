@@ -13,7 +13,9 @@ use crate::ui::types::{
 };
 
 impl Foxy {
-    pub fn load_repository_spaces(&mut self) {
+    /// Returns false when the file exists but could not be used, so callers
+    /// keep repositories' space bindings instead of reconciling them away.
+    pub fn load_repository_spaces(&mut self) -> bool {
         let path = Self::get_repository_spaces_path();
         match fs::read_to_string(&path) {
             Ok(json) => match serde_json::from_str::<Vec<RepositorySpace>>(&json) {
@@ -25,15 +27,24 @@ impl Foxy {
                         "Loaded repository_spaces.json with {} repository spaces",
                         self.repository_spaces.len()
                     );
+                    true
                 }
                 Err(err) => {
                     error!("Failed to parse repository_spaces.json: {}", err);
+                    self.report_unreadable_config(&path);
+                    false
                 }
             },
-            Err(_) => {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 info!("repository_spaces.json not found, using empty repository space list");
                 self.repository_spaces.clear();
                 self.bump_repository_spaces_version();
+                true
+            }
+            Err(err) => {
+                error!("Failed to read repository_spaces.json: {}", err);
+                self.report_unreadable_config(&path);
+                false
             }
         }
     }
@@ -47,6 +58,10 @@ impl Foxy {
 
         let path = Self::get_repository_spaces_path();
         let mut spaces = self.repository_spaces.clone();
+        if !self.persistence_path_is_confirmed_for_replacement(&path) {
+            self.show_unreadable_config_replacement = true;
+            return;
+        }
         sanitize_repository_spaces_paths(&mut spaces);
         match serde_json::to_string_pretty(&spaces) {
             Ok(json) => {
@@ -81,12 +96,17 @@ impl Foxy {
                 }
                 Err(err) => {
                     error!("Failed to parse repository_visual_folders.json: {}", err);
+                    self.report_unreadable_config(&path);
                 }
             },
-            Err(_) => {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 info!("repository_visual_folders.json not found, using empty visual folder list");
                 self.repository_visual_folders.clear();
                 self.bump_repository_visual_folders_version();
+            }
+            Err(err) => {
+                error!("Failed to read repository_visual_folders.json: {}", err);
+                self.report_unreadable_config(&path);
             }
         }
     }
@@ -101,6 +121,10 @@ impl Foxy {
 
         let path = Self::get_repository_visual_folders_path();
         let mut folders = self.repository_visual_folders.clone();
+        if !self.persistence_path_is_confirmed_for_replacement(&path) {
+            self.show_unreadable_config_replacement = true;
+            return;
+        }
         sanitize_repository_visual_folders(&mut folders);
         match serde_json::to_string_pretty(&folders) {
             Ok(json) => {
@@ -367,6 +391,7 @@ impl Foxy {
             if let Some(shared_path) = space_paths.get(&space_id) {
                 if repo.path.trim().is_empty() && !shared_path.trim().is_empty() {
                     repo.path = shared_path.clone();
+                    repo.update_timing = None;
                     changed = true;
                 }
             } else {
@@ -405,6 +430,7 @@ impl Foxy {
                 && repo.path != path
             {
                 repo.path = path.clone();
+                repo.update_timing = None;
                 repo_changed = true;
             }
         }

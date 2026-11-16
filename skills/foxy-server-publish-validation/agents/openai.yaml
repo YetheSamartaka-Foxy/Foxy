@@ -1,0 +1,4 @@
+interface:
+  display_name: "Server publish validation"
+  short_description: "Validate Foxy server repository output"
+  default_prompt: "Use $foxy-server-publish-validation to validate or troubleshoot generated server output."

@@ -1,4 +1,4 @@
-﻿#![cfg_attr(
+#![cfg_attr(
     all(target_os = "windows", not(debug_assertions)),
     windows_subsystem = "windows"
 )]
@@ -410,6 +410,34 @@ fn launch_ui(
     agent_gui: AgentGuiLaunchConfig,
     debug_modals: Vec<ui::app::debug_modals::DebugModal>,
 ) {
+    let ownership = core::tasks::config_process_lock::acquire_for_config_root();
+    let refusal = match ownership {
+        core::tasks::db_process_lock::LockOutcome::Acquired => None,
+        core::tasks::db_process_lock::LockOutcome::Busy { .. } => Some(ui::i18n::tr(
+            "Foxy is already running for this configuration. Close the other instance and try again.",
+        )),
+        core::tasks::db_process_lock::LockOutcome::Unavailable(_) => Some(ui::i18n::tr(
+            "Foxy could not claim this configuration. Restore access and try again.",
+        )),
+    };
+    if let Some(message) = refusal {
+        #[cfg(target_os = "windows")]
+        {
+            let text: Vec<u16> = message.encode_utf16().chain(std::iter::once(0)).collect();
+            let title: Vec<u16> = "Foxy".encode_utf16().chain(std::iter::once(0)).collect();
+            unsafe {
+                winapi::um::winuser::MessageBoxW(
+                    std::ptr::null_mut(),
+                    text.as_ptr(),
+                    title.as_ptr(),
+                    winapi::um::winuser::MB_OK | winapi::um::winuser::MB_ICONWARNING,
+                );
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        eprintln!("{message}");
+        return;
+    }
     core::api::ensure_logger_with_terminal();
 
     // Agent GUI (driver/test) sessions must not mutate the user's desktop
@@ -447,7 +475,48 @@ fn launch_ui(
         }
     }
 
-    core::game::spaces::ensure_game_spaces_layout();
+    match core::game::spaces::unreadable_registry_backup() {
+        Ok(Some(backup)) => {
+            let message = ui::i18n::tr(
+                "The game-space registry is unreadable. Foxy preserved a copy. Replace it with a default registry? Existing game-space files and downloaded mods will be kept.",
+            );
+            #[cfg(target_os = "windows")]
+            let confirmed = {
+                let text: Vec<u16> = message.encode_utf16().chain(std::iter::once(0)).collect();
+                let title: Vec<u16> = ui::i18n::tr("Game-space registry recovery")
+                    .encode_utf16()
+                    .chain(std::iter::once(0))
+                    .collect();
+                unsafe {
+                    winapi::um::winuser::MessageBoxW(
+                        std::ptr::null_mut(),
+                        text.as_ptr(),
+                        title.as_ptr(),
+                        winapi::um::winuser::MB_YESNO
+                            | winapi::um::winuser::MB_DEFBUTTON2
+                            | winapi::um::winuser::MB_ICONWARNING,
+                    ) == winapi::um::winuser::IDYES
+                }
+            };
+            #[cfg(not(target_os = "windows"))]
+            let confirmed = {
+                eprintln!("{message}");
+                false
+            };
+            if !confirmed || core::game::spaces::replace_unreadable_registry(&backup).is_err() {
+                return;
+            }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("{error}");
+            return;
+        }
+    }
+    if let Err(error) = core::game::spaces::ensure_game_spaces_layout() {
+        eprintln!("{error}");
+        return;
+    }
     ui::window::main(debug_mode, agent_gui, debug_modals);
 }
 

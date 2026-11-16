@@ -9,6 +9,7 @@ use crate::core::game::workshop::pin::{PinState, PinStatus};
 use crate::core::game::workshop::share::{self, ShareCodeOptions, ShareComparison};
 use crate::core::game::{spaces, workshop};
 use crate::ui::app::Foxy;
+use crate::ui::context_menu::{ContextMenuItem, attach_context_menu};
 use crate::ui::i18n::tr;
 
 use tasks::{WorkshopTask, WorkshopTaskContext, WorkshopTaskOutcome};
@@ -27,6 +28,9 @@ pub struct WorkshopViewState {
     pub import_freeze: bool,
     pub pending_remove: Option<String>,
     pub remove_delete_data: bool,
+    pub pending_bundle_import: Option<std::path::PathBuf>,
+    pub bundle_import_preview: Option<workshop::bundle::BundleImportPreview>,
+    pub bundle_import_mode: workshop::bundle::BundleImportMode,
     pub compare_code: String,
     pub compare_result: Option<ShareComparison>,
     /// Cleared whenever the tab is (re)entered so the store is read from disk
@@ -190,6 +194,7 @@ impl Foxy {
     pub(crate) fn render_workshop_modals(&mut self, ui: &mut Ui) {
         self.render_workshop_import_modal(ui);
         self.render_workshop_remove_confirmation(ui);
+        self.render_workshop_bundle_import_confirmation(ui);
     }
 
     fn render_workshop_state_badge(&mut self, ui: &mut Ui) {
@@ -421,11 +426,28 @@ impl Foxy {
                                 }
                                 ui.vertical(|ui| {
                                     ui.horizontal(|ui| {
-                                        ui.label(
-                                            RichText::new(&title)
-                                                .strong()
-                                                .color(self.color_text_normal()),
+                                        let title_response = ui
+                                            .add(
+                                                egui::Label::new(
+                                                    RichText::new(&title)
+                                                        .strong()
+                                                        .color(self.color_text_normal()),
+                                                )
+                                                .sense(egui::Sense::click()),
+                                            )
+                                            .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                        let mut open_workshop = None;
+                                        attach_context_menu(
+                                            &title_response,
+                                            &[ContextMenuItem::new(
+                                                (),
+                                                tr("Open on Steam Workshop"),
+                                            )],
+                                            &mut open_workshop,
                                         );
+                                        if open_workshop.is_some() {
+                                            open_page = Some(workshop::workshop_url(&item.item_id));
+                                        }
                                         let (label, color) = self.workshop_pin_badge(item.state);
                                         if let Some(label) = label {
                                             ui.label(RichText::new(label).small().color(color));
@@ -628,10 +650,107 @@ impl Foxy {
         }) else {
             return;
         };
-        self.start_workshop_task(WorkshopTask::ImportBundle {
-            path,
-            download: true,
-        });
+        let Some(app_id) = self.workshop_app_id() else {
+            return;
+        };
+        match workshop::bundle::preview_import_bundle(
+            &spaces::active_game_space_dir(),
+            app_id,
+            &path,
+        ) {
+            Ok(preview) => {
+                self.workshop_view_state.pending_bundle_import = Some(path);
+                self.workshop_view_state.bundle_import_preview = Some(preview);
+                self.workshop_view_state.bundle_import_mode =
+                    workshop::bundle::BundleImportMode::Merge;
+            }
+            Err(error) => self.show_error_toast(error),
+        }
+    }
+
+    fn render_workshop_bundle_import_confirmation(&mut self, ui: &mut Ui) {
+        let Some(path) = self.workshop_view_state.pending_bundle_import.clone() else {
+            return;
+        };
+        let Some(preview) = self.workshop_view_state.bundle_import_preview.clone() else {
+            return;
+        };
+        let mut open = true;
+        let mut confirm = false;
+        egui::Window::new(tr("Import Workshop bundle"))
+            .collapsible(false)
+            .resizable(true)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .open(&mut open)
+            .show(ui.ctx(), |ui| {
+                ui.set_min_width(420.0);
+                ui.label(self.t_fmt(
+                    "Bundle has {added} new and {updated} existing item(s).",
+                    &[
+                        ("added", preview.added.len().to_string()),
+                        ("updated", preview.updated.len().to_string()),
+                    ],
+                ));
+                ui.label(self.t_fmt(
+                    "New items: {items}",
+                    &[("items", display_preview_ids(&preview.added))],
+                ));
+                ui.label(self.t_fmt(
+                    "Existing items: {items}",
+                    &[("items", display_preview_ids(&preview.updated))],
+                ));
+                ui.label(self.t_fmt(
+                    "Enabled state changes: {items}",
+                    &[("items", display_preview_ids(&preview.enabled_changes))],
+                ));
+                ui.label(self.t_fmt(
+                    "Load order changes: {items}",
+                    &[("items", display_preview_ids(&preview.load_order_changes))],
+                ));
+                ui.radio_value(
+                    &mut self.workshop_view_state.bundle_import_mode,
+                    workshop::bundle::BundleImportMode::Merge,
+                    tr("Merge: apply bundle settings and keep unlisted items"),
+                );
+                ui.radio_value(
+                    &mut self.workshop_view_state.bundle_import_mode,
+                    workshop::bundle::BundleImportMode::Match,
+                    tr("Match: apply bundle selection and load order; disable unlisted items"),
+                );
+                if self.workshop_view_state.bundle_import_mode
+                    == workshop::bundle::BundleImportMode::Match
+                {
+                    ui.label(self.t_fmt(
+                        "Match will disable {count} unlisted item(s). Their files will be kept.",
+                        &[("count", preview.unlisted.len().to_string())],
+                    ));
+                    ui.label(self.t_fmt(
+                        "Unlisted items: {items}",
+                        &[("items", display_preview_ids(&preview.unlisted))],
+                    ));
+                }
+                ui.horizontal(|ui| {
+                    if ui.button(tr("Import")).clicked() {
+                        confirm = true;
+                    }
+                    if ui.button(tr("Cancel")).clicked() {
+                        self.workshop_view_state.pending_bundle_import = None;
+                    }
+                });
+            });
+        if !open {
+            self.workshop_view_state.pending_bundle_import = None;
+        }
+        if confirm {
+            let mode = self.workshop_view_state.bundle_import_mode;
+            self.workshop_view_state.pending_bundle_import = None;
+            self.workshop_view_state.bundle_import_preview = None;
+            self.start_workshop_task(WorkshopTask::ImportBundle {
+                path,
+                download: true,
+                mode,
+            });
+        }
     }
 
     fn render_workshop_import_modal(&mut self, ui: &mut Ui) {
@@ -711,6 +830,7 @@ impl Foxy {
         };
         let mut open = true;
         let mut confirm = false;
+        let mut unsubscribe = false;
         egui::Window::new(tr("Remove Workshop mod"))
             .collapsible(false)
             .resizable(false)
@@ -722,14 +842,20 @@ impl Foxy {
                     "Remove {item} from this game space?",
                     &[("item", item_id.clone())],
                 ));
+                ui.label(tr(
+                    "Unsubscribe in Steam is a separate action and keeps this local entry.",
+                ));
                 ui.checkbox(
                     &mut self.workshop_view_state.remove_delete_data,
-                    tr("Also delete the downloaded files and frozen copies"),
+                    tr("Also delete Foxy's frozen copy"),
                 );
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     if ui.button(tr("Remove")).clicked() {
                         confirm = true;
+                    }
+                    if ui.button(tr("Unsubscribe in Steam")).clicked() {
+                        unsubscribe = true;
                     }
                     if ui.button(tr("Cancel")).clicked() {
                         self.workshop_view_state.pending_remove = None;
@@ -743,9 +869,13 @@ impl Foxy {
             let delete_data = self.workshop_view_state.remove_delete_data;
             self.workshop_view_state.pending_remove = None;
             self.start_workshop_task(WorkshopTask::Remove {
-                item_id,
+                item_id: item_id.clone(),
                 delete_data,
             });
+        }
+        if unsubscribe {
+            self.workshop_view_state.pending_remove = None;
+            self.start_workshop_task(WorkshopTask::Unsubscribe { item_id });
         }
     }
 
@@ -757,5 +887,13 @@ impl Foxy {
                 self.show_error_toast(self.t("Failed to copy to clipboard."));
             }
         }
+    }
+}
+
+fn display_preview_ids(ids: &[String]) -> String {
+    if ids.is_empty() {
+        "None".to_string()
+    } else {
+        ids.join(", ")
     }
 }

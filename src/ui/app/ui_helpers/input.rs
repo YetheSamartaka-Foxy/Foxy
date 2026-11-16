@@ -94,6 +94,7 @@ impl Foxy {
             }
             if self.pending_join_preflight.is_some() {
                 self.pending_join_preflight = None;
+                self.prelaunch_process_checks = Default::default();
                 info!("Closed join addon preflight from Escape shortcut");
                 return;
             }

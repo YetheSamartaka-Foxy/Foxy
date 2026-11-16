@@ -223,6 +223,49 @@ pub fn install(case: &Value, config: &Path, run: &Path) -> Result<()> {
     Ok(())
 }
 
+pub fn install_config_files(case: &Value, config: &Path) -> Result<()> {
+    let Some(files) = case.get("config_files").and_then(Value::as_object) else {
+        return Ok(());
+    };
+    fs::create_dir_all(config)?;
+    let root = fs::canonicalize(config)?;
+    for (relative, value) in files {
+        let path = Path::new(relative);
+        ensure!(
+            !relative.is_empty()
+                && !relative.starts_with('/')
+                && !relative.starts_with('\\')
+                && !relative.contains('\\')
+                && !relative.contains(':')
+                && relative
+                    .split('/')
+                    .all(|part| { !part.is_empty() && part != "." && part != ".." })
+                && path
+                    .extension()
+                    .is_some_and(|extension| extension == "json")
+                && path
+                    .components()
+                    .all(|component| matches!(component, std::path::Component::Normal(_))),
+            "Config seed paths must be relative JSON files"
+        );
+        let destination = config.join(path);
+        let parent = destination.parent().context("Config seed has no parent")?;
+        fs::create_dir_all(parent)?;
+        ensure!(
+            fs::canonicalize(parent)?.starts_with(&root),
+            "Config seed parent resolves outside the isolated config directory"
+        );
+        if let Ok(metadata) = fs::symlink_metadata(&destination) {
+            ensure!(
+                metadata.file_type().is_file(),
+                "Config seed cannot replace a link or non-file"
+            );
+        }
+        write_json(&destination, value)?;
+    }
+    Ok(())
+}
+
 /// Creates the generated repository and space folders that live inside the run
 /// directory, empty, as a person picks a fresh folder: a missing folder makes
 /// the app's first check stop at its moved-folder guard.
@@ -322,5 +365,28 @@ mod tests {
         assert!(run.join("space").is_dir());
         assert!(!outside.exists());
         assert!(!root.path().join("escaped").exists());
+    }
+
+    #[test]
+    fn config_file_seeds_write_only_inside_the_isolated_root() {
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("config");
+        install_config_files(
+            &json!({"config_files":{"games/space-b/game_settings.json":{"future":7}}}),
+            &config,
+        )
+        .unwrap();
+        assert_eq!(
+            crate::case::read_json(&config.join("games/space-b/game_settings.json")).unwrap()["future"],
+            7
+        );
+        assert!(
+            install_config_files(
+                &json!({"config_files":{"../outside.json":{"bad":true}}}),
+                &config,
+            )
+            .is_err()
+        );
+        assert!(!root.path().join("outside.json").exists());
     }
 }

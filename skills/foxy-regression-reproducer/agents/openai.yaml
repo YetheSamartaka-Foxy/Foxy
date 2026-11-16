@@ -1,0 +1,4 @@
+interface:
+  display_name: "Regression Reproducer"
+  short_description: "Reduce a Foxy regression to a failing focused test."
+  default_prompt: "Use $foxy-regression-reproducer to create the smallest failing regression test for this Foxy behavior."

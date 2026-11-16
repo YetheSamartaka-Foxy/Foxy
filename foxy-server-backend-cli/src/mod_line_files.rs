@@ -42,6 +42,14 @@ pub fn resolve(config: &RepoConfig, config_path: &Path) -> Vec<PathBuf> {
 /// Rejects anything that would make the rewrite a silent no-op, so a typo in
 /// `modLineFiles` is reported before the repository is generated.
 pub fn check(files: &[PathBuf], params: &[LaunchParam]) -> Result<()> {
+    if params.is_empty()
+        && let Some(path) = files.first()
+    {
+        bail!(
+            "modLineFiles entry {} cannot be updated: this game has no server launch line",
+            path.display()
+        );
+    }
     for path in files {
         let contents = read(path)?;
         if rewrite(&contents, params).1.iter().sum::<usize>() == 0 {

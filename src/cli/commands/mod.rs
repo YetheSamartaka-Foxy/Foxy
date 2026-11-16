@@ -127,6 +127,7 @@ impl AppState {
         };
         sanitize_settings(&mut settings);
         crate::core::api::set_extended_diagnostics(settings.extended_diagnostics_logging);
+        crate::core::utils::runtime_settings::apply_runtime_settings(&settings);
 
         let mut repositories: Vec<Repository> =
             read_json_or_default(&Foxy::get_repositories_path())
@@ -177,8 +178,59 @@ impl AppState {
     }
 }
 
+fn extra_file_launch_choices(
+    action: &str,
+    settings: &SettingsViewState,
+    keep: &[String],
+    reapply: &[String],
+    approve_layers: bool,
+    yes: bool,
+) -> Result<Vec<crate::core::game::launch_preparation::ExtraFileConflictChoice>, CommandError> {
+    let module = crate::core::game::registry().active();
+    let conflicts = crate::core::game::extra_files::destination_conflicts(
+        &crate::core::game::spaces::active_game_space_dir(),
+        module.install_dir_from_settings(settings),
+    )
+    .map_err(|error| CommandError::operation(action, error))?;
+    let keep_ids = config::resolve_extra_file_choices(action, &conflicts, keep, reapply)?;
+    if (!reapply.is_empty() || approve_layers) && !yes {
+        return Err(CommandError::validation(
+            action,
+            "Replacing changed extra files or approving layers also requires --yes",
+        ));
+    }
+    Ok(conflicts
+        .into_iter()
+        .map(
+            |entry| crate::core::game::launch_preparation::ExtraFileConflictChoice {
+                keep_current: keep_ids.contains(&entry.entry_id),
+                entry_id: entry.entry_id,
+            },
+        )
+        .collect())
+}
+
 fn progress_output_muted(cli: &CliArgs) -> bool {
     cli.quiet || cli.json || cli.no_progress
+}
+
+fn approved_extra_file_layers(
+    action: &str,
+    settings: &SettingsViewState,
+    approved: bool,
+) -> Result<Option<String>, CommandError> {
+    if !approved {
+        return Ok(None);
+    }
+    let module = crate::core::game::registry().active();
+    let layers = crate::core::game::extra_files::layer_conflicts(
+        &crate::core::game::spaces::active_game_space_dir(),
+        module.install_dir_from_settings(settings),
+    )
+    .map_err(|error| CommandError::operation(action, error))?;
+    Ok(Some(
+        crate::core::game::extra_files::layer_review_signature(&layers),
+    ))
 }
 
 pub fn apply_config_override(config_dir: Option<&PathBuf>) -> Result<(), CommandError> {
@@ -223,8 +275,31 @@ fn ensure_remote_reachable_before_destructive(
         })
 }
 
+fn extra_file_launch_preview(
+    action: &str,
+    settings: &SettingsViewState,
+) -> Result<serde_json::Value, CommandError> {
+    let space = crate::core::game::spaces::active_game_space_dir();
+    let module = crate::core::game::registry().active();
+    let game_dir = module.install_dir_from_settings(settings);
+    let conflicts = crate::core::game::extra_files::destination_conflicts(&space, game_dir)
+        .map_err(|error| CommandError::operation(action, error))?;
+    let layers = crate::core::game::extra_files::layer_conflicts(&space, game_dir)
+        .map_err(|error| CommandError::operation(action, error))?;
+    let review = crate::core::game::extra_files::layer_review_needed(&space, &layers)
+        .map_err(|error| CommandError::operation(action, error))?;
+    Ok(json!({
+        "destination_conflicts": conflicts,
+        "layers": layers,
+        "layer_review_needed": review,
+    }))
+}
+
 pub fn run_command(cli: &CliArgs, command: CliCommand) -> Result<CommandSuccess, CommandError> {
-    crate::core::game::spaces::ensure_game_spaces_layout();
+    if super::command_uses_database(Some(&command), false) {
+        crate::core::game::spaces::ensure_game_spaces_layout()
+            .map_err(|error| CommandError::validation("configuration", error))?;
+    }
     let started = Instant::now();
     let result = match command {
         CliCommand::Version => Ok(CommandSuccess {
@@ -304,6 +379,12 @@ fn sanitize_settings(settings: &mut SettingsViewState) {
     if settings.download_speed_limit_mbps == Some(0) {
         settings.download_speed_limit_mbps = Some(1);
     }
+    if settings.cpu_thread_limit == Some(0) {
+        settings.cpu_thread_limit = Some(1);
+    }
+    settings.cpu_usage_limit_percent = crate::core::utils::cpu_governor::sanitize_cpu_usage_limit(
+        settings.cpu_usage_limit_percent,
+    );
     settings.app_update_url = settings.app_update_url.trim().to_string();
     if settings.app_update_url.is_empty() {
         settings.app_update_url_user_override = false;
@@ -443,39 +524,57 @@ fn run_repository_sync(
     // channel as a cancellation, so a temporary sender here races the database
     // open and intermittently fails the sync with "Cancelled".
     let (_cancel_tx, cancel_rx) = watch::channel(false);
+    let options = api::RepositorySyncOptions {
+        operation_id: api::next_operation_id("cli-sync"),
+        persisted_addon_selection: Some(selected_mod_states.clone()),
+        prepare_download_plan: false,
+        backup_local_drift: false,
+        enrolled_link_targets: Vec::new(),
+        interactive_hash_checks: false,
+        discard_prepared_queue: false,
+        repository_space_shared_path: None,
+        repository_space_members: if let Some(space_id) = repo.repository_space_id.as_ref() {
+            AppState::load()?
+                .repositories
+                .into_iter()
+                .filter(|member| member.repository_space_id.as_ref() == Some(space_id))
+                .map(|member| (member.address, member.path))
+                .collect()
+        } else {
+            Vec::new()
+        },
+        auto_backup_directory: None,
+        rollback_temp_directory: Some(if settings.temp_directory.trim().is_empty() {
+            crate::core::utils::app_paths::foxy_data_dir()
+                .display()
+                .to_string()
+        } else {
+            settings.temp_directory.trim().to_string()
+        }),
+        download_speed_limit_mbps: settings
+            .download_speed_limit_mbps
+            .filter(|limit| *limit > 0),
+        recent_local_path_reset: false,
+        force_redownload,
+        force_full_downloads: false,
+        allow_suspect_full_redownload: force_redownload,
+        download_pause_rx: pause_rx,
+        cancel_rx,
+        hash_algorithm_preference: repo.hash_algorithm_preference,
+        hash_io_profile: settings.hash_io_profile,
+        trust_verified_hashes: settings.trust_verified_hashes,
+    };
+    if mode == SyncMode::Download {
+        Foxy::clear_persisted_repository_pause_for_cli(&repo.address, &repo.path)
+            .map_err(|error| CommandError::operation("repo.sync", error))?;
+    }
     let worker = api::spawn_repository_sync(
         repo.address.clone(),
         repo.path.clone(),
-        selected_mod_states.clone(),
+        selected_mod_states,
         tx,
         mode,
-        api::RepositorySyncOptions {
-            operation_id: api::next_operation_id("cli-sync"),
-            persisted_addon_selection: Some(selected_mod_states),
-            prepare_download_plan: false,
-            discard_prepared_queue: false,
-            repository_space_shared_path: None,
-            auto_backup_directory: None,
-            rollback_temp_directory: Some(if settings.temp_directory.trim().is_empty() {
-                crate::core::utils::app_paths::foxy_data_dir()
-                    .display()
-                    .to_string()
-            } else {
-                settings.temp_directory.trim().to_string()
-            }),
-            download_speed_limit_mbps: settings
-                .download_speed_limit_mbps
-                .filter(|limit| *limit > 0),
-            recent_local_path_reset: false,
-            force_redownload,
-            force_full_downloads: false,
-            allow_suspect_full_redownload: force_redownload,
-            download_pause_rx: pause_rx,
-            cancel_rx,
-            hash_algorithm_preference: repo.hash_algorithm_preference,
-            hash_io_profile: settings.hash_io_profile,
-            trust_verified_hashes: settings.trust_verified_hashes,
-        },
+        options,
         None,
     );
 
@@ -483,6 +582,14 @@ fn run_repository_sync(
     let mut latest_stage: Option<String> = None;
     let mut latest_percent: Option<f32> = None;
     let mut latest_diff: Vec<ModDiffSummary> = Vec::new();
+    let mut verification_basis: Option<(bool, bool)> = None;
+    let mut verification_checked_at: Option<u64> = None;
+    let mut local_drift_addons = Vec::new();
+    let mut cleanup_plan_files = Vec::new();
+    let mut empty_publication: Option<(bool, Vec<String>)> = None;
+    let mut hash_evidence: Option<
+        std::sync::Arc<crate::core::tasks::calculate_hashes::HashEvidenceState>,
+    > = None;
     let mut failed: Option<String> = None;
     let mut finished = false;
     let mut last_print = Instant::now();
@@ -490,6 +597,22 @@ fn run_repository_sync(
     loop {
         match rx.try_recv() {
             Ok(event) => match event {
+                ProgressEvent::HashEvidence { state } => hash_evidence = Some(state.clone()),
+                ProgressEvent::VerificationBasis { full, remote_fresh } => {
+                    verification_basis = Some((full, remote_fresh));
+                    verification_checked_at = Some(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|duration| duration.as_secs())
+                            .unwrap_or_default(),
+                    );
+                }
+                ProgressEvent::LocalDrift { addons } => local_drift_addons = addons.clone(),
+                ProgressEvent::CleanupPlan { files } => cleanup_plan_files = files.clone(),
+                ProgressEvent::EmptyPublication {
+                    repository_empty,
+                    addons,
+                } => empty_publication = Some((repository_empty, addons.clone())),
                 ProgressEvent::Stage { label, percent } => {
                     latest_stage = Some(label.clone());
                     latest_percent = Some(percent);
@@ -502,6 +625,7 @@ fn run_repository_sync(
                     latest_diff = mods;
                 }
                 ProgressEvent::DownloadPlan { .. } => {}
+                ProgressEvent::UpdatePhase(_) => {}
                 ProgressEvent::DownloadTelemetry { .. } => {}
                 ProgressEvent::HashTelemetry { .. } => {}
                 ProgressEvent::HashSummary { .. } => {}
@@ -510,6 +634,7 @@ fn run_repository_sync(
                 ProgressEvent::DiskSpaceShortfall(_) => {}
                 ProgressEvent::DownloadMod {
                     mod_name,
+                    attempt: _,
                     files_done,
                     files_total,
                     bytes_done,
@@ -549,6 +674,13 @@ fn run_repository_sync(
                     }
                 }
                 ProgressEvent::RepositoryFoxyMode { .. } => {}
+                ProgressEvent::RetryableDownloadFailure => {}
+                ProgressEvent::SharedVersionWarning { repositories } => {
+                    eprintln!(
+                        "Updating shared files may require updates in: {}",
+                        repositories.join(", ")
+                    );
+                }
                 ProgressEvent::Finished => finished = true,
                 ProgressEvent::Cancelled => {
                     failed = Some("Cancelled".to_string());
@@ -577,7 +709,47 @@ fn run_repository_sync(
             break;
         }
     }
-    let _ = worker.join();
+    let worker_succeeded = worker.join().is_ok();
+    if !finished || !worker_succeeded {
+        return Err(CommandError::operation(
+            "repo.sync",
+            "The sync worker stopped without a successful terminal result. Retry the operation."
+                .to_string(),
+        ));
+    }
+
+    if hash_evidence
+        .as_ref()
+        .is_some_and(|state| state.is_incomplete())
+    {
+        let issues = hash_evidence
+            .as_ref()
+            .map(|state| state.issues_snapshot())
+            .unwrap_or_default();
+        let details = issues
+            .iter()
+            .map(|issue| {
+                format!(
+                    "{:?}: {}{}",
+                    issue.kind,
+                    issue.file_path,
+                    issue
+                        .detail
+                        .as_ref()
+                        .map(|detail| format!(" ({detail})"))
+                        .unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(CommandError::operation(
+            "repo.sync",
+            format!(
+                "Verification was incomplete and is not a saved clean result ({} file issues). {details}. Retry after resolving the reported read or save problem.",
+                issues.len()
+            ),
+        ));
+    }
 
     if let Some(message) = failed {
         return Err(CommandError::operation(
@@ -595,6 +767,18 @@ fn run_repository_sync(
         "latest_percent": latest_percent,
         "updates_count": latest_diff.iter().filter(|m| m.needs_update).count(),
         "diff": latest_diff,
+        "verification_basis": verification_basis.map(|(full, remote_fresh)| json!({
+            "full_local_read": full,
+            "remote_metadata_fresh": remote_fresh,
+            "checked_at_unix_seconds": verification_checked_at
+        })),
+        "known_local_drift_addons": local_drift_addons,
+        "cleanup_plan_files": cleanup_plan_files,
+        "empty_publication": empty_publication.map(|(repository_empty, addons)| json!({
+            "repository_empty": repository_empty,
+            "addons": addons,
+            "local_files_retained": true
+        })),
         "elapsed_ms": started_at.elapsed().as_millis()
     }))
 }

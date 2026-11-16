@@ -1,0 +1,19 @@
+{
+  "repoName": "MainRepo",
+  "game": "generic",
+  "chunking": "content",
+  "basePath": "R:/Mods/MainRepo",
+  "appUpdateUrl": "",
+  "gameBuild": { "folder": "@mod_01", "executable": "Game.exe" },
+  "requiredMods": [],
+  "optionalMods": [],
+  "iconImagePath": "icon.png",
+  "repoImagePath": "repo.png",
+  "clientParameters": "",
+  "repoBasicAuthentication": {
+    "username": "",
+    "password": ""
+  },
+  "version": "1.0.0.0",
+  "servers": []
+}

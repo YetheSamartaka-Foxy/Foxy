@@ -21,11 +21,21 @@ pub struct ServerTarget {
     pub password: String,
 }
 
+/// A custom game build downloaded by a repository. When a plan carries one,
+/// the game starts from that folder instead of the configured install.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GameBuildTarget {
+    pub dir: PathBuf,
+    /// Relative to `dir`, with `/` separators.
+    pub executable: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LaunchPlan {
     pub launch_args: Vec<String>,
     pub mods: Vec<ResolvedMod>,
     pub server: Option<ServerTarget>,
+    pub game_build: Option<GameBuildTarget>,
 }
 
 pub struct GameLaunchCtx<'a> {

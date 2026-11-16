@@ -140,6 +140,183 @@ fn backup_and_list_round_trip() {
 }
 
 #[test]
+fn backup_origin_is_associated_without_entering_restored_payload() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("backups");
+    let source = dir.path().join("@same");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("content.bin"), b"same bytes").unwrap();
+    let origin = AddonBackupOrigin {
+        game_space_id: "space-a".into(),
+        repository_url: "https://repo.example.invalid/".into(),
+        local_path: "R:/Mods/RepoAlpha".into(),
+    };
+    let record = backup_addon_with_origin(&root, &source, Some(&origin)).unwrap();
+    assert_eq!(record.origins, vec![origin.clone()]);
+    let destination = dir.path().join("restored");
+    restore_addon_backup(&record, &destination).unwrap();
+    assert!(!destination.join(".foxy_backup_origins.json").exists());
+}
+
+#[test]
+fn cleanup_preview_separates_last_recovery_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("backups");
+    let source = dir.path().join("@preview");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("data"), b"v1").unwrap();
+    backup_addon(&root, &source).unwrap();
+    let preview = preview_addon_backup_cleanup(
+        &root,
+        BackupCleanupPolicy {
+            keep_latest_per_addon: Some(0),
+            max_age_days: Some(0),
+        },
+    )
+    .unwrap();
+    assert!(preview.deletions.is_empty());
+    assert_eq!(preview.final_recovery_copies.len(), 1);
+}
+
+#[test]
+fn cleanup_groups_same_named_addons_by_repository_origin() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("backups");
+    let source = dir.path().join("@shared");
+    let origin_a = AddonBackupOrigin {
+        game_space_id: "space-a".into(),
+        repository_url: "https://a.example.invalid/".into(),
+        local_path: "R:/Mods/RepoAlpha".into(),
+    };
+    let origin_b = AddonBackupOrigin {
+        game_space_id: "space-a".into(),
+        repository_url: "https://b.example.invalid/".into(),
+        local_path: "R:/Mods/RepoBeta".into(),
+    };
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("content.bin"), b"A old").unwrap();
+    let old_a = backup_addon_with_origin(&root, &source, Some(&origin_a)).unwrap();
+    std::fs::write(source.join("content.bin"), b"A new").unwrap();
+    let new_a = backup_addon_with_origin(&root, &source, Some(&origin_a)).unwrap();
+    for (path, nanos) in [(&old_a.path, 100), (&new_a.path, 200)] {
+        let mut options = std::fs::File::options();
+        options.read(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            use winapi::um::winbase::FILE_FLAG_BACKUP_SEMANTICS;
+            use winapi::um::winnt::FILE_WRITE_ATTRIBUTES;
+            options
+                .access_mode(FILE_WRITE_ATTRIBUTES)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+        }
+        options
+            .open(path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(
+                std::time::UNIX_EPOCH + std::time::Duration::new(1_700_000_000, nanos),
+            ))
+            .unwrap();
+    }
+    std::fs::write(source.join("content.bin"), b"B only").unwrap();
+    backup_addon_with_origin(&root, &source, Some(&origin_b)).unwrap();
+
+    let preview = preview_addon_backup_cleanup(
+        &root,
+        BackupCleanupPolicy {
+            keep_latest_per_addon: Some(1),
+            max_age_days: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(preview.deletions.len(), 1);
+    assert_eq!(preview.deletions[0].path, old_a.path);
+    assert!(preview.final_recovery_copies.is_empty());
+}
+
+#[test]
+fn cleanup_rejects_new_origin_added_after_preview_before_deleting_anything() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("backups");
+    let source = dir.path().join("@shared");
+    let origin_a = AddonBackupOrigin {
+        game_space_id: "space-a".into(),
+        repository_url: "https://a.example.invalid/".into(),
+        local_path: "R:/Mods/RepoAlpha".into(),
+    };
+    let origin_b = AddonBackupOrigin {
+        game_space_id: "space-a".into(),
+        repository_url: "https://b.example.invalid/".into(),
+        local_path: "R:/Mods/RepoBeta".into(),
+    };
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("content.bin"), b"old shared bytes").unwrap();
+    let old_a = backup_addon_with_origin(&root, &source, Some(&origin_a)).unwrap();
+    std::fs::write(source.join("content.bin"), b"new A bytes").unwrap();
+    let newer_a = backup_addon_with_origin(&root, &source, Some(&origin_a)).unwrap();
+    for (path, nanos) in [(&old_a.path, 100), (&newer_a.path, 200)] {
+        let mut options = std::fs::File::options();
+        options.read(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            use winapi::um::winbase::FILE_FLAG_BACKUP_SEMANTICS;
+            use winapi::um::winnt::FILE_WRITE_ATTRIBUTES;
+            options
+                .access_mode(FILE_WRITE_ATTRIBUTES)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+        }
+        options
+            .open(path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(
+                std::time::UNIX_EPOCH + std::time::Duration::new(1_700_000_000, nanos),
+            ))
+            .unwrap();
+    }
+
+    let preview = preview_addon_backup_cleanup(
+        &root,
+        BackupCleanupPolicy {
+            keep_latest_per_addon: Some(1),
+            max_age_days: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(preview.deletions.len(), 1);
+    assert_eq!(preview.deletions[0].path, old_a.path);
+
+    helpers::add_origin(&root, &old_a.folder_name, &origin_b).unwrap();
+
+    let result = cleanup_addon_backup_preview_confirmed(&root, &preview, false);
+    assert!(result.is_err());
+    assert!(old_a.path.exists());
+    assert!(newer_a.path.exists());
+}
+
+#[test]
+fn unknown_legacy_backups_remain_listable_without_origin() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("backups");
+    let source = dir.path().join("@legacy");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("content.bin"), b"legacy").unwrap();
+    let record = backup_addon(&root, &source).unwrap();
+    assert!(record.origins.is_empty());
+    let origin = AddonBackupOrigin {
+        game_space_id: "space-a".into(),
+        repository_url: "https://repo.example.invalid/".into(),
+        local_path: "R:/Mods/RepoAlpha".into(),
+    };
+    assert_eq!(
+        list_addon_backups_for_origin(&root, "@legacy", &origin)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn backup_addon_non_directory_fails() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("not_a_dir.txt");
@@ -196,7 +373,9 @@ fn delete_nonexistent_backup_is_ok() {
         folder_name: "ABC_test".to_string(),
         path: PathBuf::from("/nonexistent/backup"),
         created_at_unix_secs: 0,
+        created_at_unix_nanos: 0,
         size_bytes: 0,
+        origins: Vec::new(),
     };
     assert!(delete_addon_backup(&record).is_ok());
 }

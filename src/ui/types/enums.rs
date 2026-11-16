@@ -41,6 +41,50 @@ pub enum UiRendererPreference {
     Glow,
 }
 
+/// CPU priority of the threads that hash, scan, check, and download. The
+/// interface thread and launched programs always keep normal priority.
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Default, Serialize, Deserialize)]
+pub enum WorkPriorityPreference {
+    #[default]
+    Normal,
+    BelowNormal,
+    Lowest,
+}
+
+/// Storage type assumed for every drive instead of the detected one.
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Default, Serialize, Deserialize)]
+pub enum StorageTypePreference {
+    #[default]
+    Auto,
+    Ssd,
+    Hdd,
+    Removable,
+}
+
+/// Memory pressure tier assumed instead of the sampled one.
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Default, Serialize, Deserialize)]
+pub enum MemoryPressurePreference {
+    #[default]
+    Auto,
+    Normal,
+    Constrained,
+    Severe,
+}
+
+/// How Foxy's HTTP requests reach the network.
+///
+/// - `System` (default): the Windows proxy settings and the `HTTP_PROXY` /
+///   `HTTPS_PROXY` environment variables.
+/// - `None`: connect directly and ignore any system proxy.
+/// - `Manual`: the proxy configured in Foxy's settings.
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Default, Serialize, Deserialize)]
+pub enum ProxyMode {
+    #[default]
+    System,
+    None,
+    Manual,
+}
+
 /// Where to check for app updates.
 ///
 /// - `Server` (default): Custom server manifest (`foxy-app-updater.json`).
@@ -68,6 +112,16 @@ impl fmt::Display for HashIoProfilePreference {
             HashIoProfilePreference::Conservative => write!(f, "Conservative"),
             HashIoProfilePreference::Balanced => write!(f, "Balanced"),
             HashIoProfilePreference::Aggressive => write!(f, "Aggressive"),
+        }
+    }
+}
+
+impl fmt::Display for WorkPriorityPreference {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            WorkPriorityPreference::Normal => write!(f, "normal"),
+            WorkPriorityPreference::BelowNormal => write!(f, "below_normal"),
+            WorkPriorityPreference::Lowest => write!(f, "lowest"),
         }
     }
 }

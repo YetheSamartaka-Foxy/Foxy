@@ -20,30 +20,77 @@ impl Foxy {
             repo_name, from_idx, to_idx
         );
 
-        // Update all index-based fields to follow the move
-        self.repository_view_state.selected_repository = Self::adjust_index_after_move(
-            self.repository_view_state.selected_repository,
-            from_idx,
-            to_idx,
-        );
-        self.syncing_repository =
-            Self::adjust_index_after_move(self.syncing_repository, from_idx, to_idx);
-        self.update_ready_repo =
-            Self::adjust_index_after_move(self.update_ready_repo, from_idx, to_idx);
-        self.download_finished_repo =
-            Self::adjust_index_after_move(self.download_finished_repo, from_idx, to_idx);
-        self.download_disk_space_shortfall =
-            self.download_disk_space_shortfall
-                .take()
-                .and_then(|(index, shortfall)| {
-                    Self::adjust_index_after_move(Some(index), from_idx, to_idx)
-                        .map(|index| (index, shortfall))
-                });
-        self.update_modal_disk_space_probe = None;
-        self.selected_repository_for_settings =
-            Self::adjust_index_after_move(self.selected_repository_for_settings, from_idx, to_idx);
-
+        self.remap_repository_indices(|idx| {
+            Self::adjust_index_after_move(Some(idx), from_idx, to_idx)
+        });
         self.save_repositories();
+    }
+
+    /// Re-point index-based fields after the repository list changes shape.
+    /// Queued syncs keep instance identities and resolve them when dispatched.
+    pub(crate) fn remap_repository_indices(&mut self, remap: impl Fn(usize) -> Option<usize>) {
+        let remap_opt = |index: Option<usize>| index.and_then(&remap);
+        self.repository_view_state.selected_repository =
+            remap_opt(self.repository_view_state.selected_repository);
+        self.selected_repository_for_settings = remap_opt(self.selected_repository_for_settings);
+        self.syncing_repository = remap_opt(self.syncing_repository);
+        self.update_ready_repo = remap_opt(self.update_ready_repo);
+        self.download_finished_repo = remap_opt(self.download_finished_repo);
+        self.download_disk_space_shortfall = self
+            .download_disk_space_shortfall
+            .take()
+            .and_then(|(index, shortfall)| remap(index).map(|index| (index, shortfall)));
+        self.update_modal_disk_space_probe = None;
+        self.completed_repository_check_banner = self
+            .completed_repository_check_banner
+            .take()
+            .and_then(|mut banner| {
+                banner.repo_index = remap(banner.repo_index)?;
+                Some(banner)
+            });
+        self.pending_repo_metadata_refresh = self
+            .pending_repo_metadata_refresh
+            .iter()
+            .filter_map(|index| remap(*index))
+            .collect();
+        if let Some(action) = self.pending_repository_space_bulk_action.as_mut() {
+            action
+                .entries
+                .retain_mut(|entry| match remap(entry.repo_index) {
+                    Some(index) => {
+                        entry.repo_index = index;
+                        true
+                    }
+                    None => false,
+                });
+            if action.entries.is_empty() {
+                self.pending_repository_space_bulk_action = None;
+            }
+        }
+        self.remap_addon_selection_indices(&remap);
+    }
+
+    /// Given an optional index referencing a repository, adjust it after the
+    /// repository at `removed_idx` was removed; the removed one maps to `None`.
+    pub(crate) fn adjust_index_after_removal(
+        index: Option<usize>,
+        removed_idx: usize,
+    ) -> Option<usize> {
+        match index? {
+            idx if idx == removed_idx => None,
+            idx if idx > removed_idx => Some(idx - 1),
+            idx => Some(idx),
+        }
+    }
+
+    /// Given an index referencing a repository, adjust it after a repository was
+    /// inserted at `inserted_idx`.
+    pub(crate) fn adjust_index_after_insertion(index: usize, inserted_idx: usize) -> usize {
+        if index >= inserted_idx {
+            index + 1
+        } else {
+            index
+        }
     }
 
     /// Convert a visual insertion slot (`0..=len`) into the final Vec index used after removal.
@@ -177,6 +224,21 @@ mod tests {
         // Move 1 to 2, item at 5 should stay at 5
         // Item at 5 -> after remove of 1: 4, after insert at 2: 4 (since 4 < 2 is false; 4 >= 2 so +1 = 5)
         assert_eq!(Foxy::adjust_index_after_move(Some(5), 1, 2), Some(5));
+    }
+
+    #[test]
+    fn removal_drops_the_removed_index_and_shifts_later_ones() {
+        assert_eq!(Foxy::adjust_index_after_removal(Some(2), 2), None);
+        assert_eq!(Foxy::adjust_index_after_removal(Some(5), 2), Some(4));
+        assert_eq!(Foxy::adjust_index_after_removal(Some(1), 2), Some(1));
+        assert_eq!(Foxy::adjust_index_after_removal(None, 2), None);
+    }
+
+    #[test]
+    fn insertion_shifts_indices_at_and_after_the_new_row() {
+        assert_eq!(Foxy::adjust_index_after_insertion(1, 2), 1);
+        assert_eq!(Foxy::adjust_index_after_insertion(2, 2), 3);
+        assert_eq!(Foxy::adjust_index_after_insertion(4, 2), 5);
     }
 
     #[test]

@@ -40,7 +40,9 @@ pub async fn fetch_manifest(base_url: &str) -> Result<UpdateManifest> {
     let url = format!("{}/foxy-app-updater.json", base_url.trim_end_matches('/'));
     log::info!("Fetching update manifest from {}", sanitize_log_url(&url));
 
-    let response = reqwest::get(&url)
+    let response = crate::core::utils::proxy::client()
+        .get(&url)
+        .send()
         .await
         .with_context(|| format!("Failed to fetch update manifest from {}", url))?;
 
@@ -95,7 +97,9 @@ pub async fn fetch_changelog(base_url: &str, changelog_path: &str) -> Result<Cha
     );
     log::debug!("Fetching changelog from {}", sanitize_log_url(&url));
 
-    let response = reqwest::get(&url)
+    let response = crate::core::utils::proxy::client()
+        .get(&url)
+        .send()
         .await
         .with_context(|| format!("Failed to fetch changelog from {}", url))?;
 
@@ -164,6 +168,13 @@ mod tests {
         // Semver: 1.0.0-alpha < 1.0.0
         assert!(is_newer("1.0.0", "1.0.0-alpha"));
         assert!(!is_newer("1.0.0-alpha", "1.0.0"));
+    }
+
+    #[test]
+    fn is_newer_offers_stable_release_to_its_prerelease_build() {
+        assert!(is_newer("1.2.2", "1.2.2-pre"));
+        assert!(is_newer("1.2.3", "1.2.2-pre"));
+        assert!(!is_newer("1.2.1", "1.2.2-pre"));
     }
 
     // ── current_platform_key ───────────────────────────────────────────

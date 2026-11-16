@@ -1,4 +1,4 @@
-use super::repository::Repository;
+use super::repository::{Repository, RepositoryGameBuild};
 use super::repository_space::RepositorySpace;
 use super::settings::SettingsViewState;
 use serde_json::Value;
@@ -126,6 +126,50 @@ pub fn apply_repo_client_parameters(repo: &mut Repository, params: &str) {
     }
 
     repo.additional_params = additional.join(" ");
+}
+
+/// The `gameBuild` of a custom game's `repo.json`. Both names come from the
+/// server, so anything that could leave the repository folder is refused.
+pub fn repo_json_game_build(json: &Value) -> Option<RepositoryGameBuild> {
+    let value = json.get("gameBuild")?;
+    let addon = value.get("modName")?.as_str()?.trim();
+    let executable = value.get("executable")?.as_str()?.trim().replace('\\', "/");
+    let safe_addon = crate::core::utils::fs_safety::is_safe_child_path(addon)
+        && !addon.contains(['/', '\\'])
+        && addon != ".";
+    let safe_executable = crate::core::utils::fs_safety::is_safe_child_path(&executable)
+        && executable
+            .split('/')
+            .all(|component| !component.is_empty() && component != ".");
+    if !safe_addon || !safe_executable {
+        log::warn!("Ignoring a repo.json gameBuild that names an unsafe path");
+        return None;
+    }
+    Some(RepositoryGameBuild {
+        addon: addon.to_string(),
+        executable,
+    })
+}
+
+/// Record the repository's game build and drop it from every addon list, so
+/// it can neither be shown nor disabled. Sync then falls back to the
+/// manifest's own `enabled` flag for it, which the server always sets.
+pub fn apply_repo_game_build(repo: &mut Repository, game_build: Option<RepositoryGameBuild>) {
+    repo.game_build = game_build;
+    strip_game_build_addon(repo);
+}
+
+pub fn strip_game_build_addon(repo: &mut Repository) {
+    let Some(game_build) = repo.game_build.as_ref() else {
+        return;
+    };
+    let is_game = |name: &String| name.eq_ignore_ascii_case(&game_build.addon);
+    repo.addons.retain(|(name, _)| !is_game(name));
+    repo.optional_addons.retain(|(name, _)| !is_game(name));
+    for profile in &mut repo.profiles {
+        profile.addons.retain(|(name, _)| !is_game(name));
+        profile.optional_addons.retain(|(name, _)| !is_game(name));
+    }
 }
 
 /// Locate the DLC list in a `repo.json`. Foxy publishes `dlcContent`; Swifty
@@ -275,6 +319,156 @@ pub fn merge_remote_addon_list(
             (name, enabled)
         })
         .collect()
+}
+
+pub fn merge_remote_addon_categories(
+    repo: &mut Repository,
+    remote_required: Option<Vec<(String, bool)>>,
+    remote_optional: Option<Vec<(String, bool)>>,
+) -> Vec<String> {
+    let old_required = repo.addons.clone();
+    let old_optional = repo.optional_addons.clone();
+    let update_both_categories = remote_required.is_some() && remote_optional.is_some();
+    let required = remote_required.unwrap_or_else(|| old_required.clone());
+    let optional = remote_optional.unwrap_or_else(|| old_optional.clone());
+    let required_keys: HashSet<String> = required
+        .iter()
+        .map(|(name, _)| name.to_ascii_lowercase())
+        .collect();
+    let optional_keys: HashSet<String> = optional
+        .iter()
+        .map(|(name, _)| name.to_ascii_lowercase())
+        .collect();
+    let old_required_keys: HashSet<String> = old_required
+        .iter()
+        .map(|(name, _)| name.to_ascii_lowercase())
+        .collect();
+    let old_optional_keys: HashSet<String> = old_optional
+        .iter()
+        .map(|(name, _)| name.to_ascii_lowercase())
+        .collect();
+
+    let moved_to_required: HashSet<String> = if update_both_categories {
+        required_keys
+            .intersection(&old_optional_keys)
+            .cloned()
+            .collect()
+    } else {
+        HashSet::new()
+    };
+    let moved_to_optional: HashSet<String> = if update_both_categories {
+        optional_keys
+            .intersection(&old_required_keys)
+            .cloned()
+            .collect()
+    } else {
+        HashSet::new()
+    };
+
+    let previous_profile_values: Vec<(String, HashMap<String, bool>)> = repo
+        .profiles
+        .iter()
+        .map(|profile| {
+            let values = profile
+                .addons
+                .iter()
+                .chain(&profile.optional_addons)
+                .map(|(name, enabled)| (name.to_ascii_lowercase(), *enabled))
+                .collect();
+            (profile.name.clone(), values)
+        })
+        .collect();
+
+    repo.addons = merge_remote_addon_list(required.clone(), &old_required);
+    repo.optional_addons = merge_remote_addon_list(optional.clone(), &old_optional);
+
+    let required_profile_defaults: Vec<_> = required
+        .iter()
+        .map(|(name, published_default)| {
+            let key = name.to_ascii_lowercase();
+            let enabled = if moved_to_required.contains(&key) || old_required_keys.contains(&key) {
+                *published_default
+            } else {
+                true
+            };
+            (name.clone(), enabled)
+        })
+        .collect();
+    let optional_profile_defaults: Vec<_> = optional
+        .iter()
+        .map(|(name, published_default)| {
+            let key = name.to_ascii_lowercase();
+            let enabled = if moved_to_optional.contains(&key) || old_optional_keys.contains(&key) {
+                *published_default
+            } else {
+                false
+            };
+            (name.clone(), enabled)
+        })
+        .collect();
+
+    for profile in &mut repo.profiles {
+        let same_category_required: Vec<_> = profile
+            .addons
+            .iter()
+            .filter(|(name, _)| old_required_keys.contains(&name.to_ascii_lowercase()))
+            .cloned()
+            .collect();
+        let same_category_optional: Vec<_> = profile
+            .optional_addons
+            .iter()
+            .filter(|(name, _)| old_optional_keys.contains(&name.to_ascii_lowercase()))
+            .cloned()
+            .collect();
+        profile.addons =
+            merge_remote_addon_list(required_profile_defaults.clone(), &same_category_required);
+        profile.optional_addons =
+            merge_remote_addon_list(optional_profile_defaults.clone(), &same_category_optional);
+    }
+
+    let mut changed = Vec::new();
+    for (name, _) in required.iter().chain(&optional) {
+        let key = name.to_ascii_lowercase();
+        let moved = moved_to_required.contains(&key) || moved_to_optional.contains(&key);
+        if !moved {
+            continue;
+        }
+        let old_default = old_required
+            .iter()
+            .chain(&old_optional)
+            .find(|(old_name, _)| old_name.eq_ignore_ascii_case(name))
+            .map(|(_, enabled)| *enabled);
+        let new_default = repo
+            .addons
+            .iter()
+            .chain(&repo.optional_addons)
+            .find(|(new_name, _)| new_name.eq_ignore_ascii_case(name))
+            .map(|(_, enabled)| *enabled);
+        let profile_changed = previous_profile_values
+            .iter()
+            .any(|(profile_name, old_values)| {
+                let old_value = old_values.get(&key).copied();
+                let new_value = repo
+                    .profiles
+                    .iter()
+                    .find(|profile| &profile.name == profile_name)
+                    .and_then(|profile| {
+                        profile
+                            .addons
+                            .iter()
+                            .chain(&profile.optional_addons)
+                            .find(|(new_name, _)| new_name.eq_ignore_ascii_case(name))
+                            .map(|(_, enabled)| *enabled)
+                    });
+                old_value != new_value
+            });
+        if old_default != new_default || profile_changed {
+            changed.push(name.clone());
+        }
+    }
+    changed.sort_by_key(|name| name.to_ascii_lowercase());
+    changed.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    changed
 }
 
 pub fn sanitize_external_addons(addons: &mut Vec<(String, bool, String)>) {
@@ -533,6 +727,7 @@ pub fn sanitize_repository_paths(repo: &mut Repository) {
 pub fn normalize_loaded_repository(repo: &mut Repository) {
     sanitize_repository_paths(repo);
     repo.app_update_url = repo.app_update_url.trim().to_string();
+    strip_game_build_addon(repo);
 
     let master_addons = repo.addons.clone();
     let master_optional = repo.optional_addons.clone();

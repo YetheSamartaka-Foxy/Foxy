@@ -16,6 +16,10 @@ impl Foxy {
             .as_ref()
             .map(|session| session.is_running())
             .unwrap_or(false)
+            || self
+                .direct_download_worker
+                .as_ref()
+                .is_some_and(|worker| !worker.is_finished())
     }
 
     pub fn effective_direct_download_speed_limit_mbps(&self) -> Option<u32> {
@@ -49,9 +53,21 @@ impl Foxy {
     }
 
     pub fn start_direct_download(&mut self) -> bool {
+        if self.hash_evidence_retry_in_flight
+            || self.retained_files_cleanup_in_flight
+            || self.pending_retained_file_removal.is_some()
+        {
+            self.direct_download_error =
+                Some(self.t("Finish reviewing retained files before starting another download."));
+            return false;
+        }
         if self.repository_sync_active() {
             self.direct_download_error = Some(self.t("Another download is already running"));
             warn!("Direct download ignored: repository sync is currently active");
+            return false;
+        }
+        if self.has_pending_hash_save() {
+            self.hash_evidence_notice_open = true;
             return false;
         }
         if self.is_direct_download_running() {
@@ -154,6 +170,7 @@ impl Foxy {
         self.download_hash_sample_parts = 0;
         if !self.mod_download_progress.is_empty() {
             self.mod_download_progress.clear();
+            self.mod_download_attempts.clear();
             self.invalidate_update_modal_sort_cache();
         }
         self.current_sync_mode = None;
@@ -179,6 +196,15 @@ impl Foxy {
     }
 
     pub fn poll_direct_download_progress(&mut self) {
+        if self.direct_download_progress_rx.is_none()
+            && self
+                .direct_download_worker
+                .as_ref()
+                .is_some_and(|worker| worker.is_finished())
+            && let Some(worker) = self.direct_download_worker.take()
+        {
+            let _ = worker.join();
+        }
         loop {
             let evt = {
                 let Some(rx) = self.direct_download_progress_rx.as_mut() else {
@@ -196,6 +222,13 @@ impl Foxy {
 
             let Some(evt) = evt else { continue };
             match evt {
+                DirectDownloadProgressEvent::CollisionApprovalRequested { paths, reply_tx } => {
+                    self.pending_direct_download_collisions = Some((paths.clone(), reply_tx));
+                    self.direct_download_error = Some(
+                        self.t("Existing destination files need approval before replacement."),
+                    );
+                    self.needs_repaint = true;
+                }
                 DirectDownloadProgressEvent::PlanResolved {
                     target_label,
                     files_total,
@@ -339,16 +372,14 @@ impl Foxy {
     }
 
     pub fn cancel_direct_download(&mut self) {
-        if !self.is_direct_download_running() {
+        if !self.is_direct_download_running() || self.direct_download_progress_rx.is_none() {
             return;
         }
         info!("Cancelling direct download");
-        // Drop the progress receiver and worker to signal cancellation
-        self.direct_download_progress_rx = None;
-        if let Some(handle) = self.direct_download_worker.take() {
-            // The worker will naturally stop when its progress_tx send fails
-            drop(handle);
+        if let Some((_, reply_tx)) = self.pending_direct_download_collisions.take() {
+            let _ = reply_tx.send(false);
         }
+        self.direct_download_progress_rx = None;
         // Clean up UI state
         let cancelled_message = self.t("Cancelled by user");
         if let Some(session) = self.direct_download_session.as_mut() {
@@ -368,10 +399,37 @@ impl Foxy {
         self.needs_repaint = true;
     }
 
+    /// The Cancel the user presses: also stops the folder, space, or scheduled
+    /// run the sync belongs to, so the next queued repository does not start.
+    pub fn cancel_sync_and_queued_runs(&mut self) {
+        let had_pending_retry = self.pending_download_retry.is_some();
+        let had_pending_preview = self.pending_link_target_sync.take().is_some();
+        if had_pending_preview {
+            self.pending_link_target_previews = None;
+            self.link_target_preview_bypass_once = false;
+            self.enrolled_link_targets.clear();
+            self.settle_pending_repository_space_target();
+        }
+        self.cancel_pending_download_retry();
+        if had_pending_retry
+            || had_pending_preview
+            || self.syncing_repository.is_some()
+            || self.current_sync_mode.is_some()
+            || self.is_direct_download_running()
+        {
+            self.drop_queued_repository_runs();
+        }
+        self.cancel_sync();
+    }
+
     pub fn cancel_sync(&mut self) {
         let is_syncing = self.syncing_repository.is_some() || self.current_sync_mode.is_some();
         let direct_running = self.is_direct_download_running();
         if !is_syncing && !direct_running {
+            return;
+        }
+        if direct_running && !is_syncing {
+            self.cancel_direct_download();
             return;
         }
 
@@ -387,6 +445,7 @@ impl Foxy {
             }
             if self.current_sync_mode == Some(SyncMode::Download) {
                 self.download_progress = Some((self.t("Cancelling..."), 0.84));
+                self.invalidate_update_completion_estimate();
                 self.download_paused = false;
                 self.needs_repaint = true;
             } else {
@@ -429,6 +488,20 @@ impl Foxy {
         }
 
         self.download_paused = paused;
+        self.pause_update_completion_estimate(paused);
+        if let Some(repo_idx) = self.syncing_repository
+            && let Some(repo) = self
+                .repository_view_state
+                .repositories
+                .get(repo_idx)
+                .cloned()
+            && let Err(err) = self.persist_repository_pause(&repo, paused)
+        {
+            warn!("Could not persist download pause state: {}", err);
+            self.show_error_toast(
+                self.t_fmt("Could not save pause state: {error}", &[("error", err)]),
+            );
+        }
         self.download_eta_remaining = None;
         self.download_eta_updated_at = None;
         self.download_speed_sample_at = None;
@@ -498,10 +571,14 @@ impl Foxy {
     }
 
     pub fn update_download_estimate(&mut self, total_bytes: u64) {
-        if self.current_sync_mode != Some(SyncMode::Download) {
-            return;
-        }
-        if self.download_paused {
+        if self.download_paused
+            || (self.current_sync_mode != Some(SyncMode::Download)
+                && !self.is_direct_download_running())
+            || (self.current_sync_mode == Some(SyncMode::Download)
+                && self.update_completion_phase()
+                    != Some(crate::core::utils::update_estimate::UpdatePhase::Transferring))
+        {
+            self.download_eta_remaining = None;
             return;
         }
         let now = Instant::now();
@@ -510,13 +587,36 @@ impl Foxy {
         {
             return;
         }
-        if total_bytes == 0 || self.download_speed_bps <= 0.0 {
+        if total_bytes == 0
+            || !self.download_speed_bps.is_finite()
+            || self.download_speed_bps <= 0.0
+            || self
+                .download_speed_sample_at
+                .is_none_or(|sample| now.saturating_duration_since(sample) > Duration::from_secs(5))
+        {
+            self.download_eta_remaining = None;
             return;
         }
-        let downloaded = self.total_downloaded_bytes.min(total_bytes);
-        let remaining_bytes = total_bytes.saturating_sub(downloaded);
+        let (current_done, current_total) = self.mod_download_progress.values().fold(
+            (0u64, 0u64),
+            |(done, total), (_, _, _, bytes_done, bytes_total)| {
+                (
+                    done.saturating_add(*bytes_done),
+                    total.saturating_add(*bytes_total),
+                )
+            },
+        );
+        let downloaded = if self.is_direct_download_running() {
+            self.total_downloaded_bytes
+        } else {
+            current_done
+        };
+        let remaining_bytes = total_bytes.max(current_total).saturating_sub(downloaded);
         let remaining_secs = (remaining_bytes as f64 / self.download_speed_bps).max(0.0);
-        self.download_eta_remaining = Some(Duration::from_secs_f64(remaining_secs));
+        self.download_eta_remaining = (remaining_bytes > 0)
+            .then(|| Duration::try_from_secs_f64(remaining_secs).ok())
+            .flatten()
+            .map(|remaining| remaining.max(Duration::from_secs(1)));
         self.download_eta_updated_at = Some(now);
     }
 }

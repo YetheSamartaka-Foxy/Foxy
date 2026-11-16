@@ -1,0 +1,49 @@
+{
+  "id": "state-r03-r18-single-config-process",
+  "kind": "perf",
+  "description": "While the GUI owns one game space, run a second Foxy CLI command against the same config root targeting another space; require DATABASE_BUSY and unchanged settings and registry files.",
+  "build": "release",
+  "harness": "gui",
+  "timeout_s": 120,
+  "origin": {
+    "root": "${RUN_DIR}/origin",
+    "port": 18172,
+    "synthetic": [
+      { "root": "${RUN_DIR}/origin", "seed": 20261018, "mods": 1, "files_per_mod": 1, "file_bytes": 1024, "repo_name": "RepoAlpha" }
+    ]
+  },
+  "repository": { "name": "RepoAlpha", "address": "http://127.0.0.1:18172/", "path": "${RUN_DIR}/repo-alpha", "space_id": null },
+  "settings": { "auto_recheck_on_launch": false, "auto_quick_scan_on_launch": false },
+  "config_files": {
+    "games.json": {
+      "active_game_space_id": "arma3",
+      "last_opened_game_space_id": "arma3",
+      "game_spaces": [
+        { "id": "arma3", "game_id": "arma3", "display_name": "Arma 3", "created_at": 1 },
+        { "id": "space-b", "game_id": "arma3", "display_name": "Synthetic Space B", "created_at": 2 }
+      ]
+    },
+    "app_settings.json": { "auto_recheck_on_launch": false, "auto_quick_scan_on_launch": false, "swifty_migration_offered": true, "future_app_value": "preserve-me" },
+    "games/arma3/repositories.json": [
+      { "profiles": [], "selected_profile": null, "name": "RepoAlpha", "address": "http://127.0.0.1:18172/", "path": "${RUN_DIR}/repo-alpha", "additional_params": "", "addons": [["@synthetic_000", true]], "optional_addons": [], "arma3_profile": null, "repository_space_id": null, "repository_space_entry_address": null }
+    ],
+    "games/arma3/game_settings.json": { "future_active_space_value": "keep-a" },
+    "games/space-b/game_settings.json": { "future_target_space_value": "keep-b" }
+  },
+  "operations": [
+    {
+      "op": "second-process-game-use", "setup_once": true, "space_id": "space-b", "wait_timeout_s": 15,
+      "unchanged_paths": [
+        "${RUN_DIR}/config/games.json",
+        "${RUN_DIR}/config/app_settings.json",
+        "${RUN_DIR}/config/games/arma3/game_settings.json",
+        "${RUN_DIR}/config/games/space-b/game_settings.json"
+      ]
+    },
+    { "op": "assert-config-json", "path": "${RUN_DIR}/config/games.json", "json_path": "active_game_space_id", "equals": "arma3" },
+    { "op": "assert-config-json", "path": "${RUN_DIR}/config/games/space-b/game_settings.json", "json_path": "future_target_space_value", "equals": "keep-b" }
+  ],
+  "repetitions": 1,
+  "warmup": false,
+  "guards": { "require_storage_class": "ssd", "require_no_other_foxy": true, "require_clean_worktree": false, "fail_on_db_wipe": true, "max_run_gb": 1 }
+}

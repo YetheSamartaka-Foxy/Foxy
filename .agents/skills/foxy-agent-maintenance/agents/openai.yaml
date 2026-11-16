@@ -1,0 +1,5 @@
+interface:
+  display_name: "Foxy Agent Maintenance"
+  short_description: "Maintain shared skills and Codex/Claude agent roles"
+  default_prompt: "Use $foxy-agent-maintenance to update Foxy's agent instructions and validate their discovery metadata."
+

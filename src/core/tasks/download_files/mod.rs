@@ -5,17 +5,23 @@ mod metrics;
 mod orchestrator;
 mod progress;
 mod range_scheduler;
+#[cfg(test)]
+mod recovery_tests;
+mod request;
 mod rollback;
+mod target_binding;
 mod transfer;
 
 pub(crate) use bandwidth::AdaptiveBandwidthLimiter;
 pub(crate) use batching::DownloadModCompletion;
 pub(crate) use failure::MissingRemoteFiles;
+pub(crate) use failure::TransientDownloadFailure;
 pub(crate) use metrics::{DownloadMetrics, DownloadRunReport};
 pub(crate) use orchestrator::{
     apply_download_plan_bytes, build_download_estimate_diffs, download_files,
 };
 pub(crate) use rollback::{SharedRollbackSession, UpdateRollbackSession};
+pub(crate) use target_binding::PinnedDownloadTargets;
 
 pub(super) const LARGE_FILE_THRESHOLD: usize = 10 * 1024 * 1024;
 pub(super) const ATTEMPT_DELAY_MS: u64 = 25;

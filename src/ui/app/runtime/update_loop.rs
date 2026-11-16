@@ -5,7 +5,7 @@ use eframe::egui::{
     self, CentralPanel, CursorIcon, Frame, Id, PointerButton, Rect, ResizeDirection, Sense, Ui,
     Vec2, ViewportCommand,
 };
-use log::{error, info, warn};
+use log::{info, warn};
 
 use crate::core::api::SyncMode;
 use crate::ui::app::debug_modals::DebugModal;
@@ -20,6 +20,27 @@ const FRAME_INTERVAL_WINDOW: usize = 240;
 /// How soon a frame follows a state change the UI flagged with `needs_repaint`.
 const STATE_CHANGE_REPAINT_DELAY: Duration = Duration::from_millis(16);
 
+/// Where the window is for progress pacing. A GUI-harness session stays in the
+/// foreground pacing so its frame measurements compare across runs, whatever
+/// window the operating system gives focus.
+fn window_presence_for(
+    harness_attached: bool,
+    hidden_to_tray: bool,
+    focused: Option<bool>,
+    minimized: Option<bool>,
+) -> crate::ui::app::WindowPresence {
+    use crate::ui::app::WindowPresence;
+    if harness_attached {
+        WindowPresence::Foreground
+    } else if hidden_to_tray || minimized == Some(true) {
+        WindowPresence::Hidden
+    } else if focused == Some(false) {
+        WindowPresence::Background
+    } else {
+        WindowPresence::Foreground
+    }
+}
+
 /// `(p50, p95, max)` of the recent frame intervals in milliseconds.
 pub(crate) fn frame_interval_stats(intervals: &VecDeque<f32>) -> Option<(f32, f32, f32)> {
     if intervals.is_empty() {
@@ -31,7 +52,88 @@ pub(crate) fn frame_interval_stats(intervals: &VecDeque<f32>) -> Option<(f32, f3
     Some((at(50), at(95), sorted[sorted.len() - 1]))
 }
 
+/// Drains queued worker results and reports whether the worker had exited.
+/// The exit is sampled first: a worker queues its result before exiting, so one
+/// seen exited here cannot deliver a result after the drain.
+fn drain_worker_results<T>(
+    receiver: &std::sync::mpsc::Receiver<T>,
+    worker_exited: impl FnOnce() -> bool,
+) -> (Vec<T>, bool) {
+    let exited = worker_exited();
+    (receiver.try_iter().collect(), exited)
+}
+
 impl Foxy {
+    fn service_proxy_change_prompt(&mut self, ctx: &egui::Context) {
+        let Some(prompt) = self.proxy_change_prompt.as_ref() else {
+            return;
+        };
+        let mut apply_to_new_work = false;
+        let mut restart = false;
+        egui::Modal::new(egui::Id::unique("proxy_change_active_work")).show(ctx, |ui| {
+            ui.set_max_width(520.0);
+            ui.heading(self.t("Proxy settings changed during active work"));
+            if prompt.restart_requested {
+                ui.label(self.t("Waiting for the current attempt to cancel and restore its files."));
+            } else {
+                ui.label(self.t("The current attempt keeps its existing connection. Choose when the new proxy settings should affect this work."));
+                ui.horizontal(|ui| {
+                    apply_to_new_work = ui.button(self.t("Apply to new work")).clicked();
+                    restart = ui.button(self.t("Restart this work now")).clicked();
+                });
+            }
+        });
+        if apply_to_new_work {
+            self.proxy_change_prompt = None;
+        } else if restart && let Some(prompt) = self.proxy_change_prompt.as_mut() {
+            prompt.restart_requested = true;
+            self.cancel_sync();
+        }
+
+        let Some(prompt) = self.proxy_change_prompt.as_ref() else {
+            return;
+        };
+        if !prompt.restart_requested
+            || self.repository_sync_active()
+            || self.current_sync_mode.is_some()
+            || self
+                .backend_worker
+                .as_ref()
+                .is_some_and(|worker| !worker.is_finished())
+        {
+            return;
+        }
+        let prompt = self.proxy_change_prompt.take().expect("prompt was checked");
+        let repo_index = self
+            .repository_view_state
+            .repositories
+            .iter()
+            .position(|repo| {
+                repo.address == prompt.repository_url && repo.path == prompt.repository_path
+            });
+        if let Some(repo_index) = repo_index {
+            if prompt.mode == SyncMode::Download {
+                self.supersede_pending_retry_for_instance(
+                    &prompt.repository_url,
+                    &prompt.repository_path,
+                );
+            }
+            let previous_backup_local_drift = self.backup_local_drift_requested;
+            self.backup_local_drift_requested = prompt.backup_local_drift;
+            self.start_core_sync_internal(
+                repo_index,
+                prompt.mode,
+                Some(prompt.selected_mod_states),
+                prompt.force_redownload,
+                prompt.prepare_download_plan,
+                prompt.force_full_downloads,
+            );
+            self.backup_local_drift_requested = previous_backup_local_drift;
+        } else {
+            self.show_error_toast(self.t("The repository changed before the work could restart."));
+        }
+    }
+
     fn handle_tray_events(&mut self, ctx: &egui::Context) {
         let mut restore_requested = false;
 
@@ -59,6 +161,9 @@ impl Foxy {
         if self.close_requested_at.is_none() {
             self.persist_window_state_if_changed(ctx);
             self.close_requested_at = Some(Instant::now());
+            if self.shutdown_after_close {
+                self.launch_action.invalidate_shutdown_sample();
+            }
             info!("Window close requested ({reason})");
         }
         if let Some(tray_manager) = self.tray_manager.as_ref() {
@@ -128,8 +233,12 @@ impl Foxy {
         }
 
         // Repaint every frame so the counter or opt-in agent probe reflects the
-        // current framerate.
-        ctx.request_repaint();
+        // current framerate; out of front the counter follows the slower pacing.
+        if agent_gui_probe
+            || crate::ui::app::window_presence() == crate::ui::app::WindowPresence::Foreground
+        {
+            ctx.request_repaint();
+        }
     }
 
     /// Color for the FPS readout in the footer: green when healthy, amber when
@@ -160,6 +269,29 @@ impl Foxy {
         const PERSISTENCE_REPAINT_INTERVAL: Duration = Duration::from_millis(100);
 
         let mut interval = None;
+
+        if self.settings_view_state.periodic_remote_check_enabled
+            && self.startup_tasks_started
+            && !self.repository_sync_active()
+            && self.quick_scan_worker.is_none()
+            && !self.is_direct_download_running()
+            && self.scheduler_active_run.is_none()
+            && self.startup_recheck_queue.is_empty()
+        {
+            let period = Duration::from_secs(
+                u64::from(
+                    self.settings_view_state
+                        .periodic_remote_check_interval_minutes
+                        .max(5),
+                )
+                .saturating_mul(60),
+            );
+            let until_due = self
+                .periodic_remote_check_last_run
+                .map(|last| period.saturating_sub(last.elapsed()))
+                .unwrap_or(Duration::ZERO);
+            Self::merge_repaint_interval(&mut interval, until_due.max(Duration::from_millis(16)));
+        }
 
         let repository_download_visible = self.update_modal_open
             && self.current_sync_mode == Some(SyncMode::Download)
@@ -208,6 +340,7 @@ impl Foxy {
             || self.repositories_save_in_flight_revision.is_some()
             || self.backup_inventory_refresh_requested
             || self.backup_inventory_refresh_in_progress
+            || self.backup_cleanup_in_flight
         {
             Self::merge_repaint_interval(&mut interval, PERSISTENCE_REPAINT_INTERVAL);
         }
@@ -218,11 +351,13 @@ impl Foxy {
             Self::merge_repaint_interval(&mut interval, scheduler_interval);
         }
 
-        interval
+        match crate::ui::app::progress_frame_interval_override() {
+            Some(cap) => interval.map(|interval| interval.max(cap)),
+            None => interval,
+        }
     }
 
     pub fn update(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
-        const CLOSE_FORCE_EXIT_TIMEOUT: Duration = Duration::from_secs(2);
         let repaint_causes = ui.ctx().repaint_causes();
         self.frame_cost.begin_frame(
             crate::core::utils::thread_cpu::current_thread_cpu(),
@@ -240,15 +375,23 @@ impl Foxy {
         }
 
         super::keyboard_focus::repair_lost_keyboard_focus();
+        if self.render_configuration_recovery_error(&ctx) {
+            polls.stop(&mut self.frame_cost);
+            return;
+        }
         self.apply_runtime_ui_scale(&ctx);
         self.apply_runtime_motion_preference(&ctx);
         self.invalidate_galley_caches_on_font_atlas_change(&ctx);
         self.log_display_metrics_if_changed(&ctx);
+        let (focused, minimized) = ctx.input(|i| (i.viewport().focused, i.viewport().minimized));
+        crate::ui::app::set_window_presence(window_presence_for(
+            self.agent_gui.is_some(),
+            self.hidden_to_tray,
+            focused,
+            minimized,
+        ));
         self.update_fps_estimate(&ctx);
         self.poll_agent_gui(&ctx);
-        // After `poll_agent_gui`: the driver pushes injected key events into the
-        // current frame's `InputState`, which egui rebuilds from RawInput next
-        // frame, so a handler running before it never sees them.
         self.handle_global_accessibility_shortcuts(&ctx);
 
         if self.close_requested_at.is_none() && ctx.input(|i| i.viewport().close_requested()) {
@@ -256,23 +399,116 @@ impl Foxy {
             self.close_requested_at = Some(Instant::now());
             info!("Close requested by viewport event");
         }
+        self.poll_launch_action(&ctx);
+        self.poll_profile_backups(&ctx);
+        self.poll_game_space_removal(&ctx);
+        self.poll_scheduled_gameplay(&ctx);
+        self.service_proxy_change_prompt(&ctx);
+        self.render_pending_addon_backup_origin_confirmation(&ctx);
+        self.poll_installer_request(&ctx);
 
-        if let Some(close_requested_at) = self.close_requested_at {
-            if close_requested_at.elapsed() > CLOSE_FORCE_EXIT_TIMEOUT {
-                error!(
-                    "Close request timed out after {} seconds; forcing process exit",
-                    CLOSE_FORCE_EXIT_TIMEOUT.as_secs()
+        // Killing a sync mid-promotion leaves a mix of old and new files its
+        // rollback can no longer revert, so a close cancels it and keeps the
+        // window (showing the cancel) until the worker has rolled back.
+        let close_waits_for_worker = self.close_requested_at.is_some()
+            && (self
+                .backend_worker
+                .as_ref()
+                .is_some_and(|handle| !handle.is_finished())
+                || self.is_direct_download_running()
+                || self.retained_files_cleanup_in_flight
+                || self.hash_evidence_retry_in_flight
+                || self.launch_action.is_busy()
+                || self.game_space_removal_in_flight()
+                || self.profile_backup_work_in_flight()
+                || self
+                    .workshop_task_worker
+                    .as_ref()
+                    .is_some_and(|worker| !worker.is_finished())
+                || self
+                    .addon_backup_worker
+                    .as_ref()
+                    .is_some_and(|worker| !worker.is_finished())
+                || self
+                    .backup_cleanup_worker
+                    .as_ref()
+                    .is_some_and(|worker| !worker.is_finished()));
+        if close_waits_for_worker {
+            self.close_worker_wait_started_at.get_or_insert_with(|| {
+                info!(
+                    "Close requested while a sync runs; cancelling it and waiting for its rollback"
                 );
-                std::process::exit(0);
+                Instant::now()
+            });
+            self.cancel_sync_and_queued_runs();
+            ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+            ctx.request_repaint_after(Duration::from_millis(50));
+        } else if self.close_requested_at.is_some() {
+            self.poll_backend_progress();
+            if self.close_requested_at.is_none() {
+                return;
             }
-
+            if let Some(wait_started_at) = self.close_worker_wait_started_at.take() {
+                info!(
+                    "Cancelled sync finished {:.1}s after the close request",
+                    wait_started_at.elapsed().as_secs_f64()
+                );
+                // The persistence flush gets its own window after the wait.
+                self.close_requested_at = Some(Instant::now());
+            }
             self.poll_persistence_results();
             self.maybe_dispatch_persistence_requests(true);
             if self.has_pending_persistence_writes() {
+                if self.shutdown_after_close {
+                    self.launch_action.invalidate_shutdown_sample();
+                }
+                ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+                if self.show_unreadable_config_replacement {
+                    self.render_unreadable_config_replacement(&ctx);
+                } else {
+                    self.render_close_wait(&ctx, true);
+                }
                 ctx.request_repaint_after(Duration::from_millis(16));
                 return;
             }
 
+            #[cfg(target_os = "windows")]
+            if self.shutdown_after_close {
+                if !self.launch_action.ensure_shutdown_sample_ready() {
+                    ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+                    ctx.request_repaint_after(Duration::from_millis(50));
+                    return;
+                }
+                let gameplay_changed =
+                    self.scheduler_pending_post_action
+                        .as_ref()
+                        .is_some_and(|pending| {
+                            pending.gameplay_generation != self.launch_action.gameplay_generation
+                        });
+                if gameplay_changed {
+                    if let Some(pending) = self.scheduler_pending_post_action.as_mut() {
+                        pending.requires_confirmation = true;
+                        pending.gameplay_generation = self.launch_action.gameplay_generation;
+                        pending.handoff_generation = self.launch_action.handoff_generation;
+                    }
+                    self.close_requested_at = None;
+                    self.close_worker_wait_started_at = None;
+                    self.shutdown_after_close = false;
+                    ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+                    ctx.request_repaint();
+                    return;
+                }
+                self.shutdown_after_close = false;
+                if let Err(error) = crate::ui::app::scheduling::initiate_pc_shutdown() {
+                    self.close_requested_at = None;
+                    self.show_error_toast(
+                        self.t_fmt("Could not request shutdown: {error}", &[("error", error)]),
+                    );
+                    return;
+                }
+                self.scheduler_pending_post_action = None;
+                self.scheduler_deferred_post_actions.clear();
+            }
             ctx.send_viewport_cmd(ViewportCommand::Close);
             ctx.request_repaint_after(Duration::from_millis(16));
             return;
@@ -280,6 +516,7 @@ impl Foxy {
 
         self.poll_persistence_results();
         self.process_pending_game_space_switch(&ctx);
+        self.poll_update_recovery();
         if self.db_lock_conflict.is_some() {
             self.render_db_lock_conflict_prompt(&ctx);
             polls.stop(&mut self.frame_cost);
@@ -319,6 +556,7 @@ impl Foxy {
         self.poll_mission_scan();
         self.poll_restore_pending_updates();
         self.poll_startup_quick_scan_filter_results();
+        self.service_startup_probe_retry(&ctx);
         if self.startup_tasks_started {
             self.refresh_fs_watcher_if_stale();
         }
@@ -330,16 +568,43 @@ impl Foxy {
         self.poll_addon_delete_results();
         self.poll_addon_force_redownload_results();
         self.poll_addon_backup_results();
+        self.poll_addon_workshop_lookups(&ctx);
         self.poll_repository_settings_addon_preload_results();
         self.maybe_warm_addon_inventory();
         self.poll_repository_addon_size_load_results();
         self.poll_persistence_results();
+        if self.pending_game_space_switch.is_some() {
+            self.render_pending_game_space_switch(&ctx);
+            polls.stop(&mut self.frame_cost);
+            return;
+        }
         self.poll_backend_progress();
+        if self.startup_tasks_started {
+            self.start_automatic_profile_backups(&ctx);
+        }
+        self.poll_linked_target_preview_results();
+        self.poll_hash_evidence_retry();
+        self.poll_retained_file_task_results();
         self.poll_finished_backend_worker();
+        self.process_pending_integrity_recheck();
         self.poll_benchmark_save_results();
         self.tick_benchmark_capture(&ctx);
         self.poll_benchmark_export_screenshot(&ctx);
         self.poll_join_preflight_results(&ctx);
+        if self.close_requested_at.is_some() {
+            self.render_close_wait(&ctx, false);
+            polls.stop(&mut self.frame_cost);
+            return;
+        }
+        self.render_corrupt_database_recovery(&ctx);
+        self.render_unreadable_config_replacement(&ctx);
+        if self.pending_game_space_switch.is_some() {
+            self.render_pending_game_space_switch(&ctx);
+            polls.stop(&mut self.frame_cost);
+            return;
+        }
+        self.render_queued_update_launch(&ctx);
+        self.service_download_retry(&ctx);
         // Drain any pending repo.json metadata refreshes queued by sync completion.
         if !self.pending_repo_metadata_refresh.is_empty() {
             let indices: Vec<usize> = self.pending_repo_metadata_refresh.drain(..).collect();
@@ -357,11 +622,13 @@ impl Foxy {
         self.poll_cached_update_load_results();
         self.poll_ts3_plugin_scan();
         self.maybe_dispatch_persistence_requests(false);
+        self.maybe_queue_periodic_remote_checks();
         self.process_startup_rechecks();
         self.maybe_log_startup_repository_layout();
         self.process_repository_space_sync_queue();
         self.process_repository_visual_folder_sync_queue();
         self.process_scheduled_jobs(&ctx);
+        self.process_addon_selection_checks();
         self.process_addon_hash_recalc_queue();
         self.maybe_sample_memory_diagnostics();
         self.maybe_emit_startup_sol();
@@ -381,21 +648,27 @@ impl Foxy {
 
         // Resume any Join that was waiting on a background server-status query.
         self.poll_pending_join_status(&ctx);
+        self.render_pending_join_status(&ctx);
 
         if self.needs_repaint {
             // One 60 Hz frame later, not at once: while progress events keep
             // arriving, an immediate repaint chains frames at the display rate.
-            crate::ui::app::request_frame_after(&ctx, STATE_CHANGE_REPAINT_DELAY);
+            let delay = crate::ui::app::progress_frame_interval_override()
+                .map_or(STATE_CHANGE_REPAINT_DELAY, |cap| {
+                    cap.max(STATE_CHANGE_REPAINT_DELAY)
+                });
+            crate::ui::app::request_frame_after(&ctx, delay);
             self.needs_repaint = false;
         } else if let Some(repaint_interval) = self.next_visible_repaint_interval() {
             ctx.request_repaint_after(repaint_interval);
         }
 
         self.pending_queries.retain(|h| !h.is_finished());
-        if self
-            .join_preflight_worker
-            .as_ref()
-            .is_some_and(|h| h.is_finished())
+        if self.pending_join_preflight_query.is_none()
+            && self
+                .join_preflight_worker
+                .as_ref()
+                .is_some_and(|h| h.is_finished())
         {
             self.join_preflight_worker = None;
         }
@@ -515,8 +788,13 @@ impl Foxy {
         self.render_db_lock_conflict_prompt(&ctx);
         self.render_db_schema_wipe_prompt(&ctx);
         self.render_app_update_prompt(&ctx);
+        self.render_legacy_migration_review(&ctx);
         self.render_benchmark_save_prompt(&ctx);
         self.render_scheduled_post_action_overlay(&ctx);
+        self.render_integrity_recheck_prompt(&ctx);
+        self.render_link_target_enrollment_prompt(&ctx);
+        self.render_hash_evidence_notice(&ctx);
+        self.render_retained_file_removal_confirmation(&ctx);
         overlays.stop(&mut self.frame_cost);
 
         if !self.startup_frame_rendered {
@@ -527,20 +805,24 @@ impl Foxy {
     }
 
     fn poll_join_preflight_results(&mut self, ctx: &egui::Context) {
-        while let Ok(result) = self.join_preflight_result_rx.try_recv() {
-            let Some(pending) = self.pending_join_preflight_query.take() else {
+        let (results, worker_exited) = drain_worker_results(&self.join_preflight_result_rx, || {
+            self.join_preflight_worker
+                .as_ref()
+                .is_some_and(|worker| worker.is_finished())
+        });
+        for result in results {
+            let Some(pending) = self.pending_join_preflight_query.as_ref() else {
                 continue;
             };
+            if !result.matches_pending(pending) {
+                continue;
+            }
+            let pending = self
+                .pending_join_preflight_query
+                .take()
+                .expect("matching preflight request is present");
             match result.result {
                 Ok(query_result) => {
-                    self.join_preflight_cache.insert(
-                        (result.address, result.port),
-                        crate::ui::app::JoinPreflightCacheEntry {
-                            result: query_result.clone(),
-                            display_names: result.display_names.clone(),
-                            cached_at: Instant::now(),
-                        },
-                    );
                     self.finish_join_preflight(
                         ctx,
                         &pending.original_repository,
@@ -555,10 +837,44 @@ impl Foxy {
                         "Join addon preflight query failed for {}:{}: {}",
                         pending.server.address, pending.server.port, err
                     );
-                    self.show_error_toast(self.t("Operation cancelled"));
+                    if let Some(state) = self.pending_join_preflight.as_mut().filter(|state| {
+                        state.server.address == result.address
+                            && state.server.port.parse::<u16>().ok() == Some(result.port)
+                            && state.final_confirmation_choice.is_some()
+                    }) {
+                        state.final_query_error = Some(err);
+                        self.show_error_toast(self.t(
+                            "The final Join refresh failed. Retry or cancel the reviewed Join.",
+                        ));
+                    } else {
+                        self.present_join_addon_query_failure(
+                            ctx,
+                            &pending.original_repository,
+                            &pending.server,
+                            &pending.repo_name,
+                            err,
+                        );
+                    }
                     ctx.request_repaint();
                 }
             }
+        }
+        if self.pending_join_preflight_query.is_some() && worker_exited {
+            let pending = self
+                .pending_join_preflight_query
+                .take()
+                .expect("failed query is present");
+            let message = self.t("The Join requirements refresh ended without a result.");
+            if let Some(state) = self.pending_join_preflight.as_mut().filter(|state| {
+                state.server.address == pending.server.address
+                    && state.server.port == pending.server.port
+                    && state.final_confirmation_choice.is_some()
+            }) {
+                state.final_query_error = Some(message);
+            } else {
+                self.show_error_toast(message);
+            }
+            ctx.request_repaint();
         }
     }
 
@@ -694,7 +1010,7 @@ impl Foxy {
 fn resize_single(
     ui: &mut Ui,
     rect: Rect,
-    id: impl Into<Id>,
+    id: &'static str,
     cursor: CursorIcon,
     direction: ResizeDirection,
 ) {
@@ -708,7 +1024,7 @@ fn resize_single(
         return;
     }
 
-    let response = ui.interact(rect, id.into(), Sense::drag());
+    let response = ui.interact(rect, Id::unique(id), Sense::drag());
     if response.hovered() {
         ui.ctx().output_mut(|o| o.cursor_icon = cursor);
     }
@@ -818,6 +1134,10 @@ fn resize(ui: &mut Ui) {
 }
 
 impl eframe::App for Foxy {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
+        self.agent_gui_raw_input(ctx, input);
+    }
+
     fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
         egui::Rgba::from(visuals.window_fill()).to_array()
     }
@@ -845,5 +1165,53 @@ mod tests {
         intervals.push_back(300.0);
         let (_, _, max) = frame_interval_stats(&intervals).unwrap();
         assert_eq!(max, 300.0);
+    }
+
+    #[test]
+    fn window_presence_follows_focus_minimize_and_the_tray() {
+        use crate::ui::app::WindowPresence;
+        assert_eq!(
+            window_presence_for(false, false, Some(true), Some(false)),
+            WindowPresence::Foreground
+        );
+        assert_eq!(
+            window_presence_for(false, false, None, None),
+            WindowPresence::Foreground
+        );
+        assert_eq!(
+            window_presence_for(false, false, Some(false), Some(false)),
+            WindowPresence::Background
+        );
+        assert_eq!(
+            window_presence_for(false, false, Some(false), Some(true)),
+            WindowPresence::Hidden
+        );
+        assert_eq!(
+            window_presence_for(false, true, Some(true), None),
+            WindowPresence::Hidden
+        );
+    }
+
+    #[test]
+    fn a_harness_session_keeps_foreground_pacing() {
+        assert_eq!(
+            window_presence_for(true, true, Some(false), Some(true)),
+            crate::ui::app::WindowPresence::Foreground
+        );
+    }
+
+    #[test]
+    fn worker_result_sent_just_before_exit_is_not_reported_as_missing() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let (results, exited) = drain_worker_results(&receiver, || {
+            sender.send("requirements").unwrap();
+            true
+        });
+        assert!(exited);
+        assert_eq!(results, vec!["requirements"]);
+
+        let (results, exited) = drain_worker_results(&receiver, || false);
+        assert!(!exited);
+        assert!(results.is_empty());
     }
 }

@@ -78,6 +78,10 @@ impl Foxy {
                             ui.end_row();
                         }
                     });
+                if matches!(record.outcome, BenchmarkOutcome::Failed { .. }) {
+                    ui.add_space(8.0);
+                    self.render_export_logs_button(ui);
+                }
                 ui.add_space(8.0);
                 ui.label(self.t("Name"));
                 ui.add(TextEdit::singleline(&mut name).desired_width(f32::INFINITY));

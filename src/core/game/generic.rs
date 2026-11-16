@@ -171,6 +171,24 @@ impl GameModule for GenericRunScriptModule {
             .map(|result| result.command)
     }
 
+    fn build_launch_preview(
+        &self,
+        plan: &LaunchPlan,
+        ctx: &GameLaunchCtx,
+    ) -> Result<LaunchCommand, LaunchError> {
+        self.build_launch_with_manifest_mode(plan, ctx, false)
+            .map(|built| built.command)
+    }
+
+    fn launch_write_targets(&self, _plan: &LaunchPlan, ctx: &GameLaunchCtx) -> Vec<PathBuf> {
+        self.config.manifest.map_or_else(Vec::new, |manifest| {
+            vec![
+                Path::new(ctx.install_dir).join(manifest.primary_file_name),
+                Path::new(ctx.install_dir).join(manifest.fallback_file_name),
+            ]
+        })
+    }
+
     fn settings_schema(&self) -> GameSettingsSchema {
         GameSettingsSchema {
             directories: vec![DirectorySetting {

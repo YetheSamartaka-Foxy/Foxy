@@ -20,8 +20,8 @@
 //!   - Summary with pass/fail per locale
 
 use i18n_checker::{
-    LocaleLoad, find_locales_dir, is_valid_plural_extra, load_locale_file, parse_locale_object,
-    placeholder_names, read_key_file, translation_files, truncate,
+    LocaleLoad, english_source_key, find_locales_dir, is_valid_plural_extra, load_locale_file,
+    parse_locale_object, placeholder_names, read_key_file, translation_files, truncate,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -83,10 +83,9 @@ fn main() {
         let empty_values: Vec<&str> = locale_map
             .iter()
             .filter(|(k, v)| {
-                en_keys.contains(k.as_str())
-                    && v.as_str().is_some_and(|s| s.is_empty())
-                    && en_map
-                        .get(k.as_str())
+                v.as_str().is_some_and(|s| s.is_empty())
+                    && english_source_key(k, &en_map)
+                        .and_then(|source| en_map.get(source))
                         .and_then(|v| v.as_str())
                         .is_some_and(|s| !s.is_empty())
             })
@@ -99,7 +98,9 @@ fn main() {
         let mut blocking_placeholders: Vec<String> = Vec::new();
         let mut warned_placeholders: Vec<String> = Vec::new();
         for (key, value) in &locale_map {
-            let Some(english) = en_map.get(key.as_str()) else {
+            let Some(english) =
+                english_source_key(key, &en_map).and_then(|source| en_map.get(source))
+            else {
                 continue;
             };
             let Some(report) = placeholder_report(key, english, value) else {
@@ -284,19 +285,22 @@ fn audit_changed_pairs(
         for (key, value) in &locale_map {
             match baseline_map.get(key) {
                 Some(old) if old == value => continue,
-                None => continue,
-                Some(_) => {}
+                _ => {}
             }
 
             local_changes += 1;
             changed_pairs += 1;
             changed_keys.insert(key.clone());
 
-            let english = en_map.get(key).cloned().unwrap_or(Value::Null);
-            if let Some(report) = placeholder_report(key, &english, value) {
+            let Some(english) =
+                english_source_key(key, en_map).and_then(|source| en_map.get(source))
+            else {
+                continue;
+            };
+            if let Some(report) = placeholder_report(key, english, value) {
                 errors.push(format!("{filename}: placeholder mismatch for {report}"));
             }
-            if !allowed_english_keys.contains(key) && en_map.get(key) == Some(value) {
+            if !allowed_english_keys.contains(key) && english == value {
                 errors.push(format!(
                     "{filename}: changed value still equals en.json for {}",
                     truncate(key, 100)

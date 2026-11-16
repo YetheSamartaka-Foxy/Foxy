@@ -1,0 +1,4 @@
+interface:
+  display_name: "Workshop integration"
+  short_description: "Maintain Foxy Workshop and addon flows"
+  default_prompt: "Use $foxy-workshop-integration to change or review Foxy Workshop behavior."

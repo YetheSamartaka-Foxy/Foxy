@@ -1,9 +1,11 @@
+pub mod addon_workshop;
 pub mod arma3;
 pub mod extra_files;
 pub mod foxypack;
 pub mod generic;
 pub mod generic_game;
 mod launch;
+pub(crate) mod launch_preparation;
 pub mod profile;
 pub mod reforger;
 mod registry;
@@ -12,7 +14,8 @@ pub mod twwh3;
 pub mod workshop;
 
 pub use launch::{
-    GameLaunchCtx, LaunchCommand, LaunchError, LaunchPlan, ResolvedMod, ServerTarget,
+    GameBuildTarget, GameLaunchCtx, LaunchCommand, LaunchError, LaunchPlan, ResolvedMod,
+    ServerTarget,
 };
 pub use profile::Profile;
 pub use registry::registry;
@@ -158,6 +161,19 @@ pub trait GameModule: Send + Sync {
         plan: &LaunchPlan,
         ctx: &GameLaunchCtx,
     ) -> Result<LaunchCommand, LaunchError>;
+    fn build_launch_preview(
+        &self,
+        plan: &LaunchPlan,
+        ctx: &GameLaunchCtx,
+    ) -> Result<LaunchCommand, LaunchError> {
+        self.build_launch(plan, ctx)
+    }
+    fn launch_write_targets(&self, _plan: &LaunchPlan, _ctx: &GameLaunchCtx) -> Vec<PathBuf> {
+        Vec::new()
+    }
+    fn running_game_status(&self, _settings: &SettingsViewState) -> Option<bool> {
+        None
+    }
     fn settings_schema(&self) -> GameSettingsSchema;
 
     /// Container formats this game's repositories ship, as `foxy_formats`
@@ -206,6 +222,17 @@ pub trait GameModule: Send + Sync {
     /// reads it from its own settings.
     fn steam_app_id_from_settings(&self, _settings: &SettingsViewState) -> Option<u32> {
         self.steam_app_id()
+    }
+
+    fn addon_workshop(
+        &self,
+        settings: &SettingsViewState,
+    ) -> Option<addon_workshop::AddonWorkshop> {
+        self.capabilities()
+            .steam_workshop
+            .then(|| self.steam_app_id_from_settings(settings))
+            .flatten()
+            .map(addon_workshop::AddonWorkshop::Steam)
     }
 
     fn repository_profile_to_profile(

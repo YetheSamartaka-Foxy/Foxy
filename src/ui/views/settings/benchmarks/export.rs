@@ -3,7 +3,7 @@
 
 use std::io::Cursor;
 
-use eframe::egui::{self, Event, UserData, ViewportCommand};
+use eframe::egui;
 use log::{info, warn};
 
 use crate::core::benchmarks::export::ExportImage;
@@ -60,6 +60,7 @@ impl Foxy {
             chart_count,
             frames_rendered: 0,
             screenshot_requested: false,
+            screenshot_rx: None,
             chart_rect: None,
             images: Vec::new(),
         });
@@ -95,20 +96,12 @@ impl Foxy {
         }
 
         if screenshot_requested {
-            let events = ctx.input(|input| input.events.clone());
-            let shot = events.into_iter().find_map(|event| match event {
-                Event::Screenshot {
-                    user_data, image, ..
-                } if user_data
-                    .data
-                    .as_ref()
-                    .and_then(|data| data.downcast_ref::<String>())
-                    .is_some_and(|known| *known == id) =>
-                {
-                    Some(image)
-                }
-                _ => None,
-            });
+            let shot = self
+                .benchmarks_view
+                .export
+                .as_ref()
+                .and_then(|job| job.screenshot_rx.as_ref())
+                .and_then(|receiver| receiver.try_recv().ok());
             let timed_out = frames_rendered > SCREENSHOT_TIMEOUT_FRAMES;
             if shot.is_some() || timed_out {
                 let ppp = ctx.pixels_per_point();
@@ -136,6 +129,7 @@ impl Foxy {
                     job.chart_index += 1;
                     job.frames_rendered = 0;
                     job.screenshot_requested = false;
+                    job.screenshot_rx = None;
                     job.chart_rect = None;
                 }
                 if chart_index + 1 >= chart_count {
@@ -150,7 +144,7 @@ impl Foxy {
             .fill(self.color_card_bg().to_opaque());
         let mut rects = Vec::new();
         egui::Window::new(self.t("Exporting benchmark"))
-            .id(egui::Id::new("benchmark_export_window"))
+            .id(egui::Id::unique("benchmark_export_window"))
             // No fade-in: the screenshot must not catch a half-transparent window.
             .fade_in(false)
             .frame(frame)
@@ -179,7 +173,13 @@ impl Foxy {
             job.chart_rect = rects.into_iter().next();
             if !job.screenshot_requested && job.frames_rendered >= SETTLE_FRAMES {
                 job.screenshot_requested = true;
-                ctx.send_viewport_cmd(ViewportCommand::Screenshot(UserData::new(job.id.clone())));
+                let (image_tx, image_rx) = std::sync::mpsc::channel();
+                job.screenshot_rx = Some(image_rx);
+                let repaint = ctx.clone();
+                ctx.request_screenshot(move |image| {
+                    let _ = image_tx.send(image);
+                    repaint.request_repaint();
+                });
             }
         }
         ctx.request_repaint();

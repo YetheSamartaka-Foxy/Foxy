@@ -180,6 +180,7 @@ pub(super) async fn run_incremental_hash_batch(
             *sticky_auto_profile,
             true,
             clean_part_mark_downloaded_files,
+            None,
         )
         .await
     } else {
@@ -194,6 +195,7 @@ pub(super) async fn run_incremental_hash_batch(
             *sticky_auto_profile,
             true,
             clean_part_mark_downloaded_files,
+            None,
         )
         .await
     };

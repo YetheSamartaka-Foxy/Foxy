@@ -11,13 +11,17 @@
 //! `last_result`) are persisted. Live execution state lives on `Foxy` behind
 //! `#[serde(skip)]` runtime fields, never here.
 
-use chrono::{DateTime, Datelike, Local, NaiveTime, TimeZone, Timelike};
+use chrono::{
+    DateTime, Datelike, Local, LocalResult, NaiveDateTime, NaiveTime, TimeZone, Timelike,
+};
 use serde::{Deserialize, Serialize};
 
 /// A job that fires more than this many seconds after its scheduled time (for
 /// example because Foxy was closed when it was due) is treated as missed rather
 /// than run late. This keeps a stale "download then shut down" job from firing
-/// hours after the fact on the next launch.
+/// hours after the fact on the next launch. Time a due job spends waiting for
+/// other work while Foxy runs does not count (see
+/// [`ScheduledJob::due_state_with_hold`]).
 pub const SCHEDULER_MISSED_GRACE_SECS: i64 = 10 * 60;
 
 /// Seconds the cancellable countdown overlay is shown before a post-action
@@ -97,8 +101,8 @@ pub enum DueState {
     NotDue,
     /// The job is due; `fire_ms` is the scheduled instant that triggered it.
     Due { fire_ms: u64 },
-    /// The scheduled instant passed while the app was not running; record it as
-    /// missed without executing. `fire_ms` is that instant.
+    /// The scheduled instant is more than the grace window in the past; record
+    /// it as missed without executing. `fire_ms` is that instant.
     Missed { fire_ms: u64 },
 }
 
@@ -173,9 +177,9 @@ fn recurring_fire(
         if weekdays & (1u8 << date.weekday().num_days_from_monday()) == 0 {
             continue;
         }
-        // A local time can be ambiguous or non-existent across DST shifts; skip
-        // those candidates rather than guess.
-        let Some(candidate) = Local.from_local_datetime(&date.and_time(time)).single() else {
+        let Some(candidate) = first_valid_local_instant(date.and_time(time), |local| {
+            Local.from_local_datetime(local)
+        }) else {
             continue;
         };
         if forward {
@@ -184,6 +188,31 @@ fn recurring_fire(
             }
         } else if candidate <= anchor {
             return Some(candidate);
+        }
+    }
+    None
+}
+
+fn first_valid_local_instant<Tz, F>(
+    requested: NaiveDateTime,
+    mut resolve: F,
+) -> Option<DateTime<Tz>>
+where
+    Tz: TimeZone,
+    F: FnMut(&NaiveDateTime) -> LocalResult<DateTime<Tz>>,
+{
+    for minute in 0..=24 * 60 {
+        let local = requested + chrono::Duration::minutes(minute);
+        match resolve(&local) {
+            LocalResult::Single(value) => return Some(value),
+            LocalResult::Ambiguous(first, second) => {
+                return Some(if first.timestamp() <= second.timestamp() {
+                    first
+                } else {
+                    second
+                });
+            }
+            LocalResult::None => {}
         }
     }
     None
@@ -242,6 +271,37 @@ impl ScheduledJob {
         } else {
             DueState::Due { fire_ms }
         }
+    }
+
+    /// Like [`Self::due_state`], but an occurrence Foxy already saw due and held
+    /// back for other work stays due past the grace window.
+    pub fn due_state_with_hold(&self, now: DateTime<Local>, held_fire_ms: Option<u64>) -> DueState {
+        match self.due_state(now) {
+            DueState::Missed { fire_ms } if held_fire_ms == Some(fire_ms) => {
+                DueState::Due { fire_ms }
+            }
+            other => other,
+        }
+    }
+}
+
+/// The scheduler did not tick for longer than the grace window: the computer
+/// slept or Foxy was suspended, so held-back jobs lose their claim to run late.
+pub fn scheduler_paused_between(previous_tick: DateTime<Local>, now: DateTime<Local>) -> bool {
+    (now - previous_tick).num_seconds() > SCHEDULER_MISSED_GRACE_SECS
+}
+
+/// Why a job's occurrence was missed, for the log.
+pub fn missed_run_reason(
+    previous_tick: Option<DateTime<Local>>,
+    now: DateTime<Local>,
+) -> &'static str {
+    match previous_tick {
+        None => "Foxy was not running at its scheduled time",
+        Some(previous) if scheduler_paused_between(previous, now) => {
+            "the computer was asleep or Foxy was paused at its scheduled time"
+        }
+        Some(_) => "it was enabled or changed after its scheduled time had passed",
     }
 }
 
@@ -380,10 +440,10 @@ impl ScheduleJobDraft {
                     .ok_or_else(|| "Invalid date.".to_string())?;
                 let time = NaiveTime::from_hms_opt(self.hour, self.minute, 0)
                     .ok_or_else(|| "Invalid time.".to_string())?;
-                let local = Local
-                    .from_local_datetime(&date.and_time(time))
-                    .single()
-                    .ok_or_else(|| "That local time does not exist (clock change).".to_string())?;
+                let local = first_valid_local_instant(date.and_time(time), |local| {
+                    Local.from_local_datetime(local)
+                })
+                .ok_or_else(|| "That local time could not be resolved.".to_string())?;
                 if local <= now {
                     return Err("Pick a date and time in the future.".into());
                 }
@@ -459,6 +519,37 @@ mod tests {
         Local.with_ymd_and_hms(y, mo, d, h, mi, 0).single().unwrap()
     }
 
+    #[test]
+    fn local_time_gap_uses_first_valid_instant() {
+        let requested = chrono::NaiveDate::from_ymd_opt(2026, 3, 29)
+            .unwrap()
+            .and_hms_opt(2, 0, 0)
+            .unwrap();
+        let resolved = first_valid_local_instant(requested, |local| {
+            if local.hour() == 2 {
+                LocalResult::None
+            } else {
+                LocalResult::Single(chrono::Utc.from_utc_datetime(local))
+            }
+        })
+        .unwrap();
+        assert_eq!(resolved.naive_utc(), requested + chrono::Duration::hours(1));
+    }
+
+    #[test]
+    fn ambiguous_local_time_uses_earlier_instant() {
+        let requested = chrono::NaiveDate::from_ymd_opt(2026, 10, 25)
+            .unwrap()
+            .and_hms_opt(2, 0, 0)
+            .unwrap();
+        let earlier = chrono::Utc.from_utc_datetime(&requested);
+        let later = earlier + chrono::Duration::hours(1);
+        let resolved =
+            first_valid_local_instant(requested, |_| LocalResult::Ambiguous(later, earlier))
+                .unwrap();
+        assert_eq!(resolved, earlier);
+    }
+
     fn once_job(fire: DateTime<Local>) -> ScheduledJob {
         ScheduledJob {
             id: "j".into(),
@@ -511,6 +602,48 @@ mod tests {
                 fire_ms: local_to_unix_ms(fire)
             }
         );
+    }
+
+    #[test]
+    fn a_held_back_occurrence_stays_due_past_the_grace_window() {
+        let now = at(2026, 6, 30, 12, 0);
+        let fire = now - Duration::hours(2);
+        let fire_ms = local_to_unix_ms(fire);
+        let job = once_job(fire);
+        assert_eq!(
+            job.due_state_with_hold(now, Some(fire_ms)),
+            DueState::Due { fire_ms }
+        );
+        assert_eq!(
+            job.due_state_with_hold(now, None),
+            DueState::Missed { fire_ms }
+        );
+        assert_eq!(
+            job.due_state_with_hold(now, Some(fire_ms - 1)),
+            DueState::Missed { fire_ms }
+        );
+
+        let mut done = job.clone();
+        done.last_run_unix_ms = Some(fire_ms);
+        assert_eq!(
+            done.due_state_with_hold(now, Some(fire_ms)),
+            DueState::NotDue
+        );
+    }
+
+    #[test]
+    fn a_missed_run_names_why_foxy_could_not_run_it() {
+        let now = at(2026, 6, 30, 12, 0);
+        assert_eq!(
+            missed_run_reason(None, now),
+            "Foxy was not running at its scheduled time"
+        );
+        let slept = now - Duration::minutes(SCHEDULER_MISSED_GRACE_SECS / 60 + 1);
+        assert!(scheduler_paused_between(slept, now));
+        assert!(missed_run_reason(Some(slept), now).contains("asleep"));
+        let ticking = now - Duration::seconds(30);
+        assert!(!scheduler_paused_between(ticking, now));
+        assert!(missed_run_reason(Some(ticking), now).contains("enabled or changed"));
     }
 
     #[test]

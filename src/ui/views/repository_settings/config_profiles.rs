@@ -61,8 +61,9 @@ impl Foxy {
             .selected_profile
             .as_ref()
             .is_some_and(|name| repo.profiles.iter().any(|profile| &profile.name == name));
-        let launch_params_managed =
-            !profile_selected && self.repo_apply_repo_json_client_parameters(repo);
+        let launch_params_managed = !repo.is_local()
+            && !profile_selected
+            && self.repo_apply_repo_json_client_parameters(repo);
         let managed_hint = tr(
             "Auto apply repo.json launch parameters is on, so the repository overwrites these fields on every refresh. Turn that setting off, or select a launch profile, to edit them.",
         );
@@ -218,56 +219,57 @@ impl Foxy {
             self.is_repository_db_wipe_pending(&repo.address)
         };
 
-        // Action buttons
-        ui.horizontal(|ui| {
-            let w = ui.available_width() - 2.0 * pad_f32;
-            let recheck_integrity_btn = ui.add_sized(
-                Vec2::new(w, 30.0),
-                Button::new(tr("Recheck repository integrity")).fill(color_primary_accent),
-            );
-            if recheck_integrity_btn.hovered() {
-                ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
-            }
-            if recheck_integrity_btn.clicked() {
-                *recheck_repository_integrity = true;
-                info!("Manual repository integrity recheck requested");
-            }
-        });
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            let w = ui.available_width() - 2.0 * pad_f32;
-            let force_btn = ui.add_enabled(
-                !wipe_pending,
-                Button::new(tr("Force redownload repository"))
-                    .fill(color_primary_accent)
-                    .min_size(Vec2::new(w, 30.0)),
-            );
-            if force_btn.hovered() {
-                ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
-            }
-            if force_btn.clicked() {
-                self.show_force_redownload_confirmation = true;
-                warn!("Force redownload confirmation opened");
-            }
-        });
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            let w = ui.available_width() - 2.0 * pad_f32;
-            let wipe_db_btn = ui.add_enabled(
-                !wipe_pending,
-                Button::new(tr("Wipe repository database entries"))
-                    .fill(color_text_error)
-                    .min_size(Vec2::new(w, 30.0)),
-            );
-            if wipe_db_btn.hovered() {
-                ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
-            }
-            if wipe_db_btn.clicked() {
-                self.show_wipe_repo_db_confirmation = true;
-                warn!("Repository database wipe confirmation opened");
-            }
-        });
-        ui.add_space(8.0);
+        if !self.repository_view_state.repositories[repo_index].is_local() {
+            ui.horizontal(|ui| {
+                let w = ui.available_width() - 2.0 * pad_f32;
+                let recheck_integrity_btn = ui.add_sized(
+                    Vec2::new(w, 30.0),
+                    Button::new(tr("Recheck repository integrity")).fill(color_primary_accent),
+                );
+                if recheck_integrity_btn.hovered() {
+                    ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                }
+                if recheck_integrity_btn.clicked() {
+                    *recheck_repository_integrity = true;
+                    info!("Manual repository integrity recheck requested");
+                }
+            });
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                let w = ui.available_width() - 2.0 * pad_f32;
+                let force_btn = ui.add_enabled(
+                    !wipe_pending,
+                    Button::new(tr("Force redownload repository"))
+                        .fill(color_primary_accent)
+                        .min_size(Vec2::new(w, 30.0)),
+                );
+                if force_btn.hovered() {
+                    ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                }
+                if force_btn.clicked() {
+                    self.show_force_redownload_confirmation = true;
+                    warn!("Force redownload confirmation opened");
+                }
+            });
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                let w = ui.available_width() - 2.0 * pad_f32;
+                let wipe_db_btn = ui.add_enabled(
+                    !wipe_pending,
+                    Button::new(tr("Wipe repository database entries"))
+                        .fill(color_text_error)
+                        .min_size(Vec2::new(w, 30.0)),
+                );
+                if wipe_db_btn.hovered() {
+                    ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                }
+                if wipe_db_btn.clicked() {
+                    self.show_wipe_repo_db_confirmation = true;
+                    warn!("Repository database wipe confirmation opened");
+                }
+            });
+            ui.add_space(8.0);
+        }
         ui.horizontal(|ui| {
             let w = ui.available_width() - 2.0 * pad_f32;
             let d = ui.add_sized(

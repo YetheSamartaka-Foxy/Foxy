@@ -84,7 +84,7 @@ impl Foxy {
         let stroke = Self::blend_color(stroke_base, fill, 0.25);
         let text_color = self.color_text_normal();
 
-        egui::Area::new(Id::new("ui_toast"))
+        egui::Area::new(Id::unique("ui_toast"))
             .order(egui::Order::Foreground)
             .anchor(
                 Align2::CENTER_BOTTOM,

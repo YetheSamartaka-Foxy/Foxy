@@ -763,26 +763,8 @@ fn copy_dir_recursive(source: &Path, dest: &Path) -> std::io::Result<()> {
 pub fn is_arma3_running() -> bool {
     #[cfg(target_os = "windows")]
     {
-        for image in ["arma3_x64.exe", "arma3.exe"] {
-            let output = std::process::Command::new("tasklist")
-                .args([
-                    "/FI",
-                    &format!("IMAGENAME eq {}", image),
-                    "/FO",
-                    "CSV",
-                    "/NH",
-                ])
-                .output();
-            if let Ok(out) = output
-                && out.status.success()
-                && String::from_utf8_lossy(&out.stdout)
-                    .to_lowercase()
-                    .contains(image)
-            {
-                return true;
-            }
-        }
-        false
+        crate::core::utils::process::any_process_running(&["arma3_x64.exe", "arma3.exe"])
+            .unwrap_or(false)
     }
     #[cfg(not(target_os = "windows"))]
     {

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Contract and docs sync"
+  short_description: "Align Foxy docs with runtime contracts"
+  default_prompt: "Use $foxy-contract-docs-sync to align Foxy documentation and examples with runtime behavior."

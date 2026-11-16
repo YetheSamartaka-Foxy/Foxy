@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LogEntry {
@@ -65,6 +65,24 @@ pub struct FsChangeEvent {
 
 #[derive(Clone, Debug)]
 pub enum ProgressEvent {
+    UpdatePhase(crate::core::utils::update_estimate::UpdatePhase),
+    HashEvidence {
+        state: Arc<crate::core::tasks::calculate_hashes::HashEvidenceState>,
+    },
+    VerificationBasis {
+        full: bool,
+        remote_fresh: bool,
+    },
+    LocalDrift {
+        addons: Vec<String>,
+    },
+    CleanupPlan {
+        files: Vec<String>,
+    },
+    EmptyPublication {
+        repository_empty: bool,
+        addons: Vec<String>,
+    },
     Stage {
         label: String,
         percent: f32,
@@ -81,6 +99,7 @@ pub enum ProgressEvent {
     },
     DownloadMod {
         mod_name: String,
+        attempt: usize,
         files_done: usize,
         files_total: usize,
         bytes_done: u64,
@@ -128,6 +147,10 @@ pub enum ProgressEvent {
     /// The destination volume cannot take the planned download; always
     /// followed by `Failed` carrying the same shortfall as text.
     DiskSpaceShortfall(crate::core::utils::disk_space::DiskSpaceShortfall),
+    RetryableDownloadFailure,
+    SharedVersionWarning {
+        repositories: Vec<String>,
+    },
     Finished,
     Failed(String),
     Cancelled,
@@ -142,12 +165,17 @@ pub enum SyncMode {
     Download,
 }
 
+#[derive(Clone)]
 pub struct RepositorySyncOptions {
     pub operation_id: String,
     /// Build and persist the final download queue, but stop before backup or transfer.
     pub prepare_download_plan: bool,
     pub repository_space_shared_path: Option<String>,
+    pub repository_space_members: Vec<(String, String)>,
     pub auto_backup_directory: Option<String>,
+    pub backup_local_drift: bool,
+    pub enrolled_link_targets: Vec<LinkedTargetPreview>,
+    pub interactive_hash_checks: bool,
     pub rollback_temp_directory: Option<String>,
     pub download_speed_limit_mbps: Option<u32>,
     pub recent_local_path_reset: bool,

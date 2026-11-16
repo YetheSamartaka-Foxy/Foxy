@@ -1,19 +1,159 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use log::{debug, info, warn};
 use tokio::runtime::Runtime;
 
 use crate::core::tasks::purge_repository::{
-    purge_addon_by_local_path, purge_repository_by_url, purge_repository_db_only_by_url,
+    purge_addon_by_local_path, purge_repository_by_url_and_path,
     purge_repository_db_only_by_url_and_path,
 };
 use crate::ui::app::{AddonDeleteResult, Foxy, RepositoryDbWipeResult};
-use crate::ui::types::sanitize_user_path;
+use crate::ui::types::{Repository, sanitize_user_path};
+
+/// Why deleting a repository with "Delete files" keeps its files on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeleteFilesKept {
+    LocalRepository,
+    SharedFolder,
+    OverlappingPath,
+}
+
+fn normalized_physical_path(path: &str) -> Option<String> {
+    let path = path.trim();
+    if path.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(path);
+    let absolute = if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
+    let lexical = normalize_path(&absolute);
+    let mut unresolved = Vec::new();
+    let mut ancestor = absolute.as_path();
+    while !ancestor.exists() {
+        let Some(file_name) = ancestor.file_name() else {
+            return Some(normalized_path_string(lexical));
+        };
+        unresolved.push(file_name.to_os_string());
+        let Some(parent) = ancestor.parent() else {
+            return Some(normalized_path_string(lexical));
+        };
+        ancestor = parent;
+    }
+    let mut physical = ancestor.canonicalize().unwrap_or_else(|_| lexical.clone());
+    if physical == lexical {
+        return Some(normalized_path_string(physical));
+    }
+    for component in unresolved.iter().rev() {
+        physical.push(component);
+    }
+    Some(normalized_path_string(physical))
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+        }
+    }
+    normalized
+}
+
+fn normalized_path_string(path: PathBuf) -> String {
+    let mut value = path.to_string_lossy().replace('\\', "/");
+    while value.ends_with('/') {
+        value.pop();
+    }
+    if cfg!(windows) {
+        value.make_ascii_lowercase();
+    }
+    value
+}
+
+fn paths_overlap(left: &str, right: &str) -> bool {
+    let (Some(left), Some(right)) = (
+        normalized_physical_path(left),
+        normalized_physical_path(right),
+    ) else {
+        return false;
+    };
+    left == right
+        || left
+            .strip_prefix(&right)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+        || right
+            .strip_prefix(&left)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
 
 impl Foxy {
+    /// Avoid deleting a folder that another configured repository still owns.
+    pub(crate) fn delete_files_kept_reason(
+        repositories: &[Repository],
+        repo_idx: usize,
+    ) -> Option<DeleteFilesKept> {
+        let repo = repositories.get(repo_idx)?;
+        if repo.is_local() {
+            return Some(DeleteFilesKept::LocalRepository);
+        }
+        for (idx, other) in repositories.iter().enumerate() {
+            if idx == repo_idx {
+                continue;
+            }
+            if paths_overlap(&repo.path, &other.path) {
+                let same_repository_instance = Self::normalize_repo_url(&other.address)
+                    == Self::normalize_repo_url(&repo.address)
+                    && Self::repo_instance_key(&other.address, &other.path)
+                        == Self::repo_instance_key(&repo.address, &repo.path);
+                if same_repository_instance
+                    && normalized_physical_path(&repo.path) == normalized_physical_path(&other.path)
+                {
+                    return Some(DeleteFilesKept::SharedFolder);
+                }
+                return Some(DeleteFilesKept::OverlappingPath);
+            }
+            if Self::normalize_repo_url(&other.address) == Self::normalize_repo_url(&repo.address)
+                && Self::repo_instance_key(&other.address, &other.path)
+                    == Self::repo_instance_key(&repo.address, &repo.path)
+            {
+                return Some(DeleteFilesKept::SharedFolder);
+            }
+        }
+        None
+    }
+
+    pub fn delete_files_kept_note(&self, repo_idx: usize) -> Option<String> {
+        Self::delete_files_kept_reason(&self.repository_view_state.repositories, repo_idx).map(
+            |reason| match reason {
+                DeleteFilesKept::LocalRepository => self.t(
+                    "This local repository has no server. Checks and downloads are unavailable. Removing it keeps existing mod files.",
+                ),
+                DeleteFilesKept::SharedFolder => self.t(
+                    "Files will not be deleted because another repository uses the same folder. Only this entry is removed.",
+                ),
+                DeleteFilesKept::OverlappingPath => self.t(
+                    "Files will not be deleted because another repository uses an overlapping folder. Only this entry is removed.",
+                ),
+            },
+        )
+    }
+
     pub fn delete_addon_from_storage_and_database(&mut self, addon_name: &str, addon_path: &str) {
-        if self.repository_sync_active() || self.is_direct_download_running() {
+        if self.repository_sync_active()
+            || self.is_direct_download_running()
+            || self.retained_files_cleanup_in_flight
+            || self.pending_retained_file_removal.is_some()
+        {
             warn!("Addon delete ignored: sync or download worker is currently active");
             self.show_error_toast(self.t("Operation cancelled"));
             return;
@@ -91,6 +231,20 @@ impl Foxy {
             }
         };
 
+        // A scan finishing after the wipe would restore the verdict and hashes
+        // the user just asked to drop.
+        if self
+            .active_quick_scan_instance_keys
+            .contains(&Self::repo_instance_key(&repo.address, &repo.path))
+        {
+            warn!(
+                "Repository database wipe ignored for {}: a quick local check is running",
+                repo.name
+            );
+            self.show_error_toast(self.t("Quick local check in progress"));
+            return;
+        }
+
         let normalized_url = Self::normalize_repo_url(&repo.address);
         // Scope the wipe to this repository's own download folder so a sibling
         // repository that shares the same remote URL but a different folder keeps
@@ -101,6 +255,20 @@ impl Foxy {
             &repo.name,
             forget_hash_record,
         );
+    }
+
+    /// Address and folder identify the instance that running work writes to.
+    /// Changing them mid-flight lands the work's results on the new identity
+    /// and wipes the old folder's rows while the worker still writes them.
+    pub fn repository_identity_locked(&self, repo_idx: usize) -> bool {
+        let Some(repo) = self.repository_view_state.repositories.get(repo_idx) else {
+            return false;
+        };
+        self.syncing_repository == Some(repo_idx)
+            || self
+                .active_quick_scan_instance_keys
+                .contains(&Self::repo_instance_key(&repo.address, &repo.path))
+            || self.is_repository_db_wipe_pending(&repo.address)
     }
 
     pub fn is_repository_db_wipe_pending(&self, repository_url: &str) -> bool {
@@ -145,95 +313,6 @@ impl Foxy {
         }
     }
 
-    pub fn wipe_repository_database_entries_by_url(
-        &mut self,
-        repository_url: &str,
-        repo_name: &str,
-    ) {
-        let normalized_url = Self::normalize_repo_url(repository_url);
-
-        if self.repo_db_reset_pending_recheck.remove(&normalized_url) {
-            debug!(
-                "Repository database wipe for {} is replacing a pending rebuild marker",
-                repo_name
-            );
-        }
-
-        if self.pending_repository_db_wipes.contains(&normalized_url) {
-            debug!(
-                "Repository database wipe skipped for {} (already running)",
-                repo_name
-            );
-            return;
-        }
-
-        info!(
-            "Repository database wipe requested for repository {}",
-            repo_name
-        );
-        self.completed_repository_check_banner = None;
-        self.completed_repository_db_wipe_banner = None;
-        self.pending_repository_db_wipes
-            .insert(normalized_url.clone());
-        self.pending_repository_db_wipe_started_at
-            .insert(normalized_url.clone(), Instant::now());
-        self.needs_repaint = true;
-
-        let repository_db_wipe_tx = self.repository_db_wipe_tx.clone();
-        let thread_url = normalized_url.clone();
-        let thread_name = repo_name.to_string();
-        let repaint_ctx = self.repaint_ctx.clone();
-        std::thread::spawn(move || {
-            let started_at = Instant::now();
-            let purge_result = match Runtime::new() {
-                Ok(rt) => rt
-                    .block_on(purge_repository_db_only_by_url(&thread_url))
-                    .map_err(|err| err.to_string()),
-                Err(err) => Err(err.to_string()),
-            };
-            let elapsed = started_at.elapsed();
-
-            if purge_result.is_ok() {
-                info!(
-                    "Repository database wipe worker completed for {} in {:.2}s",
-                    thread_name,
-                    elapsed.as_secs_f64()
-                );
-            } else if let Err(err) = &purge_result {
-                warn!(
-                    "Repository database wipe worker failed for {} in {:.2}s: {}",
-                    thread_name,
-                    elapsed.as_secs_f64(),
-                    err
-                );
-            }
-
-            if repository_db_wipe_tx
-                .send(RepositoryDbWipeResult {
-                    repository_url: thread_url,
-                    local_path: String::new(),
-                    repository_name: thread_name,
-                    elapsed,
-                    result: purge_result,
-                    force_redownload_after_purge: false,
-                })
-                .is_ok()
-            {
-                Self::request_background_repaint(repaint_ctx.as_ref());
-            } else {
-                warn!("Failed to report repository database wipe completion");
-            }
-        });
-    }
-
-    /// Wipe cached database entries for a single repository instance, identified
-    /// by remote URL *and* local download folder. Use this instead of
-    /// [`Self::wipe_repository_database_entries_by_url`] whenever a sibling
-    /// repository may share the same URL under a different folder (independent
-    /// installs, repository-space entries), since the URL-only purge would also
-    /// destroy that sibling's cached metadata and computed local hashes.
-    ///
-    /// A blank `local_path` resolves to no instance, so the purge is a safe no-op
     /// (e.g. when a freshly added repository that never had a folder is given one).
     pub fn wipe_repository_database_entries_by_url_and_path(
         &mut self,
@@ -242,6 +321,9 @@ impl Foxy {
         repo_name: &str,
         forget_hash_record: bool,
     ) {
+        if repository_url.trim().is_empty() {
+            return;
+        }
         let normalized_url = Self::normalize_repo_url(repository_url);
 
         if self.repo_db_reset_pending_recheck.remove(&normalized_url) {
@@ -370,6 +452,9 @@ impl Foxy {
         self.repository_view_state
             .repositories
             .insert(insert_idx, cloned.clone());
+        self.remap_repository_indices(|idx| {
+            Some(Self::adjust_index_after_insertion(idx, insert_idx))
+        });
         self.repository_view_state.selected_repository = Some(insert_idx);
         self.clear_completed_repository_check_banner_for_repo_change(Some(insert_idx));
         self.save_repositories();
@@ -655,7 +740,10 @@ impl Foxy {
         if self.syncing_repository == Some(repo_idx) {
             self.cancel_sync();
         }
+        let files_kept =
+            Self::delete_files_kept_reason(&self.repository_view_state.repositories, repo_idx);
         let removed = self.repository_view_state.repositories.remove(repo_idx);
+        self.forget_startup_probe_unknown(&removed.address, &removed.path);
         let removed_visual_folder_key = Self::repo_instance_key(&removed.address, &removed.path);
         let mut visual_folders_changed = false;
         for folder in &mut self.repository_visual_folders {
@@ -666,17 +754,41 @@ impl Foxy {
             visual_folders_changed |= folder.repository_keys.len() != before;
         }
         let normalized_url = Self::normalize_repo_url(&removed.address);
-        let should_purge_database = !self
+        self.clear_repo_state_for_url(&removed.address, &removed.path);
+        let url_is_unique = self
             .repository_view_state
             .repositories
             .iter()
-            .any(|repo| Self::normalize_repo_url(&repo.address) == normalized_url);
-        self.clear_repo_state_for_url(&removed.address, &removed.path);
+            .filter(|repo| Self::normalize_repo_url(&repo.address) == normalized_url)
+            .count()
+            == 0;
         let summary_notice_count = self.settings_view_state.update_summary_notices.len();
+        let active_session_count = self.settings_view_state.active_update_sessions.len();
         self.settings_view_state
             .update_summary_notices
-            .retain(|notice| notice.repository_url != normalized_url);
-        if self.settings_view_state.update_summary_notices.len() != summary_notice_count {
+            .retain(|notice| {
+                !Self::update_record_matches_instance(
+                    &notice.repository_url,
+                    &notice.local_path,
+                    &normalized_url,
+                    &removed.path,
+                    url_is_unique,
+                )
+            });
+        self.settings_view_state
+            .active_update_sessions
+            .retain(|session| {
+                !Self::update_record_matches_instance(
+                    &session.repository_url,
+                    &session.local_path,
+                    &normalized_url,
+                    &removed.path,
+                    url_is_unique,
+                )
+            });
+        if self.settings_view_state.update_summary_notices.len() != summary_notice_count
+            || self.settings_view_state.active_update_sessions.len() != active_session_count
+        {
             self.save_settings();
         }
         self.quick_scan_pending.remove(&normalized_url);
@@ -687,74 +799,16 @@ impl Foxy {
             .remove(&normalized_url);
         self.repo_db_reset_pending_recheck.remove(&normalized_url);
 
-        self.repository_view_state.selected_repository =
-            match self.repository_view_state.selected_repository {
-                Some(selected) if selected == repo_idx => None,
-                Some(selected) if selected > repo_idx => Some(selected - 1),
-                other => other,
-            };
+        self.remap_repository_indices(|idx| Self::adjust_index_after_removal(Some(idx), repo_idx));
         self.clear_completed_repository_check_banner_for_repo_change(
             self.repository_view_state.selected_repository,
         );
 
-        self.selected_repository_for_settings = match self.selected_repository_for_settings {
-            Some(selected) if selected == repo_idx => None,
-            Some(selected) if selected > repo_idx => Some(selected - 1),
-            other => other,
-        };
-
-        self.syncing_repository = match self.syncing_repository {
-            Some(selected) if selected == repo_idx => None,
-            Some(selected) if selected > repo_idx => Some(selected - 1),
-            other => other,
-        };
-
-        self.update_ready_repo = match self.update_ready_repo {
-            Some(selected) if selected == repo_idx => None,
-            Some(selected) if selected > repo_idx => Some(selected - 1),
-            other => other,
-        };
-
-        if self.download_finished_repo == Some(repo_idx) {
-            self.download_finished_repo = None;
-        }
-        self.download_disk_space_shortfall =
-            self.download_disk_space_shortfall
-                .take()
-                .and_then(|(index, shortfall)| match index {
-                    index if index == repo_idx => None,
-                    index if index > repo_idx => Some((index - 1, shortfall)),
-                    index => Some((index, shortfall)),
-                });
-        self.update_modal_disk_space_probe = None;
-
-        if let Some(action) = self.pending_repository_space_bulk_action.as_mut() {
-            action.entries.retain_mut(|entry| {
-                if entry.repo_index == repo_idx {
-                    return false;
-                }
-                if entry.repo_index > repo_idx {
-                    entry.repo_index -= 1;
-                }
-                true
-            });
-            if action.entries.is_empty() {
-                self.pending_repository_space_bulk_action = None;
-            }
-        }
-
-        if let Some(progress) = self.repository_space_bulk_progress.as_mut() {
-            if progress.target_repo_urls.remove(&normalized_url)
-                && !progress.completed_repo_urls.contains(&normalized_url)
-                && progress.total_count > 0
-            {
-                progress.total_count -= 1;
-            }
-            if progress.completed_repo_urls.remove(&normalized_url) && progress.completed_count > 0
-            {
-                progress.completed_count -= 1;
-            }
-            if progress.total_count == 0 {
+        if let Some(progress) = self.repository_space_bulk_progress.as_mut()
+            && removed.repository_space_id.as_deref() == Some(progress.space_id.as_str())
+        {
+            progress.remove_target(&normalized_url);
+            if progress.total_count == 0 && progress.failed_count == 0 {
                 self.repository_space_bulk_progress = None;
             }
         }
@@ -765,7 +819,7 @@ impl Foxy {
             self.save_repository_visual_folders();
         }
         info!("Deleted repository {}", removed.name);
-        if should_purge_database {
+        if files_kept.is_none() {
             if delete_local_files {
                 self.purge_deleted_repository_files_and_database(
                     &normalized_url,
@@ -773,11 +827,29 @@ impl Foxy {
                     &removed.path,
                 );
             } else {
-                self.wipe_repository_database_entries_by_url(&normalized_url, &removed.name);
+                self.wipe_repository_database_entries_by_url_and_path(
+                    &normalized_url,
+                    &removed.path,
+                    &removed.name,
+                    false,
+                );
             }
+        } else if files_kept == Some(DeleteFilesKept::OverlappingPath) {
+            info!(
+                "Repository file purge skipped for {}: another configured repository uses an overlapping folder; wiping this repository instance's database rows only",
+                removed.name
+            );
+            self.wipe_repository_database_entries_by_url_and_path(
+                &normalized_url,
+                &removed.path,
+                &removed.name,
+                false,
+            );
+        } else if files_kept == Some(DeleteFilesKept::LocalRepository) {
+            info!("Local repository removed; existing mod files are kept");
         } else {
             info!(
-                "Repository purge skipped for {}: another configured repository uses the same URL",
+                "Repository purge skipped for {}: another configured repository uses the same URL and folder",
                 removed.name
             );
         }
@@ -817,12 +889,7 @@ impl Foxy {
             .insert(normalized_url.clone(), Instant::now());
         self.needs_repaint = true;
 
-        let thread_local_path = repo_path.to_string();
-        let repo_path = if repo_path.trim().is_empty() {
-            None
-        } else {
-            Some(sanitize_user_path(repo_path))
-        };
+        let thread_local_path = sanitize_user_path(repo_path);
         let repository_db_wipe_tx = self.repository_db_wipe_tx.clone();
         let thread_url = normalized_url;
         let thread_name = repo_name.to_string();
@@ -831,7 +898,10 @@ impl Foxy {
             let started_at = Instant::now();
             let purge_result = match Runtime::new() {
                 Ok(rt) => rt
-                    .block_on(purge_repository_by_url(&thread_url, repo_path.as_deref()))
+                    .block_on(purge_repository_by_url_and_path(
+                        &thread_url,
+                        &thread_local_path,
+                    ))
                     .map_err(|err| err.to_string()),
                 Err(err) => Err(err.to_string()),
             };
@@ -926,7 +996,7 @@ impl Foxy {
             self.repository_space_bulk_progress = None;
         }
         self.repository_space_sync_queue
-            .retain(|(queued_space_id, _, _)| queued_space_id != space_id);
+            .retain(|queued| queued.space_id != space_id);
         self.prune_repository_visual_folders(false);
 
         self.pending_repository_space_delete_id = None;
@@ -971,5 +1041,67 @@ impl Foxy {
         {
             self.completed_repository_db_wipe_banner = None;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn repo(address: &str, path: &str) -> Repository {
+        Repository {
+            address: address.to_string(),
+            path: path.to_string(),
+            ..Repository::default()
+        }
+    }
+
+    #[test]
+    fn delete_files_is_kept_only_for_shared_or_overlapping_paths() {
+        let independent_copies = vec![
+            repo("https://repo.example.invalid/main", "R:/Mods/Main"),
+            repo("https://repo.example.invalid/main/", "R:/Mods/Copy"),
+        ];
+        assert_eq!(Foxy::delete_files_kept_reason(&independent_copies, 0), None);
+
+        let shared_folder = vec![
+            repo("https://repo.example.invalid/main", "R:/Mods/Main"),
+            repo("https://repo.example.invalid/alpha/", "R:/Mods/Main"),
+        ];
+        assert_eq!(
+            Foxy::delete_files_kept_reason(&shared_folder, 0),
+            Some(DeleteFilesKept::OverlappingPath)
+        );
+        let duplicate_instance = vec![
+            repo("https://repo.example.invalid/main", "R:/Mods/Main"),
+            repo("https://repo.example.invalid/main/", "R:/Mods/Main/"),
+        ];
+        assert_eq!(
+            Foxy::delete_files_kept_reason(&duplicate_instance, 0),
+            Some(DeleteFilesKept::SharedFolder)
+        );
+
+        let overlapping = vec![
+            repo("https://repo.example.invalid/main", "R:/Mods/Main"),
+            repo("https://repo.example.invalid/alpha/", "R:/Mods/Main/Nested"),
+        ];
+        assert_eq!(
+            Foxy::delete_files_kept_reason(&overlapping, 0),
+            Some(DeleteFilesKept::OverlappingPath)
+        );
+        assert_eq!(
+            Foxy::delete_files_kept_reason(&shared_folder[0..1], 0),
+            None
+        );
+        assert_eq!(Foxy::delete_files_kept_reason(&independent_copies, 9), None);
+    }
+
+    #[test]
+    fn deleting_a_local_repository_always_keeps_existing_mod_files() {
+        let local = repo("", "R:/Mods/Local");
+        assert_eq!(
+            Foxy::delete_files_kept_reason(&[local], 0),
+            Some(DeleteFilesKept::LocalRepository)
+        );
     }
 }

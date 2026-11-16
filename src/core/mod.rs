@@ -7,6 +7,7 @@ pub mod benchmarks;
 pub(crate) mod db;
 pub mod game;
 pub mod models;
+pub mod profile_backups;
 pub mod steam;
 pub mod tasks;
 pub mod ts3_plugin;

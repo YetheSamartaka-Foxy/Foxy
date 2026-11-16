@@ -1,4 +1,5 @@
 use super::ExternalAddonContextAction;
+use super::addon_bulk_actions::render_filtered_only_checkbox;
 use crate::ui::app::{
     AddonDestructiveConfirmAction, ExternalAddonRowCache, Foxy, RepositoryExternalAddonsListCache,
 };
@@ -74,6 +75,7 @@ struct ExternalAddonRowTooltips {
 
 struct ExternalAddonContextMenuLabels {
     open_directory: String,
+    open_workshop: Option<String>,
     expand_structure: String,
     collapse_structure: String,
     delete: String,
@@ -1045,31 +1047,34 @@ impl Foxy {
             .repository_external_addons_list_cache
             .expanded_row_indices
             .contains(&entry_index);
-        attach_context_menu(
-            &context_response,
-            &[
-                ContextMenuItem::new(
-                    ExternalAddonContextAction::OpenDirectory,
-                    context_menu_labels.open_directory.clone(),
-                ),
-                ContextMenuItem::new(
-                    ExternalAddonContextAction::ToggleStructure,
-                    if structure_expanded {
-                        context_menu_labels.collapse_structure.clone()
-                    } else {
-                        context_menu_labels.expand_structure.clone()
-                    },
-                )
-                .separator_before(),
-                ContextMenuItem::new(
-                    ExternalAddonContextAction::Delete,
-                    context_menu_labels.delete.clone(),
-                )
-                .separator_before()
-                .danger(),
-            ],
-            &mut context_action,
-        );
+        let mut context_items = vec![
+            ContextMenuItem::new(
+                ExternalAddonContextAction::OpenDirectory,
+                context_menu_labels.open_directory.clone(),
+            ),
+            ContextMenuItem::new(
+                ExternalAddonContextAction::ToggleStructure,
+                if structure_expanded {
+                    context_menu_labels.collapse_structure.clone()
+                } else {
+                    context_menu_labels.expand_structure.clone()
+                },
+            )
+            .separator_before(),
+            ContextMenuItem::new(
+                ExternalAddonContextAction::Delete,
+                context_menu_labels.delete.clone(),
+            )
+            .separator_before()
+            .danger(),
+        ];
+        if let Some(label) = &context_menu_labels.open_workshop {
+            context_items.insert(
+                1,
+                ContextMenuItem::new(ExternalAddonContextAction::OpenWorkshop, label.clone()),
+            );
+        }
+        attach_context_menu(&context_response, &context_items, &mut context_action);
         if let Some(action) = context_action {
             let cache = &self.repository_external_addons_list_cache;
             let row = &cache.rows[entry_index];
@@ -1093,7 +1098,19 @@ impl Foxy {
             return;
         }
 
-        self.ensure_repository_external_addons_base_cache_cached(repo_index);
+        if origin_filter.is_empty() {
+            *origin_filter = "All".to_string();
+        }
+
+        self.ensure_filtered_repository_external_addon_indices_cached(
+            repo_index,
+            filter,
+            origin_filter,
+            addon_state_filter,
+            self.addon_favorites_only_filter,
+            self.addon_client_side_only_filter && Self::client_side_addons_supported(),
+            *search_files,
+        );
 
         let color_text_dim = self.color_text_dim();
         let horizontal_padding = 15.0;
@@ -1105,12 +1122,9 @@ impl Foxy {
             ExternalAddonContextAction,
         )> = None;
 
-        if origin_filter.is_empty() {
-            *origin_filter = "All".to_string();
-        }
-
         let context_menu_labels = ExternalAddonContextMenuLabels {
             open_directory: tr("Open addon directory"),
+            open_workshop: self.addon_workshop_label(),
             expand_structure: tr("Expand addon structure"),
             collapse_structure: tr("Collapse addon structure"),
             delete: tr("Delete addon"),
@@ -1180,6 +1194,8 @@ impl Foxy {
                         self.persist_repository_external_addon_row_state_cached(repo_index);
                     }
 
+                    ui.add_space(10.0);
+                    render_filtered_only_checkbox(ui, &mut self.external_addons_bulk_filtered_only);
                     ui.add_space(10.0);
                     ui.add(
                         egui::Label::new(
@@ -1667,6 +1683,14 @@ impl Foxy {
 
         if let Some((addon_name, addon_directory_path, action)) = external_addon_context_action {
             match action {
+                ExternalAddonContextAction::OpenWorkshop => {
+                    self.open_addon_workshop(
+                        ui.ctx(),
+                        &addon_name,
+                        Some(&addon_directory_path),
+                        None,
+                    );
+                }
                 ExternalAddonContextAction::OpenDirectory => {
                     if !self.open_addon_directory(&addon_name, &addon_directory_path) {
                         warn!("Failed to open addon directory for {}", addon_name);

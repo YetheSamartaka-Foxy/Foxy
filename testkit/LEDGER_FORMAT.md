@@ -215,6 +215,16 @@ from `ledger/legacy-case-inputs.json`; the pre-migration ledgers are kept under
 left untouched and reported, because those come from a case that has since
 changed, which is exactly what `case_hash` exists to keep separate.
 
+The resolved case includes expanded `${RUN_DIR}` strings. Cases using them can
+therefore have different raw hashes across runs even when their templates are
+unchanged. For an explicit manual audit, retain the exact template digest and
+compare resolved JSON after normalizing only that run's directory prefix.
+Require the same publication, work, settings and executable provenance too;
+normalizing paths does not make a different workload compatible or authorize
+baseline acceptance. This audit does not rewrite ledger hashes. With a
+`--foxy-binary` override, the row's Git identity still comes from the runner
+checkout; retain the executable hash and its actual source revision/diff.
+
 ## Metric names
 
 Two unrelated things have been called `total_ms`. Keep them apart:

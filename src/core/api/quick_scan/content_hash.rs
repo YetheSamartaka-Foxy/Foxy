@@ -28,7 +28,11 @@ fn calculate_compound_content_hash(ordered_hashes: &[(i64, String)]) -> String {
     crate::core::utils::content_hash::blake3_hex(hasher)
 }
 
-async fn persist_file_content_hashes(db: &FoxyDb, repo_url: &str, file_updates: &[FoxyModFile]) {
+async fn persist_file_content_hashes(
+    db: &FoxyDb,
+    repo_url: &str,
+    file_updates: &[FoxyModFile],
+) -> bool {
     let batch_size = bulk_write_rows_for(9);
     for (chunk_index, chunk) in file_updates
         .chunks(CONTENT_HASH_PERSIST_LOG_INTERVAL)
@@ -72,14 +76,18 @@ async fn persist_file_content_hashes(db: &FoxyDb, repo_url: &str, file_updates: 
             chunk.len(),
             had_error
         );
+        if had_error {
+            return false;
+        }
     }
+    true
 }
 
 pub(super) async fn persist_mod_content_hashes(
     db: &FoxyDb,
     repo_url: &str,
     mod_updates: &[FoxyMod],
-) {
+) -> bool {
     let batch_size = bulk_write_rows_for(12);
     for (chunk_index, chunk) in mod_updates
         .chunks(CONTENT_HASH_PERSIST_LOG_INTERVAL)
@@ -126,10 +134,18 @@ pub(super) async fn persist_mod_content_hashes(
             chunk.len(),
             had_error
         );
+        if had_error {
+            return false;
+        }
     }
+    true
 }
 
-async fn persist_repo_content_hashes(db: &FoxyDb, repo_url: &str, repo_updates: &[FoxyRepository]) {
+async fn persist_repo_content_hashes(
+    db: &FoxyDb,
+    repo_url: &str,
+    repo_updates: &[FoxyRepository],
+) -> bool {
     let batch_size = bulk_write_rows_for(9);
     for (chunk_index, chunk) in repo_updates
         .chunks(CONTENT_HASH_PERSIST_LOG_INTERVAL)
@@ -173,7 +189,18 @@ async fn persist_repo_content_hashes(db: &FoxyDb, repo_url: &str, repo_updates: 
             chunk.len(),
             had_error
         );
+        if had_error {
+            return false;
+        }
     }
+    true
+}
+
+pub(super) fn record_content_save_failure(context: &FoxyContext) {
+    context.hash_evidence.record_issue(crate::core::tasks::calculate_hashes::HashIssue {
+        file_path: String::new(), kind: crate::core::tasks::calculate_hashes::HashIssueKind::SaveFailed,
+        detail: Some("Content-hash evidence could not be saved. Restore database access and run the check again.".into()),
+    });
 }
 
 /// Refresh the content-hash baseline for a whole repository from a full tree
@@ -230,14 +257,15 @@ pub(crate) async fn refresh_content_hashes_for_scoped_tree(
 }
 
 /// Refresh content hashes for `file_ids` only, plus the addons that contain
-/// them, inside an already loaded tree. `persist_repository_rollup` must be
-/// true only when the tree carries every addon row of the repository.
+/// them, inside an already loaded tree, and roll the repository baseline up.
+/// The tree must carry every addon row of the repository (a full tree, or
+/// [`Tree::load_for_files`]), since untouched addons contribute their stored
+/// hashes to the rollup.
 pub(crate) async fn refresh_content_hashes_for_tree_files(
     context: Arc<FoxyContext>,
     repo_url: &str,
     tree: &Tree,
     file_ids: &HashSet<u64>,
-    persist_repository_rollup: bool,
 ) -> bool {
     if file_ids.is_empty() {
         return false;
@@ -247,7 +275,7 @@ pub(crate) async fn refresh_content_hashes_for_tree_files(
         repo_url,
         tree,
         Instant::now(),
-        persist_repository_rollup,
+        true,
         Some(file_ids),
     )
     .await
@@ -344,8 +372,7 @@ async fn refresh_content_hashes_for_tree_started(
     }
 
     let db = context.db();
-    let cpu_budget = std::thread::available_parallelism()
-        .map(|n| n.get())
+    let cpu_budget = crate::core::utils::cpu_threads::cpu_threads()
         .unwrap_or(4)
         .saturating_mul(9)
         .div_ceil(10)
@@ -445,10 +472,35 @@ async fn refresh_content_hashes_for_tree_started(
         }
     }
     let file_persist_started = Instant::now();
-    persist_file_content_hashes(&db, repo_url, &file_updates).await;
+    if !persist_file_content_hashes(&db, repo_url, &file_updates).await {
+        record_content_save_failure(&context);
+        return false;
+    }
     let file_persist_elapsed = file_persist_started.elapsed();
 
     let addons_to_refresh = addon_indices_to_refresh(tree, file_scope);
+    let addon_names = addons_to_refresh
+        .iter()
+        .filter_map(|index| tree.mods.get(*index))
+        .filter(|addon| addon.enabled)
+        .map(|addon| {
+            if cfg!(windows) {
+                addon.name.to_lowercase()
+            } else {
+                addon.name.clone()
+            }
+        })
+        .collect();
+    let unexpected_by_mod = super::unexpected_files::collect_unexpected_files_for_repo_mods(
+        context.clone(),
+        repo_url,
+        &addon_names,
+        None,
+    )
+    .await;
+    if context.hash_evidence.is_incomplete() {
+        return false;
+    }
     let addon_hash_started = Instant::now();
     let mut addon_content_hash_by_idx: HashMap<usize, String> = HashMap::new();
     let mut addons_with_content_hash = 0usize;
@@ -541,6 +593,13 @@ async fn refresh_content_hashes_for_tree_started(
             .get(&path_key)
             .cloned()
             .unwrap_or_default();
+        if let Some(extras) = unexpected_by_mod.get(&addon.name) {
+            info!(
+                "Preserved extra files in folder baseline: files={} extras_require_update=false op_id={}",
+                extras.len(),
+                context.operation_id().unwrap_or("none"),
+            );
+        }
 
         // A folder content hash computed over a folder that is *missing* manifest
         // files still matches a baseline recorded from the same incomplete state,
@@ -598,7 +657,10 @@ async fn refresh_content_hashes_for_tree_started(
         updated.local_content_hash = hash.clone();
         mod_updates.push(updated);
     }
-    persist_mod_content_hashes(&db, repo_url, &mod_updates).await;
+    if !persist_mod_content_hashes(&db, repo_url, &mod_updates).await {
+        record_content_save_failure(&context);
+        return false;
+    }
 
     let mut repos_with_content_hash = 0usize;
     if persist_repository_rollup {
@@ -646,7 +708,10 @@ async fn refresh_content_hashes_for_tree_started(
             updated.local_content_hash = repo_content_hash;
             repo_updates.push(updated);
         }
-        persist_repo_content_hashes(&db, repo_url, &repo_updates).await;
+        if !persist_repo_content_hashes(&db, repo_url, &repo_updates).await {
+            record_content_save_failure(&context);
+            return false;
+        }
     }
 
     let total_elapsed = content_hash_started.elapsed();
@@ -699,6 +764,33 @@ async fn refresh_content_hashes_for_tree_started(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn file_content_persistence_reports_failed_writes() {
+        let db = FoxyDb::from_turso(crate::core::tasks::db_turso::build_test_database().await);
+        let updates = vec![FoxyModFile {
+            id: 1,
+            name: "file.bin".into(),
+            remote_path: "https://repo.example.invalid/file.bin".into(),
+            local_path: "R:/Mods/RepoAlpha/file.bin".into(),
+            local_content_hash: "HASH".into(),
+            ..Default::default()
+        }];
+        assert!(persist_file_content_hashes(&db, "https://repo.example.invalid/", &updates).await);
+        let row = db
+            .query_one(
+                "SELECT local_content_hash FROM files WHERE id = 1",
+                crate::core::db::params![],
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.get_string("local_content_hash").unwrap(), "HASH");
+        db.execute("DROP TABLE files", crate::core::db::params![])
+            .await
+            .unwrap();
+        assert!(!persist_file_content_hashes(&db, "https://repo.example.invalid/", &updates).await);
+    }
     use crate::core::models::model_tree::ModNode;
 
     fn tree_with_addons(files_per_addon: &[&[u64]]) -> Tree {

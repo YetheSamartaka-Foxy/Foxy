@@ -127,6 +127,7 @@ async fn recover_renamed_file(status: u16, fail_manifest_once: bool) {
             Some(std::collections::HashSet::from([1])),
             "missing-file-test".to_string(),
             Arc::new(std::sync::OnceLock::new()),
+            None,
         ),
     )
     .await

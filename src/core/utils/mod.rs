@@ -1,7 +1,10 @@
 pub mod addon_backup;
 pub mod app_paths;
 pub mod content_hash;
+pub mod cpu_governor;
+pub mod cpu_threads;
 pub mod deelevate;
+pub mod direct_replace;
 pub mod disk_space;
 pub mod fetch_json;
 pub mod file_io;
@@ -11,10 +14,16 @@ pub mod http_range;
 pub(crate) mod manifest_cache;
 pub mod platform;
 pub mod power;
+#[cfg(target_os = "windows")]
+pub(crate) mod process;
 pub mod profiling;
+pub mod proxy;
 pub mod renderer_fallback;
 pub mod resource_profile;
 pub mod resource_sampler;
+pub mod runtime_settings;
 pub mod speed_of_light;
 pub mod storage_compat;
 pub mod thread_cpu;
+pub(crate) mod update_estimate;
+pub mod work_priority;

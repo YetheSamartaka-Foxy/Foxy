@@ -13,15 +13,19 @@ mod unexpected_files;
 mod worker;
 
 // Public API (re-exported by api/mod.rs)
+#[cfg(test)]
+pub(crate) use worker::{RemoteFreshness, remote_freshness};
 pub use worker::{
-    StartupRepositoryInstance, filter_repo_instances_with_db_entry, plan_startup_quick_scan_repos,
-    recalculate_hashes_for_addon_by_name, spawn_quick_local_scan, spawn_quick_local_scan_instances,
+    StartupProbeRetryPlan, StartupRepositoryInstance, filter_repo_instances_with_db_entry,
+    plan_startup_probe_retry, plan_startup_quick_scan_repos, recalculate_hashes_for_addon_by_name,
+    spawn_quick_local_scan, spawn_quick_local_scan_instances, startup_probe_retry_delay,
+    startup_probe_retry_is_blocked,
 };
 
 // Crate-visible items
 pub(crate) use content_hash::{
     refresh_content_hashes_for_file_ids, refresh_content_hashes_for_repository,
-    refresh_content_hashes_for_scoped_tree, refresh_content_hashes_for_tree_files,
+    refresh_content_hashes_for_tree_files,
 };
 pub(crate) use diff::{
     PreHashedFiles, quick_local_change_diff, quick_local_change_diff_with_prehashed,
@@ -40,8 +44,8 @@ pub(super) use pending_updates::{
 };
 pub(super) use readiness::{
     collect_hashable_files_with_missing_local_tree_hashes,
-    collect_targeted_init_content_baseline_files, tree_local_checksums_baseline_missing,
-    tree_local_checksums_missing,
+    collect_targeted_init_content_baseline_files, quick_scan_preflight_for_local_check,
+    tree_local_checksums_baseline_missing, tree_local_checksums_missing,
 };
 // Re-exported for integration tests (api/tests.rs) only; not referenced by the binary.
 #[cfg(test)]
@@ -53,6 +57,6 @@ pub(super) use readiness::{
     StartupQuickScanEligibility, batch_eligible_repos, launch_quick_scan_repo_eligible_joined,
     launch_quick_scan_repo_startup_eligibility,
 };
-pub(super) use unexpected_files::{
-    collect_unexpected_files_for_repo_mods, delete_unexpected_local_files,
-};
+pub(super) use unexpected_files::collect_unexpected_files_for_repo_mods;
+#[cfg(test)]
+pub(super) use unexpected_files::delete_unexpected_local_files;

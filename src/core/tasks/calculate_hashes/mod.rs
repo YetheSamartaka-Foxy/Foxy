@@ -40,6 +40,7 @@ const PERSIST_LOG_INTERVAL: usize = 25_000;
 
 mod context;
 mod direct_read;
+mod evidence;
 mod file_hashes;
 mod format_layout;
 mod part_hashes;
@@ -53,6 +54,7 @@ mod storage_probe;
 mod verified_record;
 
 pub(crate) use context::RepositoryHashContext;
+pub(crate) use evidence::{HashEvidenceState, HashIssue, HashIssueKind, StalledReadDecision};
 pub(crate) use file_hashes::{
     FileHashBatchResult, HashPhaseTimings, calculate_hashes_for_files,
     calculate_hashes_for_files_in_tree_with_profile,
@@ -71,7 +73,7 @@ pub(crate) use propagation::{
 };
 pub(crate) use scheduling::{
     AddonHashMetrics, HashStorageClass, detect_storage_class_for_path,
-    invalidate_storage_class_cache,
+    invalidate_storage_class_cache, set_storage_class_override,
 };
 pub(crate) use segment_verified::{
     PatchedFileSegments, PatchedSegment, apply_segment_verified_files,

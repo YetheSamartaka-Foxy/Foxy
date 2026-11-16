@@ -1,0 +1,4 @@
+interface:
+  display_name: "Startup Crash Diagnosis"
+  short_description: "Separate native startup crashes from app errors."
+  default_prompt: "Use $foxy-startup-crash-diagnosis to trace this Foxy startup failure from available evidence."

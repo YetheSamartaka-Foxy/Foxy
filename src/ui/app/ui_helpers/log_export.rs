@@ -17,17 +17,12 @@ impl Foxy {
     ) {
         let response = ui
             .add(
-                Button::new(
-                    RichText::new(format!("\u{1F4E6}  {}", self.t("Export logs to ZIP")))
-                        .size(font_size),
-                )
-                .fill(self.color_main_bg())
-                .min_size(min_size)
-                .wrap(),
+                Button::new(RichText::new(self.export_logs_button_text()).size(font_size))
+                    .fill(self.color_main_bg())
+                    .min_size(min_size)
+                    .wrap(),
             )
-            .on_hover_text(self.t(
-                "Package Foxy log files into a timestamped ZIP archive for sharing with support.",
-            ));
+            .on_hover_text(self.export_logs_tooltip());
         if response.hovered() {
             ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
         }
@@ -36,7 +31,15 @@ impl Foxy {
         }
     }
 
-    fn on_export_logs_to_zip(&mut self) {
+    pub(crate) fn export_logs_button_text(&self) -> String {
+        format!("\u{1F4E6}  {}", self.t("Export logs to ZIP"))
+    }
+
+    pub(crate) fn export_logs_tooltip(&self) -> String {
+        self.t("Package Foxy log files into a timestamped ZIP archive for sharing with support.")
+    }
+
+    pub(crate) fn on_export_logs_to_zip(&mut self) {
         info!("Export logs to ZIP triggered");
         match self.export_logs_to_zip() {
             Ok(true) => self.show_success_toast(self.t("Logs exported successfully.")),
